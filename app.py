@@ -52,6 +52,7 @@ T = {
         'ws5': '📈 Exotics & Structuring',
         'ws6': '🏛️ Enterprise Risk & XVA',
         'ws7': '📈 Metodo STAR & Ottimizzazione',
+        'ws8': '📊 Price Analytics (Swissix)',
         'prompt': 'Chiedi all\'AI',
         'market_params': '⚙️ Parametri di Mercato'
     },
@@ -65,6 +66,7 @@ T = {
         'ws5': '📈 Exotics & Structuring',
         'ws6': '🏛️ Enterprise Risk & XVA',
         'ws7': '📈 STAR Method & Optimization',
+        'ws8': '📊 Price Analytics (Swissix)',
         'prompt': 'Ask AI Copilot',
         'market_params': '⚙️ Market Parameters'
     },
@@ -78,6 +80,7 @@ T = {
         'ws5': '📈 Exotiques & Structuration',
         'ws6': '🏛️ Risque d\'Entreprise & XVA',
         'ws7': '📈 Méthode STAR & Optimisation',
+        'ws8': '📊 Analyse des Prix (Swissix)',
         'prompt': 'Demander à l\'IA',
         'market_params': '⚙️ Paramètres du Marché'
     }
@@ -128,6 +131,7 @@ def scarica_dati_entsoe(api_key, start_date, end_date):
     prezzi.index.name = "Data e Ora"
     return prezzi
 
+# ---------- Helpers Price Analytics (ws8) ----------
 def get_entsoe_key():
     """Chiave API ENTSO-E da st.secrets (mai hardcodata nel codice)."""
     try:
@@ -135,6 +139,47 @@ def get_entsoe_key():
     except Exception:
         return None
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def generate_mock_hourly(start_date, end_date):
+    """Serie oraria sintetica ma realistica del prezzo Swissix (€/MWh):
+    profilo giornaliero a doppia gobba, sconto weekend, trend e spike casuali (seed fisso)."""
+    rng = np.random.default_rng(7)
+    idx = pd.date_range(
+        start=pd.Timestamp(start_date),
+        end=pd.Timestamp(end_date) + pd.Timedelta(days=1) - pd.Timedelta(hours=1),
+        freq="h", tz="Europe/Zurich",
+    )
+    ore = idx.hour.to_numpy()
+    wd = idx.weekday.to_numpy()
+    profilo_giornaliero = 25 * np.sin(2 * np.pi * (ore - 6) / 24) + 18 * np.sin(4 * np.pi * (ore - 9) / 24)
+    sconto_weekend = np.where(wd < 5, 12.0, -18.0)
+    trend = np.linspace(0, 15, len(idx))
+    rumore = rng.normal(0, 9, len(idx))
+    spike = np.where(rng.random(len(idx)) < 0.008, rng.uniform(60, 160, len(idx)), 0.0)
+    prezzi = np.clip(95 + profilo_giornaliero + sconto_weekend + trend + rumore + spike, 5, None)
+    s = pd.Series(prezzi, index=idx, name="Prezzo Spot (€/MWh)")
+    s.index.name = "Data e Ora"
+    return s
+
+def fascia_oraria(ts):
+    """Fasce orarie AEEGSI F1/F2/F3."""
+    wd, h = ts.weekday(), ts.hour
+    if wd == 6:
+        return "F3"
+    if wd == 5:
+        return "F2" if 7 <= h < 23 else "F3"
+    if 8 <= h < 19:
+        return "F1"
+    if (7 <= h < 8) or (19 <= h < 23):
+        return "F2"
+    return "F3"
+
+# Impianti proxy: nome -> (costo marginale €/MWh, capacità MW, colore)
+ASSETS = {
+    "☀️ Solare Muttsee": (0.0, 50, "#eab308"),
+    "💧 Idro Biasca": (5.0, 250, "#3b82f6"),
+    "🏭 Gas WtE Giubiasco": (208.0, 100, "#ef4444"),
+}
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def generate_singularity_data():
@@ -180,7 +225,7 @@ with st.sidebar:
     st.markdown("---")
     
     workspace = st.radio("🏢 WORKSPACES", [
-        _('ws1'), _('ws2'), _('ws3'), _('ws4'), _('ws5'), _('ws6'), _('ws7')
+        _('ws1'), _('ws2'), _('ws3'), _('ws4'), _('ws5'), _('ws6'), _('ws7'), _('ws8')
     ])
     
     st.markdown("---")
@@ -371,7 +416,7 @@ elif workspace == _('ws2'):
     
     api_key = get_entsoe_key()
     if not api_key:
-        st.warning("Chiave API ENTSO-E non configurata: aggiungi `ENTSOE_API_KEY` a `.streamlit/secrets.toml` oppure incollala qui sotto.")
+        st.warning("🔑 Chiave API ENTSO-E non configurata: aggiungi `ENTSOE_API_KEY` a `.streamlit/secrets.toml` oppure incollala qui sotto.")
         api_key = st.text_input("Chiave API ENTSO-E", type="password")
     if not api_key:
         st.stop()
@@ -679,6 +724,224 @@ elif workspace == _('ws7'):
     m2.metric(label="Automazione Flussi", value="100%", delta="Real-time API", help="Integrazione diretta con le fonti dati di mercato.")
     m3.metric(label="Copertura Modelli", value="7 Workspaces", delta="Completo", help="Copertura da asset class classiche a XVA e Risk.")
     m4.metric(label="Efficienza Codice", value="Python / TS", delta="High Performance", help="Stack tecnologico solido e reattivo.")
+
+# ==========================================
+# WORKSPACE 8: PRICE ANALYTICS (SWISSIX DETTAGLIO)
+# ==========================================
+elif workspace == _('ws8'):
+    st.markdown(f"<h1>{_('ws8')}</h1>", unsafe_allow_html=True)
+    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati ed export CSV.")
+
+    # ---------- Controlli: sorgente, periodo, impianti ----------
+    st.subheader("⚙️ Sorgente dati & Timeframe")
+    c_src, c_per = st.columns([1, 2])
+    with c_src:
+        sorgente = st.radio("Sorgente dati", ["🧪 Mock (offline)", "🌐 ENTSO-E live"], index=0,
+                            help="Mock: serie oraria sintetica ma realistica (profilo giornaliero + stagionalità settimanale). Live: prezzi day-ahead reali dalla Transparency Platform ENTSO-E.")
+    with c_per:
+        preset = st.radio("Periodo", ["7 giorni", "30 giorni", "90 giorni", "Personalizzato"], horizontal=True, index=1)
+    oggi = datetime.date.today()
+    if preset == "7 giorni":
+        d0, d1 = oggi - datetime.timedelta(days=7), oggi
+    elif preset == "30 giorni":
+        d0, d1 = oggi - datetime.timedelta(days=30), oggi
+    elif preset == "90 giorni":
+        d0, d1 = oggi - datetime.timedelta(days=90), oggi
+    else:
+        cc0, cc1 = st.columns(2)
+        d0 = cc0.date_input("Data inizio", oggi - datetime.timedelta(days=30))
+        d1 = cc1.date_input("Data fine", oggi)
+    if d0 > d1:
+        st.error("La data di inizio deve precedere la data di fine.")
+        st.stop()
+
+    st.subheader("🏭 Impianti / Siti")
+    assets_sel = st.multiselect(
+        "Filtra impianti (le rette di costo marginale e la produzione stimata si aggiornano)",
+        list(ASSETS.keys()),
+        default=list(ASSETS.keys()),
+    )
+
+    soglia = st.number_input("🚨 Soglia di alert prezzo (€/MWh)", min_value=0.0, value=150.0, step=5.0,
+                             help="Le ore con prezzo sopra la soglia vengono evidenziate nel grafico, conteggiate nei KPI e filtrabili in tabella.")
+
+    # ---------- Caricamento dati ----------
+    def carica(a, b):
+        if sorgente == "🌐 ENTSO-E live":
+            key = get_entsoe_key()
+            if not key:
+                st.warning("🔑 Chiave API ENTSO-E non configurata: aggiungi `ENTSOE_API_KEY` a `.streamlit/secrets.toml`.")
+                st.stop()
+            return scarica_dati_entsoe(key, a, b).dropna()
+        return generate_mock_hourly(a, b).dropna()
+
+    try:
+        with st.spinner("⏳ Caricamento dati..."):
+            prezzi = carica(d0, d1)
+    except Exception as e:
+        st.error(f"Errore nel caricamento dati: {e}")
+        st.stop()
+    if prezzi.empty:
+        st.warning("Nessun dato disponibile per il periodo selezionato.")
+        st.stop()
+
+    # Periodo precedente (stessa durata) per variazione % e confronto
+    d_prev1 = d0 - datetime.timedelta(days=1)
+    d_prev0 = d_prev1 - (d1 - d0)
+    try:
+        prev = carica(d_prev0, d_prev1)
+        var_pct = (prezzi.mean() - prev.mean()) / prev.mean() * 100 if prev.mean() != 0 else 0.0
+    except Exception:
+        prev = None
+        var_pct = None
+
+    # ---------- KPI ----------
+    st.subheader("📌 KPI di periodo")
+    medio = prezzi.mean()
+    picco = prezzi.max()
+    t_picco = prezzi.idxmax()
+    ore_sopra = int((prezzi > soglia).sum())
+    k1, k2, k3, k4 = st.columns(4)
+    render_kpi("Prezzo medio (€/MWh)", f"{medio:,.2f}", k1)
+    render_kpi("Prezzo mediano (€/MWh)", f"{prezzi.median():,.2f}", k2)
+    render_kpi("Deviazione std (€/MWh)", f"{prezzi.std():,.2f}", k3)
+    render_kpi("Variazione vs periodo prec.", f"{var_pct:+.1f} %" if var_pct is not None else "n/d", k4)
+    k5, k6, k7, k8 = st.columns(4)
+    render_kpi("Picco di prezzo (€/MWh)", f"{picco:,.2f}", k5)
+    render_kpi("Data/ora del picco", t_picco.strftime("%d/%m %H:00"), k6)
+    render_kpi(f"Ore sopra soglia ({soglia:.0f} €/MWh)", f"{ore_sopra} h ({ore_sopra/len(prezzi)*100:.1f} %)", k7)
+    render_kpi("Valore baseload 1 MW (€)", f"{prezzi.sum():,.0f}", k8)
+
+    # ---------- Grafico principale ----------
+    st.subheader("📉 Prezzo spot orario")
+    fig_px = go.Figure()
+    fig_px.add_trace(go.Scatter(
+        x=prezzi.index, y=prezzi.values, mode='lines', name="Prezzo spot (€/MWh)",
+        line=dict(color='#3b82f6', width=1.5),
+        fill='tozeroy', fillcolor='rgba(59, 130, 246, 0.15)',
+    ))
+    sopra = prezzi[prezzi > soglia]
+    if not sopra.empty:
+        fig_px.add_trace(go.Scatter(
+            x=sopra.index, y=sopra.values, mode='markers',
+            name=f"Sopra soglia ({len(sopra)} h)", marker=dict(color='#ef4444', size=5),
+        ))
+    fig_px.add_hline(y=soglia, line_dash="dash", line_color="#ef4444",
+                     annotation_text=f"Soglia alert: {soglia:.0f} €/MWh", annotation_position="top left")
+    for nome in assets_sel:
+        mc, cap, col = ASSETS[nome]
+        fig_px.add_hline(y=mc, line_dash="dot", line_color=col,
+                         annotation_text=f"MC {nome}: {mc:.0f} €/MWh", annotation_position="top right")
+    fig_px.add_vline(x=t_picco, line_dash="dot", line_color="#eab308",
+                     annotation_text=f"Picco {picco:.0f} €/MWh", annotation_position="bottom right")
+    mostra_confronto = st.toggle("Confronta con il periodo precedente (sovrapposto)", value=False,
+                                 help="Sovrappone la serie del periodo precedente (stessa durata), allineata per ora relativa.")
+    if mostra_confronto:
+        if prev is not None and not prev.empty:
+            n = min(len(prezzi), len(prev))
+            fig_px.add_trace(go.Scatter(
+                x=prezzi.index[:n], y=prev.values[-n:], mode='lines',
+                name="Periodo precedente", line=dict(color='#9ca3af', width=1.5, dash='dash'),
+            ))
+        else:
+            st.info("Periodo precedente non disponibile per il confronto.")
+    fig_px.update_layout(
+        template="plotly_dark", height=420,
+        xaxis_title="Data e Ora", yaxis_title="Prezzo (€/MWh)",
+        hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    )
+    st.plotly_chart(fig_px, use_container_width=True)
+
+    # ---------- Impianti: marginal cost & produzione stimata ----------
+    if assets_sel:
+        st.subheader("🏭 Marginal cost & produzione stimata (impianti selezionati)")
+        righe = []
+        for nome in assets_sel:
+            mc, cap, col = ASSETS[nome]
+            ore_itm = int((prezzi > mc).sum())
+            prod = cap * ore_itm
+            margine_medio = float((prezzi[prezzi > mc] - mc).mean()) if ore_itm else 0.0
+            righe.append({
+                "Impianto": nome,
+                "Costo marginale (€/MWh)": round(mc, 1),
+                "Capacità (MW)": cap,
+                "Ore in-the-money": ore_itm,
+                "Produzione stimata (MWh)": f"{prod:,.0f}",
+                "Margine medio ITM (€/MWh)": round(margine_medio, 2),
+            })
+        st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
+
+    # ---------- Tab di analisi ----------
+    tab1, tab2, tab3, tab4 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati"])
+
+    with tab1:
+        st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
+        prof = prezzi.groupby(prezzi.index.hour).agg(["mean", "std", "max"])
+        fig_prof = go.Figure()
+        fig_prof.add_trace(go.Scatter(x=prof.index, y=prof["mean"] + prof["std"], mode='lines',
+                                      line=dict(width=0), showlegend=False, hoverinfo='skip'))
+        fig_prof.add_trace(go.Scatter(x=prof.index, y=prof["mean"] - prof["std"], mode='lines',
+                                      line=dict(width=0), fill='tonexty',
+                                      fillcolor='rgba(59,130,246,0.2)', name='±1 std', hoverinfo='skip'))
+        fig_prof.add_trace(go.Scatter(x=prof.index, y=prof["mean"], mode='lines+markers',
+                                      name='Prezzo medio', line=dict(color='#3b82f6', width=3)))
+        fig_prof.add_trace(go.Scatter(x=prof.index, y=prof["max"], mode='lines',
+                                      name='Massimo', line=dict(color='#eab308', width=1.5, dash='dash')))
+        fig_prof.update_layout(template="plotly_dark", height=380,
+                               xaxis_title="Ora del giorno", yaxis_title="Prezzo (€/MWh)",
+                               xaxis=dict(tickmode='linear', dtick=2))
+        st.plotly_chart(fig_prof, use_container_width=True)
+
+    with tab2:
+        st.markdown("**Heatmap oraria**: ogni riga è un giorno, ogni colonna un'ora. I picchi di prezzo (rosso) saltano subito all'occhio.")
+        df_hm = pd.DataFrame({"giorno": prezzi.index.date, "ora": prezzi.index.hour, "prezzo": prezzi.values})
+        pivot = df_hm.pivot_table(index="giorno", columns="ora", values="prezzo", aggfunc="mean")
+        fig_hm = px.imshow(pivot, color_continuous_scale="RdYlGn_r", aspect="auto",
+                           title="Heatmap oraria del prezzo (€/MWh)",
+                           labels=dict(x="Ora del giorno", y="Giorno", color="€/MWh"))
+        fig_hm.update_layout(template="plotly_dark", height=max(350, min(700, 40 * len(pivot) + 80)))
+        st.plotly_chart(fig_hm, use_container_width=True)
+
+    with tab3:
+        st.markdown(f"**Ripartizione per fascia oraria** {edu('F1/F2/F3', 'Fasce orarie AEEGSI: F1 = lun–ven 08:00–19:00 (ore di punta); F2 = lun–ven 07:00–08:00 e 19:00–23:00, sab 07:00–23:00; F3 = ore notturne, domeniche e festivi (fuori punta).')}", unsafe_allow_html=True)
+        df_fx = pd.DataFrame({"prezzo": prezzi.values, "fascia": prezzi.index.map(fascia_oraria)})
+        agg_fx = df_fx.groupby("fascia").agg(
+            ore=("prezzo", "size"),
+            prezzo_medio=("prezzo", "mean"),
+            prezzo_max=("prezzo", "max"),
+            valore_baseload_1MW=("prezzo", "sum"),
+        ).reindex(["F1", "F2", "F3"])
+        agg_show = agg_fx.copy()
+        agg_show["prezzo_medio"] = agg_show["prezzo_medio"].round(2)
+        agg_show["prezzo_max"] = agg_show["prezzo_max"].round(2)
+        agg_show["valore_baseload_1MW"] = agg_show["valore_baseload_1MW"].round(0)
+        st.dataframe(agg_show, use_container_width=True)
+        fig_fx = px.bar(agg_fx.reset_index(), x="fascia", y="prezzo_medio", color="fascia",
+                        color_discrete_map={"F1": "#ef4444", "F2": "#eab308", "F3": "#3b82f6"},
+                        title="Prezzo medio per fascia oraria (€/MWh)", text_auto=".1f")
+        fig_fx.update_layout(template="plotly_dark", height=350, showlegend=False,
+                             xaxis_title="Fascia", yaxis_title="Prezzo medio (€/MWh)")
+        st.plotly_chart(fig_fx, use_container_width=True)
+
+    with tab4:
+        st.markdown("**Tabella dati dettagliata**: clicca sulle intestazioni per ordinare.")
+        df_tab = pd.DataFrame({
+            "Data e Ora": prezzi.index,
+            "Prezzo (€/MWh)": prezzi.values.round(2),
+        })
+        df_tab["Fascia"] = df_tab["Data e Ora"].map(fascia_oraria)
+        df_tab["Sopra soglia"] = np.where(df_tab["Prezzo (€/MWh)"] > soglia, "🔴", "")
+        solo_sopra = st.checkbox("Mostra solo le ore sopra soglia", value=False)
+        df_view = df_tab[df_tab["Prezzo (€/MWh)"] > soglia] if solo_sopra else df_tab
+        st.dataframe(df_view, use_container_width=True, hide_index=True)
+        st.download_button(
+            "⬇️ Esporta CSV",
+            df_view.to_csv(index=False).encode("utf-8"),
+            file_name=f"swissix_{d0}_{d1}{'_sopra_soglia' if solo_sopra else ''}.csv",
+            mime="text/csv",
+            help="Scarica i dati visualizzati in tabella (rispetta il filtro 'sopra soglia').",
+        )
 
 # Footer
 st.markdown("---")
