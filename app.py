@@ -128,6 +128,14 @@ def scarica_dati_entsoe(api_key, start_date, end_date):
     prezzi.index.name = "Data e Ora"
     return prezzi
 
+def get_entsoe_key():
+    """Chiave API ENTSO-E da st.secrets (mai hardcodata nel codice)."""
+    try:
+        return st.secrets.get("ENTSOE_API_KEY", None)
+    except Exception:
+        return None
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def generate_singularity_data():
     np.random.seed(42)
@@ -241,7 +249,8 @@ if workspace == _('ws1'):
     costo_marginale_solar = 0 
 
     with chart_container:
-        prezzi_range = np.linspace(0, 300, 150)
+        xmax = max(300.0, p_elec, costo_marginale_gas, costo_marginale_coal, costo_marginale_hydro) * 1.25
+        prezzi_range = np.linspace(0, xmax, 150)
         fig_sim = go.Figure()
         
         fig_sim.add_hline(y=0, line_width=1, line_dash="solid", line_color="rgba(255,255,255,0.3)")
@@ -360,10 +369,19 @@ elif workspace == _('ws2'):
 
     st.markdown("---")
     
+    api_key = get_entsoe_key()
+    if not api_key:
+        st.warning("Chiave API ENTSO-E non configurata: aggiungi `ENTSOE_API_KEY` a `.streamlit/secrets.toml` oppure incollala qui sotto.")
+        api_key = st.text_input("Chiave API ENTSO-E", type="password")
+    if not api_key:
+        st.stop()
+
     try:
         with st.spinner("⏳ Connessione a ENTSO-E in corso..."):
-            api_key = "69b86d28-17c2-4e13-a587-1598048a6675"
-            prezzi_ch = scarica_dati_entsoe(api_key, data_inizio_selezionata, data_fine_selezionata)
+            prezzi_ch = scarica_dati_entsoe(api_key, data_inizio_selezionata, data_fine_selezionata).dropna()
+            if prezzi_ch.empty:
+                st.warning("ENTSO-E non ha restituito dati per il periodo selezionato.")
+                st.stop()
             
             prezzo_spot_ch = prezzi_ch.iloc[-1]
             valore_integrale = prezzi_ch.sum()
@@ -489,6 +507,7 @@ elif workspace == _('ws3'):
     col_a, col_b = st.columns([2, 1])
     with col_a:
         epoches = np.arange(1000)
+        np.random.seed(1234)
         reward_curve = -50 + 100 * np.log(epoches + 1) / np.log(1000) + np.random.normal(0, 5, 1000)
         fig_rl = px.line(x=epoches, y=reward_curve, title="Learning Curve dell'Agente Quantitativo")
         fig_rl.update_layout(template="plotly_dark", xaxis_title="Epoche di Addestramento", yaxis_title="Reward (PnL in €)")
@@ -499,6 +518,7 @@ elif workspace == _('ws3'):
         st.markdown(f"<h3>Regime: {regime}</h3>", unsafe_allow_html=True)
         st.markdown(f"**{edu('Stat Arb Z-Score', 'Statistical Arbitrage: Z-Score misura di quante deviazioni standard lo spread tra due asset (es. Gas/Power) si è discostato dalla media storica.')}:** +2.4", unsafe_allow_html=True)
         
+        np.random.seed(1235)
         heatmap_lat = np.random.normal(1.5, 0.2, (5, 5))
         fig_lat = px.imshow(heatmap_lat, color_continuous_scale="RdYlGn_r", title="Network Latency (ms)")
         fig_lat.update_layout(template="plotly_dark", height=200, margin=dict(l=0, r=0, t=30, b=0), xaxis_title="Gateway Node", yaxis_title="Exchange Node")
@@ -600,6 +620,7 @@ elif workspace == _('ws6'):
         
     with col_r2:
         st.markdown(f"### {edu('Wrong-Way Risk (WWR)', 'Si verifica quando l\'esposizione verso una controparte (EAD) aumenta in concomitanza con la probabilità di default (PD) della controparte stessa. Es: Compri opzioni Put su Enron da Enron stessa.')}", unsafe_allow_html=True)
+        np.random.seed(1236)
         ead = np.random.lognormal(mean=2, sigma=0.5, size=100)
         pd_cpty = 0.01 + ead * 0.002 + np.random.normal(0, 0.01, 100)
         fig_wwr = px.scatter(x=ead, y=pd_cpty)
@@ -661,4 +682,4 @@ elif workspace == _('ws7'):
 
 # Footer
 st.markdown("---")
-st.markdown(f"<div style='text-align: center; color: #4B5563; font-size: 10px;'>Singularity OS V16 | {_('auth_btn')} | Edu Mode: {st.session_state.edu_mode}</div>", unsafe_allow_html=True)
+st.markdown(f"<div style='text-align: center; color: #4B5563; font-size: 10px;'>Singularity OS V16 | Edu Mode: {st.session_state.edu_mode}</div>", unsafe_allow_html=True)
