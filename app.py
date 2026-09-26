@@ -416,6 +416,68 @@ def calcola_spread_weekend(prezzi):
         })
     return pd.DataFrame(righe, columns=cols)
 
+def profilo_solare(prezzi, potenza_mw):
+    """Profilo orario sintetico di generazione fotovoltaica (MW), deterministico.
+    Curva a campana con picco a mezzogiorno solare; la durata del giorno varia
+    per mese (min a dicembre, max a giugno), ore notturne = 0.
+    potenza_mw: potenza di picco dell'impianto (MW, <=0 -> profilo nullo).
+    Ritorna una Series (MW) indicizzata come `prezzi`."""
+    idx = prezzi.index
+    ore = idx.hour.to_numpy() + idx.minute.to_numpy() / 60.0
+    mese = idx.month.to_numpy()
+    # durata del giorno ~8.2h (dic) -> ~15.8h (giu)
+    durata = 12.0 + 3.8 * np.sin(2 * np.pi * (mese - 3.2) / 12.0)
+    alba, tramonto = 12.0 - durata / 2.0, 12.0 + durata / 2.0
+    x = np.clip((ore - alba) / np.where(durata > 0, durata, 1.0), 0.0, 1.0)
+    forma = np.sin(np.pi * x) ** 1.3
+    forma = np.where((ore >= alba) & (ore <= tramonto), forma, 0.0)
+    return pd.Series(max(0.0, float(potenza_mw)) * forma, index=idx, name="Generazione solare (MW)")
+
+def calcola_price_capture(prezzi, gen_mw):
+    """Price capture di un profilo di generazione contro lo spot orario.
+    prezzi: Series oraria in €/MWh; gen_mw: Series oraria MW (indice allineabile).
+    Prezzo catturato = Σ(prezzo_h × gen_h) / Σ(gen_h): il prezzo medio a cui
+    l'impianto vende realmente; il Tasso di cattura = catturato / media base.
+    Sconto cannibalizzazione = base - catturato (positivo = il profilo vale meno
+    del base, tipico del solare che produce nelle ore diurne più economiche).
+    NaN-safe: le ore con prezzo o generazione NaN vengono ignorate; energia
+    nulla -> derivati None; serie vuota -> DataFrame mensile vuoto con le colonne giuste.
+    Ritorna dict con base_medio, catturato, tasso_cattura, mwh, ricavo,
+    sconto_can e per_mese (DataFrame: Mese, MWh, Ricavo (€), Catturato (€/MWh), Tasso %)."""
+    cols = ["Mese", "MWh", "Ricavo (€)", "Catturato (€/MWh)", "Tasso %"]
+    df = pd.DataFrame({"prezzo": prezzi.astype(float), "gen": gen_mw.astype(float)}).dropna()
+    mwh = float(df["gen"].sum())
+    base = float(df["prezzo"].mean()) if len(df) else float("nan")
+    base_r = None if np.isnan(base) else round(base, 2)
+    if mwh <= 0:
+        return {"base_medio": base_r, "catturato": None, "tasso_cattura": None,
+                "mwh": 0.0, "ricavo": 0.0, "sconto_can": None,
+                "per_mese": pd.DataFrame({c: [] for c in cols})}
+    ricavo = float((df["prezzo"] * df["gen"]).sum())
+    catt = ricavo / mwh
+    sconto = base - catt
+    tasso = catt / base * 100 if base != 0 else float("nan")
+    mesi = (df.index.tz_localize(None) if df.index.tz is not None else df.index).to_period("M")
+    righe = []
+    for mese, grp in df.groupby(mesi):
+        gmwh = float(grp["gen"].sum())
+        gric = float((grp["prezzo"] * grp["gen"]).sum())
+        gcatt = gric / gmwh if gmwh > 0 else float("nan")
+        gbase = float(grp["prezzo"].mean())
+        righe.append({
+            "Mese": str(mese),
+            "MWh": round(gmwh, 1),
+            "Ricavo (€)": round(gric, 2),
+            "Catturato (€/MWh)": None if np.isnan(gcatt) else round(gcatt, 2),
+            "Tasso %": (None if (np.isnan(gcatt) or gbase == 0)
+                        else round(gcatt / gbase * 100, 1)),
+        })
+    return {"base_medio": base_r, "catturato": round(catt, 2),
+            "tasso_cattura": None if np.isnan(tasso) else round(tasso, 1),
+            "mwh": round(mwh, 1), "ricavo": round(ricavo, 2),
+            "sconto_can": round(sconto, 2),
+            "per_mese": pd.DataFrame(righe, columns=cols)}
+
 # Impianti proxy: nome -> (costo marginale €/MWh, capacità MW, colore)
 ASSETS = {
     "☀️ Solare Muttsee": (0.0, 50, "#eab308"),
@@ -972,7 +1034,7 @@ elif workspace == _('ws7'):
 # ==========================================
 elif workspace == _('ws8'):
     st.markdown(f"<h1>{_('ws8')}</h1>", unsafe_allow_html=True)
-    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread, shaping curva ed export CSV.")
+    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread, shaping curva, spread weekend, price capture ed export CSV.")
 
     # ---------- Controlli: sorgente, periodo, impianti ----------
     st.subheader("⚙️ Sorgente dati & Timeframe")
@@ -1115,7 +1177,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -1696,6 +1758,58 @@ elif workspace == _('ws8'):
                     mime="text/csv",
                     help="Scarica la tabella settimanale: medie weekday/weekend, spread in €/MWh e in %.",
                 )
+
+    with tab13:
+        titolo_pc = edu("Price capture", "Il PREZZO CATTURATO (capture price) è il prezzo medio a cui un impianto vende davvero la sua energia: media dei prezzi spot ponderata per le ore in cui l'impianto produce. Il TASSO DI CATTURA è il rapporto tra prezzo catturato e prezzo medio base: un solare che produce solo di giorno, quando i prezzi sono spesso più bassi, cattura tipicamente meno del 100%. Lo SCONTO CANNIBALIZZAZIONE è la differenza tra base e catturato: più è alta, più il profilo di produzione 'cannibalizza' il proprio valore. È la metrica chiave per valutare PPA e investimenti rinnovabili.")
+        st.markdown(f"**{titolo_pc}**: quanto vale davvero un profilo solare sul mercato spot.", unsafe_allow_html=True)
+
+        p_mw = st.number_input("☀️ Potenza di picco impianto solare (MW)", min_value=0.0, value=50.0, step=5.0,
+                              help="Potenza nominale del parco fotovoltaico simulato (default 50 MW come Solare Muttsee del simulatore).")
+        gen = profilo_solare(prezzi, p_mw)
+        pc = calcola_price_capture(prezzi, gen)
+        df_pm = pc["per_mese"]
+
+        if p_mw <= 0 or df_pm.empty or pc["catturato"] is None:
+            st.warning("Imposta una potenza di picco > 0 MW per calcolare il price capture.")
+        else:
+            tasso = pc["tasso_cattura"]
+            tasso_txt = f"{tasso:.1f} %" if tasso is not None else "—"
+            k1, k2, k3, k4 = st.columns(4)
+            render_kpi("Prezzo catturato (€/MWh)", f"{pc['catturato']:,.2f}", k1)
+            render_kpi("Tasso di cattura", tasso_txt, k2)
+            render_kpi("Ricavo periodo (€)", f"{pc['ricavo']:,.0f}", k3)
+            render_kpi("Sconto cannibalizzazione (€/MWh)", f"{pc['sconto_can']:+,.2f}", k4)
+            st.caption(f"📊 Su {pc['mwh']:,.1f} MWh prodotti, il solare cattura in media {pc['catturato']:,.2f} €/MWh "
+                       f"contro una media base di {pc['base_medio']:,.2f} €/MWh (tasso {tasso_txt}): "
+                       f"lo sconto da profilo è di {pc['sconto_can']:+,.2f} €/MWh.")
+
+            fig_pc = go.Figure()
+            fig_pc.add_trace(go.Bar(
+                x=df_pm["Mese"], y=df_pm["Catturato (€/MWh)"], name="Prezzo catturato",
+                marker_color="#eab308",
+                hovertemplate="Mese: %{x}<br>Catturato: %{y:,.2f} €/MWh<extra></extra>"))
+            fig_pc.add_trace(go.Scatter(
+                x=df_pm["Mese"], y=[pc["base_medio"]] * len(df_pm), name="Media base periodo",
+                mode="lines", line=dict(color="#3b82f6", width=2, dash="dash"),
+                hovertemplate="Base: %{y:,.2f} €/MWh<extra></extra>"))
+            fig_pc.add_trace(go.Scatter(
+                x=df_pm["Mese"], y=df_pm["Tasso %"], name="Tasso di cattura %", yaxis="y2",
+                mode="lines+markers", line=dict(color="#10B981", width=2.5),
+                hovertemplate="Mese: %{x}<br>Tasso: %{y:.1f} %<extra></extra>"))
+            fig_pc.update_layout(template="plotly_dark", height=420,
+                                 title="Price capture mensile del solare (vs media base)",
+                                 xaxis_title="Mese", yaxis_title="Prezzo (€/MWh)",
+                                 yaxis2=dict(title="Tasso di cattura (%)", overlaying="y", side="right"))
+            st.plotly_chart(fig_pc, use_container_width=True)
+
+            st.dataframe(df_pm, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta price capture (CSV)",
+                df_pm.to_csv(index=False).encode("utf-8"),
+                file_name=f"price_capture_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica la tabella mensile: MWh, ricavo, prezzo catturato e tasso di cattura.",
+            )
 
 # Footer
 st.markdown("---")
