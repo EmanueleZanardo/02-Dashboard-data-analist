@@ -184,6 +184,21 @@ def fascia_oraria(ts):
         return "F2"
     return "F3"
 
+def sposta_carico_f1_f3(prezzi, mw_f1, mw_f3, quota_pct):
+    """Demand response: sposta una quota del carico F1 verso F3.
+    quota_pct: % dell'energia F1 da spostare nelle ore fuori punta (0-100, clamped).
+    Ritorna (mw_f1_nuovo, mw_f3_nuovo): l'energia totale resta invariata
+    (i MWh tolti da F1 vengono ripartiti sulle ore F3).
+    Se mancano ore F1 o F3 nel periodo, ritorna il profilo invariato."""
+    q = max(0.0, min(100.0, float(quota_pct))) / 100.0
+    fasce = prezzi.index.map(fascia_oraria)
+    ore_f1 = int((fasce == "F1").sum())
+    ore_f3 = int((fasce == "F3").sum())
+    if q <= 0 or ore_f1 == 0 or ore_f3 == 0:
+        return float(mw_f1), float(mw_f3)
+    e_spostata = float(mw_f1) * q * ore_f1  # MWh spostati da F1 a F3
+    return float(mw_f1) * (1 - q), float(mw_f3) + e_spostata / ore_f3
+
 def calcola_base_peak_mensile(prezzi):
     """Analisi mensile Base/Peak/Offpeak (definizione standard EPEX: Peak = lun–ven 08:00–19:59).
     Ritorna un DataFrame con un rigo per mese: Mese, Base, Peak, Offpeak, Spread P-O, Spread %, Ore peak.
@@ -225,7 +240,10 @@ def calcola_costo_fornitura(prezzi, mw_f1, mw_f2, mw_f3):
     per_fascia = (df.groupby("fascia")
                     .agg(ore=("costo", "size"), mwh=("mw", "sum"),
                          costo=("costo", "sum"), prezzo_medio=("prezzo", "mean"))
-                    .reindex(["F1", "F2", "F3"]).fillna(0))
+                    .reindex(["F1", "F2", "F3"]))
+    # FIX: fascia senza ore -> ore/mwh/costo = 0 ma prezzo_medio resta NaN
+    # (fillna(0) su tutto mostrava un falso "0.00 €/MWh" come prezzo medio)
+    per_fascia = per_fascia.fillna({"ore": 0, "mwh": 0.0, "costo": 0.0})
     totale = float(df["costo"].sum())
     mwh = float(df["mw"].sum())
     ponderato = totale / mwh if mwh > 0 else float("nan")
@@ -779,7 +797,7 @@ elif workspace == _('ws7'):
     m1, m2, m3, m4 = st.columns(4)
     m1.metric(label="Tempo di Reportistica", value="-20%", delta="Ottimizzazione", help="Riduzione del tempo impiegato per l'analisi dei dati.")
     m2.metric(label="Automazione Flussi", value="100%", delta="Real-time API", help="Integrazione diretta con le fonti dati di mercato.")
-    m3.metric(label="Copertura Modelli", value="7 Workspaces", delta="Completo", help="Copertura da asset class classiche a XVA e Risk.")
+    m3.metric(label="Copertura Modelli", value="8 Workspaces", delta="Completo", help="Copertura da asset class classiche a XVA e Risk.")
     m4.metric(label="Efficienza Codice", value="Python / TS", delta="High Performance", help="Stack tecnologico solido e reattivo.")
 
 # ==========================================
@@ -1216,7 +1234,7 @@ elif workspace == _('ws8'):
 
             st.markdown("**Dettaglio per fascia oraria**")
             pf = ris_cf["per_fascia"].reset_index().rename(columns={
-                "index": "Fascia", "ore": "Ore", "mwh": "MWh", "costo": "Costo (€)", "prezzo_medio": "Prezzo medio (€/MWh)"})
+                "fascia": "Fascia", "ore": "Ore", "mwh": "MWh", "costo": "Costo (€)", "prezzo_medio": "Prezzo medio (€/MWh)"})
             pf["Costo (€)"] = pf["Costo (€)"].round(0)
             pf["Prezzo medio (€/MWh)"] = pf["Prezzo medio (€/MWh)"].round(2)
             pf["MWh"] = pf["MWh"].round(0)
@@ -1228,6 +1246,23 @@ elif workspace == _('ws8'):
                 mime="text/csv",
                 help="Scarica il dettaglio per fascia oraria.",
             )
+
+            titolo_dr = edu("Demand response: sposta carico da F1 a F3 (what-if)", "Parte dei consumi di punta (F1, ore care) viene spostata nelle ore fuori punta (F3, ore economiche). L'energia totale resta invariata: i MWh tolti dalla F1 vengono ripartiti sulle ore F3. Il simulatore ricalcola costo e prezzo medio ponderato: il risparmio è il business case per proporre al cliente un profilo di consumo ottimizzato.")
+            st.markdown(f"**{titolo_dr}**: quanto si risparmia spostando parte dei consumi di punta in fuori punta?", unsafe_allow_html=True)
+            shift_pct = st.slider("Quota del carico F1 spostata in F3 (%)", 0, 50, 0, step=5,
+                                  help="Percentuale dell'energia F1 da spostare in F3: il profilo di potenza viene ricalcolato a energia totale invariata.")
+            if shift_pct > 0:
+                mw1s, mw3s = sposta_carico_f1_f3(prezzi, mw_f1, mw_f3, shift_pct)
+                ris_s = calcola_costo_fornitura(prezzi, mw1s, mw_f2, mw3s)
+                risparmio = ris_cf["totale"] - ris_s["totale"]
+                pct_r = risparmio / ris_cf["totale"] * 100 if ris_cf["totale"] else 0.0
+                s1, s2, s3 = st.columns(3)
+                render_kpi("Costo con shift (€)", f"{ris_s['totale']:,.0f}", s1)
+                render_kpi("Prezzo medio ponderato (€/MWh)", f"{ris_s['ponderato']:,.2f}", s2)
+                segno_r = "🟢" if risparmio > 0 else ("🔴" if risparmio < 0 else "⚪")
+                render_kpi(f"{segno_r} Risparmio stimato", f"{risparmio:+,.0f} € ({pct_r:+.1f} %)", s3)
+                st.caption(f"Profilo shiftato: F1 {mw1s:.2f} MW, F2 {mw_f2:.2f} MW, F3 {mw3s:.2f} MW — "
+                           f"energia totale {ris_s['mwh']:,.0f} MWh (invariata vs {ris_cf['mwh']:,.0f} MWh).")
 
 # Footer
 st.markdown("---")
