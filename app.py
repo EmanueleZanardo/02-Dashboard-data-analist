@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import calendar
 import datetime
 import time
 import plotly.express as px
@@ -330,6 +331,45 @@ def calcola_spark_spread(prezzi, gas_eur_mwh, eff_pct, co2_eur_t, ef_tco2_mwh=0.
         "ore_totali": int(len(validi)),
     }
     return ss, stats
+
+def calcola_shape_fattori(prezzi):
+    """Fattori di shape stagionale dallo spot storico (per costruire curve forward 'shaped').
+    Ritorna un dict:
+      'mensile': Series(1..12) con fattore = media(mese)/media(totale)
+      'orario': DataFrame(1..12 x 0..23) con fattore = media(mese,ora)/media(mese)
+      'media_storica': media globale dello spot (€/MWh)
+    I mesi senza dati riportano NaN (il chiamante usa fallback 1.0, fattore neutro);
+    su serie vuota ritorna fattori tutti-NaN senza errori."""
+    v = prezzi.values.astype(float)
+    idx = prezzi.index
+    media = float(v.mean()) if len(v) else float("nan")
+    fattori_m = pd.Series(index=range(1, 13), dtype=float)
+    fattori_h = pd.DataFrame(index=range(1, 13), columns=range(24), dtype=float)
+    if len(v) and not np.isnan(media) and media != 0:
+        mese = idx.month.to_numpy()
+        ora = idx.hour.to_numpy()
+        df = pd.DataFrame({"prezzo": v, "mese": mese, "ora": ora})
+        mm = df.groupby("mese")["prezzo"].mean()
+        fattori_m.loc[mm.index] = (mm / media).values
+        mh = df.groupby(["mese", "ora"])["prezzo"].mean().unstack("ora")
+        for m in mh.index:
+            if not np.isnan(mm.loc[m]) and mm.loc[m] != 0:
+                fattori_h.loc[m, mh.columns] = (mh.loc[m] / mm.loc[m]).values
+    return {"mensile": fattori_m, "orario": fattori_h, "media_storica": media}
+
+def shaped_mensile(forward, fattori_mensili, ore_mese):
+    """Prezzi forward mensili 'shaped': forward * fattore_m / media_ponderata(fattori, pesi=ore).
+    La media dei prezzi shaped pesata per le ore di ciascun mese riproduce
+    ESATTAMENTE il forward in input (renormalizzazione).
+    Fattori NaN -> 1.0 (fallback neutro: mese senza storia = prezzo flat).
+    forward: prezzo flat annuo (€/MWh); ore_mese: dict/Series mese(1..12) -> ore.
+    Ritorna una Series indicizzata 1..12 in €/MWh."""
+    f = fattori_mensili.reindex(range(1, 13)).astype(float).fillna(1.0)
+    h = pd.Series(ore_mese, index=range(1, 13), dtype=float)
+    w_avg = float((f * h).sum() / h.sum()) if h.sum() > 0 else 1.0
+    if w_avg == 0:
+        w_avg = 1.0
+    return (float(forward) * f / w_avg).rename("Prezzo shaped (€/MWh)")
 
 # Impianti proxy: nome -> (costo marginale €/MWh, capacità MW, colore)
 ASSETS = {
@@ -887,7 +927,7 @@ elif workspace == _('ws7'):
 # ==========================================
 elif workspace == _('ws8'):
     st.markdown(f"<h1>{_('ws8')}</h1>", unsafe_allow_html=True)
-    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread ed export CSV.")
+    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread, shaping curva ed export CSV.")
 
     # ---------- Controlli: sorgente, periodo, impianti ----------
     st.subheader("⚙️ Sorgente dati & Timeframe")
@@ -1030,7 +1070,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -1469,6 +1509,95 @@ elif workspace == _('ws8'):
             mime="text/csv",
             help="Scarica la serie oraria: prezzo spot e spark spread con i parametri impostati.",
         )
+
+    with tab11:
+        titolo_sh = edu("Shaping della curva forward", "Lo SHAPING trasforma un prezzo forward FLAT (es. un annuale quotato 95 €/MWh) in una curva mensile e oraria che riflette la stagionalità storica: i mesi invernali (domanda alta, prezzi alti) quotano sopra il flat, i mesi estivi sotto. Fattore mensile = media storica del mese / media totale; il prezzo shaped del mese = forward × fattore, rinormalizzato per ore così che la media ponderata riproduca esattamente il forward. È lo strumento con cui il desk quota contratti mensili/trimestrali e profili di consumo strutturati partendo da un unico prezzo annuale.")
+        st.markdown(f"**{titolo_sh}**: da un forward flat annuale a una curva mensile/oraria che segue la stagionalità storica dello spot.", unsafe_allow_html=True)
+
+        shape = calcola_shape_fattori(prezzi)
+        f_m = shape["mensile"]
+        mesi_vuoti = [m for m in range(1, 13) if pd.isna(f_m.loc[m])]
+        if mesi_vuoti:
+            nomi_m = ["Gen", "Feb", "Mar", "Apr", "Mag", "Giu", "Lug", "Ago", "Set", "Ott", "Nov", "Dic"]
+            st.warning(f"⚠️ Storia insufficiente per i mesi {', '.join(nomi_m[m-1] for m in mesi_vuoti)}: usato fattore neutro 1.0 (prezzo flat). Allunga il periodo per una stagionalità affidabile.")
+
+        sh1, sh2 = st.columns(2)
+        with sh1:
+            fwd = st.number_input("Prezzo forward annuo flat (€/MWh)", min_value=0.0,
+                                  value=round(float(prezzi.mean()), 1), step=1.0,
+                                  help="Prezzo quotato per il baseload annuale (es. da broker screen o EEX).")
+        with sh2:
+            anno_c = st.number_input("Anno di consegna", min_value=2026, max_value=2040,
+                                     value=datetime.date.today().year + 1, step=1,
+                                     help="Serve per contare le ore di ciascun mese (anni bisestili inclusi).")
+
+        ore_m = {m: calendar.monthrange(int(anno_c), m)[1] * 24 for m in range(1, 13)}
+        mesi_shape = shaped_mensile(fwd, f_m, ore_m)
+        nomi_mesi = ["Gennaio", "Febbraio", "Marzo", "Aprile", "Maggio", "Giugno",
+                     "Luglio", "Agosto", "Settembre", "Ottobre", "Novembre", "Dicembre"]
+        df_shape = pd.DataFrame({
+            "Mese": [nomi_mesi[m - 1] for m in range(1, 13)],
+            "Ore": [ore_m[m] for m in range(1, 13)],
+            "Fattore stagionale": f_m.reindex(range(1, 13)).fillna(1.0).round(3).values,
+            "Prezzo shaped (€/MWh)": mesi_shape.round(2).values,
+        })
+
+        mese_max = df_shape.loc[df_shape["Prezzo shaped (€/MWh)"].idxmax()]
+        mese_min = df_shape.loc[df_shape["Prezzo shaped (€/MWh)"].idxmin()]
+        ampiezza = (mese_max["Prezzo shaped (€/MWh)"] - mese_min["Prezzo shaped (€/MWh)"])
+        wavg_check = float((mesi_shape * pd.Series(ore_m, index=range(1, 13))).sum() / sum(ore_m.values()))
+        s1, s2, s3, s4 = st.columns(4)
+        render_kpi(f"🔺 Mese più caro ({mese_max['Mese'][:3]})", f"{mese_max['Prezzo shaped (€/MWh)']:,.2f} €/MWh", s1)
+        render_kpi(f"🔻 Mese più economico ({mese_min['Mese'][:3]})", f"{mese_min['Prezzo shaped (€/MWh)']:,.2f} €/MWh", s2)
+        render_kpi("Ampiezza stagionale", f"{ampiezza:,.2f} €/MWh ({ampiezza/fwd*100 if fwd else 0:.1f} %)", s3)
+        render_kpi("✓ Media ponderata (check)", f"{wavg_check:,.2f} €/MWh", s4)
+        st.caption("Check: la media dei prezzi shaped pesata per le ore dei mesi riproduce il forward in input — la curva è arbitraggio-neutra rispetto al flat.")
+
+        fig_sh = go.Figure()
+        fig_sh.add_trace(go.Bar(
+            x=df_shape["Mese"], y=df_shape["Prezzo shaped (€/MWh)"], name="Prezzo shaped",
+            marker_color="#8b5cf6",
+            hovertemplate="Mese: %{x}<br>Shaped: %{y:,.2f} €/MWh<br>Fattore: %{customdata:.3f}<extra></extra>",
+            customdata=df_shape["Fattore stagionale"],
+        ))
+        fig_sh.add_hline(y=fwd, line_dash="dash", line_color="#eab308",
+                         annotation_text=f"Forward flat: {fwd:.1f} €/MWh", annotation_position="top left")
+        fig_sh.update_layout(template="plotly_dark", height=400,
+                             title=f"Curva forward shaped {int(anno_c)} (da stagionalità {d0} → {d1})",
+                             xaxis_title="Mese", yaxis_title="Prezzo (€/MWh)")
+        st.plotly_chart(fig_sh, use_container_width=True)
+
+        st.dataframe(df_shape, use_container_width=True, hide_index=True)
+        st.download_button(
+            "⬇️ Esporta curva shaped (CSV)",
+            df_shape.to_csv(index=False).encode("utf-8"),
+            file_name=f"curva_shaped_{int(anno_c)}.csv",
+            mime="text/csv",
+            help="Scarica la curva mensile shaped: mese, ore, fattore stagionale, prezzo.",
+        )
+
+        st.markdown("**Profilo orario shaped per mese**")
+        mese_sel = st.selectbox("Mese", nomi_mesi, index=datetime.date.today().month - 1)
+        m_num = nomi_mesi.index(mese_sel) + 1
+        fh = shape["orario"].loc[m_num].astype(float)
+        if fh.isna().all():
+            st.info(f"Nessuna storia oraria per {mese_sel}: profilo piatto.")
+            prof_h = np.full(24, mesi_shape.loc[m_num])
+        else:
+            fh = fh.fillna(1.0)
+            fh = fh / fh.mean()  # rinormalizza: media dei 24 fattori = 1
+            prof_h = mesi_shape.loc[m_num] * fh.values
+        fig_ph = go.Figure()
+        fig_ph.add_trace(go.Scatter(x=list(range(24)), y=prof_h, mode='lines+markers',
+                                    name=f"Profilo {mese_sel}", line=dict(color='#10B981', width=2.5)))
+        fig_ph.add_hline(y=mesi_shape.loc[m_num], line_dash="dash", line_color="#9ca3af",
+                         annotation_text=f"Media mese: {mesi_shape.loc[m_num]:.1f} €/MWh",
+                         annotation_position="top left")
+        fig_ph.update_layout(template="plotly_dark", height=350,
+                             title=f"Profilo orario shaped — {mese_sel} {int(anno_c)}",
+                             xaxis_title="Ora del giorno", yaxis_title="Prezzo (€/MWh)",
+                             xaxis=dict(tickmode='linear', dtick=2))
+        st.plotly_chart(fig_ph, use_container_width=True)
 
 # Footer
 st.markdown("---")
