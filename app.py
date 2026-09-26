@@ -371,6 +371,51 @@ def shaped_mensile(forward, fattori_mensili, ore_mese):
         w_avg = 1.0
     return (float(forward) * f / w_avg).rename("Prezzo shaped (€/MWh)")
 
+def calcola_spread_weekend(prezzi):
+    """Analisi settimanale dello spread weekday (lun-ven) vs weekend (sab-dom).
+
+    prezzi: Series oraria in €/MWh (indice tz-aware).
+    Ritorna un DataFrame con un rigo per settimana (lunedi-domenica):
+      Settimana (etichetta "dd/mm-dd/mm"), Inizio, Fine,
+      Weekday (€/MWh) = media lun-ven, Weekend (€/MWh) = media sab-dom,
+      Spread Wd-We (€/MWh) = weekday - weekend (positivo = sconto weekend),
+      Spread % = spread / weekday * 100,
+      Ore weekday, Ore weekend.
+    Settimane con solo weekday o solo weekend (bordi del periodo) riportano
+    None nelle colonne derivate; serie vuota -> DataFrame vuoto con le colonne giuste."""
+    cols = ["Settimana", "Inizio", "Fine", "Weekday (€/MWh)", "Weekend (€/MWh)",
+            "Spread Wd-We (€/MWh)", "Spread %", "Ore weekday", "Ore weekend"]
+    v = prezzi.values.astype(float)
+    idx = prezzi.index
+    if len(v) == 0:
+        return pd.DataFrame({c: [] for c in cols})
+    wd = idx.weekday.to_numpy()
+    is_we = wd >= 5
+    date = idx.normalize()
+    lunedi = date - pd.to_timedelta(date.weekday, unit="d")
+    df = pd.DataFrame({"prezzo": v, "we": is_we}, index=idx)
+    righe = []
+    for lun, grp in df.groupby(lunedi):
+        dom = lun + pd.Timedelta(days=6)
+        wd_p = grp.loc[~grp["we"], "prezzo"]
+        we_p = grp.loc[grp["we"], "prezzo"]
+        wd_m = float(wd_p.mean()) if len(wd_p) else float("nan")
+        we_m = float(we_p.mean()) if len(we_p) else float("nan")
+        spread = wd_m - we_m
+        righe.append({
+            "Settimana": f"{lun.strftime('%d/%m')}-{dom.strftime('%d/%m')}",
+            "Inizio": lun.date().isoformat(),
+            "Fine": dom.date().isoformat(),
+            "Weekday (€/MWh)": None if np.isnan(wd_m) else round(wd_m, 2),
+            "Weekend (€/MWh)": None if np.isnan(we_m) else round(we_m, 2),
+            "Spread Wd-We (€/MWh)": None if np.isnan(spread) else round(spread, 2),
+            "Spread %": (None if (np.isnan(spread) or wd_m == 0)
+                         else round(spread / wd_m * 100, 1)),
+            "Ore weekday": int(len(wd_p)),
+            "Ore weekend": int(len(we_p)),
+        })
+    return pd.DataFrame(righe, columns=cols)
+
 # Impianti proxy: nome -> (costo marginale €/MWh, capacità MW, colore)
 ASSETS = {
     "☀️ Solare Muttsee": (0.0, 50, "#eab308"),
@@ -1070,7 +1115,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -1598,6 +1643,59 @@ elif workspace == _('ws8'):
                              xaxis_title="Ora del giorno", yaxis_title="Prezzo (€/MWh)",
                              xaxis=dict(tickmode='linear', dtick=2))
         st.plotly_chart(fig_ph, use_container_width=True)
+
+    with tab12:
+        titolo_we = edu("Spread weekday/weekend", "Il mercato elettrico quota il WEEKEND come prodotto separato dal weekday: la domanda industriale crolla il sabato e la domenica e i prezzi sono tipicamente più bassi (SCONTO WEEKEND). Spread = media lun-ven MENO media sab-dom: positivo quando il weekend costa meno. Lo spread guida il pricing dei contratti con consumo weekend-intensivo e la quotazione dei prodotti Weekend Baseload.")
+        st.markdown(f"**{titolo_we}**: medie settimanali lun-ven vs sab-dom e sconto weekend.", unsafe_allow_html=True)
+
+        df_we = calcola_spread_weekend(prezzi)
+        if df_we.empty:
+            st.warning("Dati insufficienti per l'analisi settimanale.")
+        else:
+            df_we_v = df_we.dropna(subset=["Spread Wd-We (€/MWh)"])
+            if df_we_v.empty:
+                st.warning("Nessuna settimana completa (weekday + weekend) nel periodo.")
+            else:
+                sconto_m = float(df_we_v["Spread Wd-We (€/MWh)"].mean())
+                sconto_p = float(df_we_v["Spread %"].mean())
+                r_max = df_we_v.loc[df_we_v["Spread Wd-We (€/MWh)"].idxmax()]
+                r_min = df_we_v.loc[df_we_v["Spread Wd-We (€/MWh)"].idxmin()]
+                inv = int((df_we_v["Spread Wd-We (€/MWh)"] < 0).sum())
+                w1, w2, w3, w4 = st.columns(4)
+                render_kpi("Sconto medio weekend (€/MWh)", f"{sconto_m:+,.2f}", w1)
+                render_kpi("Sconto medio weekend (%)", f"{sconto_p:+.1f} %", w2)
+                render_kpi(f"🔺 Settimana max ({r_max['Settimana']})", f"{r_max['Spread Wd-We (€/MWh)']:+,.2f} €/MWh", w3)
+                render_kpi(f"🔻 Settimana min ({r_min['Settimana']})", f"{r_min['Spread Wd-We (€/MWh)']:+,.2f} €/MWh", w4)
+                st.caption(f"📅 Il weekend costa in media {sconto_m:+.2f} €/MWh ({sconto_p:+.1f} %) rispetto al weekday."
+                           + (f" In {inv} settimane il weekend è risultato PIÙ CARO del weekday (spread negativo)." if inv else " Il weekend non è mai risultato più caro del weekday."))
+
+                fig_we = go.Figure()
+                fig_we.add_trace(go.Bar(
+                    x=df_we_v["Settimana"], y=df_we_v["Weekday (€/MWh)"], name="Weekday (lun-ven)",
+                    marker_color="#3b82f6",
+                    hovertemplate="Settimana: %{x}<br>Weekday: %{y:,.2f} €/MWh<extra></extra>"))
+                fig_we.add_trace(go.Bar(
+                    x=df_we_v["Settimana"], y=df_we_v["Weekend (€/MWh)"], name="Weekend (sab-dom)",
+                    marker_color="#10B981",
+                    hovertemplate="Settimana: %{x}<br>Weekend: %{y:,.2f} €/MWh<extra></extra>"))
+                fig_we.add_trace(go.Scatter(
+                    x=df_we_v["Settimana"], y=df_we_v["Spread Wd-We (€/MWh)"], name="Spread Wd-We",
+                    mode="lines+markers", line=dict(color="#eab308", width=2.5),
+                    hovertemplate="Settimana: %{x}<br>Spread: %{y:+,.2f} €/MWh<extra></extra>"))
+                fig_we.add_hline(y=0, line_dash="dot", line_color="#9ca3af")
+                fig_we.update_layout(template="plotly_dark", height=420, barmode="group",
+                                     title="Medie settimanali weekday vs weekend (sconto weekend)",
+                                     xaxis_title="Settimana", yaxis_title="Prezzo (€/MWh)")
+                st.plotly_chart(fig_we, use_container_width=True)
+
+                st.dataframe(df_we, use_container_width=True, hide_index=True)
+                st.download_button(
+                    "⬇️ Esporta spread weekend (CSV)",
+                    df_we.to_csv(index=False).encode("utf-8"),
+                    file_name=f"spread_weekend_{d0}_{d1}.csv",
+                    mime="text/csv",
+                    help="Scarica la tabella settimanale: medie weekday/weekend, spread in €/MWh e in %.",
+                )
 
 # Footer
 st.markdown("---")
