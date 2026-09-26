@@ -184,6 +184,33 @@ def fascia_oraria(ts):
         return "F2"
     return "F3"
 
+def calcola_base_peak_mensile(prezzi):
+    """Analisi mensile Base/Peak/Offpeak (definizione standard EPEX: Peak = lun–ven 08:00–19:59).
+    Ritorna un DataFrame con un rigo per mese: Mese, Base, Peak, Offpeak, Spread P-O, Spread %, Ore peak.
+    Valori NaN-safe: mesi senza ore peak/offpeak riportano None nelle colonne derivate."""
+    idx = prezzi.index
+    is_peak = (idx.weekday < 5) & (idx.hour >= 8) & (idx.hour < 20)
+    df = pd.DataFrame({"prezzo": prezzi.values.astype(float), "peak": is_peak}, index=idx)
+    righe = []
+    for mese, grp in df.groupby(df.index.to_period("M")):
+        base = float(grp["prezzo"].mean())
+        pk = grp.loc[grp["peak"], "prezzo"]
+        op = grp.loc[~grp["peak"], "prezzo"]
+        peak_mean = float(pk.mean()) if len(pk) else float("nan")
+        off_mean = float(op.mean()) if len(op) else float("nan")
+        spread = peak_mean - off_mean
+        righe.append({
+            "Mese": str(mese),
+            "Base (€/MWh)": round(base, 2),
+            "Peak (€/MWh)": None if np.isnan(peak_mean) else round(peak_mean, 2),
+            "Offpeak (€/MWh)": None if np.isnan(off_mean) else round(off_mean, 2),
+            "Spread P-O (€/MWh)": None if np.isnan(spread) else round(spread, 2),
+            "Spread %": (None if (np.isnan(spread) or off_mean == 0)
+                         else round(spread / off_mean * 100, 1)),
+            "Ore peak": int(len(pk)),
+        })
+    return pd.DataFrame(righe)
+
 # Impianti proxy: nome -> (costo marginale €/MWh, capacità MW, colore)
 ASSETS = {
     "☀️ Solare Muttsee": (0.0, 50, "#eab308"),
@@ -883,7 +910,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -1070,6 +1097,50 @@ elif workspace == _('ws8'):
                 file_name=f"battery_arbitrage_{d0}_{d1}.csv",
                 mime="text/csv",
                 help="Scarica la tabella giornaliera min/max/spread/ricavo.",
+            )
+
+    with tab7:
+        titolo_bp = edu("Base/Peak mensile", "I prodotti standard del mercato elettrico: BASELOAD = prezzo medio di TUTTE le ore del mese; PEAK = media delle ore di punta (lun–ven 08:00–19:59); OFFPEAK = media delle restanti ore. Lo spread Peak–Offpeak mostra la premi al rischio di punta: è la metrica che guida acquisti/vendite a termine e il dimensionamento dei contratti PPA.")
+        st.markdown(f"**{titolo_bp}**: medie mensili Base/Peak/Offpeak (definizione EPEX) e spread di punta.", unsafe_allow_html=True)
+        df_bp = calcola_base_peak_mensile(prezzi)
+        if df_bp.empty:
+            st.warning("Dati insufficienti per l'analisi mensile.")
+        else:
+            ult_bp = df_bp.iloc[-1]
+            b1, b2, b3, b4 = st.columns(4)
+            render_kpi(f"Base ultimo mese ({ult_bp['Mese']})", f"{ult_bp['Base (€/MWh)']:,.2f} €/MWh", b1)
+            render_kpi("Peak ultimo mese", f"{ult_bp['Peak (€/MWh)']:,.2f} €/MWh" if pd.notna(ult_bp['Peak (€/MWh)']) else "n/d", b2)
+            render_kpi("Spread Peak–Offpeak", f"{ult_bp['Spread P-O (€/MWh)']:+,.2f} €/MWh" if pd.notna(ult_bp['Spread P-O (€/MWh)']) else "n/d", b3)
+            render_kpi("Spread %", f"{ult_bp['Spread %']:+.1f} %" if pd.notna(ult_bp['Spread %']) else "n/d", b4)
+
+            fig_bp = make_subplots(specs=[[{"secondary_y": True}]])
+            for col, colore, nome in [("Base (€/MWh)", "#3b82f6", "Base"),
+                                      ("Peak (€/MWh)", "#ef4444", "Peak"),
+                                      ("Offpeak (€/MWh)", "#eab308", "Offpeak")]:
+                fig_bp.add_trace(go.Bar(x=df_bp["Mese"], y=df_bp[col], name=nome,
+                                        marker_color=colore, opacity=0.9,
+                                        hovertemplate=f"{nome}: %{{y:,.1f}} €/MWh<extra></extra>"),
+                                 secondary_y=False)
+            fig_bp.add_trace(go.Scatter(x=df_bp["Mese"], y=df_bp["Spread P-O (€/MWh)"],
+                                        name="Spread P-O", mode="lines+markers",
+                                        line=dict(color="#10B981", width=2.5, dash="dash"),
+                                        hovertemplate="Spread: %{y:,.1f} €/MWh<extra></extra>"),
+                             secondary_y=True)
+            fig_bp.update_layout(template="plotly_dark", height=400,
+                                  title="Medie mensili Base/Peak/Offpeak + spread di punta",
+                                  xaxis_title="Mese", barmode="group",
+                                  legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+            fig_bp.update_yaxes(title_text="Prezzo (€/MWh)", secondary_y=False)
+            fig_bp.update_yaxes(title_text="Spread (€/MWh)", secondary_y=True)
+            st.plotly_chart(fig_bp, use_container_width=True)
+
+            st.dataframe(df_bp, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta Base/Peak mensile (CSV)",
+                df_bp.to_csv(index=False).encode("utf-8"),
+                file_name=f"base_peak_mensile_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica la tabella mensile Base/Peak/Offpeak/spread.",
             )
 
 # Footer
