@@ -653,6 +653,72 @@ def calcola_prezzi_negativi(prezzi, soglia=0.0):
         columns=cols_t).head(20)
     return out
 
+def calcola_spread_intraday(prezzi):
+    """Spread intra-day giornaliero (max - min) del prezzo orario.
+
+    Lo spread intra-day e' la misura diretta del valore della flessibilita':
+    una batteria o un carico flessibile comprano nelle ore di minimo e
+    rivendono in quelle di massimo, catturando il range giornaliero.
+    L'helper calcola per ogni giorno il range (prezzo max - prezzo min) e
+    le ore in cui si verificano il minimo e il massimo, piu' l'aggregato
+    mensile (range medio e massimo del mese).
+
+    NaN-safe: ore con prezzo NaN ignorate; i giorni senza dati validi sono
+    esclusi dal conteggio. Ritorna dict con 'n_giorni', 'range_medio'
+    (media dei range giornalieri), 'range_max' (range massimo) e 'data_max'
+    (giorno del range massimo, "YYYY-MM-DD"), 'ora_min_freq'/'ora_max_freq'
+    (ora piu' frequente di minimo/massimo, formato "HH:00"),
+    'giornaliero' (DataFrame Data, 'Range €/MWh', 'Ora min', 'Ora max',
+    ordinato per data) e 'mensile' (DataFrame Mese, 'Range medio €/MWh',
+    'Range max €/MWh')."""
+    MESI = ["Gen", "Feb", "Mar", "Apr", "Mag", "Giu",
+            "Lug", "Ago", "Set", "Ott", "Nov", "Dic"]
+    cols_g = ["Data", "Range €/MWh", "Ora min", "Ora max"]
+    cols_m = ["Mese", "Range medio €/MWh", "Range max €/MWh"]
+    vuoto = {"n_giorni": 0, "range_medio": None, "range_max": None,
+             "data_max": None, "ora_min_freq": None, "ora_max_freq": None,
+             "giornaliero": pd.DataFrame(columns=cols_g),
+             "mensile": pd.DataFrame(columns=cols_m)}
+    p = prezzi.astype(float).dropna()
+    if p.empty:
+        return vuoto
+    idxn = p.index.tz_localize(None) if p.index.tz is not None else p.index
+    date = idxn.date
+    righe = []
+    for giorno in sorted(set(date)):
+        mask = date == giorno
+        vals = p.values[mask]
+        if len(vals) == 0:
+            continue
+        i_min = int(np.argmin(vals))
+        i_max = int(np.argmax(vals))
+        ore_str = idxn[mask].strftime("%H:00")
+        righe.append({"Data": giorno.strftime("%Y-%m-%d"),
+                      "Range €/MWh": round(float(vals[i_max] - vals[i_min]), 2),
+                      "Ora min": ore_str[i_min],
+                      "Ora max": ore_str[i_max],
+                      "_mese": giorno.month})
+    out = dict(vuoto)
+    if not righe:
+        return out
+    df = pd.DataFrame(righe).sort_values("Data").reset_index(drop=True)
+    out["n_giorni"] = int(len(df))
+    out["range_medio"] = round(float(df["Range €/MWh"].mean()), 2)
+    i_max_r = int(df["Range €/MWh"].idxmax())
+    out["range_max"] = float(df.loc[i_max_r, "Range €/MWh"])
+    out["data_max"] = df.loc[i_max_r, "Data"]
+    out["ora_min_freq"] = df["Ora min"].mode().iloc[0]
+    out["ora_max_freq"] = df["Ora max"].mode().iloc[0]
+    out["giornaliero"] = df.drop(columns=["_mese"])
+    righe_m = []
+    for m in range(1, 13):
+        sel = df[df["_mese"] == m]
+        righe_m.append({"Mese": MESI[m - 1],
+                        "Range medio €/MWh": (None if sel.empty else round(float(sel["Range €/MWh"].mean()), 2)),
+                        "Range max €/MWh": (None if sel.empty else round(float(sel["Range €/MWh"].max()), 2))})
+    out["mensile"] = pd.DataFrame(righe_m, columns=cols_m)
+    return out
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def generate_singularity_data():
     np.random.seed(42)
@@ -1202,7 +1268,7 @@ elif workspace == _('ws7'):
 # ==========================================
 elif workspace == _('ws8'):
     st.markdown(f"<h1>{_('ws8')}</h1>", unsafe_allow_html=True)
-    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread, shaping curva, spread weekend, price capture, volatilità realizzata, confronto anno-su-anno, analisi prezzi negativi ed export CSV.")
+    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread, shaping curva, spread weekend, price capture, volatilità realizzata, confronto anno-su-anno, analisi prezzi negativi, spread intra-day ed export CSV.")
 
     # ---------- Controlli: sorgente, periodo, impianti ----------
     st.subheader("⚙️ Sorgente dati & Timeframe")
@@ -1345,7 +1411,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -2145,6 +2211,70 @@ elif workspace == _('ws8'):
                 file_name=f"prezzi_negativi_{d0}_{d1}.csv",
                 mime="text/csv",
                 help="Scarica le 20 ore con i prezzi più bassi del periodo selezionato.",
+            )
+
+    with tab17:
+        titolo_id = edu("Spread intra-day", "Lo SPREAD INTRA-DAY di un giorno è la differenza tra il suo prezzo massimo e il suo prezzo minimo (max − min). Per un energy analyst è la misura diretta del valore della flessibilità: una batteria o un carico flessibile possono 'comprare' nelle ore di minimo e 'vendere' in quelle di massimo, catturando questo range ogni giorno. Questo tab mostra quanto è ampio in media, in quali giorni è massimo, a che ora si verificano tipicamente minimo e massimo, e come varia per mese.")
+        st.markdown(f"**{titolo_id}**: range giornaliero max−min (valore della flessibilità), ora del minimo e del massimo, distribuzione mensile.", unsafe_allow_html=True)
+        sd = calcola_spread_intraday(prezzi)
+        if sd["n_giorni"] == 0:
+            st.info("Nessun dato giornaliero disponibile per il periodo selezionato.")
+        else:
+            k1, k2, k3, k4 = st.columns(4)
+            render_kpi("Range medio giornaliero (€/MWh)", f"{sd['range_medio']:,.2f}", k1)
+            render_kpi(edu("Range massimo (€/MWh)", "Il giorno con lo spread più ampio del periodo: massima opportunità di arbitraggio giornaliero per batterie e carichi flessibili."), f"{sd['range_max']:,.2f}<br><small>{sd['data_max']}</small>", k2)
+            render_kpi("Ora del minimo (più frequente)", sd["ora_min_freq"], k3)
+            render_kpi("Ora del massimo (più frequente)", sd["ora_max_freq"], k4)
+            st.caption(f"💡 Giorni analizzati: {sd['n_giorni']}. Un impianto da 1 MW capace di catturare metà del range medio giornaliero ogni giorno vale circa {sd['range_medio'] / 2:,.2f} €/giorno di arbitraggio teorico.")
+
+            fig_sd = go.Figure()
+            fig_sd.add_trace(go.Bar(
+                x=sd["giornaliero"]["Data"], y=sd["giornaliero"]["Range €/MWh"],
+                name="Range giornaliero", marker_color="#22d3ee",
+                hovertemplate="Data: %{x}<br>Range: %{y:.2f} €/MWh<extra></extra>"))
+            fig_sd.add_hline(y=sd["range_medio"], line_dash="dash", line_color="#eab308",
+                             annotation_text=f"Media: {sd['range_medio']:.0f} €/MWh", annotation_position="top left")
+            fig_sd.update_layout(template="plotly_dark", height=400,
+                                 title="Range giornaliero max−min (€/MWh)",
+                                 xaxis_title="Data", yaxis_title="Range (€/MWh)")
+            st.plotly_chart(fig_sd, use_container_width=True)
+
+            col_s1, col_s2 = st.columns(2)
+            with col_s1:
+                fig_sm = go.Figure()
+                fig_sm.add_trace(go.Bar(
+                    x=sd["mensile"]["Mese"], y=sd["mensile"]["Range medio €/MWh"],
+                    name="Range medio", marker_color="#38bdf8",
+                    hovertemplate="Mese: %{x}<br>Media: %{y:.2f} €/MWh<extra></extra>"))
+                fig_sm.update_layout(template="plotly_dark", height=360,
+                                     title="Range medio mensile",
+                                     xaxis_title="Mese", yaxis_title="Range medio (€/MWh)")
+                st.plotly_chart(fig_sm, use_container_width=True)
+            with col_s2:
+                ore_min_c = sd["giornaliero"]["Ora min"].value_counts().sort_index()
+                ore_max_c = sd["giornaliero"]["Ora max"].value_counts().sort_index()
+                fig_so = go.Figure()
+                fig_so.add_trace(go.Bar(x=ore_min_c.index, y=ore_min_c.values, name="Ore di minimo",
+                                        marker_color="#34d399",
+                                        hovertemplate="Ora: %{x}<br>Giorni: %{y}<extra></extra>"))
+                fig_so.add_trace(go.Bar(x=ore_max_c.index, y=ore_max_c.values, name="Ore di massimo",
+                                        marker_color="#f87171",
+                                        hovertemplate="Ora: %{x}<br>Giorni: %{y}<extra></extra>"))
+                fig_so.update_layout(template="plotly_dark", height=360,
+                                     title="Distribuzione ore di minimo e massimo",
+                                     xaxis_title="Ora", yaxis_title="Giorni",
+                                     barmode="group")
+                st.plotly_chart(fig_so, use_container_width=True)
+
+            st.markdown("**20 giorni con lo spread più ampio**")
+            top_sd = sd["giornaliero"].sort_values("Range €/MWh", ascending=False).head(20)
+            st.dataframe(top_sd, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta spread giornaliero (CSV)",
+                sd["giornaliero"].to_csv(index=False).encode("utf-8"),
+                file_name=f"spread_intraday_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica il range giornaliero max−min con ore di minimo e massimo per ogni giorno del periodo selezionato.",
             )
 
 # Footer
