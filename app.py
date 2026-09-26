@@ -485,6 +485,61 @@ ASSETS = {
     "🏭 Gas WtE Giubiasco": (208.0, 100, "#ef4444"),
 }
 
+def calcola_volatilita(prezzi):
+    """Volatilita' realizzata giornaliera dello spot orario (€/MWh).
+    prezzi: Series oraria in €/MWh. I prezzi spot possono essere 0 o negativi,
+    quindi la vol si misura sulle VARIAZIONI ORARIE di prezzo (diff €/MWh),
+    non sui log-return (indefiniti su valori non positivi).
+    Vol giorno = deviazione standard (ddof=1) delle variazioni orarie entro il
+    giorno solare: misura quanto il prezzo "sfarfalla" ora per ora. E' diversa
+    dal VaR del tab Rischio & Durata, che guarda la DISTRIBUZIONE dei livelli
+    di prezzo: qui si guarda la VELOCITA' dei movimenti, utile per trading
+    intraday e timing di arbitraggio batteria.
+    NaN-safe: le ore con prezzo NaN vengono ignorate; <3 ore valide ->
+    strutture vuote con le colonne giuste.
+    Ritorna dict con 'giornaliera' (DataFrame: Giorno, Prezzo medio (€/MWh),
+    Range (€/MWh), Vol (€/MWh)), 'profilo_orario' (Series: std delle
+    variazioni orarie per ora 0-23) e 'per_mese' (DataFrame: Mese,
+    Vol media (€/MWh), Range medio (€/MWh))."""
+    p = prezzi.astype(float).dropna()
+    cols_g = ["Giorno", "Prezzo medio (€/MWh)", "Range (€/MWh)", "Vol (€/MWh)"]
+    cols_m = ["Mese", "Vol media (€/MWh)", "Range medio (€/MWh)"]
+    vuoto = {
+        "giornaliera": pd.DataFrame({c: [] for c in cols_g}),
+        "profilo_orario": pd.Series(dtype=float),
+        "per_mese": pd.DataFrame({c: [] for c in cols_m}),
+    }
+    if len(p) < 3:
+        return vuoto
+    idxn = p.index.tz_localize(None) if p.index.tz is not None else p.index
+    diff = p.diff().dropna()
+    if diff.empty:
+        return vuoto
+    idxd = diff.index.tz_localize(None) if diff.index.tz is not None else diff.index
+    vol_g = diff.groupby(idxd.date).std(ddof=1)
+    g_p = p.groupby(idxn.date)
+    medio_g, range_g = g_p.mean(), g_p.max() - g_p.min()
+    giorni = sorted(set(vol_g.index) | set(medio_g.index))
+    righe = [{
+        "Giorno": str(g),
+        "Prezzo medio (€/MWh)": None if pd.isna(medio_g.get(g)) else round(float(medio_g.get(g)), 2),
+        "Range (€/MWh)": None if pd.isna(range_g.get(g)) else round(float(range_g.get(g)), 2),
+        "Vol (€/MWh)": None if pd.isna(vol_g.get(g)) else round(float(vol_g.get(g)), 2),
+    } for g in giorni]
+    prof_h = diff.groupby(idxd.hour).std(ddof=1).reindex(range(24)).round(2)
+    mesi = pd.Series([str(g)[:7] for g in giorni], index=giorni)
+    v_g, r_g = vol_g.reindex(giorni), range_g.reindex(giorni)
+    righe_m = [{
+        "Mese": m,
+        "Vol media (€/MWh)": (None if v_g[mesi == m].isna().all()
+                              else round(float(v_g[mesi == m].mean()), 2)),
+        "Range medio (€/MWh)": (None if r_g[mesi == m].isna().all()
+                                else round(float(r_g[mesi == m].mean()), 2)),
+    } for m in sorted(set(mesi))]
+    return {"giornaliera": pd.DataFrame(righe, columns=cols_g),
+            "profilo_orario": prof_h,
+            "per_mese": pd.DataFrame(righe_m, columns=cols_m)}
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def generate_singularity_data():
     np.random.seed(42)
@@ -1034,7 +1089,7 @@ elif workspace == _('ws7'):
 # ==========================================
 elif workspace == _('ws8'):
     st.markdown(f"<h1>{_('ws8')}</h1>", unsafe_allow_html=True)
-    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread, shaping curva, spread weekend, price capture ed export CSV.")
+    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread, shaping curva, spread weekend, price capture, volatilità realizzata ed export CSV.")
 
     # ---------- Controlli: sorgente, periodo, impianti ----------
     st.subheader("⚙️ Sorgente dati & Timeframe")
@@ -1177,7 +1232,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -1809,6 +1864,66 @@ elif workspace == _('ws8'):
                 file_name=f"price_capture_{d0}_{d1}.csv",
                 mime="text/csv",
                 help="Scarica la tabella mensile: MWh, ricavo, prezzo catturato e tasso di cattura.",
+            )
+
+    with tab14:
+        titolo_vol = edu("Volatilità realizzata", "La VOLATILITÀ REALIZZATA misura quanto il prezzo 'sfarfalla' ora per ora: è la deviazione standard delle variazioni orarie di prezzo (€/MWh) calcolata giorno per giorno. A differenza del VaR del tab Rischio & Durata (che guarda la distribuzione dei LIVELLI di prezzo), la volatilità guarda la VELOCITÀ dei movimenti. Alta volatilità = opportunità per trading intraday e arbitraggio batteria, ma anche rischio di timing per chi vende sul mercato spot. Si misura sulle differenze di prezzo (non sui rendimenti logaritmici, indefiniti quando i prezzi sono 0 o negativi).")
+        st.markdown(f"**{titolo_vol}**: deviazione standard delle variazioni orarie di prezzo, giorno per giorno.", unsafe_allow_html=True)
+
+        vol = calcola_volatilita(prezzi)
+        df_v = vol["giornaliera"]
+        if df_v.empty or df_v["Vol (€/MWh)"].isna().all():
+            st.warning("Dati insufficienti per calcolare la volatilità (servono almeno 3 ore valide).")
+        else:
+            v_s = df_v["Vol (€/MWh)"].dropna()
+            media30 = float(v_s.tail(30).mean())
+            ultimo = float(v_s.iloc[-1])
+            g_max = df_v.loc[v_s.idxmax()]
+            prof_h = vol["profilo_orario"]
+            o_max = int(prof_h.idxmax())
+            roll30 = v_s.rolling(30, min_periods=1).mean()
+            v1, v2, v3, v4 = st.columns(4)
+            render_kpi("Vol ultimo giorno (€/MWh)", f"{ultimo:,.2f}", v1)
+            render_kpi("Vol media ultimi 30gg (€/MWh)", f"{media30:,.2f}", v2)
+            render_kpi(f"🔺 Giorno più volatile ({g_max['Giorno']})", f"{g_max['Vol (€/MWh)']:,.2f}", v3)
+            render_kpi(f"⏰ Ora più volatile ({o_max}:00)", f"{prof_h.loc[o_max]:,.2f}", v4)
+            st.caption(f"📊 Nell'ultimo giorno il prezzo si è mosso in media di ±{ultimo:.2f} €/MWh da un'ora all'altra "
+                       f"(media 30gg: ±{media30:.2f} €/MWh). Il giorno più volatile è stato il {g_max['Giorno']}.")
+
+            fig_vol = go.Figure()
+            fig_vol.add_trace(go.Bar(
+                x=df_v["Giorno"], y=df_v["Vol (€/MWh)"], name="Vol giornaliera",
+                marker_color="#8b5cf6",
+                hovertemplate="Giorno: %{x}<br>Vol: %{y:,.2f} €/MWh<br>Range: %{customdata:,.2f} €/MWh<extra></extra>",
+                customdata=df_v["Range (€/MWh)"]))
+            fig_vol.add_trace(go.Scatter(
+                x=df_v["Giorno"], y=roll30, name="Media mobile 30gg",
+                mode="lines", line=dict(color="#eab308", width=2),
+                hovertemplate="Giorno: %{x}<br>Media 30gg: %{y:,.2f} €/MWh<extra></extra>"))
+            fig_vol.update_layout(template="plotly_dark", height=420,
+                                  title="Volatilità realizzata giornaliera (con media mobile 30gg)",
+                                  xaxis_title="Giorno", yaxis_title="Vol (€/MWh)")
+            st.plotly_chart(fig_vol, use_container_width=True)
+
+            st.markdown("**Profilo orario della volatilità** (std delle variazioni orarie per ora del giorno)")
+            fig_ph_vol = go.Figure()
+            fig_ph_vol.add_trace(go.Bar(
+                x=[f"{h:02d}:00" for h in range(24)], y=prof_h.values, name="Vol per ora",
+                marker_color="#3b82f6",
+                hovertemplate="Ora: %{x}<br>Vol: %{y:,.2f} €/MWh<extra></extra>"))
+            fig_ph_vol.update_layout(template="plotly_dark", height=350,
+                                     title="A che ora il prezzo 'sfarfalla' di più",
+                                     xaxis_title="Ora del giorno", yaxis_title="Vol (€/MWh)")
+            st.plotly_chart(fig_ph_vol, use_container_width=True)
+
+            st.markdown("**Riepilogo mensile**")
+            st.dataframe(vol["per_mese"], use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta volatilità (CSV)",
+                df_v.to_csv(index=False).encode("utf-8"),
+                file_name=f"volatilita_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica la tabella giornaliera: prezzo medio, range e volatilità realizzata.",
             )
 
 # Footer
