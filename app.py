@@ -98,11 +98,11 @@ def edu(term, explanation):
 # 3. AUTENTICAZIONE
 # ==========================================
 def get_app_password():
-    """Password del terminale da st.secrets (APP_PASSWORD) — mai hardcodata nel codice."""
+    """Password del terminale da st.secrets (APP_PASSWORD) — obbligatoria, MAI default nel codice."""
     try:
-        return st.secrets.get("APP_PASSWORD", "admin")
+        return st.secrets.get("APP_PASSWORD", None)
     except Exception:
-        return "admin"
+        return None
 
 if 'authenticated' not in st.session_state: st.session_state.authenticated = False
 
@@ -117,8 +117,11 @@ if not st.session_state.authenticated:
         st.markdown("<h2 style='text-align: center; color: #3B82F6;'>💠 SINGULARITY OS</h2>", unsafe_allow_html=True)
         st.markdown(f"<p style='text-align: center;'>{_('auth_title')}</p>", unsafe_allow_html=True)
         pwd = st.text_input("Key (password del terminale)", type="password")
+        app_pwd = get_app_password()
         if st.button(_('auth_btn')):
-            if pwd == get_app_password(): 
+            if not app_pwd:
+                st.error("⚠️ Terminale non configurato: imposta `APP_PASSWORD` in `.streamlit/secrets.toml`. Accesso disabilitato.")
+            elif pwd == app_pwd:
                 st.session_state.authenticated = True
                 st.rerun()
             else: st.error("Access Denied.")
@@ -880,7 +883,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata"])
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -957,7 +960,12 @@ elif workspace == _('ws8'):
         var99 = float(np.quantile(v, 0.01))
         es95 = float(v[v <= var95].mean())
         picchi = np.maximum.accumulate(v)
-        drawdown = (v - picchi) / picchi * 100
+        # FIX: prezzi live (ENTSO-E) possono essere 0 o negativi -> guardia contro divisione per zero/inf
+        drawdown = np.zeros_like(v)
+        mask_pos = picchi > 0
+        with np.errstate(divide="ignore", invalid="ignore"):
+            drawdown[mask_pos] = (v[mask_pos] - picchi[mask_pos]) / picchi[mask_pos] * 100
+        drawdown = np.nan_to_num(drawdown, nan=0.0, posinf=0.0, neginf=-100.0)
         max_dd = float(drawdown.min())
 
         titolo_var = edu("VaR 95% (€/MWh)", "Value-at-Risk: nel 95% delle ore il prezzo è STATO SOPRA questo livello. Il restante 5% delle ore ha prezzi più bassi (rischio downside).")
@@ -994,6 +1002,75 @@ elif workspace == _('ws8'):
                                  xaxis_title="Data e Ora", yaxis_title="Drawdown (%)",
                                  title=f"Drawdown del prezzo (max {max_dd:.1f} %)")
             st.plotly_chart(fig_dd, use_container_width=True)
+
+    with tab6:
+        titolo_arb = edu("Arbitraggio batteria (energy arbitrage)", "Strategia di uno storage: CARICA (buy) nelle ore più economiche (tipicamente notte/F3) e SCARICA (sell) nelle ore di punta (F1). Il ricavo giornaliero dipende dallo spread max-min del giorno e dall'efficienza round-trip: ogni MWh scaricato è costato (prezzo_min / efficienza) in fase di carica.")
+        st.markdown(f"**{titolo_arb}**: stima del ricavo di uno storage con 1 ciclo/giorno (carica all'ora più economica, scarica a quella più cara).", unsafe_allow_html=True)
+
+        b1, b2, b3 = st.columns(3)
+        with b1:
+            cap_mwh = st.number_input("Capacità utile (MWh)", min_value=0.5, value=4.0, step=0.5,
+                                      help="Energia immagazzinabile per ciclo completo.")
+        with b2:
+            pot_mw = st.number_input("Potenza (MW)", min_value=0.5, value=2.0, step=0.5,
+                                     help="Potenza di carica/scarica: limita l'energia movimentabile nella finestra di prezzo.")
+        with b3:
+            eff = st.number_input("Efficienza round-trip (%)", min_value=50.0, max_value=100.0, value=85.0, step=1.0,
+                                  help="Perdite di conversione: per scaricare 1 MWh devi averne caricati 1/efficienza.") / 100.0
+
+        # 1 ciclo/giorno: energia movimentabile limitata da capacità e potenza (finestra 2h carica+scarica)
+        e_ciclo = min(cap_mwh, pot_mw * 2.0)
+        df_b = pd.DataFrame({"giorno": prezzi.index.date, "prezzo": prezzi.values.astype(float)})
+        righe_b = []
+        for giorno, grp in df_b.groupby("giorno"):
+            if len(grp) < 4:
+                continue  # giorni parziali ai bordi del periodo
+            p_min, p_max = float(grp["prezzo"].min()), float(grp["prezzo"].max())
+            spread = p_max - p_min / eff
+            ricavo = max(0.0, spread) * e_ciclo
+            righe_b.append({"Giorno": giorno, "Min (€/MWh)": round(p_min, 2), "Max (€/MWh)": round(p_max, 2),
+                            "Spread netto (€/MWh)": round(max(0.0, spread), 2), "Ricavo (€)": round(ricavo, 2)})
+
+        if not righe_b:
+            st.warning("Dati insufficienti per la stima (servono giorni con almeno 4 ore).")
+        else:
+            df_arb = pd.DataFrame(righe_b)
+            tot = float(df_arb["Ricavo (€)"].sum())
+            medio_g = float(df_arb["Ricavo (€)"].mean())
+            best = df_arb.loc[df_arb["Ricavo (€)"].idxmax()]
+            giorni_ok = int((df_arb["Ricavo (€)"] > 0).sum())
+
+            st.caption(f"Modello: 1 ciclo/giorno, energia per ciclo = min(capacità, potenza × 2h) = {e_ciclo:.1f} MWh. "
+                       f"Il ciclo avviene solo se lo spread copre le perdite di efficienza.")
+            a1, a2, a3, a4 = st.columns(4)
+            render_kpi("Ricavo totale periodo (€)", f"{tot:,.0f}", a1)
+            render_kpi("Ricavo medio/giorno (€)", f"{medio_g:,.1f}", a2)
+            render_kpi("Miglior giorno (€)", f"{best['Ricavo (€)']:,.0f}", a3)
+            render_kpi("Giorni profittevoli", f"{giorni_ok}/{len(df_arb)} ({giorni_ok/len(df_arb)*100:.0f} %)", a4)
+            st.caption(f"📅 Miglior giorno: {best['Giorno'].strftime('%d/%m/%Y')} — min {best['Min (€/MWh)']:.0f} €/MWh → max {best['Max (€/MWh)']:.0f} €/MWh.")
+
+            fig_arb = go.Figure()
+            fig_arb.add_trace(go.Bar(
+                x=df_arb["Giorno"], y=df_arb["Ricavo (€)"],
+                marker_color=np.where(df_arb["Ricavo (€)"] > 0, "#10B981", "#EF4444"),
+                name="Ricavo giornaliero (€)",
+                hovertemplate="Giorno: %{x}<br>Ricavo: %{y:,.0f} €<extra></extra>",
+            ))
+            fig_arb.update_layout(template="plotly_dark", height=380,
+                                  title=f"Ricavo giornaliero da arbitraggio (totale {tot:,.0f} € nel periodo)",
+                                  xaxis_title="Giorno", yaxis_title="Ricavo (€)")
+            st.plotly_chart(fig_arb, use_container_width=True)
+
+            st.markdown("**Top 5 giorni per ricavo**")
+            st.dataframe(df_arb.sort_values("Ricavo (€)", ascending=False).head(5),
+                         use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta arbitraggio (CSV)",
+                df_arb.to_csv(index=False).encode("utf-8"),
+                file_name=f"battery_arbitrage_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica la tabella giornaliera min/max/spread/ricavo.",
+            )
 
 # Footer
 st.markdown("---")
