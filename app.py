@@ -211,6 +211,26 @@ def calcola_base_peak_mensile(prezzi):
         })
     return pd.DataFrame(righe)
 
+def calcola_costo_fornitura(prezzi, mw_f1, mw_f2, mw_f3):
+    """Costo di una fornitura con potenza costante per fascia oraria F1/F2/F3 (AEEGSI).
+    prezzi: Series oraria in €/MWh. mw_f1/2/3: potenza prelevata (MW) nelle ore di ciascuna fascia.
+    Costo orario = prezzo_spot * potenza_fascia. Ritorna un dict con:
+      'totale' = costo totale (€), 'mwh' = energia totale prelevata (MWh),
+      'ponderato' = prezzo medio ponderato (€/MWh, NaN se mwh == 0),
+      'per_fascia' = DataFrame con Ore, MWh, Costo (€), Prezzo medio (€/MWh) per fascia."""
+    profilo = {"F1": float(mw_f1), "F2": float(mw_f2), "F3": float(mw_f3)}
+    df = pd.DataFrame({"prezzo": prezzi.values.astype(float), "fascia": prezzi.index.map(fascia_oraria)})
+    df["mw"] = df["fascia"].map(profilo)
+    df["costo"] = df["prezzo"] * df["mw"]
+    per_fascia = (df.groupby("fascia")
+                    .agg(ore=("costo", "size"), mwh=("mw", "sum"),
+                         costo=("costo", "sum"), prezzo_medio=("prezzo", "mean"))
+                    .reindex(["F1", "F2", "F3"]).fillna(0))
+    totale = float(df["costo"].sum())
+    mwh = float(df["mw"].sum())
+    ponderato = totale / mwh if mwh > 0 else float("nan")
+    return {"totale": totale, "mwh": mwh, "ponderato": ponderato, "per_fascia": per_fascia}
+
 # Impianti proxy: nome -> (costo marginale €/MWh, capacità MW, colore)
 ASSETS = {
     "☀️ Solare Muttsee": (0.0, 50, "#eab308"),
@@ -767,7 +787,7 @@ elif workspace == _('ws7'):
 # ==========================================
 elif workspace == _('ws8'):
     st.markdown(f"<h1>{_('ws8')}</h1>", unsafe_allow_html=True)
-    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati ed export CSV.")
+    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura ed export CSV.")
 
     # ---------- Controlli: sorgente, periodo, impianti ----------
     st.subheader("⚙️ Sorgente dati & Timeframe")
@@ -910,7 +930,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -1141,6 +1161,72 @@ elif workspace == _('ws8'):
                 file_name=f"base_peak_mensile_{d0}_{d1}.csv",
                 mime="text/csv",
                 help="Scarica la tabella mensile Base/Peak/Offpeak/spread.",
+            )
+
+    with tab8:
+        titolo_cf = edu("Simulatore costo fornitura", "Stima il costo di una fornitura elettrica alle quotazioni spot del periodo: imposti la potenza (MW) prelevata in ciascuna fascia F1/F2/F3 e la dashboard calcola costo totale, energia prelevata e prezzo medio ponderato. Utile per quotare contratti, confrontare profili di consumo e valutare se conviene spostare i carichi fuori punta.")
+        st.markdown(f"**{titolo_cf}**: costo della fornitura = somma oraria (prezzo spot × potenza della fascia).", unsafe_allow_html=True)
+
+        cf1, cf2, cf3, cf4 = st.columns(4)
+        with cf1:
+            mw_f1 = st.number_input("Potenza in F1 (MW)", min_value=0.0, value=1.0, step=0.5,
+                                    help="Ore di punta: lun–ven 08:00–19:00.")
+        with cf2:
+            mw_f2 = st.number_input("Potenza in F2 (MW)", min_value=0.0, value=1.0, step=0.5,
+                                    help="Ore intermedie: lun–ven 07:00–08:00 e 19:00–23:00, sab 07:00–23:00.")
+        with cf3:
+            mw_f3 = st.number_input("Potenza in F3 (MW)", min_value=0.0, value=1.0, step=0.5,
+                                    help="Ore fuori punta: notti, domeniche e festivi.")
+        with cf4:
+            tariffa_flat = st.number_input("Tariffa flat di confronto (€/MWh)", min_value=0.0, value=95.0, step=1.0,
+                                           help="Prezzo fisso di un'offerta concorrente: il simulatore mostra quanto si risparmia (o spende in più) con lo spot.")
+
+        ris_cf = calcola_costo_fornitura(prezzi, mw_f1, mw_f2, mw_f3)
+        if ris_cf["mwh"] == 0:
+            st.warning("Imposta una potenza maggiore di zero in almeno una fascia per calcolare il costo.")
+        else:
+            costo_flat = ris_cf["mwh"] * tariffa_flat
+            delta = ris_cf["totale"] - costo_flat
+            delta_pct = delta / costo_flat * 100 if costo_flat != 0 else 0.0
+            segno = "🟢" if delta < 0 else ("🔴" if delta > 0 else "⚪")
+
+            c1, c2, c3, c4 = st.columns(4)
+            render_kpi("Costo totale periodo (€)", f"{ris_cf['totale']:,.0f}", c1)
+            render_kpi("Energia prelevata (MWh)", f"{ris_cf['mwh']:,.0f}", c2)
+            render_kpi("Prezzo medio ponderato (€/MWh)", f"{ris_cf['ponderato']:,.2f}", c3)
+            render_kpi(f"{segno} Delta vs tariffa flat", f"{delta:+,.0f} € ({delta_pct:+.1f} %)", c4)
+            st.caption(f"Tariffa flat {tariffa_flat:,.2f} €/MWh su {ris_cf['mwh']:,.0f} MWh = {costo_flat:,.0f} €. "
+                       f"Il prezzo medio ponderato è il costo diviso per l'energia: è il vero prezzo €/MWh pagato dal cliente.")
+
+            st.markdown("**Costo giornaliero della fornitura**")
+            df_cf_g = pd.DataFrame({"giorno": prezzi.index.date,
+                                    "costo": (prezzi.values.astype(float)
+                                              * prezzi.index.map(fascia_oraria).map({"F1": mw_f1, "F2": mw_f2, "F3": mw_f3}).to_numpy())})
+            costo_g = df_cf_g.groupby("giorno")["costo"].sum()
+            fig_cf = go.Figure()
+            fig_cf.add_trace(go.Bar(
+                x=costo_g.index, y=costo_g.values, name="Costo giornaliero (€)",
+                marker_color="#10B981",
+                hovertemplate="Giorno: %{x}<br>Costo: %{y:,.0f} €<extra></extra>",
+            ))
+            fig_cf.update_layout(template="plotly_dark", height=350,
+                                 title=f"Costo giornaliero (totale {ris_cf['totale']:,.0f} € nel periodo)",
+                                 xaxis_title="Giorno", yaxis_title="Costo (€)")
+            st.plotly_chart(fig_cf, use_container_width=True)
+
+            st.markdown("**Dettaglio per fascia oraria**")
+            pf = ris_cf["per_fascia"].reset_index().rename(columns={
+                "index": "Fascia", "ore": "Ore", "mwh": "MWh", "costo": "Costo (€)", "prezzo_medio": "Prezzo medio (€/MWh)"})
+            pf["Costo (€)"] = pf["Costo (€)"].round(0)
+            pf["Prezzo medio (€/MWh)"] = pf["Prezzo medio (€/MWh)"].round(2)
+            pf["MWh"] = pf["MWh"].round(0)
+            st.dataframe(pf, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta costo fornitura (CSV)",
+                pf.to_csv(index=False).encode("utf-8"),
+                file_name=f"costo_fornitura_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica il dettaglio per fascia oraria.",
             )
 
 # Footer
