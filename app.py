@@ -97,6 +97,13 @@ def edu(term, explanation):
 # ==========================================
 # 3. AUTENTICAZIONE
 # ==========================================
+def get_app_password():
+    """Password del terminale da st.secrets (APP_PASSWORD) — mai hardcodata nel codice."""
+    try:
+        return st.secrets.get("APP_PASSWORD", "admin")
+    except Exception:
+        return "admin"
+
 if 'authenticated' not in st.session_state: st.session_state.authenticated = False
 
 if not st.session_state.authenticated:
@@ -109,9 +116,9 @@ if not st.session_state.authenticated:
     with c2:
         st.markdown("<h2 style='text-align: center; color: #3B82F6;'>💠 SINGULARITY OS</h2>", unsafe_allow_html=True)
         st.markdown(f"<p style='text-align: center;'>{_('auth_title')}</p>", unsafe_allow_html=True)
-        pwd = st.text_input("Key (Scrivi 'admin')", type="password")
+        pwd = st.text_input("Key (password del terminale)", type="password")
         if st.button(_('auth_btn')):
-            if pwd == "admin": 
+            if pwd == get_app_password(): 
                 st.session_state.authenticated = True
                 st.rerun()
             else: st.error("Access Denied.")
@@ -873,7 +880,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -942,6 +949,51 @@ elif workspace == _('ws8'):
             mime="text/csv",
             help="Scarica i dati visualizzati in tabella (rispetta il filtro 'sopra soglia').",
         )
+
+    with tab5:
+        st.markdown("**Rischio downside**: VaR e Expected Shortfall sulla distribuzione oraria del prezzo (floor di ricavo atteso), max drawdown e curva di durata (prezzi ordinati dal più alto al più basso).")
+        v = prezzi.values.astype(float)
+        var95 = float(np.quantile(v, 0.05))
+        var99 = float(np.quantile(v, 0.01))
+        es95 = float(v[v <= var95].mean())
+        picchi = np.maximum.accumulate(v)
+        drawdown = (v - picchi) / picchi * 100
+        max_dd = float(drawdown.min())
+
+        titolo_var = edu("VaR 95% (€/MWh)", "Value-at-Risk: nel 95% delle ore il prezzo è STATO SOPRA questo livello. Il restante 5% delle ore ha prezzi più bassi (rischio downside).")
+        titolo_es = edu("Expected Shortfall 95%", "Media del prezzo nelle ore peggiori (il 5% sotto il VaR). Stima del ricavo atteso negli scenari di prezzo basso.")
+        r1, r2, r3, r4 = st.columns(4)
+        render_kpi(titolo_var, f"{var95:,.2f}", r1)
+        render_kpi(titolo_es, f"{es95:,.2f}", r2)
+        render_kpi("VaR 99% (€/MWh)", f"{var99:,.2f}", r3)
+        render_kpi(edu("Max Drawdown", "Peggior ribasso percentuale picco-minimo del prezzo nel periodo. Misura il rischio di timing per le vendite spot."), f"{max_dd:+.1f} %", r4)
+
+        col_d1, col_d2 = st.columns(2)
+        with col_d1:
+            dur = np.sort(v)[::-1]
+            fig_dur = go.Figure()
+            fig_dur.add_trace(go.Scatter(
+                x=np.arange(1, len(dur) + 1), y=dur, mode='lines', name="Curva di durata",
+                line=dict(color='#8b5cf6', width=2),
+                fill='tozeroy', fillcolor='rgba(139, 92, 246, 0.15)',
+            ))
+            fig_dur.add_hline(y=var95, line_dash="dash", line_color="#ef4444",
+                              annotation_text=f"VaR 95%: {var95:.0f} €/MWh", annotation_position="top left")
+            fig_dur.update_layout(template="plotly_dark", height=380,
+                                  xaxis_title="Ore (ordinate per prezzo decrescente)", yaxis_title="Prezzo (€/MWh)",
+                                  title="Curva di durata del prezzo")
+            st.plotly_chart(fig_dur, use_container_width=True)
+        with col_d2:
+            fig_dd = go.Figure()
+            fig_dd.add_trace(go.Scatter(
+                x=prezzi.index, y=drawdown, mode='lines', name="Drawdown %",
+                line=dict(color='#ef4444', width=1.5),
+                fill='tozeroy', fillcolor='rgba(239, 68, 68, 0.2)',
+            ))
+            fig_dd.update_layout(template="plotly_dark", height=380,
+                                 xaxis_title="Data e Ora", yaxis_title="Drawdown (%)",
+                                 title=f"Drawdown del prezzo (max {max_dd:.1f} %)")
+            st.plotly_chart(fig_dd, use_container_width=True)
 
 # Footer
 st.markdown("---")
