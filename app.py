@@ -305,6 +305,32 @@ def calcola_mtm(prezzi, contratti):
     cumul = pd.Series(np.cumsum(mtm_orario_tot), index=idx, name="MtM cumulato (€)")
     return df, cumul
 
+def calcola_spark_spread(prezzi, gas_eur_mwh, eff_pct, co2_eur_t, ef_tco2_mwh=0.4):
+    """Clean spark spread orario di una centrale a gas contro lo spot elettrico.
+    prezzi: Series oraria in €/MWh (indice tz-aware). gas_eur_mwh: prezzo gas €/MWh termico.
+    eff_pct: efficienza elettrica della centrale (%). co2_eur_t: prezzo CO2 €/t.
+    ef_tco2_mwh: fattore di emissione tCO2 per MWh elettrico prodotto (default 0.4, CCGT).
+    Spark spread = prezzo_elettrico - gas/efficienza - co2*ef.
+    Positivo = la centrale gira in utile; negativo = meglio comprare sul mercato.
+    Ritorna (serie_oraria, stats): la Series è in €/MWh; stats è un dict con
+    medio, pct_ore_positive, best_ora, worst_ora, ore_totali (NaN-safe)."""
+    eff = max(1.0, float(eff_pct)) / 100.0
+    v = prezzi.values.astype(float)
+    costo_gas = float(gas_eur_mwh) / eff
+    costo_co2 = float(co2_eur_t) * float(ef_tco2_mwh)
+    ss = pd.Series(v - costo_gas - costo_co2, index=prezzi.index, name="Spark spread (€/MWh)")
+    validi = ss.dropna()
+    stats = {
+        "medio": float(validi.mean()) if len(validi) else float("nan"),
+        "pct_ore_positive": float((validi > 0).mean() * 100) if len(validi) else 0.0,
+        "best_ora": validi.idxmax() if len(validi) else None,
+        "best_val": float(validi.max()) if len(validi) else float("nan"),
+        "worst_ora": validi.idxmin() if len(validi) else None,
+        "worst_val": float(validi.min()) if len(validi) else float("nan"),
+        "ore_totali": int(len(validi)),
+    }
+    return ss, stats
+
 # Impianti proxy: nome -> (costo marginale €/MWh, capacità MW, colore)
 ASSETS = {
     "☀️ Solare Muttsee": (0.0, 50, "#eab308"),
@@ -861,7 +887,7 @@ elif workspace == _('ws7'):
 # ==========================================
 elif workspace == _('ws8'):
     st.markdown(f"<h1>{_('ws8')}</h1>", unsafe_allow_html=True)
-    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging ed export CSV.")
+    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread ed export CSV.")
 
     # ---------- Controlli: sorgente, periodo, impianti ----------
     st.subheader("⚙️ Sorgente dati & Timeframe")
@@ -1004,7 +1030,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -1383,6 +1409,66 @@ elif workspace == _('ws8'):
                 mime="text/csv",
                 help="Scarica il dettaglio per contratto: lato, prezzo fisso, volume, ore delivery, prezzo medio realizzato e MtM.",
             )
+
+    with tab10:
+        titolo_ss = edu("Spark spread (margine della centrale a gas)", "Lo SPARK SPREAD è il margine lordo di una centrale elettrica a gas: prezzo dell'elettricità MENO il costo del gas (prezzo_gas / efficienza) MENO il costo della CO2 (prezzo_CO2 × fattore di emissione). Spark spread positivo = la centrale gira in UTILE (meglio produrre che comprare sul mercato); negativo = conviene fermarla e comprare lo spot. È la metrica che decide il dispatch delle centrali termoelettriche e la convenienza delle coperture gas-power.")
+        st.markdown(f"**{titolo_ss}**: margine orario di una centrale a gas contro lo spot del periodo.", unsafe_allow_html=True)
+
+        s1, s2, s3, s4 = st.columns(4)
+        with s1:
+            gas_p = st.number_input("Prezzo gas (€/MWh termico)", min_value=0.0, value=35.0, step=1.0,
+                                    help="Prezzo del gas combustibile (TTF o PSV).")
+        with s2:
+            eff_p = st.number_input("Efficienza centrale (%)", min_value=10.0, max_value=65.0, value=55.0, step=1.0,
+                                    help="Efficienza elettrica: un CCGT moderno sta intorno al 55-60%.")
+        with s3:
+            co2_p = st.number_input("Prezzo CO2 (€/t)", min_value=0.0, value=70.0, step=1.0,
+                                    help="Prezzo delle quote EUA (EU ETS).")
+        with s4:
+            ef_p = st.number_input("Fattore emissivo (tCO2/MWh el.)", min_value=0.0, max_value=1.0, value=0.4, step=0.05,
+                                   help="Default 0.4 per un ciclo combinato (CCGT).")
+
+        ss, ss_stats = calcola_spark_spread(prezzi, gas_p, eff_p, co2_p, ef_p)
+        costo_fuel = gas_p / max(1.0, eff_p) * 100 + co2_p * ef_p
+        st.caption(f"Costo marginale stimato della centrale: gas {gas_p/max(1.0, eff_p)*100:,.1f} €/MWh + CO2 {co2_p*ef_p:,.1f} €/MWh = **{costo_fuel:,.1f} €/MWh** — le ore con spot sopra questo livello hanno spark spread positivo.")
+
+        k1, k2, k3, k4 = st.columns(4)
+        segno_ss = "🟢" if ss_stats["medio"] > 0 else ("🔴" if ss_stats["medio"] < 0 else "⚪")
+        render_kpi(f"{segno_ss} Spark spread medio (€/MWh)", f"{ss_stats['medio']:+,.2f}", k1)
+        render_kpi("Ore in utile (%)", f"{ss_stats['pct_ore_positive']:.1f} %", k2)
+        if ss_stats["best_ora"] is not None:
+            render_kpi("Miglior ora", f"{ss_stats['best_val']:+,.1f} €/MWh", k3)
+            render_kpi("Peggior ora", f"{ss_stats['worst_val']:+,.1f} €/MWh", k4)
+            st.caption(f"📅 Miglior ora: {ss_stats['best_ora'].strftime('%d/%m/%Y %H:%M')} — Peggior ora: {ss_stats['worst_ora'].strftime('%d/%m/%Y %H:%M')}.")
+
+        fig_ss = go.Figure()
+        pos = ss[ss >= 0]
+        neg = ss[ss < 0]
+        fig_ss.add_trace(go.Bar(x=pos.index, y=pos.values, name="Spread ≥ 0",
+                                marker_color="#10B981",
+                                hovertemplate="Ora: %{x}<br>Spread: %{y:+,.1f} €/MWh<extra></extra>"))
+        fig_ss.add_trace(go.Bar(x=neg.index, y=neg.values, name="Spread < 0",
+                                marker_color="#EF4444",
+                                hovertemplate="Ora: %{x}<br>Spread: %{y:+,.1f} €/MWh<extra></extra>"))
+        fig_ss.add_hline(y=0, line_dash="dot", line_color="#9ca3af")
+        fig_ss.update_layout(template="plotly_dark", height=380, barmode="overlay",
+                             title=f"Spark spread orario (medio {ss_stats['medio']:+,.2f} €/MWh)",
+                             xaxis_title="Data e Ora", yaxis_title="Spark spread (€/MWh)")
+        st.plotly_chart(fig_ss, use_container_width=True)
+
+        df_ss = pd.DataFrame({"Data e Ora": ss.index.strftime("%d/%m/%Y %H:%M"),
+                              "Prezzo spot (€/MWh)": np.round(prezzi.values.astype(float), 2),
+                              "Spark spread (€/MWh)": np.round(ss.values, 2)})
+        st.markdown("**Top 5 ore per spark spread**")
+        st.dataframe(df_ss.sort_values("Spark spread (€/MWh)", ascending=False).head(5),
+                     use_container_width=True, hide_index=True)
+        st.download_button(
+            "⬇️ Esporta spark spread (CSV)",
+            df_ss.to_csv(index=False).encode("utf-8"),
+            file_name=f"spark_spread_{d0}_{d1}.csv",
+            mime="text/csv",
+            help="Scarica la serie oraria: prezzo spot e spark spread con i parametri impostati.",
+        )
 
 # Footer
 st.markdown("---")
