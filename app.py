@@ -719,6 +719,97 @@ def calcola_spread_intraday(prezzi):
     out["mensile"] = pd.DataFrame(righe_m, columns=cols_m)
     return out
 
+def calcola_picchi(prezzi, soglia=200.0):
+    """Analisi dei picchi di prezzo (ore con prezzo >= soglia, default 200 €/MWh).
+
+    I picchi sono le ore di scarsita' del mercato: un impianto flessibile
+    (peaker a gas, batteria, domanda interrompibile) guadagna proprio in
+    quelle ore. L'helper calcola quante ore superano la soglia, la quota sul
+    totale, il prezzo massimo con data/ora, le soglie percentile P99 e P99.5
+    dell'intera serie, e l'analisi dei cluster (ore consecutive sopra soglia:
+    un picco di 1 ora vale meno di un cluster di 4 ore per un peaker).
+    Aggiunge aggregati mensili, profilo orario e le 20 ore piu' care.
+
+    NaN-safe: ore con prezzo NaN ignorate; se nessuna ora supera la soglia,
+    conteggi a 0 e DataFrame vuoti con le colonne giuste. Ritorna dict con
+    'n_ore', 'tot_ore', 'quota_pct', 'massimo', 'data_max' (Data, Ora),
+    'p99', 'p995' (soglie percentile sulla serie completa), 'cluster_max_ore'
+    (durata massima di ore consecutive sopra soglia), 'n_cluster',
+    'mensile' (DataFrame Mese, 'Ore sopra soglia', 'Massimo €/MWh'),
+    'profilo_orario' (DataFrame Ora, 'Ore sopra soglia') e 'top'
+    (DataFrame Data, Ora, 'Prezzo €/MWh', ordinate dal piu' caro)."""
+    MESI = ["Gen", "Feb", "Mar", "Apr", "Mag", "Giu",
+            "Lug", "Ago", "Set", "Ott", "Nov", "Dic"]
+    cols_m = ["Mese", "Ore sopra soglia", "Massimo €/MWh"]
+    cols_o = ["Ora", "Ore sopra soglia"]
+    cols_t = ["Data", "Ora", "Prezzo €/MWh"]
+    vuoto = {"n_ore": 0, "tot_ore": 0, "quota_pct": 0.0, "massimo": None,
+             "data_max": None, "p99": None, "p995": None,
+             "cluster_max_ore": 0, "n_cluster": 0,
+             "mensile": pd.DataFrame(columns=cols_m),
+             "profilo_orario": pd.DataFrame(columns=cols_o),
+             "top": pd.DataFrame(columns=cols_t)}
+    p = prezzi.astype(float).dropna()
+    if p.empty:
+        return vuoto
+    out = dict(vuoto)
+    out["tot_ore"] = int(len(p))
+    out["p99"] = round(float(p.quantile(0.99)), 2)
+    out["p995"] = round(float(p.quantile(0.995)), 2)
+    sopra = p[p >= soglia]
+    idxn = p.index.tz_localize(None) if p.index.tz is not None else p.index
+    righe_m, righe_o = [], []
+    for m in range(1, 13):
+        righe_m.append({"Mese": MESI[m - 1], "Ore sopra soglia": 0,
+                        "Massimo €/MWh": None})
+    out["mensile"] = pd.DataFrame(righe_m, columns=cols_m)
+    for h in range(24):
+        righe_o.append({"Ora": f"{h:02d}:00", "Ore sopra soglia": 0})
+    out["profilo_orario"] = pd.DataFrame(righe_o, columns=cols_o)
+    if sopra.empty:
+        return out
+    out["n_ore"] = int(len(sopra))
+    out["quota_pct"] = round(len(sopra) / len(p) * 100, 2)
+    i_max = int(np.argmax(sopra.values))
+    out["massimo"] = round(float(sopra.values[i_max]), 2)
+    ts_max = sopra.index[i_max]
+    ts_max = ts_max.tz_localize(None) if ts_max.tz is not None else ts_max
+    out["data_max"] = (ts_max.strftime("%Y-%m-%d"), ts_max.strftime("%H:00"))
+    # Cluster: ore consecutive sopra soglia (differenze orarie dell'indice).
+    sopra_ord = sopra.sort_index()
+    diffs = sopra_ord.index.to_series().diff().dropna()
+    ore_step = pd.Timedelta(hours=1)
+    # Tolleranza: gap <= 1h + 1 minuto = stesso cluster (copre DST).
+    confini = (diffs > ore_step + pd.Timedelta(minutes=1)).cumsum().tolist()
+    if len(sopra_ord) == 1:
+        confini = [0]
+    else:
+        confini = [0] + confini
+    lunghezze = pd.Series(confini).value_counts()
+    out["n_cluster"] = int(len(lunghezze))
+    out["cluster_max_ore"] = int(lunghezze.max())
+    idxs = sopra.index.tz_localize(None) if sopra.index.tz is not None else sopra.index
+    righe_m = []
+    for m in range(1, 13):
+        sel = sopra[(idxs.month == m)]
+        righe_m.append({"Mese": MESI[m - 1],
+                        "Ore sopra soglia": int(len(sel)),
+                        "Massimo €/MWh": (None if sel.empty else round(float(sel.max()), 2))})
+    out["mensile"] = pd.DataFrame(righe_m, columns=cols_m)
+    righe_o = []
+    for h in range(24):
+        sel = sopra[(idxs.hour == h)]
+        righe_o.append({"Ora": f"{h:02d}:00", "Ore sopra soglia": int(len(sel))})
+    out["profilo_orario"] = pd.DataFrame(righe_o, columns=cols_o)
+    ord_desc = sopra.sort_values(ascending=False)
+    idxo = ord_desc.index.tz_localize(None) if ord_desc.index.tz is not None else ord_desc.index
+    out["top"] = pd.DataFrame({
+        "Data": idxo.strftime("%Y-%m-%d"),
+        "Ora": idxo.strftime("%H:00"),
+        "Prezzo €/MWh": [round(float(v), 2) for v in ord_desc.values]},
+        columns=cols_t).head(20)
+    return out
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def generate_singularity_data():
     np.random.seed(42)
@@ -1268,7 +1359,7 @@ elif workspace == _('ws7'):
 # ==========================================
 elif workspace == _('ws8'):
     st.markdown(f"<h1>{_('ws8')}</h1>", unsafe_allow_html=True)
-    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread, shaping curva, spread weekend, price capture, volatilità realizzata, confronto anno-su-anno, analisi prezzi negativi, spread intra-day ed export CSV.")
+    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread, shaping curva, spread weekend, price capture, volatilità realizzata, confronto anno-su-anno, analisi prezzi negativi, spread intra-day, picchi di prezzo ed export CSV.")
 
     # ---------- Controlli: sorgente, periodo, impianti ----------
     st.subheader("⚙️ Sorgente dati & Timeframe")
@@ -1411,7 +1502,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -2275,6 +2366,57 @@ elif workspace == _('ws8'):
                 file_name=f"spread_intraday_{d0}_{d1}.csv",
                 mime="text/csv",
                 help="Scarica il range giornaliero max−min con ore di minimo e massimo per ogni giorno del periodo selezionato.",
+            )
+
+    with tab18:
+        titolo_id = edu("Picchi di prezzo", "Un PICCO è un'ora in cui il prezzo spot supera una soglia di scarsità (qui 200 €/MWh di default, modificabile). I picchi nascono da domanda alta e offerta scarsa (serate invernali senza vento, guasti alle centrali) ed è lì che un impianto flessibile — peaker a gas, batteria, domanda interrompibile — incassa i margini più alti. Questo tab conta le ore sopra soglia, misura la durata dei cluster (un picco di 4 ore consecutive vale molto più di 4 ore isolate) e confronta la soglia con i percentili P99/P99.5 della serie.")
+        st.markdown(f"**{titolo_id}**: ore sopra soglia di scarsità, cluster consecutivi, percentili P99/P99.5 e le 20 ore più care.", unsafe_allow_html=True)
+        soglia_pk = st.slider("🎯 Soglia di picco (€/MWh)", min_value=50, max_value=600, value=200, step=10,
+                              help="Ore con prezzo maggiore o uguale a questa soglia contano come picchi.")
+        pk = calcola_picchi(prezzi, soglia=float(soglia_pk))
+        if pk["tot_ore"] == 0:
+            st.info("Nessun dato disponibile per il periodo selezionato.")
+        else:
+            k1, k2, k3, k4 = st.columns(4)
+            render_kpi(f"Ore sopra {soglia_pk} €/MWh", f"{pk['n_ore']:,}<br><small>{pk['quota_pct']:.2f}% delle ore</small>", k1)
+            if pk["massimo"] is not None:
+                render_kpi("Prezzo massimo (€/MWh)", f"{pk['massimo']:,.2f}<br><small>{pk['data_max'][0]} {pk['data_max'][1]}</small>", k2)
+            else:
+                render_kpi("Prezzo massimo (€/MWh)", "—", k2)
+            render_kpi("Cluster più lungo (ore)", f"{pk['cluster_max_ore']}<br><small>{pk['n_cluster']} cluster totali</small>", k3)
+            render_kpi(edu("Soglia P99.5 (€/MWh)", "Il prezzo superato solo nello 0,5% delle ore: se la soglia di picco scelta è molto sopra il P99.5, i picchi sono eventi davvero estremi; se è sotto, cattura anche eventi frequenti."), f"{pk['p995']:,.2f}<br><small>P99: {pk['p99']:,.2f}</small>", k4)
+            st.caption(f"💡 Ore analizzate: {pk['tot_ore']:,}. Un peaker da 1 MW che cattura ogni ora sopra {soglia_pk} €/MWh avrebbe incassato ricavi spot concentrati in {pk['n_ore']} ore ({pk['quota_pct']:.2f}% del periodo).")
+
+            col_p1, col_p2 = st.columns(2)
+            with col_p1:
+                fig_pm = go.Figure()
+                fig_pm.add_trace(go.Bar(
+                    x=pk["mensile"]["Mese"], y=pk["mensile"]["Ore sopra soglia"],
+                    name="Ore sopra soglia", marker_color="#f59e0b",
+                    hovertemplate="Mese: %{x}<br>Ore: %{y}<extra></extra>"))
+                fig_pm.update_layout(template="plotly_dark", height=360,
+                                     title=f"Ore sopra {soglia_pk} €/MWh per mese",
+                                     xaxis_title="Mese", yaxis_title="Ore")
+                st.plotly_chart(fig_pm, use_container_width=True)
+            with col_p2:
+                fig_po = go.Figure()
+                fig_po.add_trace(go.Bar(
+                    x=pk["profilo_orario"]["Ora"], y=pk["profilo_orario"]["Ore sopra soglia"],
+                    name="Ore sopra soglia", marker_color="#ef4444",
+                    hovertemplate="Ora: %{x}<br>Ore: %{y}<extra></extra>"))
+                fig_po.update_layout(template="plotly_dark", height=360,
+                                     title="Profilo orario dei picchi",
+                                     xaxis_title="Ora", yaxis_title="Ore")
+                st.plotly_chart(fig_po, use_container_width=True)
+
+            st.markdown("**20 ore più care del periodo**")
+            st.dataframe(pk["top"], use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta picchi (CSV)",
+                pk["top"].to_csv(index=False).encode("utf-8"),
+                file_name=f"picchi_prezzo_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica le 20 ore con prezzo più alto del periodo selezionato.",
             )
 
 # Footer
