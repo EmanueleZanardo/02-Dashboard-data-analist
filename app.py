@@ -540,6 +540,56 @@ def calcola_volatilita(prezzi):
             "profilo_orario": prof_h,
             "per_mese": pd.DataFrame(righe_m, columns=cols_m)}
 
+def calcola_yoy(prezzi):
+    """Confronto anno-su-anno del prezzo medio mensile (€/MWh).
+    Raggruppa lo spot orario per (anno, mese solare) e calcola la media
+    mensile; il delta YoY confronta ogni mese con lo stesso mese dell'anno
+    precedente, in €/MWh e in %.
+    Utile per: capire se il mercato e' strutturalmente piu' caro o piu'
+    economico dello scorso anno al netto della stagionalita' (budget,
+    negoziazione contratti annuali), e per validare le curve forward
+    (il forward sconta gia' questo delta?).
+    NaN-safe: ore con prezzo NaN ignorate; mesi senza ore valide -> None.
+    Con < 2 anni di dati il delta non e' calcolabile: 'delta' torna vuoto
+    con le colonne giuste.
+    Ritorna dict con 'tabella' (DataFrame: Mese + una colonna per anno con
+    la media mensile €/MWh), 'delta' (DataFrame: Mese, 'Δ €/MWh', 'Δ %'
+    tra gli ultimi due anni disponibili) e 'anni' (lista anni ordinata)."""
+    MESI = ["Gen", "Feb", "Mar", "Apr", "Mag", "Giu",
+            "Lug", "Ago", "Set", "Ott", "Nov", "Dic"]
+    cols_d = ["Mese", "Δ €/MWh", "Δ %"]
+    vuoto = {"tabella": pd.DataFrame(columns=["Mese"]),
+             "delta": pd.DataFrame(columns=cols_d), "anni": []}
+    p = prezzi.astype(float).dropna()
+    if p.empty:
+        return vuoto
+    idxn = p.index.tz_localize(None) if p.index.tz is not None else p.index
+    med = p.groupby([idxn.year, idxn.month]).mean()
+    anni = sorted({y for y, _ in med.index})
+    righe = []
+    for m in range(1, 13):
+        riga = {"Mese": MESI[m - 1]}
+        for y in anni:
+            v = med.get((y, m), np.nan)
+            riga[str(y)] = None if pd.isna(v) else round(float(v), 2)
+        righe.append(riga)
+    tabella = pd.DataFrame(righe, columns=["Mese"] + [str(y) for y in anni])
+    righe_d = []
+    if len(anni) >= 2:
+        y0, y1 = anni[-2], anni[-1]
+        for m in range(1, 13):
+            a = med.get((y0, m), np.nan)
+            b = med.get((y1, m), np.nan)
+            if pd.isna(a) or pd.isna(b):
+                righe_d.append({"Mese": MESI[m - 1], "Δ €/MWh": None, "Δ %": None})
+            else:
+                d = b - a
+                righe_d.append({"Mese": MESI[m - 1], "Δ €/MWh": round(float(d), 2),
+                                "Δ %": (None if a == 0 else round(float(d / a * 100), 1))})
+    return {"tabella": tabella,
+            "delta": pd.DataFrame(righe_d, columns=cols_d),
+            "anni": anni}
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def generate_singularity_data():
     np.random.seed(42)
@@ -1089,7 +1139,7 @@ elif workspace == _('ws7'):
 # ==========================================
 elif workspace == _('ws8'):
     st.markdown(f"<h1>{_('ws8')}</h1>", unsafe_allow_html=True)
-    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread, shaping curva, spread weekend, price capture, volatilità realizzata ed export CSV.")
+    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread, shaping curva, spread weekend, price capture, volatilità realizzata, confronto anno-su-anno ed export CSV.")
 
     # ---------- Controlli: sorgente, periodo, impianti ----------
     st.subheader("⚙️ Sorgente dati & Timeframe")
@@ -1232,7 +1282,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -1924,6 +1974,64 @@ elif workspace == _('ws8'):
                 file_name=f"volatilita_{d0}_{d1}.csv",
                 mime="text/csv",
                 help="Scarica la tabella giornaliera: prezzo medio, range e volatilità realizzata.",
+            )
+
+    with tab15:
+        titolo_yoy = edu("Confronto anno-su-anno", "Il CONFRONTO ANNO-SU-ANNO (YoY) confronta il prezzo medio di ogni mese con lo stesso mese dell'anno precedente. Serve a capire se il mercato è strutturalmente più caro o più economico rispetto a un anno fa, al netto della stagionalità: fondamentale per budget, negoziazione dei contratti annuali e per validare le curve forward (il forward sconta già questo delta?).")
+        st.markdown(f"**{titolo_yoy}**: prezzo medio mensile per anno e delta YoY (€/MWh e %).", unsafe_allow_html=True)
+
+        yoy = calcola_yoy(prezzi)
+        if len(yoy["anni"]) < 2:
+            st.warning("Servono almeno 2 anni di dati per il confronto YoY: seleziona un periodo personalizzato più lungo (es. gli ultimi 24 mesi).")
+            if not yoy["tabella"].empty:
+                st.markdown("**Medie mensili disponibili**")
+                st.dataframe(yoy["tabella"], use_container_width=True, hide_index=True)
+        else:
+            anni = yoy["anni"]
+            tab_y, dlt = yoy["tabella"], yoy["delta"]
+            y0, y1 = anni[-2], anni[-1]
+            p_clean = prezzi.astype(float).dropna()
+            idx_py = p_clean.index.tz_localize(None) if p_clean.index.tz is not None else p_clean.index
+            annuali = p_clean.groupby(idx_py.year).mean()
+            m0, m1 = float(annuali.loc[y0]), float(annuali.loc[y1])
+            dlt_v = dlt["Δ €/MWh"].dropna()
+            if dlt_v.empty:
+                st.warning("Nessun mese confrontabile tra i due anni (periodi non sovrapposti).")
+            else:
+                r_max = dlt.loc[dlt_v.idxmax()]
+                r_min = dlt.loc[dlt_v.idxmin()]
+                k1, k2, k3, k4 = st.columns(4)
+                render_kpi(f"Media {y1} (€/MWh)", f"{m1:,.2f}", k1)
+                render_kpi(f"Media {y0} (€/MWh)", f"{m0:,.2f}", k2)
+                render_kpi("Delta annuo (€/MWh)", f"{m1 - m0:+,.2f}", k3)
+                render_kpi(f"🔺 Max aumento YoY ({r_max['Mese']})", f"{r_max['Δ €/MWh']:+,.2f}", k4)
+                st.caption(f"📊 Nel {y1} il prezzo medio è {m1:,.2f} €/MWh contro {m0:,.2f} €/MWh del {y0} "
+                           f"({m1 - m0:+,.2f} €/MWh). Il mese con il maggior aumento è {r_max['Mese']} "
+                           f"({r_max['Δ €/MWh']:+,.2f} €/MWh), quello con il maggior calo è {r_min['Mese']} "
+                           f"({r_min['Δ €/MWh']:+,.2f} €/MWh).")
+
+            colori_yoy = ["#3b82f6", "#eab308", "#10b981", "#8b5cf6", "#f97316"]
+            fig_yoy = go.Figure()
+            for i, y in enumerate(anni):
+                vals = pd.to_numeric(tab_y[str(y)], errors="coerce")
+                fig_yoy.add_trace(go.Scatter(
+                    x=tab_y["Mese"], y=vals, name=str(y), mode="lines+markers",
+                    line=dict(color=colori_yoy[i % len(colori_yoy)], width=2),
+                    hovertemplate=f"Anno: {y}<br>Mese: %{{x}}<br>Media: %{{y:,.2f}} €/MWh<extra></extra>"))
+            fig_yoy.update_layout(template="plotly_dark", height=420,
+                                  title="Prezzo medio mensile per anno (€/MWh)",
+                                  xaxis_title="Mese", yaxis_title="€/MWh")
+            st.plotly_chart(fig_yoy, use_container_width=True)
+
+            st.markdown(f"**Delta YoY: {y1} vs {y0}**")
+            st.dataframe(dlt, use_container_width=True, hide_index=True)
+            export_yoy = tab_y.merge(dlt, on="Mese", how="left")
+            st.download_button(
+                "⬇️ Esporta confronto YoY (CSV)",
+                export_yoy.to_csv(index=False).encode("utf-8"),
+                file_name=f"yoy_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica medie mensili per anno e delta anno-su-anno (€/MWh e %).",
             )
 
 # Footer
