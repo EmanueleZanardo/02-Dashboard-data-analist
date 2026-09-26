@@ -202,12 +202,15 @@ def sposta_carico_f1_f3(prezzi, mw_f1, mw_f3, quota_pct):
 def calcola_base_peak_mensile(prezzi):
     """Analisi mensile Base/Peak/Offpeak (definizione standard EPEX: Peak = lun–ven 08:00–19:59).
     Ritorna un DataFrame con un rigo per mese: Mese, Base, Peak, Offpeak, Spread P-O, Spread %, Ore peak.
-    Valori NaN-safe: mesi senza ore peak/offpeak riportano None nelle colonne derivate."""
+    Valori NaN-safe: mesi senza ore peak/offpeak riportano None nelle colonne derivate.
+    Il raggruppamento mensile usa l'indice reso tz-naive per evitare il
+    UserWarning 'Converting to PeriodArray/Index representation will drop timezone information'."""
     idx = prezzi.index
+    mesi = (idx.tz_localize(None) if idx.tz is not None else idx).to_period("M")
     is_peak = (idx.weekday < 5) & (idx.hour >= 8) & (idx.hour < 20)
     df = pd.DataFrame({"prezzo": prezzi.values.astype(float), "peak": is_peak}, index=idx)
     righe = []
-    for mese, grp in df.groupby(df.index.to_period("M")):
+    for mese, grp in df.groupby(mesi):
         base = float(grp["prezzo"].mean())
         pk = grp.loc[grp["peak"], "prezzo"]
         op = grp.loc[~grp["peak"], "prezzo"]
@@ -248,6 +251,59 @@ def calcola_costo_fornitura(prezzi, mw_f1, mw_f2, mw_f3):
     mwh = float(df["mw"].sum())
     ponderato = totale / mwh if mwh > 0 else float("nan")
     return {"totale": totale, "mwh": mwh, "ponderato": ponderato, "per_fascia": per_fascia}
+
+def calcola_mtm(prezzi, contratti):
+    """Mark-to-market di contratti forward a prezzo fisso contro lo spot realizzato del periodo.
+    prezzi: Series oraria in €/MWh (indice tz-aware).
+    contratti: lista di dict con chiavi: nome (str), lato ('Vendita'/'Acquisto'),
+      prezzo_fisso (float, €/MWh), mw (float), inizio (date), fine (date, inclusa).
+    Convenzione desk: VENDITA (short) guadagna se spot < prezzo fisso;
+      ACQUISTO (long) guadagna se spot > prezzo fisso.
+    MtM = segno * (prezzo_fisso - prezzo_medio_realizzato) * mw * ore_delivery.
+    I contratti con delivery fuori dal periodo dati (o volume 0) riportano
+    0 ore e MtM 0, senza errori.
+    Ritorna (df_dettaglio, cumul_mtm): il DataFrame ha un rigo per contratto
+    (Nome, Lato, Prezzo fisso, Volume, Ore delivery, Prezzo medio realizzato, MtM);
+    cumul_mtm è la Series del MtM cumulato orario sommato su tutti i contratti."""
+    idx = prezzi.index
+    v = prezzi.values.astype(float)
+    righe = []
+    mtm_orario_tot = np.zeros(len(v))
+    for c in contratti or []:
+        nome = str(c.get("nome") or "Contratto")
+        lato = "Vendita" if str(c.get("lato")) != "Acquisto" else "Acquisto"
+        segno = 1.0 if lato == "Vendita" else -1.0
+        mw = max(0.0, float(c.get("mw", 0) or 0))
+        fisso = float(c.get("prezzo_fisso", 0) or 0)
+        di, df_ = c.get("inizio"), c.get("fine")
+        if di is None or df_ is None:
+            mask = np.zeros(len(v), dtype=bool)
+        else:
+            t0 = pd.Timestamp(di)
+            t1 = pd.Timestamp(df_) + pd.Timedelta(days=1) - pd.Timedelta(hours=1)
+            if idx.tz is not None:
+                t0, t1 = t0.tz_localize(idx.tz), t1.tz_localize(idx.tz)
+            mask = (idx >= t0) & (idx <= t1)
+        ore = int(np.asarray(mask).sum())
+        if ore == 0 or mw == 0:
+            righe.append({"Nome": nome, "Lato": lato,
+                          "Prezzo fisso (€/MWh)": round(fisso, 2),
+                          "Volume (MW)": mw, "Ore delivery": 0,
+                          "Prezzo medio realizzato (€/MWh)": None,
+                          "MtM (€)": 0.0})
+            continue
+        realizzato = float(v[np.asarray(mask)].mean())
+        mtm = segno * (fisso - realizzato) * mw * ore
+        mtm_orario_tot += np.where(np.asarray(mask), segno * (fisso - v) * mw, 0.0)
+        righe.append({"Nome": nome, "Lato": lato,
+                      "Prezzo fisso (€/MWh)": round(fisso, 2),
+                      "Volume (MW)": mw, "Ore delivery": ore,
+                      "Prezzo medio realizzato (€/MWh)": round(realizzato, 2),
+                      "MtM (€)": round(mtm, 2)})
+    df = pd.DataFrame(righe, columns=["Nome", "Lato", "Prezzo fisso (€/MWh)", "Volume (MW)",
+                                      "Ore delivery", "Prezzo medio realizzato (€/MWh)", "MtM (€)"])
+    cumul = pd.Series(np.cumsum(mtm_orario_tot), index=idx, name="MtM cumulato (€)")
+    return df, cumul
 
 # Impianti proxy: nome -> (costo marginale €/MWh, capacità MW, colore)
 ASSETS = {
@@ -805,7 +861,7 @@ elif workspace == _('ws7'):
 # ==========================================
 elif workspace == _('ws8'):
     st.markdown(f"<h1>{_('ws8')}</h1>", unsafe_allow_html=True)
-    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura ed export CSV.")
+    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging ed export CSV.")
 
     # ---------- Controlli: sorgente, periodo, impianti ----------
     st.subheader("⚙️ Sorgente dati & Timeframe")
@@ -948,7 +1004,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -1263,6 +1319,70 @@ elif workspace == _('ws8'):
                 render_kpi(f"{segno_r} Risparmio stimato", f"{risparmio:+,.0f} € ({pct_r:+.1f} %)", s3)
                 st.caption(f"Profilo shiftato: F1 {mw1s:.2f} MW, F2 {mw_f2:.2f} MW, F3 {mw3s:.2f} MW — "
                            f"energia totale {ris_s['mwh']:,.0f} MWh (invariata vs {ris_cf['mwh']:,.0f} MWh).")
+
+    with tab9:
+        titolo_mtm = edu("Mark-to-market dei contratti forward (hedging)", "Un contratto forward fissa OGGI il prezzo di una consegna futura. Il MtM dice quanto vale ORA quella copertura rispetto allo spot: se hai VENDUTO a 120 €/MWh e lo spot medio del periodo è stato 100, hai guadagnato 20 €/MWh (MtM positivo). Se hai ACQUISTATO a 120 e lo spot è stato 100, hai pagato più del mercato (MtM negativo). Qui il MtM è calcolato sullo spot del periodo selezionato: è il P&L 'realizzato' della copertura. Utile per valutare se le coperture in portafoglio hanno protetto o penalizzato rispetto allo spot.")
+        st.markdown(f"**{titolo_mtm}**: P&L realizzato delle coperture a prezzo fisso contro lo spot del periodo.", unsafe_allow_html=True)
+
+        n_contr = st.slider("Numero di contratti", 1, 4, 1, step=1,
+                            help="Definisci fino a 4 contratti forward: lato, prezzo fisso, volume e finestra di consegna.")
+        contratti = []
+        cols_mtm = st.columns(n_contr)
+        for i, col_m in enumerate(cols_mtm):
+            with col_m:
+                nome_m = st.text_input("Nome", f"Contratto {i+1}", key=f"mtm_nome_{i}")
+                lato_m = st.selectbox("Lato", ["Vendita", "Acquisto"], key=f"mtm_lato_{i}",
+                                      help="Vendita = hai venduto a termine (guadagni se lo spot scende); Acquisto = hai comprato a termine (guadagni se lo spot sale).")
+                fisso_m = st.number_input("Prezzo fisso (€/MWh)", value=round(float(prezzi.mean()), 1),
+                                          step=1.0, key=f"mtm_fisso_{i}")
+                mw_m = st.number_input("Volume (MW)", min_value=0.0, value=1.0, step=0.5, key=f"mtm_mw_{i}")
+                di_m = st.date_input("Inizio consegna", d0, min_value=d0, max_value=d1, key=f"mtm_di_{i}")
+                df_m = st.date_input("Fine consegna", d1, min_value=d0, max_value=d1, key=f"mtm_df_{i}")
+                if di_m > df_m:
+                    st.warning(f"⚠️ {nome_m}: inizio consegna dopo la fine — contratto escluso dal calcolo.")
+                else:
+                    contratti.append({"nome": nome_m, "lato": lato_m, "prezzo_fisso": fisso_m,
+                                      "mw": mw_m, "inizio": di_m, "fine": df_m})
+
+        df_mtm, cumul_mtm = calcola_mtm(prezzi, contratti)
+        if df_mtm.empty:
+            st.info("Nessun contratto valido: controlla le date di consegna.")
+        else:
+            tot_mtm = float(df_mtm["MtM (€)"].sum())
+            n_pos = int((df_mtm["MtM (€)"] > 0).sum())
+            best_m = df_mtm.loc[df_mtm["MtM (€)"].idxmax()]
+            worst_m = df_mtm.loc[df_mtm["MtM (€)"].idxmin()]
+            m1, m2, m3, m4 = st.columns(4)
+            segno_t = "🟢" if tot_mtm > 0 else ("🔴" if tot_mtm < 0 else "⚪")
+            render_kpi(f"{segno_t} MtM totale (€)", f"{tot_mtm:+,.0f}", m1)
+            render_kpi("Contratti in utile", f"{n_pos}/{len(df_mtm)}", m2)
+            render_kpi("Miglior contratto", f"{best_m['Nome']}: {best_m['MtM (€)']:+,.0f} €", m3)
+            render_kpi("Peggior contratto", f"{worst_m['Nome']}: {worst_m['MtM (€)']:+,.0f} €", m4)
+            st.caption("MtM = segno(lato) × (prezzo fisso − prezzo medio realizzato) × volume × ore di consegna. "
+                       "Positivo = la copertura ha battuto lo spot.")
+
+            fig_mtm = go.Figure()
+            fig_mtm.add_trace(go.Scatter(
+                x=cumul_mtm.index, y=cumul_mtm.values, mode='lines', name="MtM cumulato (€)",
+                line=dict(color='#10B981' if tot_mtm >= 0 else '#ef4444', width=2),
+                fill='tozeroy', fillcolor='rgba(16,185,129,0.15)' if tot_mtm >= 0 else 'rgba(239,68,68,0.15)',
+                hovertemplate="Data: %{x}<br>MtM cumulato: %{y:,.0f} €<extra></extra>",
+            ))
+            fig_mtm.add_hline(y=0, line_dash="dot", line_color="#9ca3af")
+            fig_mtm.update_layout(template="plotly_dark", height=350,
+                                  title=f"MtM cumulato dei contratti (totale {tot_mtm:+,.0f} €)",
+                                  xaxis_title="Data e Ora", yaxis_title="MtM cumulato (€)")
+            st.plotly_chart(fig_mtm, use_container_width=True)
+
+            st.markdown("**Dettaglio contratti**")
+            st.dataframe(df_mtm, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta MtM hedging (CSV)",
+                df_mtm.to_csv(index=False).encode("utf-8"),
+                file_name=f"mtm_hedging_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica il dettaglio per contratto: lato, prezzo fisso, volume, ore delivery, prezzo medio realizzato e MtM.",
+            )
 
 # Footer
 st.markdown("---")
