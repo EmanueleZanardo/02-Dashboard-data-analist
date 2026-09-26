@@ -590,6 +590,69 @@ def calcola_yoy(prezzi):
             "delta": pd.DataFrame(righe_d, columns=cols_d),
             "anni": anni}
 
+def calcola_prezzi_negativi(prezzi, soglia=0.0):
+    """Analisi delle ore con prezzo sotto soglia (default: < 0, prezzi negativi).
+    I prezzi negativi nascono dall'eccesso di produzione rinnovabile (soprattutto
+    solare a mezzogiorno in primavera/estate) e dai vincoli di dispacciamento:
+    chi immette energia quando il prezzo e' negativo CI PAGA per farlo.
+    Utile per: valutare la cannibalizzazione del valore per rinnovabili e
+    accumulatori, dimensionare strategie di curtailment (spegnimento), e capire
+    in quali mesi/ore si concentrano le ore negative.
+    NaN-safe: ore con prezzo NaN ignorate; se nessuna ora e' sotto soglia,
+    conteggi a 0 e DataFrame vuoti con le colonne giuste.
+    Ritorna dict con 'n_ore', 'tot_ore', 'quota_pct', 'minimo', 'somma',
+    'media_neg' (media dei prezzi sotto soglia), 'mensile' (DataFrame Mese,
+    'Ore sotto soglia', 'Minimo €/MWh'), 'profilo_orario' (DataFrame Ora,
+    'Ore sotto soglia', 'Media €/MWh') e 'top' (DataFrame delle peggiori ore:
+    Data, Ora, 'Prezzo €/MWh', ordinate dal piu' negativo)."""
+    MESI = ["Gen", "Feb", "Mar", "Apr", "Mag", "Giu",
+            "Lug", "Ago", "Set", "Ott", "Nov", "Dic"]
+    cols_m = ["Mese", "Ore sotto soglia", "Minimo €/MWh"]
+    cols_o = ["Ora", "Ore sotto soglia", "Media €/MWh"]
+    cols_t = ["Data", "Ora", "Prezzo €/MWh"]
+    vuoto = {"n_ore": 0, "tot_ore": 0, "quota_pct": 0.0, "minimo": None,
+             "somma": 0.0, "media_neg": None,
+             "mensile": pd.DataFrame(columns=cols_m),
+             "profilo_orario": pd.DataFrame(columns=cols_o),
+             "top": pd.DataFrame(columns=cols_t)}
+    p = prezzi.astype(float).dropna()
+    if p.empty:
+        return vuoto
+    sotto = p[p < soglia]
+    n = int(len(sotto))
+    out = dict(vuoto)
+    out["tot_ore"] = int(len(p))
+    out["n_ore"] = n
+    out["quota_pct"] = round(n / len(p) * 100, 2)
+    if n == 0:
+        return out
+    out["minimo"] = round(float(sotto.min()), 2)
+    out["somma"] = round(float(sotto.sum()), 2)
+    out["media_neg"] = round(float(sotto.mean()), 2)
+    idxn = sotto.index.tz_localize(None) if sotto.index.tz is not None else sotto.index
+    righe_m = []
+    for m in range(1, 13):
+        sel = sotto[(idxn.month == m)]
+        righe_m.append({"Mese": MESI[m - 1],
+                        "Ore sotto soglia": int(len(sel)),
+                        "Minimo €/MWh": (None if sel.empty else round(float(sel.min()), 2))})
+    out["mensile"] = pd.DataFrame(righe_m, columns=cols_m)
+    righe_o = []
+    for h in range(24):
+        sel = sotto[(idxn.hour == h)]
+        righe_o.append({"Ora": f"{h:02d}:00",
+                        "Ore sotto soglia": int(len(sel)),
+                        "Media €/MWh": (None if sel.empty else round(float(sel.mean()), 2))})
+    out["profilo_orario"] = pd.DataFrame(righe_o, columns=cols_o)
+    ordinato = sotto.sort_values()
+    idxo = ordinato.index.tz_localize(None) if ordinato.index.tz is not None else ordinato.index
+    out["top"] = pd.DataFrame({
+        "Data": idxo.strftime("%Y-%m-%d"),
+        "Ora": idxo.strftime("%H:00"),
+        "Prezzo €/MWh": [round(float(v), 2) for v in ordinato.values]},
+        columns=cols_t).head(20)
+    return out
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def generate_singularity_data():
     np.random.seed(42)
@@ -1139,7 +1202,7 @@ elif workspace == _('ws7'):
 # ==========================================
 elif workspace == _('ws8'):
     st.markdown(f"<h1>{_('ws8')}</h1>", unsafe_allow_html=True)
-    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread, shaping curva, spread weekend, price capture, volatilità realizzata, confronto anno-su-anno ed export CSV.")
+    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread, shaping curva, spread weekend, price capture, volatilità realizzata, confronto anno-su-anno, analisi prezzi negativi ed export CSV.")
 
     # ---------- Controlli: sorgente, periodo, impianti ----------
     st.subheader("⚙️ Sorgente dati & Timeframe")
@@ -1282,7 +1345,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -2032,6 +2095,56 @@ elif workspace == _('ws8'):
                 file_name=f"yoy_{d0}_{d1}.csv",
                 mime="text/csv",
                 help="Scarica medie mensili per anno e delta anno-su-anno (€/MWh e %).",
+            )
+
+    with tab16:
+        titolo_neg = edu("Prezzi negativi", "I PREZZI NEGATIVI nascono dall'eccesso di produzione rinnovabile (soprattutto solare a mezzogiorno in primavera/estate) combinato con vincoli di dispacciamento: quando c'è più offerta che domanda e spegnere le centrali costa troppo, chi immette energia in rete CI PAGA per farlo. Per un produttore rinnovabile queste ore 'cannibalizzano' il valore; per una batteria sono opportunità di carica pagata. Il tab mostra quante ore sono sotto soglia, in quali mesi e ore del giorno si concentrano, e le peggiori ore del periodo.")
+        st.markdown(f"**{titolo_neg}**: ore con prezzo sotto soglia, distribuzione mensile e oraria, peggiori ore.", unsafe_allow_html=True)
+
+        soglia_neg = st.number_input("Soglia di analisi (€/MWh)", value=0.0, max_value=0.0, step=0.5,
+                                     help="Ore conteggiate: quelle con prezzo < soglia. Il default 0,00 conta i prezzi strettamente negativi; abbassa la soglia (es. -5) per isolare solo le ore più estreme.")
+        neg = calcola_prezzi_negativi(prezzi, soglia=soglia_neg)
+        if neg["n_ore"] == 0:
+            st.success(f"✅ Nel periodo selezionato non ci sono ore con prezzo sotto {soglia_neg:,.2f} €/MWh.")
+            st.caption(f"Ore totali analizzate: {neg['tot_ore']}.")
+        else:
+            k1, k2, k3, k4 = st.columns(4)
+            render_kpi("Ore sotto soglia", f"{neg['n_ore']}", k1)
+            render_kpi("% ore periodo", f"{neg['quota_pct']:,.2f} %", k2)
+            render_kpi("Prezzo minimo (€/MWh)", f"{neg['minimo']:,.2f}", k3)
+            render_kpi("Media ore sotto soglia (€/MWh)", f"{neg['media_neg']:,.2f}", k4)
+            st.caption(f"💡 Con 1 MW immesso costantemente in rete, le ore sotto soglia sarebbero costate "
+                       f"{neg['somma']:,.2f} € in totale (somma dei prezzi negativi). Chi può fermare la produzione "
+                       f"(curtailment) evita questa perdita.")
+
+            fig_nm = go.Figure()
+            fig_nm.add_trace(go.Bar(
+                x=neg["mensile"]["Mese"], y=neg["mensile"]["Ore sotto soglia"],
+                name="Ore sotto soglia", marker_color="#ef4444",
+                hovertemplate="Mese: %{x}<br>Ore: %{y}<extra></extra>"))
+            fig_nm.update_layout(template="plotly_dark", height=380,
+                                 title="Ore sotto soglia per mese",
+                                 xaxis_title="Mese", yaxis_title="Ore")
+            st.plotly_chart(fig_nm, use_container_width=True)
+
+            fig_no = go.Figure()
+            fig_no.add_trace(go.Bar(
+                x=neg["profilo_orario"]["Ora"], y=neg["profilo_orario"]["Ore sotto soglia"],
+                name="Ore sotto soglia", marker_color="#f59e0b",
+                hovertemplate="Ora: %{x}<br>Ore: %{y}<extra></extra>"))
+            fig_no.update_layout(template="plotly_dark", height=380,
+                                 title="Distribuzione per ora del giorno (solare? di solito a mezzogiorno)",
+                                 xaxis_title="Ora", yaxis_title="Ore")
+            st.plotly_chart(fig_no, use_container_width=True)
+
+            st.markdown("**20 peggiori ore del periodo**")
+            st.dataframe(neg["top"], use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta peggiori ore (CSV)",
+                neg["top"].to_csv(index=False).encode("utf-8"),
+                file_name=f"prezzi_negativi_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica le 20 ore con i prezzi più bassi del periodo selezionato.",
             )
 
 # Footer
