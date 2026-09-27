@@ -2645,6 +2645,136 @@ def calcola_valore_flessibilita(prezzi, mw_f1, mw_f2, mw_f3, mw_taglio, ore_top)
     return out
 
 
+def calcola_top_ore_costo(prezzi, mw_f1, mw_f2, mw_f3, top_n=10):
+    """Classifica delle ore piu' costose del periodo (granularita' oraria).
+
+    Dato un profilo di carico (MW prelevati in ciascuna fascia F1/F2/F3),
+    calcola il costo orario (prezzo spot x MW della fascia) e classifica le
+    ore per costo decrescente. Produce anche la distribuzione del costo per
+    ora del giorno (0-23) e per fascia: utile per capire DOVE si concentra
+    la bolletta (es. 'le 18:00-19:00 dei giorni feriali') e per decidere dove
+    agire (shifting, curtailment, rinegoziazione delle fasce).
+
+    Differenza rispetto agli altri tab: Top giorni di costo ragiona per
+    GIORNO di calendario (domanda di tesoreria: 'quanto mi e' costato il
+    15/09?'); Picchi guarda le ORE di prezzo estremo (non di costo);
+    Valore flessibilita' mostra le ore migliori per il TAGLIO (risparmio
+    netto del curtailment). Qui la domanda e' 'quali ore mi sono costate di
+    piu', prezzo x carico': la classifica grezza del costo orario, senza
+    ipotesi di taglio.
+
+    NaN-safe: ore con prezzo NaN ignorate. Serie vuota o tutti i MW a zero ->
+    KPI a None e DataFrame con le colonne giuste ma vuoti. Se il costo totale
+    e' <= 0 (prezzi negativi prevalenti), le quote percentuali sono None.
+
+    Ritorna dict con 'n_ore', 'mwh_tot', 'costo_tot', 'costo_medio_orario',
+    'ora_max_data'/'ora_max_costo' (None se nessuna ora valida),
+    'rapporto_max_medio' (None se medio <= 0), 'quota_top5pct' (% del costo
+    generata dal 5% di ore piu' costose, None se totale <= 0),
+    'ora_max_giorno' (ora 0-23 con il costo totale maggiore nel periodo),
+    'top_n', 'top' (DataFrame: Data e ora, Fascia, Prezzo (€/MWh), Carico
+    (MW), Costo (€), Quota % sul totale), 'per_ora' (DataFrame con tutte le
+    24 ore: Ora, Ore osservate, Costo (€), Quota %) e 'per_fascia'
+    (DataFrame: Fascia, Ore, MWh, Costo (€), Quota %)."""
+    cols_t = ["Data e ora", "Fascia", "Prezzo (€/MWh)", "Carico (MW)",
+              "Costo (€)", "Quota % sul totale"]
+    cols_o = ["Ora", "Ore osservate", "Costo (€)", "Quota %"]
+    cols_f = ["Fascia", "Ore", "MWh", "Costo (€)", "Quota %"]
+    vuoto = {"n_ore": 0, "mwh_tot": 0.0, "costo_tot": None,
+             "costo_medio_orario": None, "ora_max_data": None,
+             "ora_max_costo": None, "rapporto_max_medio": None,
+             "quota_top5pct": None, "ora_max_giorno": None,
+             "top_n": max(1, int(top_n or 10)),
+             "top": pd.DataFrame(columns=cols_t),
+             "per_ora": pd.DataFrame(columns=cols_o),
+             "per_fascia": pd.DataFrame(columns=cols_f)}
+    try:
+        p = prezzi.astype(float).dropna()
+        p = p[~p.index.duplicated(keep="first")].sort_index()
+    except Exception:
+        return dict(vuoto)
+    if len(p) == 0:
+        return dict(vuoto)
+    out = dict(vuoto)
+    out["n_ore"] = len(p)
+    try:
+        fasce = p.index.map(fascia_oraria)
+    except Exception:
+        return out
+    mw_map = {"F1": max(0.0, float(mw_f1)), "F2": max(0.0, float(mw_f2)),
+              "F3": max(0.0, float(mw_f3))}
+    try:
+        idx = p.index
+        idxn = idx.tz_localize(None) if idx.tz is not None else idx
+        ore = idxn.hour.to_numpy()
+    except Exception:
+        return out
+    mw = fasce.map(mw_map).to_numpy(dtype=float)
+    pv = p.to_numpy(dtype=float)
+    costo = pv * mw
+    mwh = float(mw.sum())
+    totale = float(costo.sum())
+    medio = float(costo.mean())
+    cmax = float(costo.max())
+    out["mwh_tot"] = round(mwh, 1)
+    out["costo_tot"] = round(totale, 2)
+    out["costo_medio_orario"] = round(medio, 2)
+    out["rapporto_max_medio"] = round(cmax / medio, 2) if medio > 0 else None
+    if mwh <= 0:
+        return out
+    imax = int(np.argmax(costo))
+    out["ora_max_data"] = p.index[imax]
+    out["ora_max_costo"] = round(cmax, 2)
+    k5 = max(1, int(round(len(costo) * 0.05)))
+    q5 = (float(np.sort(costo)[::-1][:k5].sum() / totale * 100)
+          if totale > 0 else None)
+    out["quota_top5pct"] = round(q5, 1) if q5 is not None else None
+    try:
+        ordine = np.argsort(-costo, kind="stable")
+        tn = out["top_n"]
+        sel = ordine[:tn]
+        quote = np.where(totale > 0, costo[sel] / totale * 100, np.nan)
+        righe_t = [{
+            "Data e ora": p.index[i],
+            "Fascia": str(fasce[i]),
+            "Prezzo (€/MWh)": round(float(pv[i]), 2),
+            "Carico (MW)": round(float(mw[i]), 3),
+            "Costo (€)": round(float(costo[i]), 2),
+            "Quota % sul totale": (round(float(q), 2)
+                                   if not np.isnan(q) else None),
+        } for i, q in zip(sel.tolist(), quote)]
+        out["top"] = pd.DataFrame(righe_t, columns=cols_t)
+        righe_o = []
+        for h in range(24):
+            m = ore == h
+            co = float(costo[m].sum())
+            righe_o.append({
+                "Ora": f"{h:02d}:00",
+                "Ore osservate": int(m.sum()),
+                "Costo (€)": round(co, 2),
+                "Quota %": (round(co / totale * 100, 2)
+                            if totale > 0 else None),
+            })
+        out["per_ora"] = pd.DataFrame(righe_o, columns=cols_o)
+        out["ora_max_giorno"] = int(ore[np.argmax(costo)])
+        righe_f = []
+        for fa in ["F1", "F2", "F3"]:
+            m = np.array([str(x) == fa for x in fasce])
+            co = float(costo[m].sum())
+            righe_f.append({
+                "Fascia": fa,
+                "Ore": int(m.sum()),
+                "MWh": round(float(mw[m].sum()), 1),
+                "Costo (€)": round(co, 2),
+                "Quota %": (round(co / totale * 100, 2)
+                            if totale > 0 else None),
+            })
+        out["per_fascia"] = pd.DataFrame(righe_f, columns=cols_f)
+    except Exception:
+        pass
+    return out
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def generate_singularity_data():
     np.random.seed(42)
@@ -3337,7 +3467,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -5524,6 +5654,70 @@ elif workspace == _('ws8'):
                 file_name=f"valore_flessibilita_{d0}_{d1}.csv",
                 mime="text/csv",
                 help="Scarica tutte le ore selezionate: data e ora, fascia, prezzo, carico, MW tagliati e risparmio in €.",
+            )
+
+    with tab39:
+        titolo_to = edu("Top ore di costo", "La classifica delle ORE più care del periodo: per ogni ora il costo è prezzo spot × MW della fascia F1/F2/F3. Mentre 'Top giorni di costo' ragiona per giorno di calendario (domanda di tesoreria), qui vedi le singole ore — la domanda operativa per demand response, shifting e contratti di interrompibilità: 'a che ora mi sono costato di più?'")
+        st.markdown(f"**{titolo_to}**: le ore più care del periodo per costo orario (prezzo × carico), con distribuzione per ora del giorno e per fascia.", unsafe_allow_html=True)
+
+        to1, to2, to3 = st.columns(3)
+        with to1:
+            to_f1 = st.number_input("Potenza in F1 (MW)", min_value=0.0, value=1.0, step=0.5, key="to39_f1",
+                                    help="Ore di punta: lun–ven 08:00–19:00.")
+        with to2:
+            to_f2 = st.number_input("Potenza in F2 (MW)", min_value=0.0, value=1.0, step=0.5, key="to39_f2",
+                                    help="Ore intermedie: lun–ven 07:00–08:00 e 19:00–23:00, sab 07:00–23:00.")
+        with to3:
+            to_f3 = st.number_input("Potenza in F3 (MW)", min_value=0.0, value=1.0, step=0.5, key="to39_f3",
+                                    help="Ore fuori punta: notti, domeniche e festivi.")
+        to_top = st.slider("Numero di ore in classifica", min_value=5, max_value=100, value=20, step=5, key="to39_top",
+                           help="Quante ore (le più care per costo orario) mostrare in tabella.")
+
+        toc = calcola_top_ore_costo(prezzi, to_f1, to_f2, to_f3, to_top)
+        if toc["n_ore"] == 0:
+            st.warning("Dati insufficienti: nessuna ora con prezzo valido nel periodo.")
+        elif toc["mwh_tot"] <= 0:
+            st.info("Imposta una potenza maggiore di zero in almeno una fascia per calcolare il costo orario.")
+        else:
+            c1, c2, c3, c4 = st.columns(4)
+            om_data = toc["ora_max_data"]
+            om_txt = f"{om_data.strftime('%d/%m/%Y %H:%M')}<br><small>{toc['ora_max_costo']:,.2f} €</small>" if om_data is not None else "—"
+            render_kpi(edu("Ora più costosa", "L'ora singola con il costo più alto (prezzo × MW della fascia): il tuo picco di spesa del periodo."), om_txt, c1)
+            render_kpi(edu("Costo medio orario", "Costo orario medio del periodo: il benchmark contro cui confrontare ogni ora della classifica."), f"{toc['costo_medio_orario']:,.2f} €/h", c2)
+            q5_txt = f"{toc['quota_top5pct']:.1f} %" if toc["quota_top5pct"] is not None else "n.d."
+            render_kpi(edu("Quota del 5% di ore più care", "Che percentuale del costo totale è generata dal 5% di ore più costose: misura la concentrazione della bolletta."), f"{q5_txt}<br><small>del costo totale</small>", c3)
+            rmm_txt = f"{toc['rapporto_max_medio']:.2f} ×" if toc["rapporto_max_medio"] is not None else "n.d."
+            render_kpi(edu("Rapporto max/medio", "Quanto l'ora più costosa pesa rispetto all'ora media: più è alto, più c'è margine per shifting/curtailment."), rmm_txt, c4)
+            st.caption(f"💡 Profilo: F1 {to_f1} MW, F2 {to_f2} MW, F3 {to_f3} MW — {toc['costo_tot']:,.0f} € totali su {toc['mwh_tot']:,.0f} MWh ({toc['n_ore']:,} ore). Ora del giorno più costosa in aggregato: {toc['ora_max_giorno']:02d}:00.")
+
+            col_t1, col_t2 = st.columns(2)
+            with col_t1:
+                fig_to1 = go.Figure()
+                fig_to1.add_trace(go.Bar(x=toc["per_ora"]["Ora"], y=toc["per_ora"]["Costo (€)"],
+                                         name="Costo", marker_color="#f59e0b"))
+                fig_to1.update_layout(template="plotly_dark", height=330, title="Costo per ora del giorno",
+                                      xaxis_title="Ora", yaxis_title="€",
+                                      legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+                st.plotly_chart(fig_to1, use_container_width=True)
+            with col_t2:
+                fig_to2 = go.Figure()
+                fig_to2.add_trace(go.Bar(x=toc["per_fascia"]["Fascia"], y=toc["per_fascia"]["Quota %"],
+                                         name="Quota %", marker_color="#3b82f6"))
+                fig_to2.update_layout(template="plotly_dark", height=330, title="Quota di costo per fascia",
+                                      xaxis_title="Fascia", yaxis_title="% del costo totale",
+                                      legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+                st.plotly_chart(fig_to2, use_container_width=True)
+            st.caption("Le barre per ora del giorno mostrano dove si concentra il costo: le ore alte sono i primi candidati per shifting del carico o curtailment.")
+
+            st.markdown(f"**Top {toc['top_n']} ore più costose**")
+            st.dataframe(toc["top"], use_container_width=True, hide_index=True)
+
+            st.download_button(
+                "⬇️ Esporta top ore (CSV)",
+                toc["top"].to_csv(index=False).encode("utf-8"),
+                file_name=f"top_ore_costo_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica la classifica delle ore più care: data e ora, fascia, prezzo, carico, costo e quota % sul totale.",
             )
 
 # Footer
