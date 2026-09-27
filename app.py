@@ -2412,6 +2412,114 @@ def calcola_decomposizione_prezzo(prezzi):
     return out
 
 
+def calcola_sequenze_prezzo(prezzi):
+    """Analisi delle sequenze (run) di prezzo: rally = ore consecutive di rialzo,
+    drawdown = ore consecutive di ribasso, flat = variazioni nulle.
+
+    A cosa serve: capire quanto durano tipicamente i movimenti direzionali del
+    prezzo orario e quanto ampi sono, per calibrare stop, target e timing di
+    ingresso. Un rally/drawdown insolitamente lungo rispetto alla storia e'
+    un segnale di anomalia; l'ampiezza media delle sequenze misura il
+    momentum disponibile ora per ora.
+
+    Metodo (tutto deterministico a parita' di input):
+    - diff_i = p_i - p_{i-1}; segno +1 se > 0, -1 se < 0, 0 se nulla;
+    - una sequenza e' una run massimale di diff consecutivi con lo stesso
+      segno; durata = numero di diff nella run (ore di movimento);
+    - ampiezza = prezzo all'ultimo indice della run - prezzo al primo indice
+      della run (quindi > 0 per i rally, < 0 per i drawdown);
+    - la 'run piu' lunga' e' quella con durata massima; a parita' di durata
+      viene riportata la piu' vecchia (deterministico);
+    - gli orari con prezzo NaN e i timestamp duplicati (primo valore) vengono
+      scartati prima del calcolo.
+
+    prezzi: Series oraria in euro/MWh con indice datetime.
+    Ritorna dict con 'n_ore', 'n_rally', 'n_drawdown', 'n_flat',
+    'rally_max_ore', 'rally_max_amp', 'rally_max_inizio', 'rally_max_fine',
+    'drawdown_max_ore', 'drawdown_max_amp', 'drawdown_max_inizio',
+    'drawdown_max_fine', 'durata_media_rally', 'durata_media_drawdown',
+    'ampiezza_media_rally', 'ampiezza_media_drawdown', 'df_export'
+    (DataFrame delle run con Tipo/Inizio/Fine/Durata/Ampiezza)."""
+    cols = ["Tipo", "Inizio", "Fine", "Durata (ore)", "Ampiezza (€/MWh)"]
+    vuoto = {"n_ore": 0, "n_rally": 0, "n_drawdown": 0, "n_flat": 0,
+             "rally_max_ore": None, "rally_max_amp": None,
+             "rally_max_inizio": None, "rally_max_fine": None,
+             "drawdown_max_ore": None, "drawdown_max_amp": None,
+             "drawdown_max_inizio": None, "drawdown_max_fine": None,
+             "durata_media_rally": None, "durata_media_drawdown": None,
+             "ampiezza_media_rally": None, "ampiezza_media_drawdown": None,
+             "df_export": pd.DataFrame(columns=cols)}
+    try:
+        p = prezzi.astype(float).dropna()
+        p = p[~p.index.duplicated(keep="first")].sort_index()
+    except Exception:
+        return dict(vuoto)
+    if len(p) == 0:
+        return dict(vuoto)
+    out = dict(vuoto)
+    out["n_ore"] = len(p)
+    if len(p) < 2:
+        return out
+    try:
+        diffs = p.diff().iloc[1:]
+        idx = p.index
+        segni = diffs.apply(lambda d: 1 if d > 0 else (-1 if d < 0 else 0))
+        runs = []  # (tipo, i0, i1, durata, ampiezza)
+        s0 = None
+        j0 = None
+        for j, s in enumerate(segni.tolist()):
+            if s != s0:
+                if s0 is not None:
+                    i1 = j  # diffs j-1 e' l'ultima della run; prezzo all'indice j
+                    i0 = j0  # prima diff della run; prezzo all'indice j0
+                    amp = float(p.iloc[i1] - p.iloc[i0])
+                    runs.append((s0, idx[i0], idx[i1], i1 - i0, amp))
+                s0 = s
+                j0 = j
+        if s0 is not None:
+            i1 = len(segni)
+            i0 = j0
+            amp = float(p.iloc[i1] - p.iloc[i0])
+            runs.append((s0, idx[i0], idx[i1], i1 - i0, amp))
+    except Exception:
+        return dict(vuoto)
+    rally = [r for r in runs if r[0] == 1]
+    draw = [r for r in runs if r[0] == -1]
+    flat = [r for r in runs if r[0] == 0]
+    out["n_rally"] = len(rally)
+    out["n_drawdown"] = len(draw)
+    out["n_flat"] = len(flat)
+    if rally:
+        r_max = max(rally, key=lambda r: r[3])
+        out["rally_max_ore"] = r_max[3]
+        out["rally_max_amp"] = round(r_max[4], 2)
+        out["rally_max_inizio"] = r_max[1]
+        out["rally_max_fine"] = r_max[2]
+        out["durata_media_rally"] = round(sum(r[3] for r in rally) / len(rally), 2)
+        out["ampiezza_media_rally"] = round(sum(r[4] for r in rally) / len(rally), 2)
+    if draw:
+        d_max = max(draw, key=lambda r: r[3])
+        out["drawdown_max_ore"] = d_max[3]
+        out["drawdown_max_amp"] = round(d_max[4], 2)
+        out["drawdown_max_inizio"] = d_max[1]
+        out["drawdown_max_fine"] = d_max[2]
+        out["durata_media_drawdown"] = round(sum(r[3] for r in draw) / len(draw), 2)
+        out["ampiezza_media_drawdown"] = round(sum(r[4] for r in draw) / len(draw), 2)
+    try:
+        nomi = {1: "Rally", -1: "Drawdown", 0: "Flat"}
+        righe = [{
+            "Tipo": nomi[r[0]],
+            "Inizio": r[1],
+            "Fine": r[2],
+            "Durata (ore)": r[3],
+            "Ampiezza (€/MWh)": round(r[4], 2),
+        } for r in runs]
+        out["df_export"] = pd.DataFrame(righe, columns=cols)
+    except Exception:
+        pass
+    return out
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def generate_singularity_data():
     np.random.seed(42)
@@ -3104,7 +3212,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -5122,6 +5230,93 @@ elif workspace == _('ws8'):
                 file_name=f"decomposizione_prezzo_{d0}_{d1}.csv",
                 mime="text/csv",
                 help="Scarica la serie oraria con prezzo, trend, componenti stagionali e residuo.",
+            )
+
+    with tab37:
+        titolo_sq = edu("Sequenze (rally & drawdown)", "Quante ore di fila il prezzo sale senza interruzioni (rally) o scende senza interruzioni (drawdown), e di quanto si muove in ciascuna sequenza. Serve a calibrare stop e target: un movimento direzionale insolitamente lungo rispetto alla storia è un'anomalia, mentre l'ampiezza media delle sequenze misura il momentum disponibile ora per ora.")
+        st.markdown(f"**{titolo_sq}**: sequenze consecutive di rialzo e ribasso del prezzo orario nel periodo selezionato.", unsafe_allow_html=True)
+
+        sq = calcola_sequenze_prezzo(prezzi)
+        if sq["n_ore"] < 2:
+            st.warning("Dati insufficienti per l'analisi delle sequenze.")
+        else:
+            c1, c2, c3, c4 = st.columns(4)
+            render_kpi(edu("Sequenze totali", "Rally + drawdown + flat: quante sequenze consecutive di movimento compongono il periodo."), f"{sq['n_rally'] + sq['n_drawdown'] + sq['n_flat']}", c1)
+            render_kpi(edu("Rally / Drawdown", "Quante sequenze di rialzo e di ribasso sono state rilevate nel periodo."), f"{sq['n_rally']} / {sq['n_drawdown']}", c2)
+            if sq["rally_max_ore"] is not None:
+                try:
+                    rmi = pd.Timestamp(sq["rally_max_inizio"]).strftime("%d/%m %H:00")
+                    rmf = pd.Timestamp(sq["rally_max_fine"]).strftime("%d/%m %H:00")
+                    rally_txt = f"{sq['rally_max_ore']} ore · +{sq['rally_max_amp']:,.2f} €/MWh · {rmi}→{rmf}"
+                except Exception:
+                    rally_txt = f"{sq['rally_max_ore']} ore · +{sq['rally_max_amp']:,.2f} €/MWh"
+            else:
+                rally_txt = "—"
+            render_kpi(edu("Rally più lungo", "La sequenza di rialzo più lunga del periodo: durata, ampiezza e intervallo."), rally_txt, c3)
+            if sq["drawdown_max_ore"] is not None:
+                try:
+                    dmi = pd.Timestamp(sq["drawdown_max_inizio"]).strftime("%d/%m %H:00")
+                    dmf = pd.Timestamp(sq["drawdown_max_fine"]).strftime("%d/%m %H:00")
+                    draw_txt = f"{sq['drawdown_max_ore']} ore · {sq['drawdown_max_amp']:,.2f} €/MWh · {dmi}→{dmf}"
+                except Exception:
+                    draw_txt = f"{sq['drawdown_max_ore']} ore · {sq['drawdown_max_amp']:,.2f} €/MWh"
+            else:
+                draw_txt = "—"
+            render_kpi(edu("Drawdown più lungo", "La sequenza di ribasso più lunga del periodo: durata, ampiezza e intervallo."), draw_txt, c4)
+
+            fig_sq1 = go.Figure()
+            fig_sq1.add_trace(go.Scatter(x=prezzi.index, y=prezzi.values, mode="lines",
+                                         name="Prezzo spot (€/MWh)", line=dict(color="#3b82f6", width=1)))
+            if sq["rally_max_ore"] is not None:
+                fig_sq1.add_vrect(x0=sq["rally_max_inizio"], x1=sq["rally_max_fine"],
+                                  fillcolor="#22c55e", opacity=0.15, layer="below",
+                                  annotation_text="Rally più lungo", annotation_position="top left",
+                                  line_width=0)
+            if sq["drawdown_max_ore"] is not None:
+                fig_sq1.add_vrect(x0=sq["drawdown_max_inizio"], x1=sq["drawdown_max_fine"],
+                                  fillcolor="#ef4444", opacity=0.15, layer="below",
+                                  annotation_text="Drawdown più lungo", annotation_position="top left",
+                                  line_width=0)
+            fig_sq1.update_layout(template="plotly_dark", height=380, title="Prezzo orario con sequenze direzionali più lunghe",
+                                  xaxis_title="Data e Ora", yaxis_title="€/MWh", hovermode="x unified",
+                                  legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+            st.plotly_chart(fig_sq1, use_container_width=True)
+
+            df_exp = sq["df_export"]
+            if len(df_exp):
+                df_r = df_exp[df_exp["Tipo"] == "Rally"]["Durata (ore)"]
+                df_d = df_exp[df_exp["Tipo"] == "Drawdown"]["Durata (ore)"]
+                fig_sq2 = go.Figure()
+                if len(df_r):
+                    fig_sq2.add_trace(go.Histogram(x=df_r, name="Rally", marker_color="#22c55e",
+                                                   opacity=0.75, xbins=dict(size=1)))
+                if len(df_d):
+                    fig_sq2.add_trace(go.Histogram(x=df_d, name="Drawdown", marker_color="#ef4444",
+                                                   opacity=0.75, xbins=dict(size=1)))
+                fig_sq2.update_layout(template="plotly_dark", height=330,
+                                      title="Distribuzione delle durate delle sequenze",
+                                      xaxis_title="Durata (ore)", yaxis_title="Numero di sequenze",
+                                      barmode="overlay",
+                                      legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+                st.plotly_chart(fig_sq2, use_container_width=True)
+                st.caption("Movimenti di più ore sono meno frequenti: una sequenza in coda alla distribuzione destra è un'anomalia da investigare.")
+
+                r_sq, d_sq = st.columns(2)
+                with r_sq:
+                    st.markdown(f"**Top rally per ampiezza** (media {sq['ampiezza_media_rally'] if sq['ampiezza_media_rally'] is not None else '—'} €/MWh, durata media {sq['durata_media_rally'] if sq['durata_media_rally'] is not None else '—'} ore)")
+                    top_r = df_exp[df_exp["Tipo"] == "Rally"].sort_values("Ampiezza (€/MWh)", ascending=False).head(10)
+                    st.dataframe(top_r, use_container_width=True, hide_index=True)
+                with d_sq:
+                    st.markdown(f"**Top drawdown per ampiezza** (media {sq['ampiezza_media_drawdown'] if sq['ampiezza_media_drawdown'] is not None else '—'} €/MWh, durata media {sq['durata_media_drawdown'] if sq['durata_media_drawdown'] is not None else '—'} ore)")
+                    top_d = df_exp[df_exp["Tipo"] == "Drawdown"].sort_values("Ampiezza (€/MWh)").head(10)
+                    st.dataframe(top_d, use_container_width=True, hide_index=True)
+
+            st.download_button(
+                "⬇️ Esporta sequenze (CSV)",
+                sq["df_export"].to_csv(index=False).encode("utf-8"),
+                file_name=f"sequenze_prezzo_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica tutte le sequenze rilevate: tipo, inizio, fine, durata in ore e ampiezza in €/MWh.",
             )
 
 # Footer
