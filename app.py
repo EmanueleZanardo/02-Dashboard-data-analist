@@ -887,6 +887,60 @@ def calcola_profilo_settimanale(prezzi, top_n=10):
         .reset_index(drop=True))
     return out
 
+def calcola_curva_durata(prezzi, soglia=None):
+    """Curva di durata (price duration curve): prezzi orari ordinati in modo
+    decrescente, con l'asse x = numero di ore cumulative.
+
+    E' lo strumento standard per leggere la distribuzione dei prezzi senza
+    guardare le serie temporali: la parte sinistra mostra per quante ore
+    l'energia e' costata cara (picchi), la parte destra per quante ore e'
+    costata poco (valli). I percentili P95/P50/P5 indicano i livelli di
+    prezzo superati rispettivamente dal 5%, 50% e 95% delle ore: P95 misura
+    l'esposizione ai picchi, P50 e' il prezzo mediano, P5 il pavimento. La
+    media del 10% di ore piu' care e del 10% piu' economiche misura
+    l'ampiezza della distribuzione e serve per valutazioni di VaR
+    semplificato e per dimensionare coperture e storage.
+
+    NaN-safe: ore con prezzo NaN ignorate. Ritorna dict con 'n_ore',
+    'tot_ore', 'curva' (DataFrame 'Ore cumulative', 'Prezzo €/MWh' in
+    ordine decrescente), 'p95'/'p50'/'p5' (prezzi ai percentili 95/50/5),
+    'ore_sopra_p95' (ore con prezzo > P95, circa il 5% del totale),
+    'media_top10'/'media_bottom10' (media del 10% di ore piu' care /
+    piu' economiche), 'decili' (DataFrame 'Decile', 'Prezzo €/MWh',
+    'Ore cumulative') e 'ore_sopra_soglia' (None se soglia non data)."""
+    cols_d = ["Decile", "Prezzo €/MWh", "Ore cumulative"]
+    vuoto = {"n_ore": 0, "tot_ore": 0,
+             "curva": pd.DataFrame(columns=["Ore cumulative", "Prezzo €/MWh"]),
+             "p95": None, "p50": None, "p5": None,
+             "ore_sopra_p95": 0, "media_top10": None, "media_bottom10": None,
+             "decili": pd.DataFrame(columns=cols_d),
+             "ore_sopra_soglia": None}
+    p = prezzi.astype(float).dropna().sort_values(ascending=False)
+    out = dict(vuoto)
+    if p.empty:
+        return out
+    n = int(len(p))
+    out["tot_ore"] = n
+    out["n_ore"] = n
+    out["curva"] = (pd.DataFrame(
+        {"Ore cumulative": np.arange(1, n + 1),
+         "Prezzo €/MWh": p.values.round(2)})
+        .reset_index(drop=True))
+    p95, p50, p5 = (round(float(p.quantile(q)), 2) for q in (0.95, 0.50, 0.05))
+    out["p95"], out["p50"], out["p5"] = p95, p50, p5
+    out["ore_sopra_p95"] = int((p > p95).sum())
+    k = max(1, int(n * 0.1))
+    out["media_top10"] = round(float(p.iloc[:k].mean()), 2)
+    out["media_bottom10"] = round(float(p.iloc[-k:].mean()), 2)
+    out["decili"] = (pd.DataFrame(
+        [{"Decile": f"D{j}", "Prezzo €/MWh": round(float(p.quantile(j / 10)), 2),
+          "Ore cumulative": int(j * n / 10)}
+         for j in range(1, 11)], columns=cols_d)
+        .reset_index(drop=True))
+    if soglia is not None:
+        out["ore_sopra_soglia"] = int((p > float(soglia)).sum())
+    return out
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def generate_singularity_data():
     np.random.seed(42)
@@ -1436,7 +1490,7 @@ elif workspace == _('ws7'):
 # ==========================================
 elif workspace == _('ws8'):
     st.markdown(f"<h1>{_('ws8')}</h1>", unsafe_allow_html=True)
-    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread, shaping curva, spread weekend, price capture, volatilità realizzata, confronto anno-su-anno, analisi prezzi negativi, spread intra-day, picchi di prezzo, profilo settimanale tipo ed export CSV.")
+    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread, shaping curva, spread weekend, price capture, volatilità realizzata, confronto anno-su-anno, analisi prezzi negativi, spread intra-day, picchi di prezzo, profilo settimanale tipo, curva di durata ed export CSV.")
 
     # ---------- Controlli: sorgente, periodo, impianti ----------
     st.subheader("⚙️ Sorgente dati & Timeframe")
@@ -1579,7 +1633,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -2561,6 +2615,53 @@ elif workspace == _('ws8'):
                 file_name=f"finestre_economiche_{d0}_{d1}.csv",
                 mime="text/csv",
                 help="Scarica le 10 combinazioni giorno-ora con prezzo medio più basso del periodo selezionato.",
+            )
+
+    with tab20:
+        titolo_cd = edu("Curva di durata", "La CURVA DI DURATA (price duration curve) ordina tutte le ore del periodo dal prezzo più alto al più basso: l'asse orizzontale è il numero di ore cumulative. A sinistra si legge per quante ore l'energia è costata cara (esposizione ai picchi), a destra per quante ore è costata poco (valli da sfruttare con carichi flessibili o storage). I percentili P95/P50/P5 indicano i livelli di prezzo superati rispettivamente dal 5%, 50% e 95% delle ore: sono la base per i ragionamenti di tipo VaR (value at risk) sul costo di fornitura. A differenza del tab Picchi (soglia fissa scelta dall'utente), qui i livelli P95/P50/P5 emergono dai dati.")
+        st.markdown(f"**{titolo_cd}**: prezzi orari ordinati dal più alto al più basso, percentili e distribuzione per decili.", unsafe_allow_html=True)
+        cd = calcola_curva_durata(prezzi, soglia=soglia)
+        if cd["tot_ore"] == 0:
+            st.info("Nessun dato disponibile per il periodo selezionato.")
+        else:
+            k1, k2, k3, k4 = st.columns(4)
+            render_kpi(edu("P95 (€/MWh)", "Livello di prezzo superato solo dal 5% delle ore più care: misura l'esposizione ai picchi del periodo."), f"{cd['p95']:,.2f}<br><small>{cd['ore_sopra_p95']} h sopra ({cd['ore_sopra_p95']/cd['n_ore']*100:.1f} %)</small>", k1)
+            render_kpi(edu("Mediana P50 (€/MWh)", "Prezzo mediano: metà delle ore costa di più, metà di meno. Più robusto della media contro i picchi."), f"{cd['p50']:,.2f}", k2)
+            render_kpi(edu("P5 (€/MWh)", "Livello di prezzo superato dal 95% delle ore: il pavimento della distribuzione, interessante per carichi flessibili."), f"{cd['p5']:,.2f}", k3)
+            render_kpi(edu("Media 10% più care", "Prezzo medio del decile più caro: dove concentrare coperture e hedging se si teme la coda destra."), f"{cd['media_top10']:,.2f}", k4)
+            st.caption(f"💡 Ore analizzate: {cd['n_ore']:,}. Media 10% più economiche: {cd['media_bottom10']:,.2f} €/MWh. Il 5% più caro costa in media {cd['media_top10']/cd['media_bottom10']:.1f}x rispetto al 5% più economico." if cd["media_bottom10"] and cd["media_bottom10"] != 0 else f"💡 Ore analizzate: {cd['n_ore']:,}. Media 10% più economiche: {cd['media_bottom10']:,.2f} €/MWh.")
+
+            fig_cd = go.Figure()
+            fig_cd.add_trace(go.Scatter(
+                x=cd["curva"]["Ore cumulative"], y=cd["curva"]["Prezzo €/MWh"],
+                mode="lines", name="Prezzo per ora ordinata",
+                line=dict(color="#38bdf8", width=2),
+                fill="tozeroy", fillcolor="rgba(56, 189, 248, 0.12)",
+                hovertemplate="Ore cumulative: %{x}<br>Prezzo: %{y:.2f} €/MWh<extra></extra>"))
+            fig_cd.add_hline(y=cd["p95"], line_dash="dash", line_color="#ef4444",
+                             annotation_text=f"P95 {cd['p95']:,.0f} €/MWh", annotation_position="top right")
+            fig_cd.add_hline(y=cd["p50"], line_dash="dash", line_color="#eab308",
+                             annotation_text=f"P50 {cd['p50']:,.0f} €/MWh", annotation_position="top right")
+            fig_cd.add_hline(y=cd["p5"], line_dash="dash", line_color="#22c55e",
+                             annotation_text=f"P5 {cd['p5']:,.0f} €/MWh", annotation_position="bottom right")
+            if cd["ore_sopra_soglia"]:
+                fig_cd.add_vline(x=cd["ore_sopra_soglia"], line_dash="dot", line_color="#f97316",
+                                 annotation_text=f"Soglia alert: {cd['ore_sopra_soglia']} h", annotation_position="top left")
+            fig_cd.update_layout(template="plotly_dark", height=420,
+                                 title="Curva di durata del prezzo (€/MWh)",
+                                 xaxis_title="Ore cumulative (dalla più cara alla più economica)",
+                                 yaxis_title="Prezzo (€/MWh)",
+                                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+            st.plotly_chart(fig_cd, use_container_width=True)
+
+            st.markdown("**Prezzo per decile**")
+            st.dataframe(cd["decili"], use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta curva di durata (CSV)",
+                cd["curva"].to_csv(index=False).encode("utf-8"),
+                file_name=f"curva_durata_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica la curva di durata: ore cumulative e prezzo ordinato in modo decrescente.",
             )
 
 # Footer
