@@ -1324,6 +1324,89 @@ def calcola_stagionalita(prezzi):
     return out
 
 
+def calcola_budget_tracker(prezzi, mw_f1, mw_f2, mw_f3, budget_annuo):
+    """Monitoraggio del budget energetico annuale (budget tracker).
+
+    Dato un budget annuale in € e il profilo di prelievo (MW per fascia
+    F1/F2/F3), calcola il costo spot effettivo mese per mese sul periodo
+    disponibile, la spesa cumulata giorno per giorno, il budget PRO-RATA
+    TEMPORIS (budget x giorni trascorsi / 365) e la PROIEZIONE a fine anno
+    (burn rate giornaliero x 365). L'INDICE DI CONSUMO = spesa effettiva /
+    budget pro-rata x 100: sopra 100 il budget si brucia piu' in fretta del
+    tempo che passa (allarme sforamento), sotto 100 si e' in anticipo sul
+    piano di spesa.
+
+    Utile per: controllo di gestione dell'energia, variance analysis
+    mensile, allerta precoce di sforamento, negoziazione di integrazioni di
+    budget con dati oggettivi.
+
+    NaN-safe: ore con prezzo NaN ignorate. Con budget <= 0 o serie vuota
+    ritorna il dict vuoto (colonne giuste, KPI a None/0).
+
+    Ritorna dict con 'giorni' (int), 'mwh' (float), 'costo_tot' (float),
+    'budget' (float), 'budget_prorata' (float), 'indice_consumo_pct' (float
+    o None), 'burn_giorno' (float), 'proiezione_annua' (float),
+    'scostamento' (float), 'scostamento_pct' (float o None), 'mensile'
+    (DataFrame: Mese, Giorni, MWh, 'Costo €', '€/MWh medio',
+    'Budget mensile €', 'Scostamento €') e 'cumulata' (DataFrame: Data,
+    'Costo cumulato €', 'Budget pro-rata €')."""
+    cols_m = ["Mese", "Giorni", "MWh", "Costo €", "€/MWh medio",
+              "Budget mensile €", "Scostamento €"]
+    cols_c = ["Data", "Costo cumulato €", "Budget pro-rata €"]
+    budget = float(budget_annuo or 0.0)
+    vuoto = {"giorni": 0, "mwh": 0.0, "costo_tot": 0.0, "budget": budget,
+             "budget_prorata": 0.0, "indice_consumo_pct": None,
+             "burn_giorno": 0.0, "proiezione_annua": 0.0, "scostamento": None,
+             "scostamento_pct": None,
+             "mensile": pd.DataFrame(columns=cols_m),
+             "cumulata": pd.DataFrame(columns=cols_c)}
+    p = prezzi.astype(float).dropna()
+    out = dict(vuoto)
+    if p.empty or budget <= 0:
+        return out
+    mw_map = {"F1": float(mw_f1), "F2": float(mw_f2), "F3": float(mw_f3)}
+    idxn = p.index.tz_localize(None) if p.index.tz is not None else p.index
+    mw = idxn.map(fascia_oraria).map(mw_map).to_numpy(dtype=float)
+    costo = p.to_numpy(dtype=float) * mw
+    mese_key = idxn.strftime("%Y-%m")
+    righe = []
+    for mese in sorted(set(mese_key)):
+        mask = mese_key == mese
+        gg = int(pd.DatetimeIndex(idxn[mask]).floor("D").nunique())
+        mwh = float(mw[mask].sum())
+        cst = float(costo[mask].sum())
+        pm = round(cst / mwh, 2) if mwh > 0 else None
+        bmens = round(budget / 12.0, 2)
+        righe.append({"Mese": mese, "Giorni": gg, "MWh": round(mwh, 1),
+                      "Costo €": round(cst, 2), "€/MWh medio": pm,
+                      "Budget mensile €": bmens,
+                      "Scostamento €": round(cst - bmens, 2)})
+    out["mensile"] = pd.DataFrame(righe, columns=cols_m).reset_index(drop=True)
+    giorni_ser = pd.DatetimeIndex(idxn).floor("D")
+    giornaliero = pd.Series(costo).groupby(giorni_ser).sum().sort_index()
+    n_giorni = int(len(giornaliero))
+    cum = giornaliero.cumsum()
+    prog = (np.arange(1, n_giorni + 1) / 365.0 * budget)
+    out["cumulata"] = pd.DataFrame({
+        "Data": [d.strftime("%Y-%m-%d") for d in cum.index],
+        "Costo cumulato €": [round(float(v), 2) for v in cum.values],
+        "Budget pro-rata €": [round(float(v), 2) for v in prog],
+    }, columns=cols_c).reset_index(drop=True)
+    out["giorni"] = n_giorni
+    out["mwh"] = round(float(mw.sum()), 1)
+    out["costo_tot"] = round(float(costo.sum()), 2)
+    out["budget_prorata"] = round(budget * n_giorni / 365.0, 2)
+    out["indice_consumo_pct"] = (
+        round(out["costo_tot"] / out["budget_prorata"] * 100, 1)
+        if out["budget_prorata"] > 0 else None)
+    out["burn_giorno"] = (round(out["costo_tot"] / n_giorni, 2)
+                          if n_giorni else 0.0)
+    out["proiezione_annua"] = round(out["burn_giorno"] * 365.0, 2)
+    out["scostamento"] = round(out["proiezione_annua"] - budget, 2)
+    out["scostamento_pct"] = round(out["scostamento"] / budget * 100, 1)
+    return out
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def generate_singularity_data():
     np.random.seed(42)
@@ -1873,7 +1956,7 @@ elif workspace == _('ws7'):
 # ==========================================
 elif workspace == _('ws8'):
     st.markdown(f"<h1>{_('ws8')}</h1>", unsafe_allow_html=True)
-    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread, shaping curva, spread weekend, price capture, volatilità realizzata, confronto anno-su-anno, analisi prezzi negativi, spread intra-day, picchi di prezzo, profilo settimanale tipo, curva di durata, concentrazione del costo di fornitura, simulazione demand shifting, finestre di acquisto ottimali, stagionalità mensile ed export CSV.")
+    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread, shaping curva, spread weekend, price capture, volatilità realizzata, confronto anno-su-anno, analisi prezzi negativi, spread intra-day, picchi di prezzo, profilo settimanale tipo, curva di durata, concentrazione del costo di fornitura, simulazione demand shifting, finestre di acquisto ottimali, stagionalità mensile, monitoraggio del budget energetico annuale ed export CSV.")
 
     # ---------- Controlli: sorgente, periodo, impianti ----------
     st.subheader("⚙️ Sorgente dati & Timeframe")
@@ -2016,7 +2099,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -3298,6 +3381,72 @@ elif workspace == _('ws8'):
                 file_name=f"stagionalita_{d0}_{d1}.csv",
                 mime="text/csv",
                 help="Scarica il profilo stagionale mensile: media, mediana, min, max, deviazione standard e fattore stagionale.",
+            )
+
+    with tab25:
+        titolo_bt = edu("Budget tracker", "Il BUDGET TRACKER confronta la spesa energetica effettiva (a prezzi spot, sul tuo profilo di prelievo F1/F2/F3) con il budget annuale stanziato. Il budget pro-rata temporis (budget × giorni trascorsi / 365) dice quanto avresti dovuto spendere 'in linea' col piano; l'indice di consumo (spesa / pro-rata × 100) segnala subito se stai sforando (>100) o sei in anticipo (<100). La proiezione a fine anno (burn rate giornaliero × 365) stima dove atterri se i prezzi restano questi: è la base oggettiva per chiedere un'integrazione di budget o per accelerare le coperture forward.")
+        st.markdown(f"**{titolo_bt}**: spesa effettiva vs budget annuale, pro-rata temporis e proiezione a fine anno.", unsafe_allow_html=True)
+        st.caption("Profilo di prelievo: quello impostato nel tab 💰 Costo fornitura (MW per fascia F1/F2/F3).")
+
+        bt0, _ = st.columns([1, 2])
+        with bt0:
+            budget_in = st.number_input("Budget annuale (€)", min_value=0.0, value=1000000.0, step=50000.0,
+                                       help="Budget annuale stanziato per l'energia elettrica: il tracker lo confronta con la spesa spot effettiva.")
+        bt = calcola_budget_tracker(prezzi, mw_f1, mw_f2, mw_f3, budget_in)
+        if budget_in <= 0:
+            st.warning("Inserisci un budget annuale positivo per attivare il monitoraggio.")
+        elif bt["mensile"].empty:
+            st.info("Nessun dato valido nel periodo per il budget tracker.")
+        else:
+            b1, b2, b3, b4 = st.columns(4)
+            render_kpi(edu("Speso nel periodo", "Costo spot effettivo sul periodo analizzato: somma oraria (prezzo × MW della fascia)."), f"{bt['costo_tot']:,.2f} €", b1)
+            ind = bt["indice_consumo_pct"]
+            ind_txt = f"{bt['budget_prorata']:,.2f} €<br><small>indice {ind:.1f}</small>" if ind is not None else f"{bt['budget_prorata']:,.2f} €"
+            render_kpi(edu("Budget pro-rata", "Quota di budget 'dovuta' al tempo trascorso: budget × giorni / 365. L'indice di consumo (spesa / pro-rata × 100) dice se bruci il budget più in fretta (>100) o più piano (<100) del passare del tempo."), ind_txt, b2)
+            render_kpi(edu("Proiezione fine anno", "Stima di spesa a fine anno se il burn rate giornaliero resta quello del periodo: spesa / giorni × 365."), f"{bt['proiezione_annua']:,.2f} €", b3)
+            sc, scp = bt["scostamento"], bt["scostamento_pct"]
+            segno = "🔴" if sc > 0 else ("🟢" if sc < 0 else "⚪")
+            render_kpi(edu("Scostamento proiettato", "Proiezione meno budget: quanto sfori (rosso) o risparmi (verde) a fine anno ai prezzi correnti. Base oggettiva per integrazioni di budget o nuove coperture."), f"{segno} {sc:+,.2f} €<br><small>{scp:+.1f}%</small>", b4)
+            st.caption("💡 Indice di consumo > 100 = spendi più in fretta del tempo che passa: valuta coperture forward o revisione del budget.")
+
+            fig_bt = go.Figure()
+            fig_bt.add_trace(go.Scatter(
+                x=bt["cumulata"]["Data"], y=bt["cumulata"]["Costo cumulato €"],
+                mode="lines", name="Spesa cumulata",
+                line=dict(color="#3b82f6", width=2.5),
+                hovertemplate="Data: %{x}<br>Spesa: %{y:,.2f} €<extra></extra>"))
+            fig_bt.add_trace(go.Scatter(
+                x=bt["cumulata"]["Data"], y=bt["cumulata"]["Budget pro-rata €"],
+                mode="lines", name="Budget pro-rata",
+                line=dict(color="#94a3b8", width=2, dash="dash"),
+                hovertemplate="Data: %{x}<br>Pro-rata: %{y:,.2f} €<extra></extra>"))
+            fig_bt.update_layout(template="plotly_dark", height=360,
+                                 title="Spesa cumulata vs budget pro-rata (€)",
+                                 xaxis_title="Data", yaxis_title="€")
+            st.plotly_chart(fig_bt, use_container_width=True)
+
+            fig_btm = go.Figure()
+            fig_btm.add_trace(go.Bar(
+                x=bt["mensile"]["Mese"], y=bt["mensile"]["Costo €"],
+                name="Costo effettivo", marker_color="#3b82f6",
+                hovertemplate="Mese: %{x}<br>Costo: %{y:,.2f} €<extra></extra>"))
+            fig_btm.add_trace(go.Bar(
+                x=bt["mensile"]["Mese"], y=bt["mensile"]["Budget mensile €"],
+                name="Budget mensile", marker_color="#94a3b8",
+                hovertemplate="Mese: %{x}<br>Budget: %{y:,.2f} €<extra></extra>"))
+            fig_btm.update_layout(template="plotly_dark", height=360, barmode="group",
+                                  title="Costo mensile vs budget mensile (€)",
+                                  xaxis_title="Mese", yaxis_title="€")
+            st.plotly_chart(fig_btm, use_container_width=True)
+
+            st.markdown("**Dettaglio mensile**")
+            st.dataframe(bt["mensile"], use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta budget tracker (CSV)",
+                bt["mensile"].to_csv(index=False).encode("utf-8"),
+                file_name=f"budget_tracker_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica il dettaglio mensile: MWh, costo effettivo, €/MWh medio, budget mensile e scostamento.",
             )
 
 # Footer
