@@ -941,6 +941,84 @@ def calcola_curva_durata(prezzi, soglia=None):
         out["ore_sopra_soglia"] = int((p > float(soglia)).sum())
     return out
 
+def calcola_concentrazione_costo(prezzi, mw_f1, mw_f2, mw_f3):
+    """Concentrazione del costo di fornitura nelle ore piu' care (curva di Lorenz del costo).
+
+    Dato un profilo di carico (MW prelevati in ciascuna fascia F1/F2/F3), calcola
+    il costo orario = prezzo spot x MW della fascia, ordina le ore per prezzo
+    decrescente e cumula la quota di costo: mostra quanta parte della bolletta
+    del periodo e' generata dalle ore piu' care. E' la metrica che motiva le
+    coperture (hedging): se il 10% di ore piu' care genera il 40% del costo,
+    coprire la coda destra riduce drasticamente il rischio di budget. A
+    differenza del tab Curva durata (distribuzione dei PREZZI), qui pesa il
+    profilo di CONSUMO del cliente.
+
+    NaN-safe: ore con prezzo NaN ignorate. MW tutti a zero o serie vuota ->
+    valori neutrali. Con prezzi negativi (costo orario < 0) le quote possono
+    superare il 100% (documentato nel caption) e l'indice di Gini non e'
+    definito (None), perche' la formula standard richiede valori non negativi.
+
+    Ritorna dict con 'n_ore', 'mwh', 'totale' (costo €), 'quota_top10' /
+    'quota_top5' (% del costo nel 10%/5% di ore piu' care, None se totale <= 0),
+    'costo_top10' (€ nel 10% di ore piu' care), 'ore_50pct' (ore per coprire
+    il 50% del costo, None se totale <= 0), 'gini' (0..1, None con costi
+    negativi o totale <= 0), 'lorenz' (DataFrame 'Quota ore %', 'Quota costo %'
+    cumulata sulle ore ordinate per prezzo decrescente) e 'decili' (DataFrame
+    'Decile', 'Ore', 'Costo (€)', 'Quota costo %' per decile di prezzo;
+    D1 = 10% di ore piu' care, D10 = 10% di ore piu' economiche)."""
+    cols_l = ["Quota ore %", "Quota costo %"]
+    cols_d = ["Decile", "Ore", "Costo (€)", "Quota costo %"]
+    vuoto = {"n_ore": 0, "mwh": 0.0, "totale": 0.0,
+             "quota_top10": None, "quota_top5": None, "costo_top10": 0.0,
+             "ore_50pct": None, "gini": None,
+             "lorenz": pd.DataFrame(columns=cols_l),
+             "decili": pd.DataFrame(columns=cols_d)}
+    p = prezzi.astype(float).dropna()
+    out = dict(vuoto)
+    if p.empty:
+        return out
+    mw_map = {"F1": float(mw_f1), "F2": float(mw_f2), "F3": float(mw_f3)}
+    mw = p.index.map(fascia_oraria).map(mw_map).to_numpy(dtype=float)
+    if (mw <= 0).all():
+        return out
+    costo = p.values * mw
+    n = int(len(p))
+    mwh = float(mw.sum())
+    totale = float(costo.sum())
+    out["n_ore"] = n
+    out["mwh"] = round(mwh, 1)
+    out["totale"] = round(totale, 2)
+    order = np.argsort(-p.values, kind="stable")
+    cs = costo[order]
+    cum = np.cumsum(cs)
+    q_ore = (np.arange(1, n + 1) / n * 100).round(1)
+    q_costo = np.full(n, np.nan) if totale <= 0 else (cum / totale * 100).round(1)
+    out["lorenz"] = (pd.DataFrame({"Quota ore %": q_ore, "Quota costo %": q_costo})
+                     .reset_index(drop=True))
+    k10 = max(1, int(n * 0.10))
+    k5 = max(1, int(n * 0.05))
+    out["costo_top10"] = round(float(cum[k10 - 1]), 2)
+    if totale > 0:
+        out["quota_top10"] = round(float(cum[k10 - 1] / totale * 100), 1)
+        out["quota_top5"] = round(float(cum[k5 - 1] / totale * 100), 1)
+        out["ore_50pct"] = int(min(n, np.searchsorted(cum, totale * 0.5) + 1))
+    if totale > 0 and (costo >= 0).all():
+        y = np.sort(costo)
+        i = np.arange(1, n + 1, dtype=float)
+        g = 2.0 * float(np.sum(i * y)) / (n * float(y.sum())) - (n + 1) / n
+        out["gini"] = round(float(min(1.0, max(0.0, g))), 3)
+    righe = []
+    for j in range(10):
+        a, b = int(j * n / 10), int((j + 1) * n / 10)
+        c_dec = float(cs[a:b].sum())
+        righe.append({"Decile": f"D{j + 1}",
+                      "Ore": int(b - a),
+                      "Costo (€)": round(c_dec, 2),
+                      "Quota costo %": (round(c_dec / totale * 100, 1)
+                                        if totale > 0 else None)})
+    out["decili"] = pd.DataFrame(righe, columns=cols_d).reset_index(drop=True)
+    return out
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def generate_singularity_data():
     np.random.seed(42)
@@ -1490,7 +1568,7 @@ elif workspace == _('ws7'):
 # ==========================================
 elif workspace == _('ws8'):
     st.markdown(f"<h1>{_('ws8')}</h1>", unsafe_allow_html=True)
-    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread, shaping curva, spread weekend, price capture, volatilità realizzata, confronto anno-su-anno, analisi prezzi negativi, spread intra-day, picchi di prezzo, profilo settimanale tipo, curva di durata ed export CSV.")
+    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread, shaping curva, spread weekend, price capture, volatilità realizzata, confronto anno-su-anno, analisi prezzi negativi, spread intra-day, picchi di prezzo, profilo settimanale tipo, curva di durata, concentrazione del costo di fornitura ed export CSV.")
 
     # ---------- Controlli: sorgente, periodo, impianti ----------
     st.subheader("⚙️ Sorgente dati & Timeframe")
@@ -1633,7 +1711,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -2629,7 +2707,15 @@ elif workspace == _('ws8'):
             render_kpi(edu("Mediana P50 (€/MWh)", "Prezzo mediano: metà delle ore costa di più, metà di meno. Più robusto della media contro i picchi."), f"{cd['p50']:,.2f}", k2)
             render_kpi(edu("P5 (€/MWh)", "Livello di prezzo superato dal 95% delle ore: il pavimento della distribuzione, interessante per carichi flessibili."), f"{cd['p5']:,.2f}", k3)
             render_kpi(edu("Media 10% più care", "Prezzo medio del decile più caro: dove concentrare coperture e hedging se si teme la coda destra."), f"{cd['media_top10']:,.2f}", k4)
-            st.caption(f"💡 Ore analizzate: {cd['n_ore']:,}. Media 10% più economiche: {cd['media_bottom10']:,.2f} €/MWh. Il 5% più caro costa in media {cd['media_top10']/cd['media_bottom10']:.1f}x rispetto al 5% più economico." if cd["media_bottom10"] and cd["media_bottom10"] != 0 else f"💡 Ore analizzate: {cd['n_ore']:,}. Media 10% più economiche: {cd['media_bottom10']:,.2f} €/MWh.")
+            cap_cd = (f"💡 Ore analizzate: {cd['n_ore']:,}. "
+                      f"Media 10% più economiche: {cd['media_bottom10']:,.2f} €/MWh.")
+            # FIX 27/09: il rapporto confronta i DECILI (10%), non il 5%; con prezzi
+            # negativi il rapporto non ha senso e viene omesso.
+            b10 = cd["media_bottom10"]
+            if b10 and b10 > 0:
+                cap_cd += (f" Il 10% di ore più care costa in media "
+                           f"{cd['media_top10']/b10:.1f}x rispetto al 10% più economico.")
+            st.caption(cap_cd)
 
             fig_cd = go.Figure()
             fig_cd.add_trace(go.Scatter(
@@ -2662,6 +2748,77 @@ elif workspace == _('ws8'):
                 file_name=f"curva_durata_{d0}_{d1}.csv",
                 mime="text/csv",
                 help="Scarica la curva di durata: ore cumulative e prezzo ordinato in modo decrescente.",
+            )
+
+    with tab21:
+        titolo_cc = edu("Concentrazione del costo", "La CONCENTRAZIONE DEL COSTO mostra quanta parte della bolletta del periodo è generata dalle ore più care: si prende il tuo profilo di consumo (MW per fascia), si calcola il costo di ogni ora (prezzo spot × MW), si ordinano le ore dalla più cara alla più economica e si cumula la quota di costo (curva di Lorenz). Se il 10% di ore più care genera il 40% del costo, la coda destra è il rischio da coprire: è l'argomento quantitativo per proporre un hedging. A differenza del tab Curva durata (che guarda la distribuzione dei PREZZI), qui pesa il CONSUMO: due clienti con lo stesso spot possono avere concentrazioni molto diverse.")
+        st.markdown(f"**{titolo_cc}**: quota di costo generata dalle ore più care, con il tuo profilo di carico.", unsafe_allow_html=True)
+
+        cc1, cc2, cc3 = st.columns(3)
+        with cc1:
+            cc_f1 = st.number_input("Potenza in F1 (MW)", min_value=0.0, value=1.0, step=0.5, key="cc_f1",
+                                    help="Ore di punta: lun–ven 08:00–19:00.")
+        with cc2:
+            cc_f2 = st.number_input("Potenza in F2 (MW)", min_value=0.0, value=1.0, step=0.5, key="cc_f2",
+                                    help="Ore intermedie: lun–ven 07:00–08:00 e 19:00–23:00, sab 07:00–23:00.")
+        with cc3:
+            cc_f3 = st.number_input("Potenza in F3 (MW)", min_value=0.0, value=1.0, step=0.5, key="cc_f3",
+                                    help="Ore fuori punta: notti, domeniche e festivi.")
+        conc = calcola_concentrazione_costo(prezzi, cc_f1, cc_f2, cc_f3)
+        if conc["n_ore"] == 0:
+            st.info("Imposta una potenza maggiore di zero in almeno una fascia per calcolare la concentrazione del costo.")
+        elif conc["totale"] <= 0:
+            st.warning("Costo totale del periodo non positivo (prezzi negativi dominanti): le quote di concentrazione non sono significative.")
+        else:
+            g1, g2, g3, g4 = st.columns(4)
+            render_kpi(edu("Quota costo nel 10% di ore più care", "Percentuale della bolletta generata dal decile di ore più care: più è alta, più conviene coprire (hedging) la coda destra invece di pagare lo spot."), f"{conc['quota_top10']:.1f} %<br><small>{conc['costo_top10']:,.0f} €</small>", g1)
+            render_kpi(edu("Quota costo nel 5% di ore più care", "Quota di costo nel 5% di ore più care: misura l'esposizione agli spike estremi."), f"{conc['quota_top5']:.1f} %", g2)
+            render_kpi(edu("Ore per il 50% del costo", "In quante ore (le più care) si concentra metà della bolletta: poche ore = rischio concentrato e copribile."), f"{conc['ore_50pct']:,} h<br><small>({conc['ore_50pct']/conc['n_ore']*100:.1f} % delle ore)</small>", g3)
+            gini_txt = f"{conc['gini']:.3f}" if conc['gini'] is not None else "n.d."
+            render_kpi(edu("Indice di Gini", "0 = costo perfettamente uniforme tra le ore, 1 = tutto il costo in un'ora sola. Sopra ~0.5 la bolletta è dominata dai picchi: forte caso per l'hedging."), gini_txt, g4)
+            st.caption(f"💡 Profilo: F1 {cc_f1} MW, F2 {cc_f2} MW, F3 {cc_f3} MW — "
+                       f"{conc['mwh']:,.0f} MWh per {conc['totale']:,.0f} € nel periodo "
+                       f"({conc['n_ore']:,} ore).")
+
+            col_l1, col_l2 = st.columns(2)
+            with col_l1:
+                fig_lz = go.Figure()
+                fig_lz.add_trace(go.Scatter(
+                    x=conc["lorenz"]["Quota ore %"], y=conc["lorenz"]["Quota costo %"],
+                    mode="lines", name="Costo cumulato",
+                    line=dict(color="#f59e0b", width=2.5),
+                    fill="tozeroy", fillcolor="rgba(245, 158, 11, 0.12)",
+                    hovertemplate="Ore: %{x:.1f} %<br>Costo cumulato: %{y:.1f} %<extra></extra>"))
+                fig_lz.add_trace(go.Scatter(
+                    x=[0, 100], y=[0, 100], mode="lines", name="Uguaglianza perfetta",
+                    line=dict(color="#6b7280", width=1, dash="dash")))
+                fig_lz.update_layout(template="plotly_dark", height=380,
+                                     title="Curva di Lorenz del costo",
+                                     xaxis_title="Quota di ore (dalla più cara, %)",
+                                     yaxis_title="Quota di costo cumulata (%)",
+                                     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+                st.plotly_chart(fig_lz, use_container_width=True)
+            with col_l2:
+                fig_dc = go.Figure()
+                fig_dc.add_trace(go.Bar(
+                    x=conc["decili"]["Decile"], y=conc["decili"]["Quota costo %"],
+                    name="Quota costo %", marker_color="#f59e0b",
+                    hovertemplate="Decile: %{x}<br>Quota costo: %{y:.1f} %<br>Costo: %{customdata:,.0f} €<extra></extra>",
+                    customdata=conc["decili"]["Costo (€)"]))
+                fig_dc.update_layout(template="plotly_dark", height=380,
+                                     title="Quota di costo per decile di prezzo (D1 = 10% ore più care)",
+                                     xaxis_title="Decile", yaxis_title="Quota costo (%)")
+                st.plotly_chart(fig_dc, use_container_width=True)
+
+            st.markdown("**Dettaglio per decile di prezzo**")
+            st.caption("D1 = 10% di ore più care · D10 = 10% di ore più economiche.")
+            st.dataframe(conc["decili"], use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta concentrazione costo (CSV)",
+                conc["decili"].to_csv(index=False).encode("utf-8"),
+                file_name=f"concentrazione_costo_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica il dettaglio per decile: ore, costo e quota di costo.",
             )
 
 # Footer
