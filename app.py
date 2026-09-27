@@ -2871,6 +2871,125 @@ def calcola_ohlc_giornaliero(prezzi):
     return out
 
 
+def calcola_drawdown(prezzi, soglia_eur=20.0):
+    """Analisi drawdown (crolli dal picco) della serie oraria dei prezzi.
+
+    DRAWDOWN = calo dal massimo corrente (running max) fino al punto di
+    svolta piu' basso prima di un nuovo massimo: picco -> minimo (ore di
+    calo) -> recupero al livello del picco (ore di recupero, None se non
+    recuperato entro fine serie). E' la misura da risk manager: non quanto
+    si muove il prezzo ora-su-ora (tab 'Rampe di prezzo') ne' le sequenze
+    consecutive (tab 'Sequenze'), ma quanto perde un acquirente che ha
+    comprato al picco e quanto tempo serve per tornare in pari.
+
+    Differenza rispetto agli altri tab: 'Sequenze' conta le ore di fila in
+    calo; 'Candele OHLC' guarda l'escursione giornaliera; qui ogni episodio
+    e' ancorato a un PICCO e include il tempo di recupero — la domanda
+    operativa per chi copre il rischio prezzo: "se compro male, quanto
+    ci mette il mercato a tornare dove ho pagato?".
+
+    NaN-safe: ore NaN ignorate. Serie vuota, indice non datetime,
+    duplicato o tutti NaN -> KPI a None e DataFrame vuoto. Prezzi negativi:
+    la profondita' in euro resta valida; la profondita' % e' None quando il
+    picco <= 0 (denominatore non significativo). Giorni con 23/25 ore (DST)
+    contribuiscono con le ore osservate (logica posizionale).
+
+    Ritorna dict con 'n_ore', 'max_drawdown_eur', 'max_drawdown_pct' (None
+    se picco <= 0), 'picco_max_drawdown' (Timestamp o None), 'n_episodi',
+    'n_oltre_soglia' (episodi con profondita' >= soglia_eur),
+    'tempo_medio_recupero_ore' (None se nessun recupero concluso),
+    'drawdown_attuale_eur', 'picco_attuale_eur', 'picco_attuale_ts',
+    'df' (episodi ordinati per profondita' decrescente: Picco, Picco (€/MWh),
+    Minimo ora, Minimo (€/MWh), Recupero, Profondita' (€/MWh),
+    Profondita' (%), Ore di calo, Ore di recupero)."""
+
+
+    cols = ["Picco", "Picco (€/MWh)", "Minimo ora", "Minimo (€/MWh)",
+            "Recupero", "Profondita' (€/MWh)", "Profondita' (%)",
+            "Ore di calo", "Ore di recupero"]
+    vuoto = {"n_ore": 0, "max_drawdown_eur": None, "max_drawdown_pct": None,
+             "picco_max_drawdown": None, "n_episodi": 0, "n_oltre_soglia": 0,
+             "tempo_medio_recupero_ore": None, "drawdown_attuale_eur": None,
+             "picco_attuale_eur": None, "picco_attuale_ts": None,
+             "df": pd.DataFrame(columns=cols)}
+    try:
+        p = prezzi.astype(float).dropna()
+        p = p[~p.index.duplicated(keep="first")].sort_index()
+    except Exception:
+        return dict(vuoto)
+    if len(p) == 0:
+        return dict(vuoto)
+    try:
+        if not isinstance(p.index, pd.DatetimeIndex):
+            return dict(vuoto)
+    except Exception:
+        return dict(vuoto)
+
+    out = dict(vuoto)
+    vals = p.to_numpy(dtype=float)
+    idx = p.index
+    n = len(p)
+    runmax = np.maximum.accumulate(vals)
+    dd = runmax - vals
+    out["n_ore"] = n
+    out["max_drawdown_eur"] = round(float(dd.max()), 2)
+    out["picco_attuale_eur"] = round(float(runmax[-1]), 2)
+    out["picco_attuale_ts"] = idx[int(np.argmax(runmax == runmax[-1]) if n else 0)] if n else None
+    out["drawdown_attuale_eur"] = round(float(dd[-1]), 2)
+
+    # Picchi: posizioni con nuovo massimo stretto. Per ogni picco i (tranne
+    # l'ultimo) l'episodio va dal picco al minimo prima del picco
+    # successivo; il recupero e' la prima ora con prezzo >= picco.
+    picchi = [0] + [i for i in range(1, n) if vals[i] > runmax[i - 1]]
+    episodi = []
+    for k, pi in enumerate(picchi):
+        fine = picchi[k + 1] if k + 1 < len(picchi) else n
+        if fine - pi < 2:
+            continue
+        segmento = vals[pi:fine]
+        rel_min = int(np.argmin(segmento))
+        if rel_min == 0:
+            continue  # mai sceso dopo il picco
+        ti = pi + rel_min
+        profondita = float(vals[pi] - vals[ti])
+        if profondita <= 0:
+            continue
+        # recupero: prima ora dopo il minimo con prezzo >= picco
+        rec_i = None
+        for j in range(ti + 1, fine):
+            if vals[j] >= vals[pi]:
+                rec_i = j
+                break
+        prof_pct = (round(profondita / vals[pi] * 100, 1)
+                    if vals[pi] > 0 else None)
+        episodi.append({
+            "Picco": idx[pi],
+            "Picco (€/MWh)": round(float(vals[pi]), 2),
+            "Minimo ora": idx[ti],
+            "Minimo (€/MWh)": round(float(vals[ti]), 2),
+            "Recupero": idx[rec_i] if rec_i is not None else pd.NaT,
+            "Profondita' (€/MWh)": round(profondita, 2),
+            "Profondita' (%)": prof_pct,
+            "Ore di calo": int(ti - pi),
+            "Ore di recupero": int(rec_i - ti) if rec_i is not None else np.nan,
+        })
+    episodi.sort(key=lambda e: e["Profondita' (€/MWh)"], reverse=True)
+    df_ep = pd.DataFrame(episodi, columns=cols)
+    out["df"] = df_ep
+    out["n_episodi"] = len(episodi)
+    out["n_oltre_soglia"] = int((df_ep["Profondita' (€/MWh)"] >= float(soglia_eur)).sum()) \
+        if len(df_ep) else 0
+    if out["max_drawdown_eur"] is not None and len(episodi):
+        picco_dd = episodi[0]["Picco (€/MWh)"]
+        out["picco_max_drawdown"] = episodi[0]["Picco"]
+        out["max_drawdown_pct"] = (round(out["max_drawdown_eur"] / picco_dd * 100, 1)
+                                   if picco_dd > 0 else None)
+    rec = df_ep["Ore di recupero"].dropna() if len(df_ep) else pd.Series(dtype=float)
+    out["tempo_medio_recupero_ore"] = (round(float(rec.mean()), 1)
+                                       if len(rec) else None)
+    return out
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def generate_singularity_data():
     np.random.seed(42)
@@ -3563,7 +3682,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -5889,6 +6008,82 @@ elif workspace == _('ws8'):
                 file_name=f"candele_ohlc_{d0}_{d1}.csv",
                 mime="text/csv",
                 help="Scarica le candele giornaliere: giorno, ore osservate, apertura, massimo, minimo, chiusura, escursione, corpo e direzione.",
+            )
+
+    with tab41:
+        titolo_dd = edu("Crolli & recuperi (drawdown)", "Il DRAWDOWN misura quanto perde il mercato dal suo PICCO fino al punto più basso successivo: è il rischio di chi compra al momento sbagliato. Ogni episodio parte da un massimo storico (il 'picco'), scende fino al 'minimo' (ORE DI CALO) e poi risale fino a tornare al livello del picco (ORE DI RECUPERO). Se il recupero non arriva entro fine periodo, l'episodio resta 'aperto' — stai ancora sotto il prezzo pagato. Il TEMPO MEDIO DI RECUPERO dice quanto ci mette tipicamente il mercato a tornare in pari: è la metrica chiave per dimensionare la copertura e decidere se comprare subito o aspettare che il prezzo torni giù. Nota: 'Sequenze' conta le ore di fila in calo, 'Candele OHLC' l'escursione giornaliera; qui ogni crollo è ancorato al suo picco e include il recupero.")
+        st.markdown(f"**{titolo_dd}**: crolli dal picco del prezzo spot (drawdown) con profondità, durata del calo e tempo di recupero.", unsafe_allow_html=True)
+
+        dd_soglia = st.slider("Soglia episodio significativo (€/MWh)", min_value=0.0, max_value=100.0, value=20.0, step=5.0, key="dd41_soglia",
+                              help="Solo gli episodi con profondità (picco meno minimo) pari o superiore a questa soglia vengono contati nel KPI 'Episodi significativi'.")
+
+        dd = calcola_drawdown(prezzi, soglia_eur=dd_soglia)
+        if dd["n_ore"] == 0:
+            st.warning("Dati insufficienti per l'analisi dei drawdown.")
+        else:
+            c1, c2, c3, c4 = st.columns(4)
+            render_kpi(edu("Max drawdown", "Il crollo peggiore del periodo: massima perdita dal picco al minimo successivo. È il 'worst case' di chi ha comprato nel momento peggiore."), f"{dd['max_drawdown_eur']:,.2f} €/MWh", c1)
+            mddp_txt = f"{dd['max_drawdown_pct']:.1f} %" if dd["max_drawdown_pct"] is not None else "n.d."
+            render_kpi(edu("Max drawdown %", "Lo stesso crollo in percentuale sul picco di partenza: misura la severità relativa. 'n.d.' quando il picco è ≤ 0 (prezzi negativi)."), f"{mddp_txt}<br><small>sul picco di partenza</small>", c2)
+            nsg_txt = f"{dd['n_oltre_soglia']} di {dd['n_episodi']}"
+            render_kpi(edu("Episodi significativi", f"Quanti episodi di crollo hanno profondità ≥ {dd_soglia:.0f} €/MWh: misura quanto spesso il mercato fa scivoloni seri."), f"{nsg_txt}<br><small>≥ {dd_soglia:.0f} €/MWh</small>", c3)
+            tmr_txt = f"{dd['tempo_medio_recupero_ore']:.0f} ore" if dd["tempo_medio_recupero_ore"] is not None else "n.d."
+            render_kpi(edu("Tempo medio di recupero", "Ore medie che il mercato impiega a tornare al livello del picco dopo un crollo: la domanda 'se compro male, quanto ci mette a tornare in pari?'. Conta solo gli episodi chiusi."), f"{tmr_txt}<br><small>episodi chiusi</small>", c4)
+            if dd["drawdown_attuale_eur"] > 0:
+                pa_ts = pd.Timestamp(dd["picco_attuale_ts"]).strftime("%d/%m %H:00") if dd["picco_attuale_ts"] is not None else "—"
+                st.caption(f"⚠️ In questo momento il mercato è sotto il picco di {dd['picco_attuale_eur']:,.2f} €/MWh ({pa_ts}): drawdown attuale di {dd['drawdown_attuale_eur']:,.2f} €/MWh.")
+            else:
+                st.caption("✅ In questo momento il prezzo è al suo picco corrente: nessun drawdown in corso.")
+
+            try:
+                p_dd = prezzi.astype(float).dropna()
+                p_dd = p_dd[~p_dd.index.duplicated(keep="first")].sort_index()
+                runmax_dd = np.maximum.accumulate(p_dd.to_numpy(dtype=float))
+                fig_dd1 = go.Figure()
+                fig_dd1.add_trace(go.Scatter(x=p_dd.index, y=runmax_dd, mode="lines",
+                                            name="Picco corrente", line=dict(color="#22c55e", width=1.5)))
+                fig_dd1.add_trace(go.Scatter(x=p_dd.index, y=p_dd.to_numpy(dtype=float), mode="lines",
+                                            name="Prezzo", line=dict(color="#3b82f6", width=1),
+                                            fill="tonexty", fillcolor="rgba(239,68,68,0.18)"))
+                fig_dd1.update_layout(template="plotly_dark", height=380,
+                                      title="Prezzo e picco corrente (l'area rossa è il drawdown)",
+                                      xaxis_title="Data", yaxis_title="€/MWh",
+                                      legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+                st.plotly_chart(fig_dd1, use_container_width=True)
+                st.caption("L'area rossa tra prezzo e picco corrente è il drawdown: quanto sei sotto il massimo. Più è profonda e lunga, più è costato comprare vicino al picco.")
+            except Exception:
+                st.info("Grafico drawdown non disponibile per questi dati.")
+
+            df_dd = dd["df"]
+            if len(df_dd):
+                top_n_dd = min(15, len(df_dd))
+                df_top = df_dd.head(top_n_dd).copy()
+                colori_dd = ["#ef4444" if not pd.isna(x) else "#f59e0b" for x in df_top["Ore di recupero"]]
+                fig_dd2 = go.Figure()
+                fig_dd2.add_trace(go.Bar(
+                    x=[pd.Timestamp(t).strftime("%d/%m %H:00") for t in df_top["Picco"]],
+                    y=df_top["Profondita' (€/MWh)"],
+                    name="Profondità",
+                    marker_color=colori_dd,
+                    hovertemplate="Picco: %{x}<br>Profondità: %{y:,.2f} €/MWh<extra></extra>"))
+                fig_dd2.update_layout(template="plotly_dark", height=330,
+                                      title=f"Top {top_n_dd} episodi per profondità di crollo",
+                                      xaxis_title="Picco di partenza", yaxis_title="€/MWh",
+                                      legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+                st.plotly_chart(fig_dd2, use_container_width=True)
+                st.caption("Rosso = episodio chiuso (recuperato), arancione = ancora aperto (il mercato non è ancora tornato al picco).")
+            else:
+                st.info("Nessun episodio di crollo nel periodo: il prezzo non è mai sceso dopo un picco.")
+
+            st.markdown("**Episodi di crollo (ordinati per profondità)**")
+            st.dataframe(df_dd, use_container_width=True, hide_index=True)
+
+            st.download_button(
+                "⬇️ Esporta episodi drawdown (CSV)",
+                df_dd.to_csv(index=False).encode("utf-8"),
+                file_name=f"drawdown_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica gli episodi di crollo: picco, minimo, recupero, profondità in €/MWh e %, ore di calo e di recupero.",
             )
 
 # Footer
