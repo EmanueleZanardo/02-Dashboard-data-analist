@@ -1251,6 +1251,79 @@ def calcola_finestre_ottimali(prezzi, mw_f1, mw_f2, mw_f3, finestra_ore):
     out["mensile"] = pd.DataFrame(righe_m, columns=cols_m).reset_index(drop=True)
     return out
 
+
+def calcola_stagionalita(prezzi):
+    """Profilo stagionale mensile (seasonality) del prezzo spot orario.
+
+    Raggruppa le ore per mese solare (gennaio..dicembre, tutti gli anni
+    insieme) e calcola prezzo medio, mediano, minimo, massimo e deviazione
+    standard. Il FATTORE STAGIONALE = media_mese / media_annuale: sopra 1 il
+    mese e' strutturalmente piu' caro della media (tipicamente i mesi
+    invernali, domanda alta e rinnovabili basse), sotto 1 piu' economico
+    (tipicamente primavera/estate). L'ampiezza stagionale (fattore max -
+    fattore min, in punti) misura quanto e' marcata la stagionalita'.
+
+    Utile per: allocazione mensile del budget energia, negoziazione di
+    contratti a prezzo fisso (il fixed sconta la stagionalita' attesa),
+    timing degli acquisti su forward mensili e validazione delle curve
+    forward (il forward deve riflettere questo profilo).
+
+    NaN-safe: ore con prezzo NaN ignorate. Mesi senza ore valide sono
+    omessi dalla tabella. Con media annuale <= 0 (prezzi negativi
+    dominanti) il fattore stagionale e' None. Con meno di 2 mesi validi,
+    mese_piu_caro/economico e ampiezza tornano None.
+
+    Ritorna dict con 'mensile' (DataFrame: Mese, Ore, 'Media €/MWh',
+    'Mediana €/MWh', 'Min €/MWh', 'Max €/MWh', 'Dev.std €/MWh',
+    'Fattore stagionale'), 'media_annuale' (float, None se serie vuota),
+    'mese_piu_caro' e 'mese_piu_economico' (dict {'mese','fattore'} o None),
+    'ampiezza_pp' (float o None)."""
+    MESI = ["Gen", "Feb", "Mar", "Apr", "Mag", "Giu",
+            "Lug", "Ago", "Set", "Ott", "Nov", "Dic"]
+    cols = ["Mese", "Ore", "Media €/MWh", "Mediana €/MWh", "Min €/MWh",
+            "Max €/MWh", "Dev.std €/MWh", "Fattore stagionale"]
+    vuoto = {"mensile": pd.DataFrame(columns=cols), "media_annuale": None,
+             "mese_piu_caro": None, "mese_piu_economico": None,
+             "ampiezza_pp": None}
+    p = prezzi.astype(float).dropna()
+    if p.empty:
+        return vuoto
+    idxn = p.index.tz_localize(None) if p.index.tz is not None else p.index
+    media_ann = float(p.mean())
+    righe = []
+    for m in range(1, 13):
+        v = p[idxn.month == m]
+        if v.empty:
+            continue
+        media_m = float(v.mean())
+        fattore = (round(media_m / media_ann, 3)
+                   if media_ann > 0 else None)
+        righe.append({
+            "Mese": MESI[m - 1], "Ore": int(len(v)),
+            "Media €/MWh": round(media_m, 2),
+            "Mediana €/MWh": round(float(v.median()), 2),
+            "Min €/MWh": round(float(v.min()), 2),
+            "Max €/MWh": round(float(v.max()), 2),
+            "Dev.std €/MWh": round(float(v.std()), 2),
+            "Fattore stagionale": fattore})
+    out = dict(vuoto)
+    if not righe:
+        return out
+    out["mensile"] = pd.DataFrame(righe, columns=cols).reset_index(drop=True)
+    out["media_annuale"] = round(media_ann, 2)
+    validi = [r for r in righe if r["Fattore stagionale"] is not None]
+    if len(validi) >= 2:
+        caro = max(validi, key=lambda r: r["Fattore stagionale"])
+        econ = min(validi, key=lambda r: r["Fattore stagionale"])
+        out["mese_piu_caro"] = {"mese": caro["Mese"],
+                                "fattore": caro["Fattore stagionale"]}
+        out["mese_piu_economico"] = {"mese": econ["Mese"],
+                                     "fattore": econ["Fattore stagionale"]}
+        out["ampiezza_pp"] = round(
+            (caro["Fattore stagionale"] - econ["Fattore stagionale"]) * 100, 1)
+    return out
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def generate_singularity_data():
     np.random.seed(42)
@@ -1800,7 +1873,7 @@ elif workspace == _('ws7'):
 # ==========================================
 elif workspace == _('ws8'):
     st.markdown(f"<h1>{_('ws8')}</h1>", unsafe_allow_html=True)
-    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread, shaping curva, spread weekend, price capture, volatilità realizzata, confronto anno-su-anno, analisi prezzi negativi, spread intra-day, picchi di prezzo, profilo settimanale tipo, curva di durata, concentrazione del costo di fornitura, simulazione demand shifting, finestre di acquisto ottimali ed export CSV.")
+    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread, shaping curva, spread weekend, price capture, volatilità realizzata, confronto anno-su-anno, analisi prezzi negativi, spread intra-day, picchi di prezzo, profilo settimanale tipo, curva di durata, concentrazione del costo di fornitura, simulazione demand shifting, finestre di acquisto ottimali, stagionalità mensile ed export CSV.")
 
     # ---------- Controlli: sorgente, periodo, impianti ----------
     st.subheader("⚙️ Sorgente dati & Timeframe")
@@ -1943,7 +2016,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -3168,6 +3241,63 @@ elif workspace == _('ws8'):
                 file_name=f"finestre_acquisto_{d0}_{d1}.csv",
                 mime="text/csv",
                 help="Scarica il dettaglio giornaliero: finestra ottimale, €/MWh, sconto vs media giorno.",
+            )
+
+    with tab24:
+        titolo_stag = edu("Stagionalità mensile", "La STAGIONALITÀ è la componente prevedibile del prezzo legata al calendario: in inverno la domanda di riscaldamento spinge i prezzi su, in primavera/estate rinnovabili abbondanti e domanda bassa li spingono giù. Il fattore stagionale (media del mese / media annuale) misura questo effetto: sopra 1 il mese è strutturalmente più caro, sotto 1 più economico. A differenza del tab YoY (che confronta ANNI diversi) e del profilo settimanale (che confronta GIORNI della settimana), qui si misura il ciclo ANNUALE: serve per allocare il budget mese per mese, negoziare contratti a prezzo fisso e validare le curve forward mensili.")
+        st.markdown(f"**{titolo_stag}**: prezzo medio per mese solare e fattore stagionale (media mese / media annuale).", unsafe_allow_html=True)
+
+        stg = calcola_stagionalita(prezzi)
+        if stg["mensile"].empty:
+            st.info("Nessun dato valido nel periodo per calcolare la stagionalità.")
+        else:
+            s1, s2, s3, s4 = st.columns(4)
+            caro = f"{stg['mese_piu_caro']['mese']}<br><small>×{stg['mese_piu_caro']['fattore']:.3f}</small>" if stg["mese_piu_caro"] else "n.d."
+            render_kpi(edu("Mese più caro", "Il mese con il fattore stagionale più alto: strutturalmente il più caro dell'anno. Pianifica lì il picco di budget e la copertura forward."), caro, s1)
+            econ = f"{stg['mese_piu_economico']['mese']}<br><small>×{stg['mese_piu_economico']['fattore']:.3f}</small>" if stg["mese_piu_economico"] else "n.d."
+            render_kpi(edu("Mese più economico", "Il mese con il fattore stagionale più basso: strutturalmente il più economico. Finestra naturale per acquisti spot e consumi flessibili."), econ, s2)
+            amp = f"{stg['ampiezza_pp']:.1f} pp" if stg["ampiezza_pp"] is not None else "n.d."
+            render_kpi(edu("Ampiezza stagionale", "Differenza in punti tra fattore del mese più caro e più economico: quanto è marcata la stagionalità. Alta ampiezza = budget mensili molto diversi e forward con forte slope stagionale."), amp, s3)
+            render_kpi(edu("Media annuale", "Prezzo medio su tutte le ore del periodo: il denominatore del fattore stagionale."), f"{stg['media_annuale']:,.2f} €/MWh", s4)
+            st.caption("💡 Il fattore stagionale è 'n.d.' se la media annuale ≤ 0 (prezzi negativi dominanti): in quel caso la stagionalità perde senso come rapporto.")
+
+            fig_stag = go.Figure()
+            fig_stag.add_trace(go.Bar(
+                x=stg["mensile"]["Mese"], y=stg["mensile"]["Media €/MWh"],
+                name="Media €/MWh", marker_color="#3b82f6",
+                hovertemplate="Mese: %{x}<br>Media: %{y:,.2f} €/MWh<br>Ore: %{customdata}<extra></extra>",
+                customdata=stg["mensile"]["Ore"]))
+            fig_stag.add_hline(y=stg["media_annuale"], line_dash="dash", line_color="#94a3b8",
+                               annotation_text=f"Media annuale: {stg['media_annuale']:,.2f} €/MWh",
+                               annotation_position="top left")
+            fig_stag.update_layout(template="plotly_dark", height=360,
+                                   title="Prezzo medio mensile (€/MWh)",
+                                   xaxis_title="Mese", yaxis_title="Prezzo (€/MWh)")
+            st.plotly_chart(fig_stag, use_container_width=True)
+
+            fig_fatt = go.Figure()
+            fig_fatt.add_trace(go.Scatter(
+                x=stg["mensile"]["Mese"], y=stg["mensile"]["Fattore stagionale"],
+                mode="lines+markers", name="Fattore stagionale",
+                line=dict(color="#f59e0b", width=2.5),
+                hovertemplate="Mese: %{x}<br>Fattore: ×%{y:.3f}<extra></extra>"))
+            fig_fatt.add_hline(y=1.0, line_dash="dash", line_color="#94a3b8",
+                               annotation_text="Fattore = 1.0 (media annuale)",
+                               annotation_position="top left")
+            fig_fatt.update_layout(template="plotly_dark", height=360,
+                                   title="Fattore stagionale (media mese / media annuale)",
+                                   xaxis_title="Mese", yaxis_title="Fattore",
+                                   yaxis=dict(range=[0, max(1.3, float(stg["mensile"]["Fattore stagionale"].max()) * 1.1)]))
+            st.plotly_chart(fig_fatt, use_container_width=True)
+
+            st.markdown("**Dettaglio mensile**")
+            st.dataframe(stg["mensile"], use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta stagionalità (CSV)",
+                stg["mensile"].to_csv(index=False).encode("utf-8"),
+                file_name=f"stagionalita_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica il profilo stagionale mensile: media, mediana, min, max, deviazione standard e fattore stagionale.",
             )
 
 # Footer
