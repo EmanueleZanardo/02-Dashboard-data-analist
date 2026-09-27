@@ -2309,6 +2309,109 @@ def calcola_spread_calendario(prezzi):
     return out
 
 
+def calcola_decomposizione_prezzo(prezzi):
+    """Decomposizione deterministica del prezzo orario in trend + stagionalita'
+    giornaliera + stagionalita' settimanale + residuo (stile STL semplificato).
+
+    A cosa serve: separare quanto del prezzo e' struttura (trend di fondo,
+    pattern dell'ora del giorno, pattern del giorno della settimana) da quanto
+    e' rumore/shock. Utile per capire se un picco e' "normale" per quell'ora
+    o un'anomalia da investigare, e per stimare quanta parte del prezzo e'
+    strutturalmente prevedibile.
+
+    Metodo (tutto deterministico a parita' di input):
+    - trend: mediana mobile centrata su 168 ore (1 settimana); se la serie ha
+      meno di 24 ore, trend piatto = media complessiva;
+    - pattern giornaliero: media del detrended per ora del giorno (0-23),
+      centrata a media zero (ore senza dati -> 0);
+    - pattern settimanale: media del residuo-dopo-giornaliero per giorno della
+      settimana (0=lun .. 6=dom), centrata (giorni senza dati -> 0);
+    - residuo = prezzo - trend - pattern_giornaliero - pattern_settimanale.
+    Gli orari con prezzo NaN e i timestamp duplicati (primo valore) vengono
+    scartati prima del calcolo.
+
+    prezzi: Series oraria in €/MWh con indice datetime.
+    Ritorna dict con 'n_ore', 'quota_spiegata' (1 - var(residuo)/var(prezzo),
+    None se la varianza del prezzo e' nulla), 'std_residuo', 'shock_max'
+    (residuo con |.| massimo), 'shock_quando' (timestamp o None), 'trend' e
+    'residuo' (Series orarie), 'pattern_giornaliero' (Series indicizzata
+    0-23), 'pattern_settimanale' (Series indicizzata 0-6, lun-dom),
+    'df_export' (DataFrame orario con Prezzo, Trend, Stag. giornaliera,
+    Stag. settimanale, Residuo)."""
+    cols = ["Data/ora", "Prezzo (€/MWh)", "Trend (€/MWh)",
+            "Stag. giornaliera (€/MWh)", "Stag. settimanale (€/MWh)",
+            "Residuo (€/MWh)"]
+    vuoto = {"n_ore": 0, "quota_spiegata": None, "std_residuo": None,
+             "shock_max": None, "shock_quando": None,
+             "trend": pd.Series(dtype=float), "residuo": pd.Series(dtype=float),
+             "pattern_giornaliero": pd.Series(dtype=float),
+             "pattern_settimanale": pd.Series(dtype=float),
+             "df_export": pd.DataFrame(columns=cols)}
+    try:
+        p = prezzi.astype(float).dropna()
+        p = p[~p.index.duplicated(keep="first")].sort_index()
+    except Exception:
+        return dict(vuoto)
+    if len(p) == 0:
+        return dict(vuoto)
+    try:
+        if len(p) >= 24:
+            w = min(168, len(p))
+            trend = p.rolling(window=w, center=True,
+                              min_periods=min(24, w)).median()
+            trend = trend.ffill().bfill()
+            if trend.isna().all():
+                trend = pd.Series(float(p.mean()), index=p.index)
+        else:
+            trend = pd.Series(float(p.mean()), index=p.index)
+        detr = (p - trend).dropna()
+        if len(detr) == 0:
+            return dict(vuoto)
+        ore = detr.index.hour
+        g_giorno = detr.groupby(ore).mean().reindex(range(24), fill_value=0.0)
+        g_giorno = g_giorno - g_giorno.mean()
+        detr2 = detr - ore.map(g_giorno).to_numpy()
+        dow = detr2.index.dayofweek
+        g_sett = detr2.groupby(dow).mean().reindex(range(7), fill_value=0.0)
+        g_sett = g_sett - g_sett.mean()
+        comp_g = p.index.hour.map(g_giorno).to_numpy()
+        comp_s = p.index.dayofweek.map(g_sett).to_numpy()
+        residuo = p - trend - comp_g - comp_s
+    except Exception:
+        return dict(vuoto)
+    out = dict(vuoto)
+    out["n_ore"] = len(p)
+    out["trend"] = trend
+    out["residuo"] = residuo
+    out["pattern_giornaliero"] = g_giorno
+    out["pattern_settimanale"] = g_sett
+    try:
+        var_tot = float(p.var())
+        var_res = float(residuo.var())
+        if var_tot > 0:
+            out["quota_spiegata"] = round(max(0.0, 1.0 - var_res / var_tot), 4)
+        out["std_residuo"] = round(float(residuo.std()), 2)
+        if len(residuo):
+            iq = residuo.abs().idxmax()
+            out["shock_max"] = round(float(residuo.loc[iq]), 2)
+            out["shock_quando"] = iq
+    except Exception:
+        pass
+    try:
+        df_e = pd.DataFrame({
+            "Data/ora": p.index,
+            "Prezzo (€/MWh)": p.values.round(2),
+            "Trend (€/MWh)": trend.values.round(2),
+            "Stag. giornaliera (€/MWh)": comp_g.round(2),
+            "Stag. settimanale (€/MWh)": comp_s.round(2),
+            "Residuo (€/MWh)": residuo.values.round(2),
+        }, columns=cols)
+        out["df_export"] = df_e
+    except Exception:
+        pass
+    return out
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def generate_singularity_data():
     np.random.seed(42)
@@ -2858,7 +2961,7 @@ elif workspace == _('ws7'):
 # ==========================================
 elif workspace == _('ws8'):
     st.markdown(f"<h1>{_('ws8')}</h1>", unsafe_allow_html=True)
-    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread, shaping curva, spread weekend, price capture, volatilità realizzata, confronto anno-su-anno, analisi prezzi negativi, spread intra-day, picchi di prezzo, profilo settimanale tipo, curva di durata, concentrazione del costo di fornitura, simulazione demand shifting, finestre di acquisto ottimali, stagionalità mensile, monitoraggio del budget energetico annuale, analisi di sensitività del costo al profilo di prelievo, Value-at-Risk Monte Carlo del costo di fornitura, classifica dei giorni di calendario più costosi per il profilo di prelievo, fasce tariffarie orarie ottimali derivate dal profilo di prezzo osservato, autocorrelazione del prezzo spot (persistenza e stagionalità), stress test deterministico del costo di fornitura sotto shock di prezzo, previsione naive-stagionale del prezzo del giorno successivo con backtest di accuratezza ed export CSV.")
+    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread, shaping curva, spread weekend, price capture, volatilità realizzata, confronto anno-su-anno, analisi prezzi negativi, spread intra-day, picchi di prezzo, profilo settimanale tipo, curva di durata, concentrazione del costo di fornitura, simulazione demand shifting, finestre di acquisto ottimali, stagionalità mensile, monitoraggio del budget energetico annuale, analisi di sensitività del costo al profilo di prelievo, Value-at-Risk Monte Carlo del costo di fornitura, classifica dei giorni di calendario più costosi per il profilo di prelievo, fasce tariffarie orarie ottimali derivate dal profilo di prezzo osservato, autocorrelazione del prezzo spot (persistenza e stagionalità), stress test deterministico del costo di fornitura sotto shock di prezzo, previsione naive-stagionale del prezzo del giorno successivo con backtest di accuratezza, decomposizione stagionale del prezzo (trend + pattern giornaliero/settimanale + residuo) con export CSV.")
 
     # ---------- Controlli: sorgente, periodo, impianti ----------
     st.subheader("⚙️ Sorgente dati & Timeframe")
@@ -3001,7 +3104,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -4933,6 +5036,93 @@ elif workspace == _('ws8'):
                     mime="text/csv",
                     help="Scarica coppia di mesi, prezzi base e spread in €/MWh per ogni transizione mese-su-mese.",
                 )
+
+    with tab36:
+        titolo_dc = edu("Decomposizione prezzo", "Separa il prezzo orario nelle sue componenti: trend di fondo (mediana mobile settimanale), pattern giornaliero (quali ore costano di più/meno), pattern settimanale (feriali vs weekend) e residuo (shock e rumore non spiegati). Serve a capire se un picco è 'normale' per quell'ora o un'anomalia da investigare, e quanta parte del prezzo è strutturalmente prevedibile.")
+        st.markdown(f"**{titolo_dc}**: trend + stagionalità giornaliera/settimanale + residuo nel periodo selezionato.", unsafe_allow_html=True)
+
+        dc = calcola_decomposizione_prezzo(prezzi)
+        if dc["n_ore"] == 0:
+            st.warning("Dati insufficienti per la decomposizione.")
+        else:
+            c1, c2, c3, c4 = st.columns(4)
+            render_kpi(edu("Ore analizzate", "Numero di ore con prezzo valido usate nella decomposizione."), f"{dc['n_ore']}", c1)
+            quota_dc = f"{dc['quota_spiegata'] * 100:.1f} %" if dc["quota_spiegata"] is not None else "—"
+            render_kpi(edu("Quota varianza spiegata", "Frazione della variabilità del prezzo spiegata da trend + pattern giornaliero e settimanale: più è alta, più il prezzo è prevedibile dalla struttura."), quota_dc, c2)
+            render_kpi(edu("Std residuo", "Ampiezza tipica degli shock non spiegati dalla struttura, in €/MWh."), f"{dc['std_residuo']:,.2f} €/MWh" if dc["std_residuo"] is not None else "—", c3)
+            if dc["shock_quando"] is not None:
+                try:
+                    sq = pd.Timestamp(dc["shock_quando"]).strftime("%d/%m %H:00")
+                except Exception:
+                    sq = str(dc["shock_quando"])
+                shock_txt = f"{dc['shock_max']:+,.2f} €/MWh · {sq}"
+            else:
+                shock_txt = "—"
+            render_kpi(edu("Shock massimo", "Il residuo più grande in valore assoluto: l'ora più anomala del periodo rispetto alla struttura attesa."), shock_txt, c4)
+
+            fig_dc1 = go.Figure()
+            fig_dc1.add_trace(go.Scatter(x=prezzi.index, y=prezzi.values, mode="lines",
+                                         name="Prezzo spot (€/MWh)", line=dict(color="#3b82f6", width=1)))
+            fig_dc1.add_trace(go.Scatter(x=dc["trend"].index, y=dc["trend"].values, mode="lines",
+                                         name="Trend di fondo", line=dict(color="#f59e0b", width=2.5)))
+            fig_dc1.update_layout(template="plotly_dark", height=360, title="Prezzo orario e trend di fondo",
+                                  xaxis_title="Data e Ora", yaxis_title="€/MWh", hovermode="x unified",
+                                  legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+            st.plotly_chart(fig_dc1, use_container_width=True)
+
+            pg_dc, ps_dc = st.columns(2)
+            with pg_dc:
+                fig_dc2 = go.Figure()
+                fig_dc2.add_trace(go.Scatter(x=list(dc["pattern_giornaliero"].index),
+                                             y=dc["pattern_giornaliero"].values, mode="lines+markers",
+                                             name="Pattern giornaliero",
+                                             line=dict(color="#22c55e", width=2), marker=dict(size=4)))
+                fig_dc2.add_hline(y=0, line_dash="dash", line_color="#6b7280")
+                fig_dc2.update_layout(template="plotly_dark", height=320, title="Pattern giornaliero",
+                                      xaxis_title="Ora del giorno", yaxis_title="€/MWh vs media")
+                st.plotly_chart(fig_dc2, use_container_width=True)
+            with ps_dc:
+                giorni_lbl = ["Lun", "Mar", "Mer", "Gio", "Ven", "Sab", "Dom"]
+                vals_ps = dc["pattern_settimanale"].values
+                colori_ps = ["#ef4444" if v > 0 else "#22c55e" for v in vals_ps]
+                fig_dc3 = go.Figure()
+                fig_dc3.add_trace(go.Bar(x=giorni_lbl, y=vals_ps, marker_color=colori_ps,
+                                         name="Pattern settimanale",
+                                         hovertemplate="%{x}: %{y:+.2f} €/MWh<extra></extra>"))
+                fig_dc3.update_layout(template="plotly_dark", height=320, title="Pattern settimanale",
+                                      xaxis_title="Giorno", yaxis_title="€/MWh vs media")
+                st.plotly_chart(fig_dc3, use_container_width=True)
+            st.caption("Pattern centrati a media zero: valori positivi = ore/giorni strutturalmente più cari della media.")
+
+            res_dc = dc["residuo"]
+            sigma_dc = float(res_dc.std()) if len(res_dc) else 0.0
+            fig_dc4 = go.Figure()
+            fig_dc4.add_trace(go.Scatter(x=res_dc.index, y=res_dc.values, mode="lines",
+                                         name="Residuo (€/MWh)", line=dict(color="#a78bfa", width=1)))
+            if sigma_dc > 0:
+                anom_dc = res_dc[res_dc.abs() > 2 * sigma_dc]
+                if len(anom_dc):
+                    fig_dc4.add_trace(go.Scatter(x=anom_dc.index, y=anom_dc.values, mode="markers",
+                                                 name=f"Anomalie > 2σ ({len(anom_dc)})",
+                                                 marker=dict(color="#ef4444", size=6)))
+                fig_dc4.add_hline(y=2 * sigma_dc, line_dash="dash", line_color="#ef4444",
+                                  annotation_text="+2σ", annotation_position="top left")
+                fig_dc4.add_hline(y=-2 * sigma_dc, line_dash="dash", line_color="#ef4444",
+                                  annotation_text="−2σ", annotation_position="bottom left")
+            fig_dc4.add_hline(y=0, line_color="#6b7280")
+            fig_dc4.update_layout(template="plotly_dark", height=340, title="Residuo: shock e rumore non spiegati",
+                                  xaxis_title="Data e Ora", yaxis_title="Residuo (€/MWh)", hovermode="x unified",
+                                  legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+            st.plotly_chart(fig_dc4, use_container_width=True)
+            st.caption("Punti rossi = ore anomale (|residuo| oltre 2 deviazioni standard): candidati da investigare.")
+
+            st.download_button(
+                "⬇️ Esporta decomposizione (CSV)",
+                dc["df_export"].to_csv(index=False).encode("utf-8"),
+                file_name=f"decomposizione_prezzo_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica la serie oraria con prezzo, trend, componenti stagionali e residuo.",
+            )
 
 # Footer
 st.markdown("---")
