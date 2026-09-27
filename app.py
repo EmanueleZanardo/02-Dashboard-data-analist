@@ -1840,6 +1840,107 @@ def calcola_autocorrelazione(prezzi, max_lag=168):
             "lag_decay": decay, "df": df}
 
 
+def calcola_stress_prezzo(prezzi, mw_f1, mw_f2, mw_f3, scenari):
+    """Stress test deterministico del costo di fornitura sotto shock di prezzo.
+
+    Per ogni scenario applica uno shock alla serie oraria dei prezzi e ricalcola
+    il costo della fornitura (profilo F1/F2/F3, via calcola_costo_fornitura):
+    e' il what-if 'cosa succede al mio costo se i prezzi schizzano?'.
+
+    prezzi: Series oraria in €/MWh con indice datetime (i NaN vengono scartati).
+    mw_f1/2/3: potenza prelevata (MW) per fascia. scenari: lista di dict con
+      'nome' (str), 'tipo' ('add' = +€/MWh, 'pct' = +%), 'valore' (float),
+      'solo_fascia' (None = tutte le ore, oppure 'F1'/'F2'/'F3' = shock solo
+      sulle ore di quella fascia, es. picco F1).
+    Scenari malformati (tipo/valore/fascia non validi) vengono scartati.
+    Nota: con prezzi negativi uno shock 'pct' positivo rende il prezzo MENO
+    negativo (scala il valore, non lo sposta): per shock simmetrici sui
+    livelli usare 'add'.
+
+    Ritorna dict con 'base' (dict di calcola_costo_fornitura o None),
+    'df' (DataFrame: Scenario, Shock, Costo (€), Delta (€), Delta (%),
+    Prezzo medio (€/MWh)), 'worst_nome' (scenario col delta % piu' alto),
+    'worst_delta_pct', 'worst_delta_eur' (None se df vuoto) e 'n_scenari'.
+    Serie vuota o senza scenari validi -> base a None e df vuoto."""
+    cols = ["Scenario", "Shock", "Costo (€)", "Delta (€)", "Delta (%)",
+            "Prezzo medio (€/MWh)"]
+    vuoto = {"base": None, "df": pd.DataFrame(columns=cols),
+             "worst_nome": None, "worst_delta_pct": None,
+             "worst_delta_eur": None, "n_scenari": 0}
+    try:
+        p = prezzi.astype(float).dropna()
+    except Exception:
+        return dict(vuoto)
+    if len(p) == 0:
+        return dict(vuoto)
+    try:
+        base = calcola_costo_fornitura(p, float(mw_f1), float(mw_f2), float(mw_f3))
+    except Exception:
+        return dict(vuoto)
+    try:
+        fasce = pd.Index(p.index.map(fascia_oraria)).to_numpy()
+    except Exception:
+        return dict(vuoto)
+    base_tot = base["totale"]
+    righe = []
+    for sc in (scenari or []):
+        try:
+            nome = str(sc.get("nome", "")).strip() or "Scenario"
+            tipo = str(sc.get("tipo", "")).strip().lower()
+            valore = float(sc.get("valore"))
+            solo = sc.get("solo_fascia")
+            if tipo not in ("add", "pct"):
+                continue
+            if not np.isfinite(valore):
+                continue
+            if solo is not None and str(solo) not in ("F1", "F2", "F3"):
+                continue
+        except (AttributeError, TypeError, ValueError):
+            continue
+        vals = p.to_numpy(dtype=float).copy()
+        if solo is None:
+            maschera = np.ones(len(vals), dtype=bool)
+        else:
+            maschera = (fasce == str(solo))
+        if tipo == "add":
+            vals[maschera] = vals[maschera] + valore
+            shock = f"{valore:+g} €/MWh" + (f" su {solo}" if solo else "")
+        else:
+            vals[maschera] = vals[maschera] * (1.0 + valore / 100.0)
+            shock = f"{valore:+g} %" + (f" su {solo}" if solo else "")
+        p_sh = pd.Series(vals, index=p.index).dropna()
+        if len(p_sh) == 0:
+            continue
+        try:
+            r = calcola_costo_fornitura(p_sh, float(mw_f1), float(mw_f2), float(mw_f3))
+        except Exception:
+            continue
+        delta = r["totale"] - base_tot
+        delta_pct = (delta / base_tot * 100.0) if base_tot != 0 else float("nan")
+        pm = r["ponderato"]
+        righe.append({
+            "Scenario": nome,
+            "Shock": shock,
+            "Costo (€)": round(r["totale"], 0),
+            "Delta (€)": round(delta, 0),
+            "Delta (%)": None if np.isnan(delta_pct) else round(delta_pct, 1),
+            "Prezzo medio (€/MWh)": None if np.isnan(pm) else round(pm, 2),
+        })
+    df = pd.DataFrame(righe, columns=cols)
+    out = dict(vuoto)
+    out["base"] = base
+    out["df"] = df
+    out["n_scenari"] = len(df)
+    if len(df) > 0:
+        d_pct = pd.to_numeric(df["Delta (%)"], errors="coerce")
+        if d_pct.notna().any():
+            i = int(d_pct.idxmax())
+            out["worst_nome"] = str(df.loc[i, "Scenario"])
+            out["worst_delta_pct"] = float(d_pct.iloc[i])
+            out["worst_delta_eur"] = float(df.loc[i, "Delta (€)"])
+    return out
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def generate_singularity_data():
     np.random.seed(42)
@@ -2389,7 +2490,7 @@ elif workspace == _('ws7'):
 # ==========================================
 elif workspace == _('ws8'):
     st.markdown(f"<h1>{_('ws8')}</h1>", unsafe_allow_html=True)
-    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread, shaping curva, spread weekend, price capture, volatilità realizzata, confronto anno-su-anno, analisi prezzi negativi, spread intra-day, picchi di prezzo, profilo settimanale tipo, curva di durata, concentrazione del costo di fornitura, simulazione demand shifting, finestre di acquisto ottimali, stagionalità mensile, monitoraggio del budget energetico annuale, analisi di sensitività del costo al profilo di prelievo, Value-at-Risk Monte Carlo del costo di fornitura, classifica dei giorni di calendario più costosi per il profilo di prelievo, fasce tariffarie orarie ottimali derivate dal profilo di prezzo osservato, autocorrelazione del prezzo spot (persistenza e stagionalità) ed export CSV.")
+    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread, shaping curva, spread weekend, price capture, volatilità realizzata, confronto anno-su-anno, analisi prezzi negativi, spread intra-day, picchi di prezzo, profilo settimanale tipo, curva di durata, concentrazione del costo di fornitura, simulazione demand shifting, finestre di acquisto ottimali, stagionalità mensile, monitoraggio del budget energetico annuale, analisi di sensitività del costo al profilo di prelievo, Value-at-Risk Monte Carlo del costo di fornitura, classifica dei giorni di calendario più costosi per il profilo di prelievo, fasce tariffarie orarie ottimali derivate dal profilo di prezzo osservato, autocorrelazione del prezzo spot (persistenza e stagionalità), stress test deterministico del costo di fornitura sotto shock di prezzo ed export CSV.")
 
     # ---------- Controlli: sorgente, periodo, impianti ----------
     st.subheader("⚙️ Sorgente dati & Timeframe")
@@ -2532,7 +2633,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -4142,6 +4243,102 @@ elif workspace == _('ws8'):
                 file_name=f"autocorrelazione_{d0}_{d1}.csv",
                 mime="text/csv",
                 help="Scarica lag, ACF, banda di significatività 95 % e flag di significatività.",
+            )
+
+    with tab31:
+        titolo_st = edu("Stress test del costo di fornitura", "What-if deterministico: cosa succede al costo della tua fornitura se i prezzi di mercato schizzano o crollano? A differenza del VaR (tab27), che è probabilistico ('con il 95 % di probabilità il costo resta sotto X'), qui applichi shock precisi e vedi l'impatto esatto: +30 % sui prezzi, +25 €/MWh sulle sole ore di picco F1, ecc. È lo strumento per dimensionare il budget di rischio e per decidere quanto conviene fissare il prezzo con un contratto forward: se lo shock peggiore fa saltare il budget, la copertura vale la pena.")
+        st.markdown(f"**{titolo_st}**: applica shock di prezzo deterministici alla serie oraria e ricalcola il costo della fornitura sul tuo profilo di prelievo.", unsafe_allow_html=True)
+
+        s1, s2, s3 = st.columns(3)
+        with s1:
+            st_mw_f1 = st.number_input("Prelievo in F1 (MW)", min_value=0.0, value=1.0, step=0.5, key="st_mw_f1",
+                                       help="Ore di punta: lun–ven 08:00–19:00.")
+        with s2:
+            st_mw_f2 = st.number_input("Prelievo in F2 (MW)", min_value=0.0, value=1.0, step=0.5, key="st_mw_f2",
+                                       help="Ore intermedie: lun–ven 07:00–08:00 e 19:00–23:00, sab 07:00–23:00.")
+        with s3:
+            st_mw_f3 = st.number_input("Prelievo in F3 (MW)", min_value=0.0, value=1.0, step=0.5, key="st_mw_f3",
+                                       help="Ore fuori punta: notti, domeniche e festivi.")
+
+        st.markdown("**Scala di scenari**")
+        st_preset = st.radio("Scenario", ["Percentuale su tutte le ore", "Additivo €/MWh su tutte le ore",
+                                          "Additivo €/MWh solo su F1 (picco)", "Personalizzato"],
+                             horizontal=True, key="st_preset",
+                             help="Le scale preset applicano una serie di shock a gradini; 'Personalizzato' costruisce la scala attorno al tuo shock.")
+        if st_preset == "Personalizzato":
+            t1, t2, t3 = st.columns(3)
+            with t1:
+                c_tipo = st.radio("Tipo di shock", ["Percentuale (%)", "Additivo (€/MWh)"], horizontal=True, key="st_ctipo",
+                                  help="Percentuale: scala il prezzo (×1.3 = +30 %). Additivo: sposta il prezzo di un importo fisso.")
+            with t2:
+                c_amb = st.radio("Ore colpite", ["Tutte", "Solo F1", "Solo F2", "Solo F3"], horizontal=True, key="st_camb",
+                                 help="Applica lo shock a tutte le ore o solo alle ore di una fascia (es. solo il picco F1).")
+            with t3:
+                if c_tipo == "Percentuale (%)":
+                    c_mag = st.slider("Shock massimo", min_value=-50, max_value=200, value=50, step=5, key="st_cmag_pct",
+                                      help="La scala verrà costruita a gradini tra −shock e +shock (5 punti + base).")
+                else:
+                    c_mag = st.slider("Shock massimo", min_value=-50, max_value=150, value=30, step=5, key="st_cmag_add",
+                                      help="La scala verrà costruita a gradini tra −shock e +shock (5 punti + base).")
+
+        if st_preset == "Percentuale su tutte le ore":
+            scenari = [{"nome": f"{v:+.0f} %", "tipo": "pct", "valore": v, "solo_fascia": None}
+                       for v in (-30, -15, 0, 15, 30, 60)]
+        elif st_preset == "Additivo €/MWh su tutte le ore":
+            scenari = [{"nome": f"{v:+.0f} €/MWh", "tipo": "add", "valore": v, "solo_fascia": None}
+                       for v in (-20, -10, 0, 10, 25, 50)]
+        elif st_preset == "Additivo €/MWh solo su F1 (picco)":
+            scenari = [{"nome": f"{v:+.0f} €/MWh su F1", "tipo": "add", "valore": v, "solo_fascia": "F1"}
+                       for v in (0, 10, 20, 30, 50)]
+        else:
+            t = "pct" if c_tipo == "Percentuale (%)" else "add"
+            unit = " %" if t == "pct" else " €/MWh"
+            solo = None if c_amb == "Tutte" else c_amb.replace("Solo ", "")
+            mags = sorted(set([-c_mag, -c_mag / 2, 0, c_mag / 2, c_mag]))
+            scenari = [{"nome": (f"{v:+g}{unit}" + (f" su {solo}" if solo else "")), "tipo": t,
+                        "valore": v, "solo_fascia": solo} for v in mags]
+
+        st_r = calcola_stress_prezzo(prezzi, st_mw_f1, st_mw_f2, st_mw_f3, scenari)
+        base_r = st_r["base"]
+        if base_r is None or base_r["mwh"] == 0:
+            st.warning("Imposta una potenza maggiore di zero in almeno una fascia per calcolare lo stress test.")
+        else:
+            df_st = st_r["df"]
+            c1, c2, c3, c4 = st.columns(4)
+            render_kpi(edu("Costo base periodo", "Costo della fornitura ai prezzi osservati, senza shock: il punto di riferimento da cui si misurano tutti gli scenari."), f"{base_r['totale']:,.0f} €", c1)
+            if st_r["worst_nome"] is None:
+                render_kpi("Scenario peggiore", "n.d.", c2)
+                render_kpi("Delta max (€)", "n.d.", c3)
+                render_kpi("Delta max (%)", "n.d.", c4)
+            else:
+                render_kpi(edu("Scenario peggiore", "Lo scenario con l'aumento di costo percentuale più alto: è il caso da tenere d'occhio per il budget di rischio."), st_r["worst_nome"], c2)
+                segno = "🔴" if st_r["worst_delta_eur"] > 0 else "🟢"
+                render_kpi(f"{segno} Delta max (€)", f"{st_r['worst_delta_eur']:+,.0f} €", c3)
+                render_kpi("Delta max (%)", f"{st_r['worst_delta_pct']:+.1f} %", c4)
+
+            ord_st = df_st.sort_values("Delta (%)" if df_st["Delta (%)"].notna().any() else "Delta (€)").reset_index(drop=True)
+            colori = ["#22c55e" if d < 0 else ("#ef4444" if d > 0 else "#6b7280") for d in ord_st["Delta (€)"]]
+            fig_st = go.Figure()
+            fig_st.add_trace(go.Bar(
+                x=ord_st["Costo (€)"], y=ord_st["Scenario"], orientation="h", name="Costo scenario (€)",
+                marker_color=colori,
+                hovertemplate="Scenario: %{y}<br>Costo: %{x:,.0f} €<extra></extra>"))
+            fig_st.add_vline(x=base_r["totale"], line_dash="dash", line_color="#fbbf24",
+                             annotation_text="Base (no shock)", annotation_position="top right")
+            fig_st.update_layout(template="plotly_dark", height=max(320, 60 * len(ord_st) + 80),
+                                 title="Costo della fornitura per scenario di shock",
+                                 xaxis_title="Costo (€)", yaxis_title="Scenario")
+            st.plotly_chart(fig_st, use_container_width=True)
+            st.caption("La linea gialla tratteggiata è il costo base senza shock. Verde = lo shock riduce il costo, rosso = lo aumenta.")
+
+            st.markdown("**Tabella scenari**")
+            st.dataframe(df_st, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta stress test (CSV)",
+                df_st.to_csv(index=False).encode("utf-8"),
+                file_name=f"stress_test_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica scenario, shock applicato, costo, delta in € e % e prezzo medio ponderato.",
             )
 
 # Footer
