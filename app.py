@@ -2520,6 +2520,131 @@ def calcola_sequenze_prezzo(prezzi):
     return out
 
 
+def calcola_valore_flessibilita(prezzi, mw_f1, mw_f2, mw_f3, mw_taglio, ore_top):
+    """Valore economico della flessibilita' (curtailment / peak shaving):
+    tagliare mw_taglio MW di carico nelle ore_top ore piu' care del periodo.
+
+    Dato un profilo di carico (MW prelevati in ciascuna fascia F1/F2/F3), si
+    ordinano le ore per COSTO orario (prezzo x MW) decrescente e si prendono
+    le prime ore_top. In ciascuna ora selezionata il carico viene ridotto di
+    min(mw_taglio, mw_ora) MW (non si taglia piu' del carico presente in
+    quell'ora). Il risparmio stimato e' la somma di prezzo x MW tagliati
+    sulle ore selezionate: e' il business case di un programma di demand
+    response (interrompibilita', spegnimento dei carichi non prioritari
+    nelle ore di picco).
+
+    A cosa serve: quantificare in euro quanto vale la flessibilita' di un
+    sito. A differenza dello shifting (che SPOSTA i consumi senza ridurli),
+    qui il consumo si RIDUCE davvero nelle ore care: il risparmio e' netto,
+    ma si rinuncia a produrre/consumare in quelle ore.
+
+    Metodo (tutto deterministico a parita' di input):
+    - ore ordinate per costo orario decrescente; a pari costo viene presa
+      prima l'ora piu' vecchia (ordinamento stabile);
+    - taglio_j = min(mw_taglio, mw_ora_j); 1 ora = 1 MWh per ogni MW tagliato;
+    - risparmio_j = prezzo_j x taglio_j.
+
+    prezzi: Series oraria in euro/MWh con indice datetime.
+    mw_f1/mw_f2/mw_f3: MW del profilo per fascia. mw_taglio: MW tagliabili
+    (>= 0). ore_top: numero di ore piu' care da includere (intero >= 0).
+
+    NaN-safe: ore con prezzo NaN ignorate. Serie vuota, MW tutti a zero,
+    mw_taglio o ore_top pari a zero -> valori neutrali (le statistiche di
+    periodo sono comunque calcolate). Se tra le ore selezionate compaiono
+    prezzi negativi, il taglio genera una perdita (si rinuncia a consumare
+    quando si e' pagati per farlo): il risparmio puo' quindi risultare
+    negativo.
+
+    Ritorna dict con 'n_ore', 'mwh' (MWh totali del periodo), 'totale'
+    (costo € senza taglio), 'ore_taglio' (ore con taglio effettivo > 0),
+    'mwh_tagliati', 'risparmio' (€), 'risparmio_pct' (% sul totale, None se
+    totale <= 0), 'prezzo_medio_taglio' (€/MWh medio ponderato sulle ore
+    tagliate, None se nessun taglio), 'prezzo_medio_periodo',
+    'mensile' (DataFrame 'Mese', 'Ore taglio', 'MWh tagliati',
+    'Risparmio (€)', 'Risparmio %'), 'df_export' (DataFrame 'Data e ora',
+    'Fascia', 'Prezzo (€/MWh)', 'Carico (MW)', 'Taglio (MW)',
+    'Risparmio (€)').
+    """
+    cols_m = ["Mese", "Ore taglio", "MWh tagliati", "Risparmio (€)", "Risparmio %"]
+    cols_e = ["Data e ora", "Fascia", "Prezzo (€/MWh)", "Carico (MW)",
+              "Taglio (MW)", "Risparmio (€)"]
+    vuoto = {"n_ore": 0, "mwh": 0.0, "totale": 0.0, "ore_taglio": 0,
+             "mwh_tagliati": 0.0, "risparmio": 0.0, "risparmio_pct": None,
+             "prezzo_medio_taglio": None, "prezzo_medio_periodo": None,
+             "mensile": pd.DataFrame(columns=cols_m),
+             "df_export": pd.DataFrame(columns=cols_e)}
+    try:
+        p = prezzi.astype(float).dropna()
+        p = p[~p.index.duplicated(keep="first")].sort_index()
+    except Exception:
+        return dict(vuoto)
+    if len(p) == 0:
+        return dict(vuoto)
+    out = dict(vuoto)
+    out["n_ore"] = len(p)
+    try:
+        fasce = p.index.map(fascia_oraria)
+    except Exception:
+        return out
+    mw_map = {"F1": max(0.0, float(mw_f1)), "F2": max(0.0, float(mw_f2)),
+              "F3": max(0.0, float(mw_f3))}
+    mw = fasce.map(mw_map).to_numpy(dtype=float)
+    prezzi_v = p.to_numpy(dtype=float)
+    costo_orario = prezzi_v * mw
+    out["mwh"] = float(mw.sum())
+    out["totale"] = float(costo_orario.sum())
+    out["prezzo_medio_periodo"] = round(float(p.mean()), 2)
+    try:
+        k = max(0, int(ore_top))
+        taglio = max(0.0, float(mw_taglio))
+    except Exception:
+        return out
+    if k == 0 or taglio <= 0 or (mw <= 0).all():
+        return out
+    ordine = np.argsort(-costo_orario, kind="stable")[:k]
+    sel_idx = p.index[ordine]
+    sel_fasce = fasce[ordine]
+    sel_mw = mw[ordine]
+    sel_p = prezzi_v[ordine]
+    tag_j = np.minimum(taglio, sel_mw)
+    risp_j = sel_p * tag_j
+    out["ore_taglio"] = int((tag_j > 0).sum())
+    out["mwh_tagliati"] = round(float(tag_j.sum()), 3)
+    out["risparmio"] = round(float(risp_j.sum()), 2)
+    if out["totale"] > 0:
+        out["risparmio_pct"] = round(out["risparmio"] / out["totale"] * 100, 2)
+    if out["mwh_tagliati"] > 0:
+        out["prezzo_medio_taglio"] = round(float(risp_j.sum() / tag_j.sum()), 2)
+    try:
+        mesi = sel_idx.to_period("M").astype(str)
+        righe_m = []
+        for m in sorted(set(mesi.tolist())):
+            mm = mesi == m
+            r_m = float(risp_j[mm].sum())
+            righe_m.append({
+                "Mese": m,
+                "Ore taglio": int((tag_j[mm] > 0).sum()),
+                "MWh tagliati": round(float(tag_j[mm].sum()), 3),
+                "Risparmio (€)": round(r_m, 2),
+                "Risparmio %": (round(r_m / out["totale"] * 100, 2)
+                                if out["totale"] > 0 else None),
+            })
+        out["mensile"] = pd.DataFrame(righe_m, columns=cols_m)
+        righe_e = [{
+            "Data e ora": ts,
+            "Fascia": fa,
+            "Prezzo (€/MWh)": round(float(pr), 2),
+            "Carico (MW)": round(float(c), 3),
+            "Taglio (MW)": round(float(t), 3),
+            "Risparmio (€)": round(float(r), 2),
+        } for ts, fa, pr, c, t, r in zip(sel_idx, sel_fasce, sel_p, sel_mw,
+                                         tag_j, risp_j)]
+        out["df_export"] = pd.DataFrame(righe_e, columns=cols_e)
+    except Exception:
+        pass
+    return out
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def generate_singularity_data():
     np.random.seed(42)
@@ -3212,7 +3337,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -5317,6 +5442,88 @@ elif workspace == _('ws8'):
                 file_name=f"sequenze_prezzo_{d0}_{d1}.csv",
                 mime="text/csv",
                 help="Scarica tutte le sequenze rilevate: tipo, inizio, fine, durata in ore e ampiezza in €/MWh.",
+            )
+
+    with tab38:
+        titolo_vf = edu("Valore della flessibilità (curtailment)", "Il CURTAILMENT (taglio del carico, o peak shaving) è la forma più semplice di demand response: nelle ore più care spegni i carichi non prioritari invece di pagare lo spot. Questo tab calcola quanto varrebbe farlo: prende il tuo profilo di consumo (MW per fascia), ordina le ore del periodo per costo orario e simula il taglio di N MW nelle ore più care. A differenza dello shifting (che sposta i consumi), qui il consumo si riduce davvero: il risparmio è netto, ma rinunci a produrre in quelle ore. È il numero da portare al tavolo quando si negozia un contratto di interrompibilità.")
+        st.markdown(f"**{titolo_vf}**: risparmio stimato tagliando il carico nelle ore più care del periodo.", unsafe_allow_html=True)
+
+        vf1, vf2, vf3 = st.columns(3)
+        with vf1:
+            vf_f1 = st.number_input("Potenza in F1 (MW)", min_value=0.0, value=1.0, step=0.5, key="vf_f1",
+                                    help="Ore di punta: lun–ven 08:00–19:00.")
+        with vf2:
+            vf_f2 = st.number_input("Potenza in F2 (MW)", min_value=0.0, value=1.0, step=0.5, key="vf_f2",
+                                    help="Ore intermedie: lun–ven 07:00–08:00 e 19:00–23:00, sab 07:00–23:00.")
+        with vf3:
+            vf_f3 = st.number_input("Potenza in F3 (MW)", min_value=0.0, value=1.0, step=0.5, key="vf_f3",
+                                    help="Ore fuori punta: notti, domeniche e festivi.")
+        vf4, vf5 = st.columns(2)
+        with vf4:
+            vf_taglio = st.number_input("Potenza tagliabile (MW)", min_value=0.0, value=0.5, step=0.1, key="vf_taglio",
+                                        help="Quanti MW puoi spegnere nelle ore di picco (carichi interrompibili). Il taglio non supera mai il carico presente in ciascuna ora.")
+        with vf5:
+            vf_ore = st.slider("Ore più care da tagliare", min_value=0, max_value=500, value=100, step=10, key="vf_ore",
+                               help="Quante ore (le più care per costo orario = prezzo × MW) includere nella simulazione.")
+
+        vf = calcola_valore_flessibilita(prezzi, vf_f1, vf_f2, vf_f3, vf_taglio, vf_ore)
+        if vf["n_ore"] == 0:
+            st.warning("Dati insufficienti per la simulazione.")
+        elif vf["mwh"] <= 0:
+            st.info("Imposta una potenza maggiore di zero in almeno una fascia per simulare il taglio del carico.")
+        elif vf["ore_taglio"] == 0:
+            st.info("Nessuna ora con taglio effettivo: aumenta la potenza tagliabile o il numero di ore.")
+        else:
+            c1, c2, c3, c4 = st.columns(4)
+            pct_txt = f"{vf['risparmio_pct']:.2f} %" if vf["risparmio_pct"] is not None else "n.d."
+            render_kpi(edu("Risparmio stimato", "Euro risparmiati tagliando la potenza impostata nelle ore più care del periodo, e quota percentuale sulla bolletta totale."), f"{vf['risparmio']:,.0f} €<br><small>{pct_txt} della bolletta</small>", c1)
+            render_kpi(edu("Ore di taglio / MWh tagliati", "In quante ore (le più care) il taglio è effettivo e quanta energia viene rinunciata nel periodo."), f"{vf['ore_taglio']:,} h<br><small>{vf['mwh_tagliati']:,.1f} MWh tagliati</small>", c2)
+            pmt = f"{vf['prezzo_medio_taglio']:,.2f} €/MWh" if vf["prezzo_medio_taglio"] is not None else "—"
+            render_kpi(edu("Prezzo medio ore tagliate", "Prezzo medio ponderato delle ore in cui tagli: più è sopra la media del periodo, più il curtailment è selettivo ed efficace."), f"{pmt}<br><small>media periodo {vf['prezzo_medio_periodo']:,.2f} €/MWh</small>", c3)
+            mens = vf["mensile"]
+            if len(mens):
+                bm = mens.loc[mens["Risparmio (€)"].idxmax()]
+                mese_txt = f"{bm['Mese']}<br><small>{bm['Risparmio (€)']:,.0f} €</small>"
+            else:
+                mese_txt = "—"
+            render_kpi(edu("Mese migliore", "Il mese in cui il curtailment rende di più: utile per concentrare lì i programmi di interrompibilità stagionali."), mese_txt, c4)
+            st.caption(f"💡 Profilo: F1 {vf_f1} MW, F2 {vf_f2} MW, F3 {vf_f3} MW — taglio {vf_taglio} MW nelle {vf_ore} ore più care: {vf['mwh']:,.0f} MWh per {vf['totale']:,.0f} € nel periodo ({vf['n_ore']:,} ore).")
+
+            col_v1, col_v2 = st.columns(2)
+            with col_v1:
+                fig_vf1 = go.Figure()
+                fig_vf1.add_trace(go.Bar(x=mens["Mese"], y=mens["Risparmio (€)"], name="Risparmio",
+                                         marker_color="#22c55e"))
+                fig_vf1.update_layout(template="plotly_dark", height=330, title="Risparmio mensile da curtailment",
+                                      xaxis_title="Mese", yaxis_title="€",
+                                      legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+                st.plotly_chart(fig_vf1, use_container_width=True)
+            with col_v2:
+                df_tag = vf["df_export"][vf["df_export"]["Taglio (MW)"] > 0]
+                fig_vf2 = go.Figure()
+                fig_vf2.add_trace(go.Scatter(x=prezzi.index, y=prezzi.values, mode="lines",
+                                             name="Prezzo spot (€/MWh)", line=dict(color="#3b82f6", width=1)))
+                if len(df_tag):
+                    fig_vf2.add_trace(go.Scatter(x=df_tag["Data e ora"], y=df_tag["Prezzo (€/MWh)"],
+                                                 mode="markers", name="Ore tagliate",
+                                                 marker=dict(color="#f59e0b", size=6, opacity=0.8),
+                                                 hovertemplate="%{x}<br>%{y:.2f} €/MWh<extra></extra>"))
+                fig_vf2.update_layout(template="plotly_dark", height=330, title="Prezzo orario con ore di taglio",
+                                      xaxis_title="Data e Ora", yaxis_title="€/MWh", hovermode="x unified",
+                                      legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+                st.plotly_chart(fig_vf2, use_container_width=True)
+            st.caption("Le ore tagliate si concentrano sui picchi di prezzo: se vedi tagli sparsi anche a prezzi bassi, il tuo profilo carica molto in F3 e conviene alzare la potenza tagliabile.")
+
+            st.markdown("**Top 15 ore per risparmio**")
+            top_vf = vf["df_export"].sort_values("Risparmio (€)", ascending=False).head(15)
+            st.dataframe(top_vf, use_container_width=True, hide_index=True)
+
+            st.download_button(
+                "⬇️ Esporta ore di taglio (CSV)",
+                vf["df_export"].to_csv(index=False).encode("utf-8"),
+                file_name=f"valore_flessibilita_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica tutte le ore selezionate: data e ora, fascia, prezzo, carico, MW tagliati e risparmio in €.",
             )
 
 # Footer
