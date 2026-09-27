@@ -1547,6 +1547,109 @@ def calcola_var_costo(prezzi, mw_f1, mw_f2, mw_f3, n_scenari=1000,
     return out
 
 
+def calcola_top_giorni_costo(prezzi, mw_f1, mw_f2, mw_f3, top_n=10):
+    """Costo giornaliero del profilo di prelievo e classifica dei giorni piu' costosi.
+
+    Aggrega il costo orario (prezzo spot x MW della fascia F1/F2/F3) per giorno
+    di calendario: per ogni giorno calcola MWh prelevati, costo totale, prezzo
+    medio ponderato e la fascia che ha generato piu' costo ('fascia dominante').
+    Produce anche la classifica dei top_n giorni piu' costosi e una matrice
+    calendario (settimane ISO x giorni Lun-Dom) per la heatmap del costo
+    giornaliero.
+
+    Differenza rispetto agli altri tab: Picchi guarda le ORE di prezzo estremo,
+    Concentrazione costo la curva di Lorenz sulle ore, Settimana tipo il profilo
+    MEDIO settimanale. Qui la granularita' e' il GIORNO di calendario: 'quanto
+    mi e' costato il 15/09?' e' la domanda operativa per tesoreria, budget e
+    verifica delle fatture del fornitore.
+
+    NaN-safe: ore con prezzo NaN ignorate. Serie vuota o tutti i MW a zero ->
+    KPI a None e DataFrame con le colonne giuste ma vuoti. Il raggruppamento
+    giornaliero usa l'indice reso tz-naive (come in calcola_base_peak_mensile).
+
+    Ritorna dict con 'n_giorni', 'mwh_tot', 'costo_tot', 'costo_medio_gg',
+    'rapporto_max_medio' (None se media <= 0), 'quota_top10pct' (% del costo
+    generata dal 10% di giorni piu' costosi, None se totale <= 0),
+    'giorno_max_data', 'giorno_max_costo', 'top_n',
+    'giorni' (DataFrame cronologico: Data, Giorno, MWh, Costo €,
+    Prezzo medio €/MWh, Fascia dominante), 'top' (top_n righe di 'giorni'
+    ordinate per costo decrescente) e 'calendario' (DataFrame pivot: righe
+    settimane ISO 'YYYY-Www', colonne Lun..Dom, valori Costo € giornaliero;
+    NaN dove il giorno non appartiene al periodo)."""
+    cols_g = ["Data", "Giorno", "MWh", "Costo €", "Prezzo medio €/MWh", "Fascia dominante"]
+    cols_cal = ["Lun", "Mar", "Mer", "Gio", "Ven", "Sab", "Dom"]
+    vuoto = {"n_giorni": 0, "mwh_tot": 0.0, "costo_tot": None,
+             "costo_medio_gg": None, "rapporto_max_medio": None,
+             "quota_top10pct": None, "giorno_max_data": None,
+             "giorno_max_costo": None, "top_n": int(top_n or 0),
+             "giorni": pd.DataFrame(columns=cols_g),
+             "top": pd.DataFrame(columns=cols_g),
+             "calendario": pd.DataFrame(columns=cols_cal)}
+    out = dict(vuoto)
+    p = prezzi.astype(float).dropna()
+    mw_map = {"F1": float(mw_f1), "F2": float(mw_f2), "F3": float(mw_f3)}
+    if p.empty or all(m <= 0 for m in mw_map.values()):
+        return out
+    idx = p.index
+    idxn = idx.tz_localize(None) if idx.tz is not None else idx
+    df = pd.DataFrame({"prezzo": p.to_numpy(dtype=float),
+                       "fascia": list(idxn.map(fascia_oraria))}, index=idxn)
+    df["mw"] = df["fascia"].map(mw_map)
+    df["costo"] = df["prezzo"] * df["mw"]
+    nomi_gg = list(cols_cal)
+    righe = []
+    for giorno, grp in df.groupby(idxn.date):
+        mwh = float(grp["mw"].sum())
+        costo = float(grp["costo"].sum())
+        costo_fascia = grp.groupby("fascia")["costo"].sum()
+        dom = str(costo_fascia.idxmax()) if len(costo_fascia) else None
+        ts = pd.Timestamp(giorno)
+        righe.append({
+            "Data": ts.strftime("%d/%m/%Y"),
+            "_dt": ts,
+            "Giorno": nomi_gg[ts.weekday()],
+            "MWh": round(mwh, 1),
+            "Costo €": round(costo, 2),
+            "Prezzo medio €/MWh": round(costo / mwh, 2) if mwh > 0 else None,
+            "Fascia dominante": dom,
+        })
+    g = pd.DataFrame(righe).sort_values("_dt").reset_index(drop=True)
+    n = len(g)
+    costi = g["Costo €"].to_numpy(dtype=float)
+    totale = float(costi.sum())
+    medio = float(costi.mean())
+    cmax = float(costi.max())
+    imax = int(costi.argmax())
+    k10 = max(1, int(round(n * 0.10)))
+    quota10 = (float(np.sort(costi)[::-1][:k10].sum() / totale * 100)
+               if totale > 0 else None)
+    tn = max(1, int(top_n or 10))
+    top = g.sort_values("Costo €", ascending=False).head(tn).reset_index(drop=True)
+    # matrice calendario: righe = settimane ISO, colonne = Lun..Dom
+    cal = g.copy()
+    iso = cal["_dt"].dt.isocalendar()
+    cal["week"] = iso["year"].astype(str) + "-W" + iso["week"].astype(str).str.zfill(2)
+    cal["wd"] = cal["_dt"].dt.weekday
+    piv = cal.pivot_table(index="week", columns="wd", values="Costo €", aggfunc="sum")
+    piv = piv.reindex(columns=range(7))
+    piv.columns = nomi_gg
+    out.update({
+        "n_giorni": n,
+        "mwh_tot": round(float(g["MWh"].sum()), 1),
+        "costo_tot": round(totale, 2),
+        "costo_medio_gg": round(medio, 2),
+        "rapporto_max_medio": round(cmax / medio, 2) if medio > 0 else None,
+        "quota_top10pct": round(quota10, 1) if quota10 is not None else None,
+        "giorno_max_data": g.loc[imax, "Data"],
+        "giorno_max_costo": round(cmax, 2),
+        "top_n": tn,
+        "giorni": g.drop(columns=["_dt"]).reset_index(drop=True),
+        "top": top.drop(columns=["_dt"]).reset_index(drop=True),
+        "calendario": piv,
+    })
+    return out
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def generate_singularity_data():
     np.random.seed(42)
@@ -2096,7 +2199,7 @@ elif workspace == _('ws7'):
 # ==========================================
 elif workspace == _('ws8'):
     st.markdown(f"<h1>{_('ws8')}</h1>", unsafe_allow_html=True)
-    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread, shaping curva, spread weekend, price capture, volatilità realizzata, confronto anno-su-anno, analisi prezzi negativi, spread intra-day, picchi di prezzo, profilo settimanale tipo, curva di durata, concentrazione del costo di fornitura, simulazione demand shifting, finestre di acquisto ottimali, stagionalità mensile, monitoraggio del budget energetico annuale, analisi di sensitività del costo al profilo di prelievo, Value-at-Risk Monte Carlo del costo di fornitura ed export CSV.")
+    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread, shaping curva, spread weekend, price capture, volatilità realizzata, confronto anno-su-anno, analisi prezzi negativi, spread intra-day, picchi di prezzo, profilo settimanale tipo, curva di durata, concentrazione del costo di fornitura, simulazione demand shifting, finestre di acquisto ottimali, stagionalità mensile, monitoraggio del budget energetico annuale, analisi di sensitività del costo al profilo di prelievo, Value-at-Risk Monte Carlo del costo di fornitura, classifica dei giorni di calendario più costosi per il profilo di prelievo ed export CSV.")
 
     # ---------- Controlli: sorgente, periodo, impianti ----------
     st.subheader("⚙️ Sorgente dati & Timeframe")
@@ -2239,7 +2342,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -3688,6 +3791,61 @@ elif workspace == _('ws8'):
                 file_name=f"var_costo_{d0}_{d1}.csv",
                 mime="text/csv",
                 help="Scarica i percentili P50/P75/P90/P95/P99 del costo di fornitura simulato.",
+            )
+
+    with tab28:
+        titolo_tg = edu("Top giorni di costo", "La classifica dei GIORNI di calendario più costosi per il tuo profilo di prelievo F1/F2/F3: ogni giorno aggrega il costo orario (prezzo spot × MW della fascia). A differenza del tab Picchi (ore di prezzo estremo) e di Concentrazione costo (curva di Lorenz sulle ore), qui la granularità è il giorno: 'quanto mi è costato il 15/09?' è la domanda operativa per tesoreria, budget e verifica delle fatture del fornitore. La heatmap-calendario mostra a colpo d'occhio i giorni critici; la fascia dominante dice dove è nato il costo in ciascun giorno.")
+        st.markdown(f"**{titolo_tg}**: quali giorni hanno pesato di più sulla bolletta del periodo?", unsafe_allow_html=True)
+        st.caption("Profilo di prelievo: quello impostato nel tab 💰 Costo fornitura (MW per fascia F1/F2/F3).")
+
+        tg_topn = st.slider("Giorni in classifica", min_value=3, max_value=31, value=10, key="tg_topn",
+                            help="Quanti giorni mostrare nella classifica dei più costosi (barre orizzontali).")
+        tg = calcola_top_giorni_costo(prezzi, mw_f1, mw_f2, mw_f3, top_n=tg_topn)
+        if tg["costo_tot"] is None:
+            st.info("Imposta una potenza maggiore di zero in almeno una fascia (tab 💰 Costo fornitura) per calcolare il costo giornaliero.")
+        else:
+            t1, t2, t3, t4 = st.columns(4)
+            render_kpi(edu("Giorno più costoso", "Il giorno di calendario con il costo più alto per il tuo profilo nel periodo selezionato."), f"{tg['giorno_max_data']}", t1)
+            render_kpi(edu("Costo del giorno peggiore", "Quanto è costato il giorno peggiore: il picco di esposizione giornaliera del periodo."), f"{tg['giorno_max_costo']:,.2f} €", t2)
+            render_kpi(edu("Costo medio giornaliero", "Costo medio per giorno di calendario nel periodo: il riferimento per giudicare se un giorno è stato 'caro'."), f"{tg['costo_medio_gg']:,.2f} €", t3)
+            q10_txt = f"{tg['quota_top10pct']:.1f} %" if tg["quota_top10pct"] is not None else "n.d."
+            render_kpi(edu("Quota nel 10% di giorni peggiori", "Percentuale del costo totale generata dal 10% di giorni più costosi: misura la concentrazione temporale della spesa."), q10_txt, t4)
+            rapp_txt = f"Il giorno peggiore costa {tg['rapporto_max_medio']:.1f}× la media giornaliera." if tg["rapporto_max_medio"] is not None else ""
+            st.caption(f"💡 {tg['n_giorni']} giorni, {tg['mwh_tot']:,.0f} MWh, costo totale {tg['costo_tot']:,.2f} €. {rapp_txt}")
+
+            top_df = tg["top"]
+            fig_tg = go.Figure()
+            fig_tg.add_trace(go.Bar(
+                x=top_df["Costo €"],
+                y=top_df["Data"] + " (" + top_df["Giorno"] + ")",
+                orientation="h", marker_color="#f59e0b",
+                hovertemplate="%{y}<br>Costo: %{x:,.2f} €<extra></extra>"))
+            fig_tg.update_layout(template="plotly_dark", height=max(300, 42 * len(top_df)),
+                                 title=f"Top {tg['top_n']} giorni più costosi (€)",
+                                 xaxis_title="Costo giornaliero (€)",
+                                 yaxis=dict(autorange="reversed"))
+            st.plotly_chart(fig_tg, use_container_width=True)
+
+            cal = tg["calendario"]
+            if len(cal):
+                fig_cal = go.Figure(data=go.Heatmap(
+                    z=cal.values, x=list(cal.columns), y=list(cal.index),
+                    colorscale="YlOrRd",
+                    hovertemplate="%{y} · %{x}<br>Costo: %{z:,.2f} €<extra></extra>",
+                    colorbar=dict(title="€/giorno")))
+                fig_cal.update_layout(template="plotly_dark", height=max(240, 36 * len(cal)),
+                                      title="Calendario del costo giornaliero (€)")
+                st.plotly_chart(fig_cal, use_container_width=True)
+
+            st.markdown("**Classifica giorni per costo**")
+            classifica = tg["giorni"].sort_values("Costo €", ascending=False).reset_index(drop=True)
+            st.dataframe(classifica, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta costo giornaliero (CSV)",
+                classifica.to_csv(index=False).encode("utf-8"),
+                file_name=f"top_giorni_costo_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica la serie giornaliera ordinata per costo: data, giorno della settimana, MWh, costo, prezzo medio e fascia dominante.",
             )
 
 # Footer
