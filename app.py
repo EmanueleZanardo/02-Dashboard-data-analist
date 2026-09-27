@@ -2990,6 +2990,145 @@ def calcola_drawdown(prezzi, soglia_eur=20.0):
     return out
 
 
+def calcola_mean_reversion(prezzi, min_coppie=50):
+    """Mean reversion del prezzo orario via AR(1): x_t = a + b*x_{t-1} + e.
+
+    Il coefficiente b misura la PERSISTENZA: b vicino a 1 = il prezzo di
+    ieri sera conta ancora molto (shock lenti a rientrare); b vicino a 0
+    = ogni ora riparte quasi da zero (shock rientrati in fretta).
+    L'HALF-LIFE = -ln(2)/ln(b) e' il tempo in cui uno shock si dimezza:
+    la domanda operativa "dopo un picco, quanto ci mette il prezzo a
+    tornare verso la media?" — chiave per decidere se comprare subito
+    o aspettare.
+
+    Differenza rispetto agli altri tab: 'Autocorrelazione' mostra la
+    memoria a ogni lag, 'Sequenze' conta le ore di fila in calo,
+    'Decomposizione' separa trend e stagionalita'; qui un SOLO numero
+    (half-life) riassume la velocita' di rientro degli shock, con la
+    scomposizione per mese per vedere i cambi di regime.
+
+    NaN-safe: ore NaN ignorate (coppie con un NaN scartate). Serie vuota,
+    indice non datetime, duplicato, costante o < min_coppie coppie valide
+    -> statistiche a None. Prezzi negativi: nessun problema (OLS su livelli,
+    non su log). Giorni con 23/25 ore (DST): logica posizionale sulle ore
+    osservate. b <= 0 o b >= 1 -> half-life None (non mean-reverting).
+
+    Ritorna dict con 'n_ore', 'n_coppie', 'b', 'a', 'r2', 'half_life_ore',
+    'std_residui', 'media', 'std', 'ultimo_prezzo', 'ultima_ora',
+    'z_ultimo', 'regime' (molto rapida/rapida/moderata/lenta/molto
+    lenta/assente), 'df_mesi' (Mese, Ore, AR(1), Half-life (ore), R2)."""
+
+    cols_mesi = ["Mese", "Ore", "AR(1)", "Half-life (ore)", "R2"]
+    vuoto = {"n_ore": 0, "n_coppie": 0, "b": None, "a": None, "r2": None,
+             "half_life_ore": None, "std_residui": None, "media": None,
+             "std": None, "ultimo_prezzo": None, "ultima_ora": None,
+             "z_ultimo": None, "regime": "assente",
+             "df_mesi": pd.DataFrame(columns=cols_mesi)}
+    try:
+        p = prezzi.astype(float).dropna()
+        p = p[~p.index.duplicated(keep="first")].sort_index()
+    except Exception:
+        return dict(vuoto)
+    if len(p) == 0:
+        return dict(vuoto)
+    try:
+        if not isinstance(p.index, pd.DatetimeIndex):
+            return dict(vuoto)
+    except Exception:
+        return dict(vuoto)
+
+    def _fit_ar1(v):
+        """OLS x_t su x_{t-1}; ritorna (b, a, r2, resid_std) o None."""
+        if len(v) < 2:
+            return None
+        x_lag, x_lead = v[:-1], v[1:]
+        mask = np.isfinite(x_lag) & np.isfinite(x_lead)
+        x_lag, x_lead = x_lag[mask], x_lead[mask]
+        if len(x_lag) < 2:
+            return None
+        var_lag = float(np.var(x_lag))
+        if var_lag <= 0:
+            return None  # serie costante
+        ml_lag, ml_lead = float(np.mean(x_lag)), float(np.mean(x_lead))
+        b = float(np.mean((x_lag - ml_lag) * (x_lead - ml_lead)) / var_lag)
+        a = ml_lead - b * ml_lag
+        resid = x_lead - (a + b * x_lag)
+        ss_res = float(np.sum(resid ** 2))
+        ss_tot = float(np.sum((x_lead - ml_lead) ** 2))
+        r2 = (1.0 - ss_res / ss_tot) if ss_tot > 0 else None
+        return b, a, r2, float(np.std(resid, ddof=1)) if len(resid) > 1 else 0.0
+
+    def _half_life(b):
+        if b is None or not (0.0 < b < 1.0):
+            return None
+        try:
+            return float(-np.log(2.0) / np.log(b))
+        except (ValueError, ZeroDivisionError):
+            return None
+
+    def _regime(hl):
+        if hl is None:
+            return "assente"
+        if hl < 24:
+            return "molto rapida"
+        if hl < 72:
+            return "rapida"
+        if hl < 168:
+            return "moderata"
+        if hl < 720:
+            return "lenta"
+        return "molto lenta"
+
+    out = dict(vuoto)
+    vals = p.to_numpy(dtype=float)
+    out["n_ore"] = len(vals)
+    out["media"] = round(float(np.mean(vals)), 2)
+    s = float(np.std(vals, ddof=1)) if len(vals) > 1 else 0.0
+    out["std"] = round(s, 2)
+    out["ultimo_prezzo"] = round(float(vals[-1]), 2)
+    out["ultima_ora"] = p.index[-1]
+    out["z_ultimo"] = (round((float(vals[-1]) - float(np.mean(vals))) / s, 2)
+                       if s > 0 else None)
+
+    fit = _fit_ar1(vals)
+    if fit is None:
+        return out
+    b, a, r2, resid_std = fit
+    n_coppie = int(np.sum(np.isfinite(vals[:-1]) & np.isfinite(vals[1:])))
+    out["n_coppie"] = n_coppie
+    if n_coppie < min_coppie:
+        return out
+    out["b"] = round(b, 4)
+    out["a"] = round(a, 2)
+    out["r2"] = round(r2, 3) if r2 is not None else None
+    out["std_residui"] = round(resid_std, 2)
+    hl = _half_life(b)
+    out["half_life_ore"] = round(hl, 1) if hl is not None else None
+    out["regime"] = _regime(hl)
+
+    # Half-life per mese (cambi di regime): min 100 coppie valide
+    righe = []
+    for (anno, mese), grp in p.groupby([p.index.year, p.index.month]):
+        gv = grp.to_numpy(dtype=float)
+        ncp = int(np.sum(np.isfinite(gv[:-1]) & np.isfinite(gv[1:])))
+        if ncp < 100:
+            continue
+        gf = _fit_ar1(gv)
+        if gf is None:
+            continue
+        gb, _, gr2, _ = gf
+        ghl = _half_life(gb)
+        righe.append({
+            "Mese": f"{anno:04d}-{mese:02d}",
+            "Ore": len(gv),
+            "AR(1)": round(gb, 4),
+            "Half-life (ore)": round(ghl, 1) if ghl is not None else np.nan,
+            "R2": round(gr2, 3) if gr2 is not None else np.nan,
+        })
+    out["df_mesi"] = pd.DataFrame(righe, columns=cols_mesi)
+    return out
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def generate_singularity_data():
     np.random.seed(42)
@@ -3682,7 +3821,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -6085,6 +6224,113 @@ elif workspace == _('ws8'):
                 mime="text/csv",
                 help="Scarica gli episodi di crollo: picco, minimo, recupero, profondità in €/MWh e %, ore di calo e di recupero.",
             )
+
+    with tab42:
+        titolo_mr = edu("Mean reversion (ritorno alla media)", "La MEAN REVERSION dice se il prezzo 'torna indietro' dopo uno shock. Il modello AR(1) lega ogni ora alla precedente: coefficiente b vicino a 1 = shock che rientrano lentamente, vicino a 0 = rientro rapido. L'HALF-LIFE e' il tempo in cui uno shock si dimezza: se e' 30 ore, un picco di +60 €/MWh sopra la media sara' ancora a +30 dopo 30 ore e a +15 dopo 60. Lo Z-SCORE dice quanto e' estremo il prezzo di adesso rispetto alla storia (oltre ±2 deviazioni standard = evento raro). Uso operativo: con half-life lunga conviene coprirsi subito sugli shock; con half-life corta conviene aspettare che il prezzo torni giu' da solo. La tabella mensile mostra i cambi di regime: la mean reversion non e' costante nel tempo.")
+        st.markdown(f"**{titolo_mr}**: velocita' di rientro degli shock di prezzo (half-life) via AR(1) orario, z-score del prezzo corrente e half-life per mese.", unsafe_allow_html=True)
+
+        mr = calcola_mean_reversion(prezzi)
+        if mr["n_ore"] == 0 or mr["b"] is None:
+            st.warning("Dati insufficienti per stimare la mean reversion (servono almeno 50 ore valide con variabilita').")
+        else:
+            c1, c2, c3, c4 = st.columns(4)
+            hl_txt = f"{mr['half_life_ore']:,.0f} ore" if mr["half_life_ore"] is not None else "n.d."
+            render_kpi(edu("Half-life shock", "Tempo in cui uno shock di prezzo si dimezza tornando verso la media. 'n.d.' se il prezzo non torna verso la media (coefficiente AR(1) fuori dall'intervallo 0-1)."), f"{hl_txt}<br><small>regime: {mr['regime']}</small>", c1)
+            render_kpi(edu("Coefficiente AR(1)", "Persistenza oraria: quanto il prezzo di un'ora dipende da quella precedente. Vicino a 1 = mercato 'vischioso', vicino a 0 = mercato che dimentica in fretta."), f"{mr['b']:.3f}<br><small>R² = {mr['r2']:.3f}</small>", c2)
+            z_txt = f"{mr['z_ultimo']:+.2f} σ" if mr["z_ultimo"] is not None else "n.d."
+            z_ora = pd.Timestamp(mr["ultima_ora"]).strftime("%d/%m %H:00") if mr["ultima_ora"] is not None else "—"
+            render_kpi(edu("Z-score prezzo corrente", "Quanto e' estremo il prezzo dell'ultima ora rispetto alla media storica, in deviazioni standard. Oltre ±2 = evento raro: possibile segnale di acquisto (z molto negativo) o di copertura (z molto positivo)."), f"{z_txt}<br><small>{mr['ultimo_prezzo']:,.2f} €/MWh ({z_ora})</small>", c3)
+            render_kpi(edu("Rumore orario", "Deviazione standard dei residui AR(1): la parte di movimento orario NON spiegata dalla persistenza. E' il 'rumore' imprevedibile che resta anche conoscendo l'ora precedente."), f"{mr['std_residui']:,.2f} €/MWh<br><small>media {mr['media']:,.2f}</small>", c4)
+
+            try:
+                p_mr = prezzi.astype(float).dropna()
+                p_mr = p_mr[~p_mr.index.duplicated(keep="first")].sort_index()
+                v = p_mr.to_numpy(dtype=float)
+                b_mr = mr["b"]
+                fig_mr1 = go.Figure()
+                fig_mr1.add_trace(go.Scatter(x=v[:-1], y=v[1:], mode="markers", name="Ore",
+                                            marker=dict(color="#3b82f6", size=3, opacity=0.35),
+                                            hovertemplate="Ora prec: %{x:,.1f}<br>Ora succ: %{y:,.1f}<extra></extra>"))
+                x_line = np.array([v.min(), v.max()])
+                fig_mr1.add_trace(go.Scatter(x=x_line, y=mr["a"] + b_mr * x_line, mode="lines",
+                                            name=f"AR(1): b={b_mr:.3f}", line=dict(color="#ef4444", width=2)))
+                fig_mr1.add_trace(go.Scatter(x=x_line, y=x_line, mode="lines", name="y = x (persistenza totale)",
+                                            line=dict(color="#9ca3af", width=1, dash="dash")))
+                fig_mr1.update_layout(template="plotly_dark", height=360,
+                                      title="Prezzo ora t+1 contro ora t (la retta rossa sotto la diagonale = ritorno alla media)",
+                                      xaxis_title="Prezzo ora t (€/MWh)", yaxis_title="Prezzo ora t+1 (€/MWh)",
+                                      legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+                st.plotly_chart(fig_mr1, use_container_width=True)
+                st.caption("Ogni punto è un'ora: se la nuvola segue la retta rossa (più piatta della diagonale), il mercato torna verso la media. Punti lontani dalla retta = shock imprevedibili.")
+            except Exception:
+                st.info("Grafico AR(1) non disponibile per questi dati.")
+
+            try:
+                if mr["half_life_ore"] is not None:
+                    k = np.arange(0, 169)
+                    dec = 100.0 * (b_mr ** k)
+                    fig_mr2 = go.Figure()
+                    fig_mr2.add_trace(go.Scatter(x=k, y=dec, mode="lines", name="Shock residuo",
+                                                line=dict(color="#f59e0b", width=2),
+                                                fill="tozeroy", fillcolor="rgba(245,158,11,0.15)",
+                                                hovertemplate="Dopo %{x} ore: %{y:.1f}%<extra></extra>"))
+                    fig_mr2.add_hline(y=50, line_dash="dash", line_color="#9ca3af",
+                                      annotation_text="metà shock", annotation_position="top right")
+                    fig_mr2.update_layout(template="plotly_dark", height=300,
+                                          title="Decadimento di uno shock: quanto resta dopo N ore",
+                                          xaxis_title="Ore dallo shock", yaxis_title="% dello shock iniziale",
+                                          legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+                    st.plotly_chart(fig_mr2, use_container_width=True)
+                    st.caption(f"Uno shock di prezzo oggi vale ancora il 50% dopo {mr['half_life_ore']:,.0f} ore: è la traduzione visiva dell'half-life.")
+            except Exception:
+                st.info("Grafico decadimento shock non disponibile per questi dati.")
+
+            try:
+                roll = p_mr.rolling(168, min_periods=48)
+                z_roll = (p_mr - roll.mean()) / roll.std()
+                z_roll = z_roll.replace([np.inf, -np.inf], np.nan).dropna()
+                if len(z_roll):
+                    fig_mr3 = go.Figure()
+                    fig_mr3.add_trace(go.Scatter(x=z_roll.index, y=z_roll.to_numpy(), mode="lines",
+                                                name="Z-score (media mobile 7gg)", line=dict(color="#8b5cf6", width=1)))
+                    fig_mr3.add_hline(y=2, line_dash="dash", line_color="#ef4444",
+                                      annotation_text="+2σ", annotation_position="top right")
+                    fig_mr3.add_hline(y=-2, line_dash="dash", line_color="#22c55e",
+                                      annotation_text="−2σ", annotation_position="bottom right")
+                    fig_mr3.update_layout(template="plotly_dark", height=300,
+                                          title="Z-score del prezzo (media mobile 7 giorni): quando esce dalle bande è un evento raro",
+                                          xaxis_title="Data", yaxis_title="Deviazioni standard",
+                                          legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+                    st.plotly_chart(fig_mr3, use_container_width=True)
+                    st.caption("Sopra +2σ il prezzo è insolitamente caro (valuta la copertura), sotto −2σ è insolitamente economico (valuta l'acquisto).")
+            except Exception:
+                st.info("Grafico z-score non disponibile per questi dati.")
+
+            df_mesi_mr = mr["df_mesi"]
+            if len(df_mesi_mr):
+                st.markdown("**Half-life per mese (cambi di regime)**")
+                df_hl = df_mesi_mr.dropna(subset=["Half-life (ore)"])
+                if len(df_hl):
+                    fig_mr4 = go.Figure()
+                    fig_mr4.add_trace(go.Bar(x=df_hl["Mese"], y=df_hl["Half-life (ore)"],
+                                            name="Half-life", marker_color="#06b6d4",
+                                            hovertemplate="%{x}<br>Half-life: %{y:.0f} ore<br>AR(1): %{customdata:.3f}<extra></extra>",
+                                            customdata=df_hl["AR(1)"].to_numpy()))
+                    fig_mr4.update_layout(template="plotly_dark", height=300,
+                                          title="Half-life mensile: i mesi con barre alte 'dimenticano' gli shock lentamente",
+                                          xaxis_title="Mese", yaxis_title="Ore",
+                                          legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+                    st.plotly_chart(fig_mr4, use_container_width=True)
+                st.dataframe(df_mesi_mr, use_container_width=True, hide_index=True)
+                st.download_button(
+                    "⬇️ Esporta mean reversion mensile (CSV)",
+                    df_mesi_mr.to_csv(index=False).encode("utf-8"),
+                    file_name=f"mean_reversion_mensile_{d0}_{d1}.csv",
+                    mime="text/csv",
+                    help="Scarica AR(1), half-life e R² per mese: la mappa dei cambi di regime del mercato.",
+                )
+            else:
+                st.info("Serie troppo corta per la scomposizione mensile (servono mesi con almeno 100 ore valide).")
 
 # Footer
 st.markdown("---")
