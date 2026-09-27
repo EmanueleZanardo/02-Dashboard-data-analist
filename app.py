@@ -1407,6 +1407,68 @@ def calcola_budget_tracker(prezzi, mw_f1, mw_f2, mw_f3, budget_annuo):
     return out
 
 
+def calcola_sensibilita_profilo(prezzi, mw_f1, mw_f2, mw_f3, delta_pct=10.0):
+    """Analisi di sensitività del costo di fornitura al profilo di prelievo.
+
+    Per ciascuna fascia F1/F2/F3 calcola di quanto varia il costo spot del
+    periodo se la potenza prelevata in quella fascia cambia di +/-delta_pct %.
+    Il costo e' lineare nei MW (somma oraria prezzo x MW della fascia), quindi
+    Δcosto = costo_fascia x ±delta_pct/100 e' esatto, non un'approssimazione.
+    Il COSTO MARGINALE (€ per 1 MW aggiuntivo in una fascia) e' il KPI
+    operativo: dice dove costa di piu' aggiungere carico e dove conviene
+    tagliare i prelievi. La fascia piu' sensibile e' quella con il costo
+    assoluto piu' alto: un ±d% li' sposta piu' euro.
+
+    Utile per: negoziare contratti per fasce, valutare spostamenti di carico,
+    dimensionare interventi di efficienza (tagliare 1 MW in F1 vale X €/anno).
+
+    NaN-safe: ore con prezzo NaN ignorate. Con serie vuota, tutti i MW a 0
+    o delta_pct = 0 ritorna il dict vuoto (DataFrame con le colonne giuste,
+    KPI a None/0).
+
+    Ritorna dict con 'delta_pct' (float), 'costo_base' (float),
+    'fascia_piu_sensibile' (str o None), 'costo_marginale' (dict fascia ->
+    €/MW o None) e 'fasce' (DataFrame: Fascia, 'Costo fascia €',
+    'Quota costo %', 'Δcosto +d% €', 'Δcosto -d% €', 'Costo marginale €/MW')."""
+    cols = ["Fascia", "Costo fascia €", "Quota costo %",
+            "Δcosto +d% €", "Δcosto -d% €", "Costo marginale €/MW"]
+    dpct = abs(float(delta_pct or 0.0))
+    d = dpct / 100.0
+    vuoto = {"delta_pct": dpct, "costo_base": 0.0, "fascia_piu_sensibile": None,
+             "costo_marginale": {},
+             "fasce": pd.DataFrame(columns=cols)}
+    p = prezzi.astype(float).dropna()
+    mw_map = {"F1": float(mw_f1), "F2": float(mw_f2), "F3": float(mw_f3)}
+    out = dict(vuoto)
+    if p.empty or all(m <= 0 for m in mw_map.values()) or d <= 0:
+        return out
+    idxn = p.index.tz_localize(None) if p.index.tz is not None else p.index
+    fasce = idxn.map(fascia_oraria)
+    pv = p.to_numpy(dtype=float)
+    costi, marg = {}, {}
+    for b, mwb in mw_map.items():
+        cb = float((pv[fasce == b] * mwb).sum()) if mwb > 0 else 0.0
+        costi[b] = cb
+        marg[b] = round(cb / mwb, 2) if mwb > 0 else None
+    base = sum(costi.values())
+    righe = []
+    for b in ("F1", "F2", "F3"):
+        righe.append({"Fascia": b,
+                      "Costo fascia €": round(costi[b], 2),
+                      "Quota costo %": (round(costi[b] / base * 100, 1)
+                                        if base > 0 else None),
+                      "Δcosto +d% €": round(costi[b] * d, 2),
+                      "Δcosto -d% €": round(-costi[b] * d, 2),
+                      "Costo marginale €/MW": marg[b]})
+    out["fasce"] = pd.DataFrame(righe, columns=cols).reset_index(drop=True)
+    out["costo_base"] = round(base, 2)
+    attive = [b for b in ("F1", "F2", "F3") if mw_map[b] > 0]
+    out["fascia_piu_sensibile"] = (max(attive, key=lambda b: costi[b])
+                                   if attive else None)
+    out["costo_marginale"] = marg
+    return out
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def generate_singularity_data():
     np.random.seed(42)
@@ -1956,7 +2018,7 @@ elif workspace == _('ws7'):
 # ==========================================
 elif workspace == _('ws8'):
     st.markdown(f"<h1>{_('ws8')}</h1>", unsafe_allow_html=True)
-    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread, shaping curva, spread weekend, price capture, volatilità realizzata, confronto anno-su-anno, analisi prezzi negativi, spread intra-day, picchi di prezzo, profilo settimanale tipo, curva di durata, concentrazione del costo di fornitura, simulazione demand shifting, finestre di acquisto ottimali, stagionalità mensile, monitoraggio del budget energetico annuale ed export CSV.")
+    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread, shaping curva, spread weekend, price capture, volatilità realizzata, confronto anno-su-anno, analisi prezzi negativi, spread intra-day, picchi di prezzo, profilo settimanale tipo, curva di durata, concentrazione del costo di fornitura, simulazione demand shifting, finestre di acquisto ottimali, stagionalità mensile, monitoraggio del budget energetico annuale, analisi di sensitività del costo al profilo di prelievo ed export CSV.")
 
     # ---------- Controlli: sorgente, periodo, impianti ----------
     st.subheader("⚙️ Sorgente dati & Timeframe")
@@ -2099,7 +2161,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -3447,6 +3509,56 @@ elif workspace == _('ws8'):
                 file_name=f"budget_tracker_{d0}_{d1}.csv",
                 mime="text/csv",
                 help="Scarica il dettaglio mensile: MWh, costo effettivo, €/MWh medio, budget mensile e scostamento.",
+            )
+
+    with tab26:
+        titolo_sp = edu("Sensitività profilo", "La SENSITIVITÀ DEL PROFILO misura quanto il costo di fornitura reagisce a variazioni della potenza prelevata in ciascuna fascia F1/F2/F3. Il costo è lineare nei MW, quindi variare la potenza di ±d% in una fascia cambia il costo di ±(costo della fascia × d%): esatto, non stimato. Il COSTO MARGINALE (€ per 1 MW aggiuntivo in fascia) dice dove costa di più aggiungere carico e dove tagliare i prelievi rende di più; la fascia più sensibile è quella dove un ±d% sposta più euro. A differenza del tab Shifting (che simula lo spostamento di energia tra fasce), qui si misura l'impatto di CAMBIARE il profilo: utile per negoziare contratti per fasce, valutare interventi di efficienza e decidere dove concentrare la flessibilità.")
+        st.markdown(f"**{titolo_sp}**: di quanto cambia il costo se la potenza in F1/F2/F3 varia di ±d%.", unsafe_allow_html=True)
+        st.caption("Profilo di prelievo: quello impostato nel tab 💰 Costo fornitura (MW per fascia F1/F2/F3).")
+
+        sp0, _ = st.columns([1, 2])
+        with sp0:
+            sp_d = st.slider("Variazione di potenza ±d% per fascia", min_value=1, max_value=50, value=10, step=1, key="sp_d",
+                             help="Percentuale di variazione applicata alla potenza di ciascuna fascia, una alla volta.")
+        sp = calcola_sensibilita_profilo(prezzi, mw_f1, mw_f2, mw_f3, sp_d)
+        if sp["fasce"].empty:
+            st.info("Imposta una potenza maggiore di zero in almeno una fascia (tab 💰 Costo fornitura) per l'analisi di sensitività.")
+        else:
+            s1, s2, s3, s4 = st.columns(4)
+            fs_txt = sp["fascia_piu_sensibile"]
+            fs = sp["fasce"].loc[sp["fasce"]["Fascia"] == fs_txt].iloc[0]
+            render_kpi(edu("Fascia più sensibile", "La fascia dove un ±d% di potenza sposta più euro: è il punto di leva del tuo profilo. Concentra qui interventi di efficienza e flessibilità."), f"{fs_txt}<br><small>±{fs['Δcosto +d% €']:,.2f} €</small>", s1)
+            for i, b in enumerate(("F1", "F2", "F3")):
+                mg = sp["costo_marginale"][b]
+                mg_txt = f"{mg:,.2f} €/MW" if mg is not None else "n.d."
+                render_kpi(edu(f"Costo marginale {b}", f"Costo di 1 MW aggiuntivo prelevato in fascia {b} sul periodo: quanto paghi per aggiungere (o risparmi togliendo) 1 MW in questa fascia."), mg_txt, [s2, s3, s4][i])
+            st.caption(f"💡 Costo base del periodo: {sp['costo_base']:,.2f} €. Il Δcosto è esatto: costo_fascia × ±{sp['delta_pct']:.0f}% (costo lineare nei MW).")
+
+            fig_sp = go.Figure()
+            fig_sp.add_trace(go.Bar(
+                x=sp["fasce"]["Δcosto +d% €"], y=sp["fasce"]["Fascia"],
+                orientation="h", name=f"+{sp['delta_pct']:.0f}% MW",
+                marker_color="#ef4444",
+                hovertemplate="Fascia: %{y}<br>Δcosto: +%{x:,.2f} €<extra></extra>"))
+            fig_sp.add_trace(go.Bar(
+                x=sp["fasce"]["Δcosto -d% €"], y=sp["fasce"]["Fascia"],
+                orientation="h", name=f"-{sp['delta_pct']:.0f}% MW",
+                marker_color="#22c55e",
+                hovertemplate="Fascia: %{y}<br>Δcosto: %{x:,.2f} €<extra></extra>"))
+            fig_sp.add_vline(x=0, line_color="#94a3b8", line_width=1)
+            fig_sp.update_layout(template="plotly_dark", height=360, barmode="relative",
+                                 title=f"Tornado di sensitività: Δcosto con ±{sp['delta_pct']:.0f}% di potenza per fascia (€)",
+                                 xaxis_title="Δcosto (€)", yaxis_title="Fascia")
+            st.plotly_chart(fig_sp, use_container_width=True)
+
+            st.markdown("**Dettaglio per fascia**")
+            st.dataframe(sp["fasce"], use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta sensitività profilo (CSV)",
+                sp["fasce"].to_csv(index=False).encode("utf-8"),
+                file_name=f"sensibilita_profilo_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica il dettaglio per fascia: costo, quota %, Δcosto con ±d% e costo marginale €/MW.",
             )
 
 # Footer
