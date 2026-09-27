@@ -1129,6 +1129,128 @@ def calcola_shifting_carico(prezzi, mw_f1, mw_f2, mw_f3, pct):
     out["mensile"] = pd.DataFrame(righe, columns=cols_m).reset_index(drop=True)
     return out
 
+def calcola_finestre_ottimali(prezzi, mw_f1, mw_f2, mw_f3, finestra_ore):
+    """Finestra di acquisto ottimale per giorno di calendario.
+
+    Per ogni giorno con almeno W ore valide (prezzo non-NaN), trova la finestra
+    di W ore consecutive che minimizza il costo di acquisto (prezzo x MW di
+    fascia del compratore): la finestra in cui concentrare gli acquisti
+    flessibili / i carichi spostabili. Lo sconto % misura quanto la finestra
+    ottimale batte la media giornaliera: il valore del 'timing' di acquisto.
+
+    NaN-safe. Giorni con MWh nulli vengono saltati. Sconto None quando la
+    media giornaliera non e' positiva (es. prezzi negativi dominanti). W viene
+    tagliato all'intervallo 1..24. A parita' di costo vince la finestra con
+    ora di inizio piu' bassa (argmin stabile = deterministico).
+
+    Ritorna dict con 'n_giorni', 'w' (finestra effettiva), 'prezzo_finestra'
+    (media €/MWh pesata sui MWh delle finestre, None se 0 MWh),
+    'sconto_pct' (media semplice degli sconti % giornalieri validi, None se
+    nessun giorno valido), 'mwh_finestra', 'ora_moda' (ora di inizio piu'
+    frequente, None se nessun giorno), 'giornaliero' (DataFrame 'Giorno',
+    'Finestra', 'Ora inizio', 'MWh finestra', '€/MWh finestra',
+    'Sconto vs media giorno %', 'Costo giorno (€)', 'MWh giorno'),
+    'mensile' (DataFrame 'Mese', 'Giorni', 'MWh finestra', '€/MWh finestra',
+    'Sconto medio %'), 'distrib_ore' (DataFrame 'Ora', 'Giorni')."""
+    w = int(np.clip(int(finestra_ore or 0), 1, 24))
+    cols_g = ["Giorno", "Finestra", "Ora inizio", "MWh finestra",
+              "€/MWh finestra", "Sconto vs media giorno %",
+              "Costo giorno (€)", "MWh giorno"]
+    cols_m = ["Mese", "Giorni", "MWh finestra", "€/MWh finestra",
+              "Sconto medio %"]
+    vuoto = {"n_giorni": 0, "w": w, "prezzo_finestra": None,
+             "sconto_pct": None, "mwh_finestra": 0.0, "ora_moda": None,
+             "giornaliero": pd.DataFrame(columns=cols_g),
+             "mensile": pd.DataFrame(columns=cols_m),
+             "distrib_ore": pd.DataFrame({"Ora": range(24),
+                                          "Giorni": [0] * 24})}
+    p = prezzi.astype(float).dropna()
+    out = dict(vuoto)
+    if p.empty:
+        return out
+    mw_map = {"F1": float(mw_f1), "F2": float(mw_f2), "F3": float(mw_f3)}
+    raw = []
+    for giorno, grp in p.groupby(p.index.floor("D")):
+        pv = grp.values
+        mw = grp.index.map(fascia_oraria).map(mw_map).to_numpy(dtype=float)
+        nn = len(grp)
+        if nn < w or (mw <= 0).all():
+            continue
+        costo_orario = pv * mw
+        kernel = np.ones(w)
+        costo_w = np.convolve(costo_orario, kernel, mode="valid")
+        mwh_w = np.convolve(mw, kernel, mode="valid")
+        start = int(np.argmin(costo_w))
+        mm = float(mwh_w[start])
+        if mm <= 0:
+            continue
+        cw = float(costo_w[start])
+        tot_mwh = float(mw.sum())
+        tot_costo = float(costo_orario.sum())
+        pm_win = cw / mm
+        pm_gio = tot_costo / tot_mwh if tot_mwh > 0 else None
+        sconto = ((1.0 - pm_win / pm_gio) * 100.0
+                  if (pm_gio is not None and pm_gio > 0) else None)
+        ts0 = grp.index[start]
+        ore_inizio = [int(x.hour) for x in grp.index[start:start + w]]
+        raw.append({"giorno": giorno, "inizio": int(ts0.hour),
+                    "finestra": f"{ore_inizio[0]:02d}:00-{ore_inizio[-1] + 1:02d}:00"
+                                if ore_inizio[-1] < 23
+                                else f"{ore_inizio[0]:02d}:00-24:00",
+                    "mwh_win": mm, "costo_win": cw, "sconto": sconto,
+                    "tot_mwh": tot_mwh, "tot_costo": tot_costo})
+    if not raw:
+        return out
+    righe = []
+    for r in raw:
+        pm_win = r["costo_win"] / r["mwh_win"]
+        pm_gio = r["tot_costo"] / r["tot_mwh"] if r["tot_mwh"] > 0 else None
+        righe.append({
+            "Giorno": r["giorno"].strftime("%Y-%m-%d"),
+            "Finestra": r["finestra"], "Ora inizio": r["inizio"],
+            "MWh finestra": round(r["mwh_win"], 1),
+            "€/MWh finestra": round(pm_win, 2),
+            "Sconto vs media giorno %": (round(r["sconto"], 1)
+                                         if r["sconto"] is not None else None),
+            "Costo giorno (€)": round(r["tot_costo"], 2),
+            "MWh giorno": round(r["tot_mwh"], 1)})
+    out["giornaliero"] = pd.DataFrame(righe, columns=cols_g).reset_index(drop=True)
+    tot_mwh_win = sum(r["mwh_win"] for r in raw)
+    tot_costo_win = sum(r["costo_win"] for r in raw)
+    out["n_giorni"] = len(raw)
+    out["mwh_finestra"] = round(tot_mwh_win, 1)
+    out["prezzo_finestra"] = (round(tot_costo_win / tot_mwh_win, 2)
+                              if tot_mwh_win > 0 else None)
+    sconti = [r["sconto"] for r in raw if r["sconto"] is not None]
+    out["sconto_pct"] = round(sum(sconti) / len(sconti), 1) if sconti else None
+    out["ora_moda"] = int(pd.Series([r["inizio"] for r in raw]).mode().iloc[0])
+    conteggi = pd.Series([r["inizio"] for r in raw]).value_counts()
+    out["distrib_ore"] = pd.DataFrame(
+        {"Ora": range(24),
+         "Giorni": [int(conteggi.get(h, 0)) for h in range(24)]})
+    mr = {}
+    for r in raw:
+        mese = r["giorno"].strftime("%Y-%m")
+        d = mr.setdefault(mese, {"giorni": 0, "mwh": 0.0, "costo": 0.0,
+                                 "sconti": []})
+        d["giorni"] += 1
+        d["mwh"] += r["mwh_win"]
+        d["costo"] += r["costo_win"]
+        if r["sconto"] is not None:
+            d["sconti"].append(r["sconto"])
+    righe_m = []
+    for mese in sorted(mr):
+        d = mr[mese]
+        righe_m.append({
+            "Mese": mese, "Giorni": d["giorni"],
+            "MWh finestra": round(d["mwh"], 1),
+            "€/MWh finestra": (round(d["costo"] / d["mwh"], 2)
+                               if d["mwh"] > 0 else None),
+            "Sconto medio %": (round(sum(d["sconti"]) / len(d["sconti"]), 1)
+                               if d["sconti"] else None)})
+    out["mensile"] = pd.DataFrame(righe_m, columns=cols_m).reset_index(drop=True)
+    return out
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def generate_singularity_data():
     np.random.seed(42)
@@ -1678,7 +1800,7 @@ elif workspace == _('ws7'):
 # ==========================================
 elif workspace == _('ws8'):
     st.markdown(f"<h1>{_('ws8')}</h1>", unsafe_allow_html=True)
-    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread, shaping curva, spread weekend, price capture, volatilità realizzata, confronto anno-su-anno, analisi prezzi negativi, spread intra-day, picchi di prezzo, profilo settimanale tipo, curva di durata, concentrazione del costo di fornitura, simulazione demand shifting ed export CSV.")
+    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread, shaping curva, spread weekend, price capture, volatilità realizzata, confronto anno-su-anno, analisi prezzi negativi, spread intra-day, picchi di prezzo, profilo settimanale tipo, curva di durata, concentrazione del costo di fornitura, simulazione demand shifting, finestre di acquisto ottimali ed export CSV.")
 
     # ---------- Controlli: sorgente, periodo, impianti ----------
     st.subheader("⚙️ Sorgente dati & Timeframe")
@@ -1821,7 +1943,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -2983,6 +3105,69 @@ elif workspace == _('ws8'):
                 file_name=f"shifting_carico_{d0}_{d1}.csv",
                 mime="text/csv",
                 help="Scarica il dettaglio mensile: MWh spostati, costo prima/dopo e risparmio.",
+            )
+
+    with tab23:
+        titolo_fo = edu("Finestre di acquisto ottimali", "Il TIMING DI ACQUISTO è il valore di comprare (o consumare in modo flessibile) nelle ore più economiche: per ogni giorno il tab trova la finestra di W ore CONSECUTIVE che minimizza il costo di acquisto (prezzo × MW di fascia). Lo sconto % misura quanto quella finestra batte la media giornaliera: è il margine teorico di una strategia 'buy-the-dip' oraria per carichi flessibili (ricarica, pompaggi, batch). A differenza del tab Shifting (che SIMULA lo spostamento di energia), qui si MISURA il vantaggio di prezzo di ogni giorno: dove e quando conviene comprare.")
+        st.markdown(f"**{titolo_fo}**: per ogni giorno, la finestra di ore consecutive più economica per acquistare.", unsafe_allow_html=True)
+
+        fo1, fo2, fo3, fo4 = st.columns(4)
+        with fo1:
+            fo_f1 = st.number_input("Potenza in F1 (MW)", min_value=0.0, value=1.0, step=0.5, key="fo_f1",
+                                    help="Ore di punta: lun–ven 08:00–19:00.")
+        with fo2:
+            fo_f2 = st.number_input("Potenza in F2 (MW)", min_value=0.0, value=1.0, step=0.5, key="fo_f2",
+                                    help="Ore intermedie: lun–ven 07:00–08:00 e 19:00–23:00, sab 07:00–23:00.")
+        with fo3:
+            fo_f3 = st.number_input("Potenza in F3 (MW)", min_value=0.0, value=1.0, step=0.5, key="fo_f3",
+                                    help="Ore fuori punta: notti, domeniche e festivi.")
+        with fo4:
+            fo_w = st.slider("Durata finestra (ore consecutive)", min_value=1, max_value=12, value=4, step=1, key="fo_w",
+                             help="Numero di ore consecutive della finestra di acquisto ottimale.")
+        fo = calcola_finestre_ottimali(prezzi, fo_f1, fo_f2, fo_f3, fo_w)
+        if fo["n_giorni"] == 0:
+            st.info("Imposta una potenza maggiore di zero in almeno una fascia per trovare le finestre ottimali.")
+        else:
+            f1, f2, f3, f4 = st.columns(4)
+            pfin = f"{fo['prezzo_finestra']:,.2f} €/MWh" if fo["prezzo_finestra"] is not None else "n.d."
+            render_kpi(edu("Prezzo medio in finestra", "Media €/MWh pesata sui MWh delle finestre ottimali di tutti i giorni: il prezzo che pagheresti comprando solo nelle finestre migliori."), pfin, f1)
+            sc = f"{fo['sconto_pct']:.1f} %" if fo["sconto_pct"] is not None else "n.d."
+            render_kpi(edu("Sconto medio vs media giornaliera", "Media degli sconti % giornalieri: quanto la finestra ottimale batte in media il prezzo medio del giorno. Il margine teorico del timing di acquisto."), sc, f2)
+            render_kpi(edu("MWh in finestra", "Energia totale coperta dalle finestre ottimali nel periodo: i MWh su cui si applica lo sconto."), f"{fo['mwh_finestra']:,.1f} MWh<br><small>{fo['n_giorni']} giorni × {fo['w']} h</small>", f3)
+            om = f"{fo['ora_moda']:02d}:00" if fo["ora_moda"] is not None else "n.d."
+            render_kpi(edu("Ora di inizio più frequente", "L'ora in cui la finestra ottimale inizia più spesso: l'abitudine di acquisto da fissare in procedura."), om, f4)
+            st.caption("💡 Lo sconto è 'n.d.' nei giorni con media giornaliera ≤ 0 (prezzi negativi dominanti): la finestra resta comunque quella a costo minimo.")
+
+            fig_fo = go.Figure()
+            fig_fo.add_trace(go.Bar(
+                x=fo["distrib_ore"]["Ora"], y=fo["distrib_ore"]["Giorni"],
+                name="Giorni", marker_color="#3b82f6",
+                hovertemplate="Ora inizio: %{x}:00<br>Giorni: %{y}<extra></extra>"))
+            fig_fo.update_layout(template="plotly_dark", height=360,
+                                 title=f"Distribuzione ora di inizio della finestra ottimale ({fo['w']} h)",
+                                 xaxis_title="Ora di inizio", yaxis_title="Giorni",
+                                 xaxis=dict(tickmode="linear", dtick=2))
+            st.plotly_chart(fig_fo, use_container_width=True)
+
+            fig_fom = go.Figure()
+            fig_fom.add_trace(go.Bar(
+                x=fo["mensile"]["Mese"], y=fo["mensile"]["Sconto medio %"],
+                name="Sconto %", marker_color="#22c55e",
+                hovertemplate="Mese: %{x}<br>Sconto medio: %{y:.1f} %<br>€/MWh finestra: %{customdata:,.2f}<extra></extra>",
+                customdata=fo["mensile"]["€/MWh finestra"].fillna(0)))
+            fig_fom.update_layout(template="plotly_dark", height=360,
+                                  title="Sconto medio mensile vs media giornaliera",
+                                  xaxis_title="Mese", yaxis_title="Sconto medio (%)")
+            st.plotly_chart(fig_fom, use_container_width=True)
+
+            st.markdown("**Dettaglio giornaliero**")
+            st.dataframe(fo["giornaliero"], use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta finestre di acquisto (CSV)",
+                fo["giornaliero"].to_csv(index=False).encode("utf-8"),
+                file_name=f"finestre_acquisto_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica il dettaglio giornaliero: finestra ottimale, €/MWh, sconto vs media giorno.",
             )
 
 # Footer
