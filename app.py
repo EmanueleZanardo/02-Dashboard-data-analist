@@ -1650,6 +1650,118 @@ def calcola_top_giorni_costo(prezzi, mw_f1, mw_f2, mw_f3, top_n=10):
     return out
 
 
+def calcola_fasce_ottimali(prezzi, n_bande=3):
+    """Fasce tariffarie OTTIMALI derivate dai dati: raggruppa le 24 ore in
+    n_bande fasce che minimizzano la dispersione di prezzo dentro ogni fascia.
+
+    A differenza delle fasce AEEGSI F1/F2/F3 (tab3, orari fissi per regolamento)
+    e di Base/Peak/Offpeak EPEX (tab7, definizioni di mercato), qui le fasce
+    nascono dal PROFILO ORARIO MEDIO osservato: serve a disegnare una tariffa
+    time-of-use su misura o a decidere in quali ore conviene concentrare i
+    carichi flessibili.
+
+    Algoritmo: k-means 1-D deterministico (nessun seed casuale) sui prezzi medi
+    orari. Centroidi iniziali sui quantili ordinati, iterazioni di Lloyd fino a
+    stabilita' (max 100). n_bande viene clamped a [2, n_ore_con_dati].
+
+    NaN-safe: le ore senza dati vengono escluse dal clustering (Banda = None).
+    Serie vuota o un solo valore distinto -> KPI a None e DataFrame con le
+    colonne giuste ma vuoti (o con una sola banda se tutto e' piatto).
+
+    Ritorna dict con 'n_bande' (effettive), 'n_ore',
+    'varianza_spiegata_pct' (1 - within_ss/total_ss: quota della variabilita'
+    oraria catturata dalle fasce, None se totale_ss <= 0),
+    'std_within_media' (std media ponderata dentro le fasce),
+    'spread_bande' (differenza tra prezzo medio della fascia piu' cara e
+    quella piu' economica, None con < 2 bande),
+    'profilo' (DataFrame: Ora, Prezzo medio €/MWh, Banda) e
+    'bande' (DataFrame: Banda, N. ore, Ore, Prezzo medio €/MWh,
+    Scostamento vs media %)."""
+    cols_p = ["Ora", "Prezzo medio €/MWh", "Banda"]
+    cols_b = ["Banda", "N. ore", "Ore", "Prezzo medio €/MWh", "Scostamento vs media %"]
+    vuoto = {"n_bande": 0, "n_ore": 0, "varianza_spiegata_pct": None,
+             "std_within_media": None, "spread_bande": None,
+             "profilo": pd.DataFrame(columns=cols_p),
+             "bande": pd.DataFrame(columns=cols_b)}
+    out = dict(vuoto)
+    p = prezzi.astype(float).dropna()
+    if p.empty:
+        return out
+    idx = p.index
+    idxn = idx.tz_localize(None) if idx.tz is not None else idx
+    ore = np.array([t.hour for t in idxn])
+    vals = p.to_numpy(dtype=float)
+    h_uni = np.arange(24)
+    profilo = pd.Series(index=h_uni, dtype=float)
+    for h in h_uni:
+        m = vals[ore == h]
+        if len(m):
+            profilo[h] = float(m.mean())
+    prof = profilo.dropna()
+    n_ore = len(prof)
+    if n_ore == 0:
+        return out
+    x = prof.to_numpy(dtype=float)
+    ore_v = prof.index.to_numpy(dtype=int)
+    n_distinti = len(np.unique(x))
+    k = max(1, min(int(n_bande or 3), n_ore, n_distinti))
+    out["n_ore"] = n_ore
+    # k-means 1-D deterministico: centroidi iniziali sui quantili dei dati ordinati
+    xs = np.sort(x)
+    pos = np.linspace(0, len(xs) - 1, k)
+    cent = np.array([xs[int(round(q))] for q in pos], dtype=float)
+    labels = np.zeros(len(x), dtype=int)
+    for _ in range(100):
+        d = np.abs(x[:, None] - cent[None, :])
+        new_labels = d.argmin(axis=1)
+        new_cent = cent.copy()
+        for j in range(k):
+            mem = x[new_labels == j]
+            if len(mem):
+                new_cent[j] = mem.mean()
+        if np.array_equal(new_labels, labels) and np.allclose(new_cent, cent):
+            labels = new_labels
+            cent = new_cent
+            break
+        labels, cent = new_labels, new_cent
+    # riordina le bande per prezzo crescente (B1 = piu' economica)
+    ordine = np.argsort(cent)
+    mappa = {old: new for new, old in enumerate(ordine)}
+    labels = np.array([mappa[l] for l in labels])
+    cent = cent[ordine]
+    total_ss = float(((x - x.mean()) ** 2).sum())
+    within_ss = float(sum(((x[labels == j] - cent[j]) ** 2).sum() for j in range(k)))
+    media = float(x.mean())
+    righe_p = [{"Ora": int(h), "Prezzo medio €/MWh": round(float(v), 2),
+                "Banda": f"B{b + 1}"} for h, v, b in zip(ore_v, x, labels)]
+    df_p = pd.DataFrame(righe_p).sort_values("Ora").reset_index(drop=True)
+    righe_b = []
+    for j in range(k):
+        mem = x[labels == j]
+        ore_b = sorted(int(h) for h in ore_v[labels == j])
+        righe_b.append({
+            "Banda": f"B{j + 1}",
+            "N. ore": len(mem),
+            "Ore": ", ".join(f"{h:02d}" for h in ore_b),
+            "Prezzo medio €/MWh": round(float(cent[j]), 2),
+            "Scostamento vs media %": (round((float(cent[j]) / media - 1) * 100, 1)
+                                       if media else None),
+        })
+    df_b = pd.DataFrame(righe_b)
+    std_w = float(np.sqrt(sum(((x[labels == j] - cent[j]) ** 2).sum()
+                              for j in range(k)) / len(x))) if len(x) else None
+    out.update({
+        "n_bande": k,
+        "varianza_spiegata_pct": (round((1 - within_ss / total_ss) * 100, 1)
+                                  if total_ss > 0 else None),
+        "std_within_media": round(std_w, 2) if std_w is not None else None,
+        "spread_bande": (round(float(cent[-1] - cent[0]), 2) if k >= 2 else None),
+        "profilo": df_p,
+        "bande": df_b,
+    })
+    return out
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def generate_singularity_data():
     np.random.seed(42)
@@ -2199,7 +2311,7 @@ elif workspace == _('ws7'):
 # ==========================================
 elif workspace == _('ws8'):
     st.markdown(f"<h1>{_('ws8')}</h1>", unsafe_allow_html=True)
-    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread, shaping curva, spread weekend, price capture, volatilità realizzata, confronto anno-su-anno, analisi prezzi negativi, spread intra-day, picchi di prezzo, profilo settimanale tipo, curva di durata, concentrazione del costo di fornitura, simulazione demand shifting, finestre di acquisto ottimali, stagionalità mensile, monitoraggio del budget energetico annuale, analisi di sensitività del costo al profilo di prelievo, Value-at-Risk Monte Carlo del costo di fornitura, classifica dei giorni di calendario più costosi per il profilo di prelievo ed export CSV.")
+    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread, shaping curva, spread weekend, price capture, volatilità realizzata, confronto anno-su-anno, analisi prezzi negativi, spread intra-day, picchi di prezzo, profilo settimanale tipo, curva di durata, concentrazione del costo di fornitura, simulazione demand shifting, finestre di acquisto ottimali, stagionalità mensile, monitoraggio del budget energetico annuale, analisi di sensitività del costo al profilo di prelievo, Value-at-Risk Monte Carlo del costo di fornitura, classifica dei giorni di calendario più costosi per il profilo di prelievo, fasce tariffarie orarie ottimali derivate dal profilo di prezzo osservato ed export CSV.")
 
     # ---------- Controlli: sorgente, periodo, impianti ----------
     st.subheader("⚙️ Sorgente dati & Timeframe")
@@ -2342,7 +2454,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -3846,6 +3958,53 @@ elif workspace == _('ws8'):
                 file_name=f"top_giorni_costo_{d0}_{d1}.csv",
                 mime="text/csv",
                 help="Scarica la serie giornaliera ordinata per costo: data, giorno della settimana, MWh, costo, prezzo medio e fascia dominante.",
+            )
+
+    with tab29:
+        titolo_fo = edu("Fasce tariffarie ottimali", "Le fasce F1/F2/F3 sono fissate dal regolamento e Base/Peak/Offpeak dal mercato: qui le fasce nascono DAI DATI. Un k-means 1-D deterministico (nessun caso, risultati riproducibili) raggruppa le 24 ore in N fasce che minimizzano la dispersione di prezzo dentro ogni fascia, usando il profilo orario medio del periodo selezionato. Serve a disegnare una tariffa time-of-use su misura, a quotare contratti con fasce personalizzate e a decidere in quali ore conviene concentrare i carichi flessibili: la VARIANZA SPIEGATA dice quanta della variabilità oraria le fasce catturano (più alta = fasce più rappresentative).")
+        st.markdown(f"**{titolo_fo}**: raggruppa le 24 ore in N fasce omogenee per prezzo, derivate dal profilo osservato.", unsafe_allow_html=True)
+
+        fo_nb = st.slider("Numero di fasce", min_value=2, max_value=5, value=3, key="fo_nb",
+                          help="In quante fasce dividere le 24 ore. 3 è il default (analogo alle F1/F2/F3 ma con orari ottimizzati dai dati).")
+        fo = calcola_fasce_ottimali(prezzi, n_bande=fo_nb)
+        if fo["n_bande"] == 0:
+            st.info("Nessun dato di prezzo nel periodo selezionato: impossibile calcolare le fasce ottimali.")
+        else:
+            f1, f2, f3, f4 = st.columns(4)
+            sp_txt = f"{fo['spread_bande']:,.2f} €/MWh" if fo["spread_bande"] is not None else "n.d."
+            render_kpi(edu("Spread fascia cara − economica", "Differenza tra il prezzo medio della fascia più cara e quella più economica: l'incentivo massimo a spostare i consumi nelle ore della fascia B1."), sp_txt, f1)
+            vs_txt = f"{fo['varianza_spiegata_pct']:.1f} %" if fo["varianza_spiegata_pct"] is not None else "n.d."
+            render_kpi(edu("Varianza oraria spiegata", "Quota della variabilità del profilo orario catturata dalle fasce (1 − dispersione interna / dispersione totale). Più è alta, più le fasce rappresentano bene il prezzo."), vs_txt, f2)
+            sw_txt = f"{fo['std_within_media']:,.2f} €/MWh" if fo["std_within_media"] is not None else "n.d."
+            render_kpi(edu("Dispersione dentro le fasce", "Deviazione standard media del prezzo dentro le fasce: misura l'omogeneità. Più è bassa, più ogni fascia ha un prezzo 'piatto'."), sw_txt, f3)
+            b1 = fo["bande"].iloc[0]
+            render_kpi(edu("Fascia più economica", "La fascia con il prezzo medio più basso: le ore in cui conviene concentrare i carichi flessibili."), f"{b1['Banda']}<br><small>{b1['Prezzo medio €/MWh']:,.2f} €/MWh · {b1['N. ore']} ore</small>", f4)
+            if fo["n_bande"] < fo_nb:
+                st.caption(f"⚠️ Solo {fo['n_bande']} fasce effettive: il profilo ha meno valori distinti del numero di fasce richiesto.")
+
+            colori = ["#22c55e", "#eab308", "#f97316", "#ef4444", "#a855f7"]
+            prof = fo["profilo"]
+            fig_fo = go.Figure()
+            for j, b in enumerate(fo["bande"]["Banda"]):
+                ore_b = prof.loc[prof["Banda"] == b]
+                fig_fo.add_trace(go.Bar(
+                    x=ore_b["Ora"], y=ore_b["Prezzo medio €/MWh"], name=b,
+                    marker_color=colori[j % len(colori)],
+                    hovertemplate="Ora: %{x}:00<br>Prezzo medio: %{y:,.2f} €/MWh<br>Fascia: " + b + "<extra></extra>"))
+            fig_fo.update_layout(template="plotly_dark", height=380, barmode="group",
+                                 title=f"Profilo orario medio per fascia ottimale ({fo['n_ore']} ore con dati)",
+                                 xaxis_title="Ora", yaxis_title="Prezzo medio (€/MWh)",
+                                 xaxis=dict(tickmode="linear", dtick=1))
+            st.plotly_chart(fig_fo, use_container_width=True)
+
+            st.markdown("**Dettaglio fasce**")
+            st.dataframe(fo["bande"], use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta fasce ottimali (CSV)",
+                fo["bande"].to_csv(index=False).encode("utf-8"),
+                file_name=f"fasce_ottimali_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica le fasce: ore assegnate, prezzo medio e scostamento dalla media oraria.",
             )
 
 # Footer
