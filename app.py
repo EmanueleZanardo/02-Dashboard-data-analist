@@ -2059,6 +2059,76 @@ def calcola_forecast_prezzo(prezzi, n_settimane=8, backtest_settimane=4):
     return out
 
 
+def calcola_rampe_prezzo(prezzi, soglia=10.0, top_n=50):
+    """Rampa massima ora-su-ora del prezzo day-ahead.
+
+    La 'rampa' e' la variazione del prezzo tra due ore consecutive: il segnale
+    piu' diretto di quanto il mercato possa muoversi in fretta. Interessa a
+    chi opera intraday (quanto puo' guadagnare/perdere una flessibilita'
+    spostabile di un'ora), a chi dimensiona gli alert e a chi deve gestire il
+    rischio di un profilo di prelievo concentrato in poche ore.
+
+    Il calcolo usa le differenze prime della serie ordinata per tempo, ma
+    scarta le coppie con distanza temporale > 120 minuti (buchi nei dati,
+    cambi DST): senza questo filtro un buco di 6 ore sembrerebbe una rampa
+    estrema. I duplicati di timestamp vengono scartati (primo valore).
+
+    prezzi: Series oraria in €/MWh con indice datetime (i NaN vengono scartati).
+    soglia: |delta| minimo (€/MWh) perche' una variazione conti come 'evento'
+            (default 10.0). top_n: quanti eventi mostrare nella tabella.
+    Ritorna dict con 'rampa_max_up' (max delta, None se non valutabile),
+    'rampa_max_down' (min delta), 'media_abs' (media di |delta|),
+    'n_up'/'n_down' (eventi oltre soglia), 'df_eventi' (Data e ora, Delta
+    (€/MWh), Direzione, Prezzo prima/dopo), tutto deterministico a parita'
+    di input. Serie con < 2 ore consecutive ravvicinate -> None e df vuoto."""
+    cols_ev = ["Data e ora", "Delta (€/MWh)", "Direzione",
+               "Prezzo prima (€/MWh)", "Prezzo dopo (€/MWh)"]
+    vuoto = {"rampa_max_up": None, "rampa_max_down": None, "media_abs": None,
+             "n_up": 0, "n_down": 0,
+             "df_eventi": pd.DataFrame(columns=cols_ev)}
+    try:
+        p = prezzi.astype(float).dropna()
+        p = p[~p.index.duplicated(keep="first")].sort_index()
+    except Exception:
+        return dict(vuoto)
+    if len(p) < 2:
+        return dict(vuoto)
+    try:
+        soglia = abs(float(soglia))
+        top_n = max(1, int(top_n))
+    except Exception:
+        soglia, top_n = 10.0, 50
+    try:
+        delta_t = p.index.to_series().diff().dt.total_seconds() / 60.0
+        d = p.diff()[delta_t.between(1, 120, inclusive="both").fillna(False)]
+    except Exception:
+        return dict(vuoto)
+    if len(d) == 0:
+        return dict(vuoto)
+    v = d.to_numpy(dtype=float)
+    out = dict(vuoto)
+    out["media_abs"] = round(float(np.abs(v).mean()), 2)
+    out["rampa_max_up"] = round(float(v.max()), 2)
+    out["rampa_max_down"] = round(float(v.min()), 2)
+    out["n_up"] = int((v >= soglia).sum())
+    out["n_down"] = int((v <= -soglia).sum())
+    ev = d[np.abs(d) >= soglia].sort_values(key=np.abs, ascending=False).head(top_n)
+    righe = []
+    for ts, dv in ev.items():
+        try:
+            dopo = float(p.loc[ts])
+            prima = float(p.iloc[p.index.get_loc(ts) - 1])
+        except Exception:
+            prima, dopo = float("nan"), float("nan")
+        righe.append({"Data e ora": ts.strftime("%Y-%m-%d %H:%M"),
+                      "Delta (€/MWh)": round(float(dv), 2),
+                      "Direzione": "▲ rialzo" if dv > 0 else "▼ ribasso",
+                      "Prezzo prima (€/MWh)": round(prima, 2),
+                      "Prezzo dopo (€/MWh)": round(dopo, 2)})
+    out["df_eventi"] = pd.DataFrame(righe, columns=cols_ev)
+    return out
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def generate_singularity_data():
     np.random.seed(42)
@@ -2751,7 +2821,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -4521,6 +4591,56 @@ elif workspace == _('ws8'):
                 st.dataframe(fc["df_backtest"], use_container_width=True, hide_index=True)
                 if fc["rmse"] is not None:
                     st.caption(f"RMSE medio backtest: {fc['rmse']:,.2f} €/MWh. Un MAE molto inferiore alla volatilità oraria del periodo indica un metodo utile; un bias sistematico va sottratto dalla previsione prima dell'uso.")
+
+    with tab33:
+        titolo_ra = edu("Rampa massima ora-su-ora", "La 'rampa' è la variazione del prezzo tra due ore consecutive: misura quanto in fretta il mercato può muoversi. Un analista la usa per: (1) dimensionare le flessibilità intraday — se sposti un consumo di un'ora, quanto puoi guadagnare o perdere? (2) tarare gli alert di prezzo; (3) capire il rischio di un profilo di prelievo concentrato in poche ore. Le coppie con buchi > 2 ore nei dati (e i cambi DST) sono escluse, così un buco non viene scambiato per una rampa estrema.")
+        st.markdown(f"**{titolo_ra}**: le variazioni più brusche del prezzo tra un'ora e la successiva nel periodo selezionato.", unsafe_allow_html=True)
+
+        r1, r2 = st.columns(2)
+        with r1:
+            ra_soglia = st.slider("Soglia evento (€/MWh)", min_value=1.0, max_value=50.0, value=10.0, step=1.0, key="ra_soglia",
+                                  help="Solo le variazioni con |delta| sopra questa soglia compaiono nella tabella eventi e nel conteggio.")
+        with r2:
+            ra_n = st.slider("N. eventi in tabella", min_value=5, max_value=50, value=15, key="ra_n",
+                             help="Quante delle rampe più estreme (per |delta|) mostrare in tabella e grafico.")
+
+        ra = calcola_rampe_prezzo(prezzi, soglia=ra_soglia, top_n=ra_n)
+        if ra["rampa_max_up"] is None:
+            st.warning("Dati insufficienti: servono almeno due ore consecutive con dati per calcolare le rampe.")
+        else:
+            df_ra = ra["df_eventi"]
+            c1, c2, c3, c4 = st.columns(4)
+            render_kpi(edu("Rampa max al rialzo", "Il salto positivo più grande tra due ore consecutive: il prezzo è salito di questo importo in un'ora sola."), f"+{ra['rampa_max_up']:,.2f} €/MWh", c1)
+            render_kpi(edu("Rampa max al ribasso", "Il crollo più grande tra due ore consecutive: il prezzo è sceso di questo importo in un'ora sola."), f"{ra['rampa_max_down']:,.2f} €/MWh", c2)
+            render_kpi(edu("Rampa media |Δ|", "Variazione assoluta media tra ore consecutive: il 'rumore di fondo' del mercato ora-su-ora."), f"{ra['media_abs']:,.2f} €/MWh", c3)
+            render_kpi(edu("Eventi oltre soglia", "Quante rampe superano la soglia impostata, divise tra rialzi e ribassi."), f"{ra['n_up']} ▲ / {ra['n_down']} ▼", c4)
+
+            if len(df_ra) > 0:
+                ord_ra = df_ra.sort_values("Delta (€/MWh)").reset_index(drop=True)
+                colori_ra = ["#ef4444" if d > 0 else "#22c55e" for d in ord_ra["Delta (€/MWh)"]]
+                fig_ra = go.Figure()
+                fig_ra.add_trace(go.Bar(
+                    x=ord_ra["Delta (€/MWh)"], y=ord_ra["Data e ora"], orientation="h",
+                    name="Rampa (€/MWh)", marker_color=colori_ra,
+                    hovertemplate="Data e ora: %{y}<br>Delta: %{x:+.2f} €/MWh<extra></extra>"))
+                fig_ra.update_layout(template="plotly_dark", height=max(320, 60 * len(ord_ra) + 80),
+                                     title="Rampe più estreme nel periodo",
+                                     xaxis_title="Variazione (€/MWh, + = rialzo, − = ribasso)",
+                                     yaxis_title="Data e ora")
+                st.plotly_chart(fig_ra, use_container_width=True)
+                st.caption("Rosso = rialzo improvviso (prezzo salito in un'ora), verde = crollo improvviso.")
+
+                st.markdown("**Tabella eventi**")
+                st.dataframe(df_ra, use_container_width=True, hide_index=True)
+                st.download_button(
+                    "⬇️ Esporta rampe (CSV)",
+                    df_ra.to_csv(index=False).encode("utf-8"),
+                    file_name=f"rampe_prezzo_{d0}_{d1}.csv",
+                    mime="text/csv",
+                    help="Scarica data e ora, delta in €/MWh, direzione e prezzi prima/dopo per ogni evento oltre soglia.",
+                )
+            else:
+                st.info("Nessuna rampa oltre la soglia nel periodo: abbassa la soglia per vederle.")
 
 # Footer
 st.markdown("---")
