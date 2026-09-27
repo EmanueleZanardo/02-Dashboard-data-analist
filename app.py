@@ -205,8 +205,14 @@ def calcola_base_peak_mensile(prezzi):
     Ritorna un DataFrame con un rigo per mese: Mese, Base, Peak, Offpeak, Spread P-O, Spread %, Ore peak.
     Valori NaN-safe: mesi senza ore peak/offpeak riportano None nelle colonne derivate.
     Il raggruppamento mensile usa l'indice reso tz-naive per evitare il
-    UserWarning 'Converting to PeriodArray/Index representation will drop timezone information'."""
+    UserWarning 'Converting to PeriodArray/Index representation will drop timezone information'.
+    Serie vuota o con indice non datetime (es. nessun dato nel periodo) -> DataFrame
+    vuoto con le colonne giuste, senza AttributeError su idx.tz/idx.weekday."""
+    colonne = ["Mese", "Base (€/MWh)", "Peak (€/MWh)", "Offpeak (€/MWh)",
+               "Spread P-O (€/MWh)", "Spread %", "Ore peak"]
     idx = prezzi.index
+    if not isinstance(idx, pd.DatetimeIndex) or len(prezzi) == 0:
+        return pd.DataFrame(columns=colonne)
     mesi = (idx.tz_localize(None) if idx.tz is not None else idx).to_period("M")
     is_peak = (idx.weekday < 5) & (idx.hour >= 8) & (idx.hour < 20)
     df = pd.DataFrame({"prezzo": prezzi.values.astype(float), "peak": is_peak}, index=idx)
@@ -228,7 +234,7 @@ def calcola_base_peak_mensile(prezzi):
                          else round(spread / off_mean * 100, 1)),
             "Ore peak": int(len(pk)),
         })
-    return pd.DataFrame(righe)
+    return pd.DataFrame(righe, columns=colonne)
 
 def calcola_costo_fornitura(prezzi, mw_f1, mw_f2, mw_f3):
     """Costo di una fornitura con potenza costante per fascia oraria F1/F2/F3 (AEEGSI).
@@ -1762,6 +1768,78 @@ def calcola_fasce_ottimali(prezzi, n_bande=3):
     return out
 
 
+def calcola_autocorrelazione(prezzi, max_lag=168):
+    """Autocorrelazione del prezzo spot orario ai lag 1..max_lag.
+
+    Misura quanto il prezzo di oggi 'ricorda' il prezzo delle ore precedenti:
+    e' la firma statistica della persistenza degli shock di prezzo e della
+    stagionalita'. ACF(1) alta = prezzo appiccicoso (mean-reversion lenta);
+    picchi a lag 24/168 = stagionalita' giornaliera/settimanale dominante;
+    ACF che decade in fretta = mercato imprevedibile ora per ora.
+
+    Metodo: correlazione di Pearson su coppie sovrapposte (vals[:-lag], vals[lag:]),
+    NaN-safe (i NaN vengono scartati prima del calcolo). La significativita'
+    usa la banda 95% classica +/- 1.96/sqrt(n_coppie) per ogni lag. lag_decay e'
+    il primo lag in cui |ACF| scende sotto la banda (la 'memoria' del mercato
+    in ore); None se l'autocorrelazione resta significativa oltre max_lag.
+
+    Serie vuota, < 3 punti validi o prezzo perfettamente piatto (std = 0) ->
+    KPI a None e DataFrame con le colonne giuste ma vuoto. max_lag viene
+    clamped a [1, n - 1].
+
+    Ritorna dict con 'max_lag' (effettivo), 'n' (punti validi),
+    'acf_lag1', 'acf_lag24', 'acf_lag168' (None se lag fuori range),
+    'lag_decay' (int o None) e 'df' (DataFrame: Lag (ore), ACF, Banda 95%,
+    Significativo 95%)."""
+    cols = ["Lag (ore)", "ACF", "Banda 95%", "Significativo 95%"]
+    vuoto = {"max_lag": 0, "n": 0, "acf_lag1": None, "acf_lag24": None,
+             "acf_lag168": None, "lag_decay": None,
+             "df": pd.DataFrame(columns=cols)}
+    try:
+        p = prezzi.astype(float).dropna()
+    except Exception:
+        return dict(vuoto)
+    n = len(p)
+    try:
+        ml = int(max_lag)
+    except (TypeError, ValueError):
+        ml = 0
+    if n < 3 or ml < 1:
+        return dict(vuoto)
+    ml = min(ml, n - 1)
+    vals = p.to_numpy(dtype=float)
+    if float(np.std(vals)) == 0.0:
+        return dict(vuoto, n=n, max_lag=ml)
+    righe = []
+    decay = None
+    for lag in range(1, ml + 1):
+        x, y = vals[:-lag], vals[lag:]
+        n_c = len(x)
+        band = 1.96 / np.sqrt(n_c) if n_c > 0 else float("nan")
+        if n_c >= 2 and float(np.std(x)) > 0 and float(np.std(y)) > 0:
+            acf = float(np.corrcoef(x, y)[0, 1])
+        else:
+            acf = float("nan")
+        sig = (not np.isnan(acf)) and abs(acf) > band
+        if decay is None and not np.isnan(acf) and abs(acf) < band:
+            decay = lag
+        righe.append({
+            "Lag (ore)": lag,
+            "ACF": None if np.isnan(acf) else round(acf, 4),
+            "Banda 95%": None if np.isnan(band) else round(band, 4),
+            "Significativo 95%": "Sì" if sig else "No",
+        })
+    df = pd.DataFrame(righe, columns=cols)
+
+    def _at(lag):
+        r = df.loc[df["Lag (ore)"] == lag, "ACF"]
+        return float(r.iloc[0]) if (len(r) and r.iloc[0] is not None) else None
+
+    return {"max_lag": ml, "n": n,
+            "acf_lag1": _at(1), "acf_lag24": _at(24), "acf_lag168": _at(168),
+            "lag_decay": decay, "df": df}
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def generate_singularity_data():
     np.random.seed(42)
@@ -2311,7 +2389,7 @@ elif workspace == _('ws7'):
 # ==========================================
 elif workspace == _('ws8'):
     st.markdown(f"<h1>{_('ws8')}</h1>", unsafe_allow_html=True)
-    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread, shaping curva, spread weekend, price capture, volatilità realizzata, confronto anno-su-anno, analisi prezzi negativi, spread intra-day, picchi di prezzo, profilo settimanale tipo, curva di durata, concentrazione del costo di fornitura, simulazione demand shifting, finestre di acquisto ottimali, stagionalità mensile, monitoraggio del budget energetico annuale, analisi di sensitività del costo al profilo di prelievo, Value-at-Risk Monte Carlo del costo di fornitura, classifica dei giorni di calendario più costosi per il profilo di prelievo, fasce tariffarie orarie ottimali derivate dal profilo di prezzo osservato ed export CSV.")
+    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread, shaping curva, spread weekend, price capture, volatilità realizzata, confronto anno-su-anno, analisi prezzi negativi, spread intra-day, picchi di prezzo, profilo settimanale tipo, curva di durata, concentrazione del costo di fornitura, simulazione demand shifting, finestre di acquisto ottimali, stagionalità mensile, monitoraggio del budget energetico annuale, analisi di sensitività del costo al profilo di prelievo, Value-at-Risk Monte Carlo del costo di fornitura, classifica dei giorni di calendario più costosi per il profilo di prelievo, fasce tariffarie orarie ottimali derivate dal profilo di prezzo osservato, autocorrelazione del prezzo spot (persistenza e stagionalità) ed export CSV.")
 
     # ---------- Controlli: sorgente, periodo, impianti ----------
     st.subheader("⚙️ Sorgente dati & Timeframe")
@@ -2454,7 +2532,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -4005,6 +4083,65 @@ elif workspace == _('ws8'):
                 file_name=f"fasce_ottimali_{d0}_{d1}.csv",
                 mime="text/csv",
                 help="Scarica le fasce: ore assegnate, prezzo medio e scostamento dalla media oraria.",
+            )
+
+    with tab30:
+        titolo_acf = edu("Autocorrelazione dei prezzi", "Quanto il prezzo di un'ora 'ricorda' quello delle ore precedenti. ACF(1) vicina a 1 = prezzo appiccicoso: gli shock rientrano lentamente (mean-reversion lenta, i livelli di prezzo persistono). Picchi a lag 24 e 168 = stagionalità giornaliera e settimanale: il prezzo segue un ritmo prevedibile. ACF che decade subito sotto la banda tratteggiata = mercato imprevedibile ora per ora. Le barre sopra/sotto la banda sono statisticamente significative al 95 % (banda = ±1.96/√n). Utile per decidere l'orizzonte delle previsioni: se la memoria è lunga, i modelli di breve funzionano; se è corta, meglio strategie meno direzionali.")
+        st.markdown(f"**{titolo_acf}**: persistenza degli shock di prezzo e firma della stagionalità, dai lag 1h fino a 2 settimane.", unsafe_allow_html=True)
+
+        acf_maxl = st.slider("Lag massimo (ore)", min_value=24, max_value=336, value=168, step=24, key="acf_maxl",
+                            help="Fino a quante ore indietro guardare. 168 = una settimana (cattura la stagionalità settimanale), 336 = due settimane.")
+        acf_r = calcola_autocorrelazione(prezzi, max_lag=acf_maxl)
+        if acf_r["n"] < 3:
+            st.info("Dati insufficienti per calcolare l'autocorrelazione: servono almeno 3 prezzi orari validi nel periodo selezionato.")
+        else:
+            a1, a2, a3, a4 = st.columns(4)
+            v1 = f"{acf_r['acf_lag1']:+.3f}" if acf_r["acf_lag1"] is not None else "n.d."
+            render_kpi(edu("Persistenza a 1h", "Autocorrelazione al lag di 1 ora: quanto il prezzo dell'ora t+1 assomiglia a quello dell'ora t. Vicina a +1 = prezzo appiccicoso, vicino a 0 = ogni ora è una storia a sé."), v1, a1)
+            v2 = f"{acf_r['acf_lag24']:+.3f}" if acf_r["acf_lag24"] is not None else "n.d."
+            render_kpi(edu("Stagionalità 24h", "Autocorrelazione al lag di 24 ore: misura la regolarità giornaliera. Alta = la stessa ora del giorno costa sistematicamente simile (profilo giorno/notte stabile)."), v2, a2)
+            v3 = f"{acf_r['acf_lag168']:+.3f}" if acf_r["acf_lag168"] is not None else "n.d."
+            render_kpi(edu("Stagionalità 168h", "Autocorrelazione al lag di 168 ore (una settimana): misura il ritmo settimanale. Alta = la stessa ora dello stesso giorno della settimana si ripete (es. weekend sempre più economico)."), v3, a3)
+            if acf_r["lag_decay"] is None:
+                v4 = f"> {acf_r['max_lag']} h"
+                t4 = "La correlazione resta significativa oltre il lag massimo: la memoria del mercato supera l'orizzonte osservato."
+            else:
+                v4 = f"{acf_r['lag_decay']} h"
+                t4 = "Primo lag in cui l'autocorrelazione scende sotto la banda di significatività del 95 %: dopo queste ore il prezzo 'dimentica' il passato."
+            render_kpi(edu("Memoria del mercato", t4), v4, a4)
+
+            df_acf = acf_r["df"]
+            fig_acf = go.Figure()
+            colori_sig = ["#22c55e" if s == "Sì" else "#6b7280" for s in df_acf["Significativo 95%"]]
+            fig_acf.add_trace(go.Bar(
+                x=df_acf["Lag (ore)"], y=df_acf["ACF"], name="ACF",
+                marker_color=colori_sig,
+                hovertemplate="Lag: %{x} h<br>ACF: %{y:.4f}<extra></extra>"))
+            fig_acf.add_trace(go.Scatter(
+                x=df_acf["Lag (ore)"], y=df_acf["Banda 95%"], name="Banda +95%",
+                mode="lines", line=dict(color="#f87171", dash="dash", width=1)))
+            fig_acf.add_trace(go.Scatter(
+                x=df_acf["Lag (ore)"], y=-df_acf["Banda 95%"], name="Banda −95%",
+                mode="lines", line=dict(color="#f87171", dash="dash", width=1)))
+            for lag_ref, nome in [(24, "24h"), (168, "168h")]:
+                if lag_ref <= acf_r["max_lag"]:
+                    fig_acf.add_vline(x=lag_ref, line_dash="dot", line_color="#60a5fa",
+                                      annotation_text=nome, annotation_position="top right")
+            fig_acf.update_layout(template="plotly_dark", height=420,
+                                  title=f"Autocorrelazione del prezzo spot (n = {acf_r['n']:,} ore valide)",
+                                  xaxis_title="Lag (ore)", yaxis_title="ACF",
+                                  xaxis=dict(tickmode="linear", dtick=24))
+            st.plotly_chart(fig_acf, use_container_width=True)
+            st.caption("Verde = autocorrelazione significativa al 95 %; grigia = rumore. Le linee verticali tratteggiate blu marcano i lag giornaliero (24h) e settimanale (168h).")
+
+            st.markdown("**Tabella autocorrelazione**")
+            st.dataframe(df_acf, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta autocorrelazione (CSV)",
+                df_acf.to_csv(index=False).encode("utf-8"),
+                file_name=f"autocorrelazione_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica lag, ACF, banda di significatività 95 % e flag di significatività.",
             )
 
 # Footer
