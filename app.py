@@ -2775,6 +2775,102 @@ def calcola_top_ore_costo(prezzi, mw_f1, mw_f2, mw_f3, top_n=10):
     return out
 
 
+def calcola_ohlc_giornaliero(prezzi):
+    """Candele giornaliere OHLC del prezzo spot orario.
+
+    Per ogni giorno di calendario: Apertura = prezzo dell'ora 00:00, Massimo
+    e Minimo = estremi delle ore osservate, Chiusura = prezzo dell'ultima
+    ora del giorno. Escursione = max - min (quanto si e' mosso il mercato in
+    giornata), Corpo = close - open, Direzione = rialzo (close > open),
+    ribasso (close < open), flat (close == open).
+
+    Differenza rispetto agli altri tab: 'Rampe di prezzo' guarda la variazione
+    ORA-su-ora (nervosismo ad alta frequenza); 'Sequenze' i rally/drawdown
+    plurigiornalieri; qui la grana e' il GIORNO di mercato, la vista da
+    trader per decidere il timing degli acquisti sulla borsa day-ahead.
+
+    NaN-safe: ore con prezzo NaN ignorate. Serie vuota, indice non datetime,
+    duplicato o tutti NaN -> KPI a None e DataFrame vuoto. Giorni con 23/25
+    ore (DST) contribuiscono solo con le ore osservate. Il rapporto
+    escursione-media/prezzo-medio e' None se il prezzo medio <= 0 (serie con
+    molti prezzi negativi).
+
+    Ritorna dict con 'n_giorni', 'escursione_media', 'escursione_max',
+    'giorno_max_escursione' (datetime.date o None), 'quota_rialzo_pct',
+    'quota_ribasso_pct', 'rapporto_esc_media_prezzo_medio' (None se prezzo
+    medio <= 0), 'prezzo_medio', 'df' (DataFrame: Giorno, Ore,
+    Apertura/ Massimo/ Minimo/ Chiusura (€/MWh), Escursione (€/MWh),
+    Corpo (€/MWh), Direzione)."""
+    cols = ["Giorno", "Ore", "Apertura (€/MWh)", "Massimo (€/MWh)",
+            "Minimo (€/MWh)", "Chiusura (€/MWh)", "Escursione (€/MWh)",
+            "Corpo (€/MWh)", "Direzione"]
+    vuoto = {"n_giorni": 0, "escursione_media": None, "escursione_max": None,
+             "giorno_max_escursione": None, "quota_rialzo_pct": None,
+             "quota_ribasso_pct": None,
+             "rapporto_esc_media_prezzo_medio": None, "prezzo_medio": None,
+             "df": pd.DataFrame(columns=cols)}
+    try:
+        p = prezzi.astype(float).dropna()
+        p = p[~p.index.duplicated(keep="first")].sort_index()
+    except Exception:
+        return dict(vuoto)
+    if len(p) == 0:
+        return dict(vuoto)
+    try:
+        idx = p.index
+        if not isinstance(idx, pd.DatetimeIndex):
+            return dict(vuoto)
+        giorni = idx.floor("D")
+    except Exception:
+        return dict(vuoto)
+    out = dict(vuoto)
+    try:
+        righe = []
+        for g, grp in p.groupby(giorni):
+            o = float(grp.iloc[0])
+            h = float(grp.max())
+            l = float(grp.min())
+            c = float(grp.iloc[-1])
+            corpo = c - o
+            if corpo > 0:
+                d = "rialzo"
+            elif corpo < 0:
+                d = "ribasso"
+            else:
+                d = "flat"
+            righe.append({
+                "Giorno": g.date() if hasattr(g, "date") else g,
+                "Ore": len(grp),
+                "Apertura (€/MWh)": round(o, 2),
+                "Massimo (€/MWh)": round(h, 2),
+                "Minimo (€/MWh)": round(l, 2),
+                "Chiusura (€/MWh)": round(c, 2),
+                "Escursione (€/MWh)": round(h - l, 2),
+                "Corpo (€/MWh)": round(corpo, 2),
+                "Direzione": d,
+            })
+    except Exception:
+        return out
+    if not righe:
+        return out
+    df = pd.DataFrame(righe, columns=cols)
+    out["df"] = df
+    out["n_giorni"] = len(df)
+    esc = df["Escursione (€/MWh)"].to_numpy(dtype=float)
+    corpi = df["Corpo (€/MWh)"].to_numpy(dtype=float)
+    out["escursione_media"] = round(float(np.mean(esc)), 2)
+    out["escursione_max"] = round(float(np.max(esc)), 2)
+    out["giorno_max_escursione"] = df.loc[df["Escursione (€/MWh)"].idxmax(),
+                                          "Giorno"]
+    out["quota_rialzo_pct"] = round(float((corpi > 0).mean()) * 100, 1)
+    out["quota_ribasso_pct"] = round(float((corpi < 0).mean()) * 100, 1)
+    pm = float(p.mean())
+    out["prezzo_medio"] = round(pm, 2)
+    out["rapporto_esc_media_prezzo_medio"] = (
+        round(float(np.mean(esc)) / pm, 3) if pm > 0 else None)
+    return out
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def generate_singularity_data():
     np.random.seed(42)
@@ -3467,7 +3563,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -5718,6 +5814,81 @@ elif workspace == _('ws8'):
                 file_name=f"top_ore_costo_{d0}_{d1}.csv",
                 mime="text/csv",
                 help="Scarica la classifica delle ore più care: data e ora, fascia, prezzo, carico, costo e quota % sul totale.",
+            )
+
+    with tab40:
+        titolo_ohlc = edu("Candele giornaliere (OHLC)", "La CANDELA GIORNALIERA riassume in una figura le 24 ore di mercato: APERTURA (prezzo dell'ora 00:00), MASSIMO e MINIMO di giornata, CHIUSURA (prezzo dell'ultima ora). L'ESCURSIONE (max meno min) misura quanto il mercato si è mosso in giornata: escursioni alte = giornata nervosa, in cui il timing degli acquisti fa la differenza; escursioni basse = giornata piatta. La direzione (rialzo/ribasso/flat) dice se il mercato ha chiuso sopra, sotto o uguale all'apertura. È la vista da trader per pianificare gli acquisti sulla borsa day-ahead: comprare nelle ore del minimo e non sul picco.")
+        st.markdown(f"**{titolo_ohlc}**: candele giornaliere del prezzo spot (apertura, massimo, minimo, chiusura) con escursione e direzione.", unsafe_allow_html=True)
+
+        oh_soglia = st.slider("Evidenzia escursioni oltre (€/MWh)", min_value=0.0, max_value=100.0, value=25.0, step=1.0, key="oh40_soglia",
+                              help="Giorni con escursione (massimo meno minimo) oltre questa soglia vengono evidenziati: giornate nervose in cui il timing degli acquisti conta di più.")
+
+        oh = calcola_ohlc_giornaliero(prezzi)
+        if oh["n_giorni"] == 0:
+            st.warning("Dati insufficienti per le candele giornaliere.")
+        else:
+            c1, c2, c3, c4 = st.columns(4)
+            render_kpi(edu("Escursione media", "Movimento medio intraday (massimo meno minimo di ogni giorno): quanto si muove tipicamente il mercato in una giornata."), f"{oh['escursione_media']:,.2f} €/MWh", c1)
+            gm = oh["giorno_max_escursione"]
+            gm_txt = gm.strftime("%d/%m/%Y") if gm is not None and hasattr(gm, "strftime") else "—"
+            render_kpi(edu("Escursione massima", "Il giorno più nervoso del periodo: massima escursione (max meno min) osservata."), f"{oh['escursione_max']:,.2f} €/MWh<br><small>{gm_txt}</small>", c2)
+            render_kpi(edu("Giorni rialzisti", "Quota di giorni con chiusura sopra l'apertura: sopra il 50% il mercato tende a salire in giornata."), f"{oh['quota_rialzo_pct']:.1f} %", c3)
+            rem_txt = f"{oh['rapporto_esc_media_prezzo_medio'] * 100:.1f} %" if oh["rapporto_esc_media_prezzo_medio"] is not None else "n.d."
+            render_kpi(edu("Escursione / prezzo medio", "L'escursione media in percentuale sul prezzo medio del periodo: misura la nervosità relativa del mercato."), f"{rem_txt}<br><small>prezzo medio {oh['prezzo_medio']:,.2f} €/MWh</small>", c4)
+
+            df_oh = oh["df"]
+            fig_ohlc = go.Figure()
+            fig_ohlc.add_trace(go.Candlestick(
+                x=df_oh["Giorno"], open=df_oh["Apertura (€/MWh)"],
+                high=df_oh["Massimo (€/MWh)"], low=df_oh["Minimo (€/MWh)"],
+                close=df_oh["Chiusura (€/MWh)"], name="OHLC giornaliero",
+                increasing_line_color="#22c55e", decreasing_line_color="#ef4444"))
+            fig_ohlc.update_layout(template="plotly_dark", height=420,
+                                   title="Candele giornaliere del prezzo spot",
+                                   xaxis_title="Giorno", yaxis_title="€/MWh",
+                                   xaxis_rangeslider_visible=False)
+            st.plotly_chart(fig_ohlc, use_container_width=True)
+            st.caption("Candele verdi = chiusura sopra l'apertura (rialzo), rosse = sotto (ribasso). Il corpo va da apertura a chiusura, le ombre toccano massimo e minimo di giornata.")
+
+            col_o1, col_o2 = st.columns(2)
+            with col_o1:
+                colori = ["#f59e0b" if e >= oh_soglia else "#3b82f6"
+                          for e in df_oh["Escursione (€/MWh)"]]
+                fig_o1 = go.Figure()
+                fig_o1.add_trace(go.Bar(x=df_oh["Giorno"], y=df_oh["Escursione (€/MWh)"],
+                                        name="Escursione", marker_color=colori,
+                                        hovertemplate="Giorno: %{x}<br>Escursione: %{y:,.2f} €/MWh<extra></extra>"))
+                fig_o1.add_hline(y=oh_soglia, line_dash="dot", line_color="#9ca3af")
+                fig_o1.update_layout(template="plotly_dark", height=330,
+                                     title="Escursione giornaliera (max − min)",
+                                     xaxis_title="Giorno", yaxis_title="€/MWh",
+                                     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+                st.plotly_chart(fig_o1, use_container_width=True)
+            with col_o2:
+                fig_o2 = go.Figure()
+                fig_o2.add_trace(go.Bar(x=["Rialzo", "Ribasso", "Flat"],
+                                        y=[int((df_oh["Direzione"] == "rialzo").sum()),
+                                           int((df_oh["Direzione"] == "ribasso").sum()),
+                                           int((df_oh["Direzione"] == "flat").sum())],
+                                        name="Giorni",
+                                        marker_color=["#22c55e", "#ef4444", "#9ca3af"]))
+                fig_o2.update_layout(template="plotly_dark", height=330,
+                                     title="Direzione delle giornate",
+                                     xaxis_title="", yaxis_title="Giorni",
+                                     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+                st.plotly_chart(fig_o2, use_container_width=True)
+            n_alta = int((df_oh["Escursione (€/MWh)"] >= oh_soglia).sum())
+            st.caption(f"💡 {n_alta} giorni su {oh['n_giorni']} con escursione ≥ {oh_soglia:.0f} €/MWh: giornate in cui il timing degli acquisti sulla borsa day-ahead conta di più.")
+
+            st.markdown("**Candele giornaliere**")
+            st.dataframe(df_oh, use_container_width=True, hide_index=True)
+
+            st.download_button(
+                "⬇️ Esporta candele OHLC (CSV)",
+                df_oh.to_csv(index=False).encode("utf-8"),
+                file_name=f"candele_ohlc_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica le candele giornaliere: giorno, ore osservate, apertura, massimo, minimo, chiusura, escursione, corpo e direzione.",
             )
 
 # Footer
