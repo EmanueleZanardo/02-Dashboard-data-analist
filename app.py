@@ -2129,6 +2129,97 @@ def calcola_rampe_prezzo(prezzi, soglia=10.0, top_n=50):
     return out
 
 
+def calcola_persistenza_soglia(prezzi, soglia=100.0):
+    """Blocchi di ore consecutive con prezzo sopra una soglia.
+
+    Per chi gestisce un impianto dispacciabile (o una flessibilita') non conta
+    solo quanto spesso il prezzo supera il costo variabile, ma per quante ore
+    consecutive resta sopra: un blocco di 6 ore giustifica un avviamento, sei
+    ore isolate no. La soglia e' quindi il costo variabile (o strike)
+    dell'analista; ogni 'blocco' e' una sequenza di ore consecutive con prezzo
+    >= soglia.
+
+    Il calcolo ordina la serie per tempo, scarta i duplicati di timestamp (primo
+    valore) e interrompe un blocco quando: la distanza temporale tra due ore
+    supera 120 minuti (buchi nei dati; i cambi DST restano dentro i blocchi
+    perche' sono ore di mercato consecutive), oppure un'ora intermedia ha
+    prezzo mancante (NaN): un blocco contiene solo ore osservate e consecutive.
+    Deterministico a parita' di input.
+
+    prezzi: Series oraria in €/MWh con indice datetime.
+    soglia: prezzo minimo (€/MWh) perche' un'ora conti (default 100.0).
+    Ritorna dict con 'soglia', 'n_ore_sopra', 'n_ore_totali', 'quota' (frazione
+    di ore sopra soglia, None se non valutabile), 'n_blocchi', 'durata_max',
+    'durata_media', 'durata_mediana' (ore; None se nessun blocco) e
+    'df_blocchi' (Inizio, Fine, Durata (ore), Prezzo medio/max in €/MWh)."""
+    cols_bl = ["Inizio", "Fine", "Durata (ore)",
+               "Prezzo medio (€/MWh)", "Prezzo max (€/MWh)"]
+    vuoto = {"soglia": None, "n_ore_sopra": 0, "n_ore_totali": 0, "quota": None,
+             "n_blocchi": 0, "durata_max": None, "durata_media": None,
+             "durata_mediana": None,
+             "df_blocchi": pd.DataFrame(columns=cols_bl)}
+    try:
+        soglia = float(soglia)
+    except Exception:
+        return dict(vuoto)
+    try:
+        p0 = prezzi.astype(float)
+        p0 = p0[~p0.index.duplicated(keep="first")].sort_index()
+    except Exception:
+        return dict(vuoto)
+    valido = p0.notna().to_numpy()
+    p = p0.dropna()
+    n_tot = len(p)
+    if n_tot == 0:
+        return dict(vuoto)
+    try:
+        dt_min = p.index.to_series().diff().dt.total_seconds() / 60.0
+        consecutiva = dt_min.between(1, 120, inclusive="both").fillna(False).to_numpy()
+    except Exception:
+        consecutiva = np.zeros(n_tot, dtype=bool)
+    # ore osservate adiacenti nell'indice originale (nessun NaN in mezzo)
+    pos_validi = np.flatnonzero(valido)
+    adiacente = np.zeros(n_tot, dtype=bool)
+    if n_tot > 1:
+        adiacente[1:] = np.diff(pos_validi) == 1
+    sopra = (p.to_numpy() >= soglia)
+    idx = p.index
+    vals = p.to_numpy()
+    pos = np.flatnonzero(sopra)
+    blocchi = []
+    if len(pos):
+        ini = prev = int(pos[0])
+        for j in (int(x) for x in pos[1:]):
+            if j == prev + 1 and bool(consecutiva[j]) and bool(adiacente[j]):
+                prev = j
+            else:
+                blocchi.append((ini, prev))
+                ini = prev = j
+        blocchi.append((ini, prev))
+    righe = []
+    for a, b in blocchi:
+        seg = vals[a:b + 1]
+        righe.append({"Inizio": idx[a].strftime("%Y-%m-%d %H:%M"),
+                      "Fine": idx[b].strftime("%Y-%m-%d %H:%M"),
+                      "Durata (ore)": int(b - a + 1),
+                      "Prezzo medio (€/MWh)": round(float(np.mean(seg)), 2),
+                      "Prezzo max (€/MWh)": round(float(np.max(seg)), 2)})
+    out = dict(vuoto)
+    out["soglia"] = soglia
+    out["n_ore_totali"] = n_tot
+    n_sopra = int(sopra.sum())
+    out["n_ore_sopra"] = n_sopra
+    out["quota"] = n_sopra / n_tot
+    out["n_blocchi"] = len(blocchi)
+    if blocchi:
+        dur = [b - a + 1 for a, b in blocchi]
+        out["durata_max"] = int(max(dur))
+        out["durata_media"] = float(np.mean(dur))
+        out["durata_mediana"] = float(np.median(dur))
+    out["df_blocchi"] = pd.DataFrame(righe, columns=cols_bl)
+    return out
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def generate_singularity_data():
     np.random.seed(42)
@@ -2821,7 +2912,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -4641,6 +4732,62 @@ elif workspace == _('ws8'):
                 )
             else:
                 st.info("Nessuna rampa oltre la soglia nel periodo: abbassa la soglia per vederle.")
+
+    with tab34:
+        titolo_ps = edu("Persistenza sopra soglia", "Per chi gestisce un impianto dispacciabile (o una flessibilità) conta sapere non solo quanto spesso il prezzo supera il costo variabile, ma per quante ore consecutive resta sopra: un blocco di 6 ore giustifica un avviamento, sei ore isolate no. La soglia è il tuo costo variabile (o strike): ogni 'blocco' è una sequenza di ore osservate e consecutive con prezzo ≥ soglia. Buchi nei dati e ore con prezzo mancante interrompono i blocchi; i cambi DST no, perché sono ore di mercato consecutive.")
+        st.markdown(f"**{titolo_ps}**: blocchi di ore consecutive con prezzo sopra la soglia nel periodo selezionato.", unsafe_allow_html=True)
+
+        try:
+            _pv = prezzi.values.astype(float)
+            ps_max = float(np.nanmax(_pv))
+            ps_med = float(np.nanmedian(_pv))
+            if not np.isfinite(ps_max) or not np.isfinite(ps_med):
+                raise ValueError("prezzi non validi")
+            ps_hi = max(10.0, round(ps_max))
+            ps_val = min(max(0.0, round(ps_med)), ps_hi)
+        except Exception:
+            ps_hi, ps_val = 200.0, 100.0
+        ps_soglia = st.slider("Soglia (€/MWh)", min_value=0.0, max_value=ps_hi,
+                              value=ps_val, step=5.0, key="ps_soglia",
+                              help="Ore con prezzo ≥ soglia. Imposta il tuo costo variabile (o strike) per vedere i blocchi economicamente utili.")
+
+        ps = calcola_persistenza_soglia(prezzi, soglia=ps_soglia)
+        if ps["n_ore_totali"] == 0:
+            st.warning("Dati insufficienti per calcolare la persistenza.")
+        else:
+            k1, k2, k3, k4 = st.columns(4)
+            render_kpi(edu("Ore sopra soglia", "Quante ore del periodo hanno prezzo ≥ soglia, e che quota del totale rappresentano."), f"{ps['n_ore_sopra']:,} ({ps['quota'] * 100:.1f} %)", k1)
+            render_kpi(edu("N. blocchi", "Quanti blocchi di ore consecutive sopra soglia ci sono nel periodo."), f"{ps['n_blocchi']:,}", k2)
+            render_kpi(edu("Blocco più lungo", "La sequenza più lunga di ore consecutive sopra soglia: il tuo miglior 'run' economico."), f"{ps['durata_max']} h" if ps["durata_max"] else "—", k3)
+            render_kpi(edu("Durata mediana", "Metà dei blocchi dura al massimo queste ore: la persistenza 'tipica'."), f"{ps['durata_mediana']:.0f} h" if ps["durata_mediana"] is not None else "—", k4)
+
+            df_ps = ps["df_blocchi"]
+            if len(df_ps):
+                top_ps = df_ps.sort_values("Durata (ore)", ascending=False).head(20).iloc[::-1].copy()
+                top_ps["_medio_txt"] = top_ps["Prezzo medio (€/MWh)"].map(lambda v: f"{v:.2f}")
+                fig_ps = go.Figure()
+                fig_ps.add_trace(go.Bar(
+                    x=top_ps["Durata (ore)"], y=top_ps["Inizio"], orientation="h",
+                    marker_color="#38bdf8", name="Durata (ore)",
+                    customdata=np.stack([top_ps["Fine"].to_numpy(), top_ps["_medio_txt"].to_numpy()], axis=1),
+                    hovertemplate="Inizio: %{y}<br>Fine: %{customdata[0]}<br>Durata: %{x} h<br>Prezzo medio: %{customdata[1]} €/MWh<extra></extra>"))
+                fig_ps.update_layout(template="plotly_dark", height=max(320, 40 * len(top_ps) + 80),
+                                     title="Blocchi più lunghi sopra soglia",
+                                     xaxis_title="Durata (ore)", yaxis_title="Inizio blocco")
+                st.plotly_chart(fig_ps, use_container_width=True)
+
+                st.markdown("**Tabella blocchi**")
+                st.dataframe(df_ps.sort_values("Durata (ore)", ascending=False),
+                             use_container_width=True, hide_index=True)
+                st.download_button(
+                    "⬇️ Esporta blocchi (CSV)",
+                    df_ps.to_csv(index=False).encode("utf-8"),
+                    file_name=f"persistenza_soglia_{d0}_{d1}.csv",
+                    mime="text/csv",
+                    help="Scarica inizio, fine, durata in ore e prezzo medio/max di ogni blocco sopra soglia.",
+                )
+            else:
+                st.info("Nessuna ora sopra la soglia nel periodo: abbassa la soglia per vedere i blocchi.")
 
 # Footer
 st.markdown("---")
