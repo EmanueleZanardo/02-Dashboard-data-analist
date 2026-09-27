@@ -1019,6 +1019,116 @@ def calcola_concentrazione_costo(prezzi, mw_f1, mw_f2, mw_f3):
     out["decili"] = pd.DataFrame(righe, columns=cols_d).reset_index(drop=True)
     return out
 
+def calcola_shifting_carico(prezzi, mw_f1, mw_f2, mw_f3, pct):
+    """Simulazione demand shifting: spostamento di una quota di energia dalle
+    ore piu' care alle ore piu' economiche del periodo.
+
+    Dato un profilo di carico (MW prelevati in ciascuna fascia F1/F2/F3) e una
+    quota pct (%, 0..50, valori oltre vengono tagliati a 50), identifica le
+    'ore fonte': le ore piu' care per COSTO orario (prezzo x MW) fino a
+    cumulare pct% dei MWh totali. Gli stessi MWh vengono 'ricaricati' nelle
+    'ore destinazione': le ore con prezzo €/MWh piu' basso del periodo,
+    escluse le ore fonte, fino allo stesso ammontare di MWh. Il risparmio
+    stimato e' (costo delle ore fonte) - (costo delle stesse MWh nelle ore
+    destinazione): misura il valore economico della flessibilita' (demand
+    response / load shifting) senza cambiare il consumo totale.
+
+    NaN-safe: ore con prezzo NaN ignorate. MW tutti a zero o serie vuota ->
+    valori neutrali. Con prezzi negativi le ore destinazione a prezzo
+    negativo generano ricavo invece di costo (risparmio > costo fonte):
+    documentato nel caption del tab.
+
+    Ritorna dict con 'n_ore', 'mwh', 'totale' (costo € senza shifting),
+    'pct' (quota effettiva 0..50), 'mwh_spostati', 'ore_fonte',
+    'ore_dest', 'costo_fonte', 'costo_dest', 'risparmio' (€),
+    'risparmio_pct' (% sul totale, None se totale <= 0), 'costo_dopo' (€),
+    'mensile' (DataFrame 'Mese', 'MWh spostati', 'Costo prima (€)',
+    'Costo dopo (€)', 'Risparmio (€)', 'Risparmio %')."""
+    cols_m = ["Mese", "MWh spostati", "Costo prima (€)", "Costo dopo (€)",
+              "Risparmio (€)", "Risparmio %"]
+    vuoto = {"n_ore": 0, "mwh": 0.0, "totale": 0.0, "pct": 0.0,
+             "mwh_spostati": 0.0, "ore_fonte": 0, "ore_dest": 0,
+             "costo_fonte": 0.0, "costo_dest": 0.0,
+             "risparmio": 0.0, "risparmio_pct": None, "costo_dopo": 0.0,
+             "mensile": pd.DataFrame(columns=cols_m)}
+    p = prezzi.astype(float).dropna()
+    out = dict(vuoto)
+    if p.empty:
+        return out
+    mw_map = {"F1": float(mw_f1), "F2": float(mw_f2), "F3": float(mw_f3)}
+    mw = p.index.map(fascia_oraria).map(mw_map).to_numpy(dtype=float)
+    if (mw <= 0).all():
+        return out
+    pct = max(0.0, min(50.0, float(pct)))
+    pv = p.values
+    costo = pv * mw
+    n = int(len(p))
+    mwh = float(mw.sum())
+    totale = float(costo.sum())
+    out["n_ore"] = n
+    out["mwh"] = round(mwh, 1)
+    out["totale"] = round(totale, 2)
+    out["pct"] = pct
+
+    order_desc = np.argsort(-costo, kind="stable")
+    idx_fonte = set(order_desc[: (int(np.searchsorted(np.cumsum(mw[order_desc]),
+                           mwh * pct / 100.0, side="left") + 1)
+                           if pct > 0 else 0)])
+    if pct <= 0 or not idx_fonte:
+        out["costo_dopo"] = round(totale, 2)
+        out["risparmio_pct"] = 0.0 if totale > 0 else None
+    else:
+        ore_fonte = sorted(idx_fonte)
+        mwh_mov = float(mw[ore_fonte].sum())
+        costo_f = float(costo[ore_fonte].sum())
+        resto = np.array([i for i in range(n) if i not in idx_fonte], dtype=int)
+        order_asc = resto[np.argsort(pv[resto], kind="stable")]
+        cum_r = np.cumsum(mw[order_asc])
+        j = int(min(len(order_asc),
+                    np.searchsorted(cum_r, mwh_mov, side="left") + 1))
+        ore_dest = order_asc[:j]
+        costo_d = float((pv[ore_dest] * mw[ore_dest]).sum())
+        risp = costo_f - costo_d
+        out["mwh_spostati"] = round(mwh_mov, 1)
+        out["ore_fonte"] = int(len(ore_fonte))
+        out["ore_dest"] = int(j)
+        out["costo_fonte"] = round(costo_f, 2)
+        out["costo_dest"] = round(costo_d, 2)
+        out["risparmio"] = round(risp, 2)
+        out["costo_dopo"] = round(totale - risp, 2)
+        out["risparmio_pct"] = (round(risp / totale * 100, 1)
+                                if totale > 0 else None)
+    righe = []
+    for mese, grp in p.groupby(p.index.strftime("%Y-%m")):
+        mw_g = grp.index.map(fascia_oraria).map(mw_map).to_numpy(dtype=float)
+        if (mw_g <= 0).all() or pct <= 0:
+            righe.append({"Mese": mese, "MWh spostati": 0.0,
+                          "Costo prima (€)": round(float((grp.values * mw_g).sum()), 2),
+                          "Costo dopo (€)": round(float((grp.values * mw_g).sum()), 2),
+                          "Risparmio (€)": 0.0, "Risparmio %": 0.0})
+            continue
+        c_g = grp.values * mw_g
+        nn = len(grp)
+        tgt = float(mw_g.sum()) * pct / 100.0
+        od = np.argsort(-c_g, kind="stable")
+        kk = int(min(nn, np.searchsorted(np.cumsum(mw_g[od]), tgt, side="left") + 1))
+        f_idx = set(od[:kk])
+        mm = float(mw_g[od[:kk]].sum())
+        cf = float(c_g[od[:kk]].sum())
+        rest = np.array([i for i in range(nn) if i not in f_idx], dtype=int)
+        oa = rest[np.argsort(grp.values[rest], kind="stable")]
+        jj = int(min(len(oa), np.searchsorted(np.cumsum(mw_g[oa]), mm, side="left") + 1))
+        cd = float((grp.values[oa[:jj]] * mw_g[oa[:jj]]).sum())
+        cp = float(c_g.sum())
+        rs = cf - cd
+        righe.append({"Mese": mese, "MWh spostati": round(mm, 1),
+                      "Costo prima (€)": round(cp, 2),
+                      "Costo dopo (€)": round(cp - rs, 2),
+                      "Risparmio (€)": round(rs, 2),
+                      "Risparmio %": (round(rs / cp * 100, 1) if cp > 0 else None)})
+    out["mensile"] = pd.DataFrame(righe, columns=cols_m).reset_index(drop=True)
+    return out
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def generate_singularity_data():
     np.random.seed(42)
@@ -1568,7 +1678,7 @@ elif workspace == _('ws7'):
 # ==========================================
 elif workspace == _('ws8'):
     st.markdown(f"<h1>{_('ws8')}</h1>", unsafe_allow_html=True)
-    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread, shaping curva, spread weekend, price capture, volatilità realizzata, confronto anno-su-anno, analisi prezzi negativi, spread intra-day, picchi di prezzo, profilo settimanale tipo, curva di durata, concentrazione del costo di fornitura ed export CSV.")
+    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread, shaping curva, spread weekend, price capture, volatilità realizzata, confronto anno-su-anno, analisi prezzi negativi, spread intra-day, picchi di prezzo, profilo settimanale tipo, curva di durata, concentrazione del costo di fornitura, simulazione demand shifting ed export CSV.")
 
     # ---------- Controlli: sorgente, periodo, impianti ----------
     st.subheader("⚙️ Sorgente dati & Timeframe")
@@ -1711,7 +1821,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -2819,6 +2929,60 @@ elif workspace == _('ws8'):
                 file_name=f"concentrazione_costo_{d0}_{d1}.csv",
                 mime="text/csv",
                 help="Scarica il dettaglio per decile: ore, costo e quota di costo.",
+            )
+
+    with tab22:
+        titolo_sh = edu("Shifting del carico", "Il DEMAND SHIFTING (spostamento del carico) è la capacità di muovere consumo dalle ore più care alle ore più economiche senza cambiare il totale consumato: tipico di chi ha carichi flessibili (pompe, cold storage, ricarica EV, batch industriali). Qui si simula: si prendono le ore più care per COSTO (prezzo × MW) fino al X% dei MWh del periodo e si 'ricaricano' gli stessi MWh nelle ore con prezzo più basso. Il risparmio stimato è il valore economico della flessibilità: il numero da portare al tavolo per valutare investimenti in storage o contratti di demand response. A differenza del tab Concentrazione (che MISURA il problema), qui si SIMULA la soluzione.")
+        st.markdown(f"**{titolo_sh}**: quanto si risparmierebbe spostando parte del consumo dalle ore più care alle più economiche.", unsafe_allow_html=True)
+
+        sh1, sh2, sh3, sh4 = st.columns(4)
+        with sh1:
+            sh_f1 = st.number_input("Potenza in F1 (MW)", min_value=0.0, value=1.0, step=0.5, key="sh_f1",
+                                    help="Ore di punta: lun–ven 08:00–19:00.")
+        with sh2:
+            sh_f2 = st.number_input("Potenza in F2 (MW)", min_value=0.0, value=1.0, step=0.5, key="sh_f2",
+                                    help="Ore intermedie: lun–ven 07:00–08:00 e 19:00–23:00, sab 07:00–23:00.")
+        with sh3:
+            sh_f3 = st.number_input("Potenza in F3 (MW)", min_value=0.0, value=1.0, step=0.5, key="sh_f3",
+                                    help="Ore fuori punta: notti, domeniche e festivi.")
+        with sh4:
+            sh_pct = st.slider("Quota di energia spostata (%)", min_value=0, max_value=30, value=10, step=1, key="sh_pct",
+                               help="Percentuale dei MWh del periodo spostata dalle ore più care a quelle più economiche (tetto 50% nell'helper).")
+        sh = calcola_shifting_carico(prezzi, sh_f1, sh_f2, sh_f3, sh_pct)
+        if sh["n_ore"] == 0:
+            st.info("Imposta una potenza maggiore di zero in almeno una fascia per simulare lo shifting.")
+        elif sh["pct"] == 0:
+            st.info("Aumenta la quota di energia spostata (slider) per vedere il risparmio stimato.")
+        else:
+            s1, s2, s3, s4 = st.columns(4)
+            render_kpi(edu("Risparmio stimato (€)", "Costo delle ore più care meno costo degli stessi MWh ricaricati nelle ore più economiche: il valore economico della flessibilità nel periodo."), f"{sh['risparmio']:,.0f} €", s1)
+            rp = f"{sh['risparmio_pct']:.1f} %" if sh['risparmio_pct'] is not None else "n.d."
+            render_kpi(edu("Risparmio %", "Risparmio rapportato al costo totale del periodo senza shifting: la leva percentuale del demand response."), rp, s2)
+            render_kpi(edu("MWh spostati", "Energia spostata dalle ore più care (ore fonte) alle ore più economiche (ore destinazione): il consumo totale resta invariato."), f"{sh['mwh_spostati']:,.1f} MWh<br><small>{sh['ore_fonte']:,} h fonte → {sh['ore_dest']:,} h dest.</small>", s3)
+            render_kpi(edu("Costo dopo shifting (€)", "Costo totale del periodo se si applicasse lo shifting simulato: costo attuale meno risparmio stimato."), f"{sh['costo_dopo']:,.0f} €", s4)
+            st.caption(f"💡 {sh['mwh']:,.0f} MWh per {sh['totale']:,.0f} € senza shifting — "
+                       f"ore fonte: costo {sh['costo_fonte']:,.0f} €, ore destinazione: costo {sh['costo_dest']:,.0f} €. "
+                       "Con prezzi negativi, spostare verso ore a prezzo negativo genera ricavo (risparmio > costo fonte).")
+
+            fig_sh = go.Figure()
+            fig_sh.add_trace(go.Bar(
+                x=sh["mensile"]["Mese"], y=sh["mensile"]["Risparmio (€)"],
+                name="Risparmio €", marker_color="#22c55e",
+                hovertemplate="Mese: %{x}<br>Risparmio: %{y:,.0f} €<br>MWh spostati: %{customdata:,.1f}<extra></extra>",
+                customdata=sh["mensile"]["MWh spostati"]))
+            fig_sh.update_layout(template="plotly_dark", height=380,
+                                 title=f"Risparmio mensile da shifting ({sh['pct']:.0f}% dei MWh)",
+                                 xaxis_title="Mese", yaxis_title="Risparmio (€)")
+            st.plotly_chart(fig_sh, use_container_width=True)
+
+            st.markdown("**Dettaglio mensile**")
+            st.dataframe(sh["mensile"], use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta shifting carico (CSV)",
+                sh["mensile"].to_csv(index=False).encode("utf-8"),
+                file_name=f"shifting_carico_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica il dettaglio mensile: MWh spostati, costo prima/dopo e risparmio.",
             )
 
 # Footer
