@@ -1469,6 +1469,84 @@ def calcola_sensibilita_profilo(prezzi, mw_f1, mw_f2, mw_f3, delta_pct=10.0):
     return out
 
 
+def calcola_var_costo(prezzi, mw_f1, mw_f2, mw_f3, n_scenari=1000,
+                      soglia_euro=None, seed=42):
+    """Value-at-Risk del COSTO di fornitura via Monte Carlo (block bootstrap).
+
+    Simula n_scenari futuri di pari durata del periodo osservato ricampionando
+    (con seed fisso -> risultati deterministici e riproducibili) blocchi
+    circolari di 24 ore consecutive dalla serie dei prezzi spot: il ricampionamento
+    per giornate intere preserva il profilo giornaliero tipico (picchi diurni,
+    valli notturne). Per ciascuno scenario il costo del profilo di prelievo
+    F1/F2/F3 e' la somma oraria prezzo_simulato x MW della fascia oraria.
+
+    KPI: costo atteso (media degli scenari), P50/P75/P90/P95/P99. Il P95 e' il
+    VaR del costo: nel 95% degli scenari il costo resta SOTTO questo livello
+    (soglia di budget a rischio). Se e' impostata una soglia di allarme
+    (soglia_euro), calcola anche la probabilità di sforamento.
+
+    Differenza rispetto al tab Rischio & Durata: li' il VaR e' STORICO sulla
+    distribuzione del prezzo orario; qui e' PROSPETTICO sul costo totale del
+    profilo, quello che finisce davvero in bolletta.
+
+    NaN-safe: ore con prezzo NaN ignorate. Con serie vuota, tutti i MW a 0 o
+    n_scenari <= 0 ritorna il dict vuoto (DataFrame con le colonne giuste,
+    KPI a None, array scenari vuoto).
+
+    Ritorna dict con 'n_scenari' (int), 'ore' (int), 'mwh' (float),
+    'costo_spot' (float: costo del profilo sui prezzi osservati),
+    'costo_atteso', 'p50', 'p75', 'p90', 'p95', 'p99', 'costo_min',
+    'costo_max' (float o None), 'soglia' (float o None),
+    'prob_sforamento_pct' (float o None), 'percentili' (DataFrame:
+    Percentile, 'Costo €') e 'scenari' (np.array dei costi per scenario)."""
+    cols = ["Percentile", "Costo €"]
+    vuoto = {"n_scenari": 0, "ore": 0, "mwh": 0.0, "costo_spot": None,
+             "costo_atteso": None, "p50": None, "p75": None, "p90": None,
+             "p95": None, "p99": None, "costo_min": None, "costo_max": None,
+             "soglia": soglia_euro,
+             "prob_sforamento_pct": None,
+             "percentili": pd.DataFrame(columns=cols),
+             "scenari": np.array([], dtype=float)}
+    out = dict(vuoto)
+    p = prezzi.astype(float).dropna()
+    mw_map = {"F1": float(mw_f1), "F2": float(mw_f2), "F3": float(mw_f3)}
+    n = int(n_scenari or 0)
+    if p.empty or n <= 0 or all(m <= 0 for m in mw_map.values()):
+        return out
+    idxn = p.index.tz_localize(None) if p.index.tz is not None else p.index
+    fasce = idxn.map(fascia_oraria).to_numpy()
+    mw_prof = np.array([mw_map.get(b, 0.0) for b in fasce], dtype=float)
+    pv = p.to_numpy(dtype=float)
+    L = len(pv)
+    blocco = max(1, min(24, L))
+    rng = np.random.default_rng(int(seed))
+    n_blocchi = int(np.ceil(L / blocco))
+    ore_idx = np.arange(blocco)
+    costi = np.empty(n, dtype=float)
+    for s in range(n):
+        starts = rng.integers(0, L, size=n_blocchi)
+        path = pv[(starts[:, None] + ore_idx) % L].ravel()[:L]
+        costi[s] = float((path * mw_prof).sum())
+    out["n_scenari"] = n
+    out["ore"] = L
+    out["mwh"] = round(float(mw_prof.sum()), 2)
+    out["costo_spot"] = round(float((pv * mw_prof).sum()), 2)
+    out["costo_atteso"] = round(float(costi.mean()), 2)
+    pct = {k: float(np.quantile(costi, k / 100.0))
+           for k in (50, 75, 90, 95, 99)}
+    for k, v in pct.items():
+        out[f"p{k}"] = round(v, 2)
+    out["costo_min"] = round(float(costi.min()), 2)
+    out["costo_max"] = round(float(costi.max()), 2)
+    out["percentili"] = pd.DataFrame(
+        [{"Percentile": f"P{k}", "Costo €": round(v, 2)}
+         for k, v in pct.items()], columns=cols).reset_index(drop=True)
+    out["scenari"] = costi
+    if soglia_euro is not None:
+        out["prob_sforamento_pct"] = round(float((costi > soglia_euro).mean() * 100), 1)
+    return out
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def generate_singularity_data():
     np.random.seed(42)
@@ -2018,7 +2096,7 @@ elif workspace == _('ws7'):
 # ==========================================
 elif workspace == _('ws8'):
     st.markdown(f"<h1>{_('ws8')}</h1>", unsafe_allow_html=True)
-    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread, shaping curva, spread weekend, price capture, volatilità realizzata, confronto anno-su-anno, analisi prezzi negativi, spread intra-day, picchi di prezzo, profilo settimanale tipo, curva di durata, concentrazione del costo di fornitura, simulazione demand shifting, finestre di acquisto ottimali, stagionalità mensile, monitoraggio del budget energetico annuale, analisi di sensitività del costo al profilo di prelievo ed export CSV.")
+    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread, shaping curva, spread weekend, price capture, volatilità realizzata, confronto anno-su-anno, analisi prezzi negativi, spread intra-day, picchi di prezzo, profilo settimanale tipo, curva di durata, concentrazione del costo di fornitura, simulazione demand shifting, finestre di acquisto ottimali, stagionalità mensile, monitoraggio del budget energetico annuale, analisi di sensitività del costo al profilo di prelievo, Value-at-Risk Monte Carlo del costo di fornitura ed export CSV.")
 
     # ---------- Controlli: sorgente, periodo, impianti ----------
     st.subheader("⚙️ Sorgente dati & Timeframe")
@@ -2161,7 +2239,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -3559,6 +3637,57 @@ elif workspace == _('ws8'):
                 file_name=f"sensibilita_profilo_{d0}_{d1}.csv",
                 mime="text/csv",
                 help="Scarica il dettaglio per fascia: costo, quota %, Δcosto con ±d% e costo marginale €/MW.",
+            )
+
+    with tab27:
+        titolo_vc = edu("VaR del costo di fornitura (Monte Carlo)", "Il VaR del COSTO (Value-at-Risk) stima il rischio di budget su un periodo futuro di pari durata: simula 1.000+ scenari di prezzo ricampionando giornate intere (24h) dai prezzi osservati, preservando il profilo giornaliero tipico, e calcola in ciascuno il costo del tuo profilo F1/F2/F3. Il P95 è il VaR: nel 95% degli scenari il costo resta SOTTO quel livello. A differenza del tab Rischio & Durata (VaR STORICO sul prezzo orario), qui il rischio è PROSPETTICO sul costo totale: quello che finisce davvero in bolletta. Con il seed fisso i risultati sono deterministici e riproducibili.")
+        st.markdown(f"**{titolo_vc}**: quanto può costare il periodo futuro? Simula 1.000+ scenari di prezzo e trova la soglia di budget a rischio.", unsafe_allow_html=True)
+        st.caption("Profilo di prelievo: quello impostato nel tab 💰 Costo fornitura (MW per fascia F1/F2/F3).")
+
+        vc0, vc1 = st.columns([1, 1])
+        with vc0:
+            vc_n = st.slider("Scenari simulati", min_value=100, max_value=5000, value=1000, step=100, key="vc_n",
+                             help="Numero di scenari Monte Carlo. 1.000 è il default; 5.000 dà percentili più stabili ma è più lento.")
+        spot_tmp = calcola_var_costo(prezzi, mw_f1, mw_f2, mw_f3, n_scenari=100, seed=42)
+        soglia_def = (spot_tmp["costo_spot"] * 1.2) if spot_tmp["costo_spot"] else 1000.0
+        with vc1:
+            vc_soglia = st.number_input("Soglia di allarme costo (€)", min_value=0.0, value=round(soglia_def, 2), step=100.0, key="vc_soglia",
+                                        help="Budget di allarme: calcola la probabilità che il costo simulato lo superi. Default = 120% del costo spot del periodo.")
+        vc = calcola_var_costo(prezzi, mw_f1, mw_f2, mw_f3, n_scenari=vc_n,
+                               soglia_euro=vc_soglia, seed=42)
+        if vc["costo_atteso"] is None:
+            st.info("Imposta una potenza maggiore di zero in almeno una fascia (tab 💰 Costo fornitura) per la simulazione Monte Carlo.")
+        else:
+            v1, v2, v3, v4 = st.columns(4)
+            render_kpi(edu("Costo atteso (media scenari)", "Media del costo del profilo su tutti gli scenari simulati: la stima centrale di quanto costerà il periodo futuro."), f"{vc['costo_atteso']:,.2f} €", v1)
+            render_kpi(edu("P95 = VaR del costo", "Nel 95% degli scenari simulati il costo resta SOTTO questo livello: la soglia di budget a rischio (Value-at-Risk)."), f"{vc['p95']:,.2f} €", v2)
+            render_kpi(edu("P99 (stress)", "Scenario estremo: solo l'1% degli scenari simulati costa di più. Utile per stress test di budget."), f"{vc['p99']:,.2f} €", v3)
+            render_kpi(edu("Probabilità di sforamento", "Quota di scenari simulati in cui il costo supera la soglia di allarme impostata sopra."), f"{vc['prob_sforamento_pct']:.1f} %", v4)
+            st.caption(f"💡 {vc['n_scenari']:,} scenari su {vc['ore']} ore ({vc['mwh']:,.0f} MWh). Costo spot del periodo osservato: {vc['costo_spot']:,.2f} €. Simulazione deterministica (seed 42): rieseguendola ottieni gli stessi numeri.")
+
+            fig_vc = go.Figure()
+            fig_vc.add_trace(go.Histogram(x=vc["scenari"], nbinsx=60, name="Scenari",
+                                          marker_color="#3b82f6",
+                                          hovertemplate="Costo: %{x:,.2f} €<br>Scenari: %{y}<extra></extra>"))
+            fig_vc.add_vline(x=vc["costo_atteso"], line_color="#ffffff", line_width=2, line_dash="dash",
+                             annotation_text="Atteso", annotation_position="top")
+            fig_vc.add_vline(x=vc["p95"], line_color="#ef4444", line_width=2,
+                             annotation_text="P95 (VaR)", annotation_position="top")
+            fig_vc.add_vline(x=vc["soglia"], line_color="#f59e0b", line_width=2, line_dash="dot",
+                             annotation_text="Soglia", annotation_position="top")
+            fig_vc.update_layout(template="plotly_dark", height=380,
+                                 title="Distribuzione del costo di fornitura simulato (€)",
+                                 xaxis_title="Costo per scenario (€)", yaxis_title="N. scenari")
+            st.plotly_chart(fig_vc, use_container_width=True)
+
+            st.markdown("**Percentili del costo simulato**")
+            st.dataframe(vc["percentili"], use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta percentili VaR costo (CSV)",
+                vc["percentili"].to_csv(index=False).encode("utf-8"),
+                file_name=f"var_costo_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica i percentili P50/P75/P90/P95/P99 del costo di fornitura simulato.",
             )
 
 # Footer
