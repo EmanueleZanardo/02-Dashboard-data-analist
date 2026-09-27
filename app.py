@@ -2220,6 +2220,95 @@ def calcola_persistenza_soglia(prezzi, soglia=100.0):
     return out
 
 
+def calcola_spread_calendario(prezzi):
+    """Prezzi base mensili e spread calendario (mese su mese).
+
+    Il 'prezzo base mensile' e' la media di tutte le ore del mese: il
+    riferimento piu' usato in ETRM per confrontare mesi tra loro. Lo 'spread
+    calendario' e' la differenza tra il base di un mese e quello del mese
+    precedente (M+1 - M): positivo = mese successivo piu' caro.
+
+    Interessa a chi copre i costi (hedging: i mesi cari si comprano prima),
+    a chi fa stagionalita' (quanto costa spostare consumi/produzione da un
+    mese all'altro) e a chi valuta contratti indicizzati a media mensile.
+
+    Il calcolo ordina la serie per tempo, scarta i duplicati di timestamp
+    (primo valore) e le ore con prezzo mancante (NaN); gli spread vengono
+    calcolati solo tra mesi di calendario consecutivi (un mese saltato per
+    buchi nei dati non genera uno spread finto). Deterministico a parita'
+    di input.
+
+    prezzi: Series oraria in €/MWh con indice datetime.
+    Ritorna dict con 'n_mesi', 'spread_medio'/'spread_max'/'spread_min'/
+    'std_spread' (degli spread consecutivi, None se < 1 spread), 'quota_pos'
+    (frazione di spread positivi, None se non valutabile), 'df_mesi'
+    (Mese, Ore, Prezzo base medio (€/MWh)) e 'df_spread' (Coppia, Da, A,
+    Spread in €/MWh)."""
+    cols_m = ["Mese", "Ore", "Prezzo base medio (€/MWh)"]
+    cols_s = ["Coppia", "Da (€/MWh)", "A (€/MWh)", "Spread (€/MWh)"]
+    vuoto = {"n_mesi": 0, "spread_medio": None, "spread_max": None,
+             "spread_min": None, "std_spread": None, "quota_pos": None,
+             "df_mesi": pd.DataFrame(columns=cols_m),
+             "df_spread": pd.DataFrame(columns=cols_s)}
+    try:
+        p = prezzi.astype(float).dropna()
+        p = p[~p.index.duplicated(keep="first")].sort_index()
+    except Exception:
+        return dict(vuoto)
+    if len(p) == 0:
+        return dict(vuoto)
+    try:
+        idx = p.index
+        try:
+            idx = idx.tz_localize(None)  # mesi di calendario in ora locale
+        except Exception:
+            pass
+        per = idx.to_period("M")
+    except Exception:
+        return dict(vuoto)
+    try:
+        mensili = p.groupby(per).agg(["mean", "size"])
+    except Exception:
+        return dict(vuoto)
+    if len(mensili) == 0:
+        return dict(vuoto)
+    mensili = mensili.sort_index()
+    periodi = list(mensili.index)
+    mezzi = [float(mensili["mean"].iloc[i]) for i in range(len(periodi))]
+    ore = [int(mensili["size"].iloc[i]) for i in range(len(periodi))]
+    righe_m = [{"Mese": str(periodi[i]), "Ore": ore[i],
+                "Prezzo base medio (€/MWh)": round(mezzi[i], 2)}
+               for i in range(len(periodi))]
+    righe_s, vals = [], []
+    for i in range(1, len(periodi)):
+        try:
+            consecutivi = periodi[i] == periodi[i - 1] + 1
+        except Exception:
+            consecutivi = False
+        if not consecutivi:
+            continue
+        spr = mezzi[i] - mezzi[i - 1]
+        vals.append(spr)
+        righe_s.append({"Coppia": f"{periodi[i - 1]} → {periodi[i]}",
+                        "Da (€/MWh)": round(mezzi[i - 1], 2),
+                        "A (€/MWh)": round(mezzi[i], 2),
+                        "Spread (€/MWh)": round(spr, 2)})
+    out = dict(vuoto)
+    out["n_mesi"] = len(periodi)
+    out["df_mesi"] = pd.DataFrame(righe_m, columns=cols_m)
+    out["df_spread"] = pd.DataFrame(righe_s, columns=cols_s)
+    if vals:
+        out["spread_medio"] = round(float(np.mean(vals)), 2)
+        out["spread_max"] = round(float(np.max(vals)), 2)
+        out["spread_min"] = round(float(np.min(vals)), 2)
+        if len(vals) > 1:
+            out["std_spread"] = round(float(np.std(vals)), 2)
+        else:
+            out["std_spread"] = 0.0
+        out["quota_pos"] = sum(1 for v in vals if v > 0) / len(vals)
+    return out
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def generate_singularity_data():
     np.random.seed(42)
@@ -2912,7 +3001,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -4788,6 +4877,62 @@ elif workspace == _('ws8'):
                 )
             else:
                 st.info("Nessuna ora sopra la soglia nel periodo: abbassa la soglia per vedere i blocchi.")
+
+    with tab35:
+        titolo_sc = edu("Spread calendario", "Il prezzo base di un mese è la media di tutte le sue ore: il riferimento ETRM più usato per confrontare i mesi tra loro. Lo spread calendario è la differenza tra il base di un mese e quello del mese precedente (M+1 − M): positivo = mese successivo più caro. Serve a chi copre i costi (i mesi cari si comprano in anticipo), a chi valuta stagionalità e contratti indicizzati alla media mensile.")
+        st.markdown(f"**{titolo_sc}**: prezzo base mensile e spread mese-su-mese nel periodo selezionato.", unsafe_allow_html=True)
+
+        sc = calcola_spread_calendario(prezzi)
+        if sc["n_mesi"] == 0:
+            st.warning("Dati insufficienti per calcolare i prezzi base mensili.")
+        else:
+            s1, s2, s3, s4 = st.columns(4)
+            render_kpi(edu("Mesi analizzati", "Quanti mesi di calendario hanno almeno un'ora di dati nel periodo."), f"{sc['n_mesi']}", s1)
+            render_kpi(edu("Spread medio M/M+1", "Differenza media tra il base di un mese e quello del precedente: quanto costa in media 'spostarsi' di un mese."), f"{sc['spread_medio']:+,.2f} €/MWh" if sc["spread_medio"] is not None else "—", s2)
+            render_kpi(edu("Spread max / min", "La transizione mese-su-mese più cara e quella più economica del periodo."), f"{sc['spread_max']:+,.0f} / {sc['spread_min']:+,.0f}" if sc["spread_max"] is not None else "—", s3)
+            quota_txt = f"{sc['quota_pos'] * 100:.0f} % positivi" if sc["quota_pos"] is not None else "—"
+            render_kpi(edu("Volatilità spread", "Deviazione std degli spread mensili e quota di transizioni al rialzo: quanto è irregolare la curva stagionale."), f"σ {sc['std_spread']:,.2f} · {quota_txt}" if sc["std_spread"] is not None else "—", s4)
+
+            df_sc = sc["df_spread"]
+            if len(df_sc):
+                ord_sc = df_sc.reset_index(drop=True)
+                colori_sc = ["#ef4444" if d > 0 else "#22c55e" for d in ord_sc["Spread (€/MWh)"]]
+                fig_sc = go.Figure()
+                fig_sc.add_trace(go.Bar(
+                    x=ord_sc["Coppia"], y=ord_sc["Spread (€/MWh)"], orientation="v",
+                    name="Spread (€/MWh)", marker_color=colori_sc,
+                    hovertemplate="Coppia: %{x}<br>Spread: %{y:+.2f} €/MWh<extra></extra>"))
+                fig_sc.update_layout(template="plotly_dark", height=380,
+                                     title="Spread calendario mese-su-mese",
+                                     xaxis_title="Coppia di mesi", yaxis_title="Spread (€/MWh, + = mese successivo più caro)")
+                st.plotly_chart(fig_sc, use_container_width=True)
+                st.caption("Rosso = mese successivo più caro (contango stagionale), verde = mese successivo più economico.")
+            elif sc["n_mesi"] > 1:
+                st.info("I mesi presenti non sono di calendario consecutivi: nessuno spread calcolabile.")
+
+            st.markdown("**Confronto libero tra due mesi**")
+            mesi_opts = list(sc["df_mesi"]["Mese"])
+            cc0, cc1 = st.columns(2)
+            m_a = cc0.selectbox("Mese A", mesi_opts, index=0, key="sc_mese_a")
+            m_b = cc1.selectbox("Mese B", mesi_opts, index=min(1, len(mesi_opts) - 1), key="sc_mese_b")
+            va = float(sc["df_mesi"].loc[sc["df_mesi"]["Mese"] == m_a, "Prezzo base medio (€/MWh)"].iloc[0])
+            vb = float(sc["df_mesi"].loc[sc["df_mesi"]["Mese"] == m_b, "Prezzo base medio (€/MWh)"].iloc[0])
+            delta_ab = vb - va
+            st.metric(f"Spread {m_a} → {m_b}", f"{delta_ab:+,.2f} €/MWh",
+                      delta=f"{va:,.2f} → {vb:,.2f} €/MWh", delta_color="off")
+
+            st.markdown("**Tabella mesi**")
+            st.dataframe(sc["df_mesi"], use_container_width=True, hide_index=True)
+            if len(df_sc):
+                st.markdown("**Tabella spread**")
+                st.dataframe(df_sc, use_container_width=True, hide_index=True)
+                st.download_button(
+                    "⬇️ Esporta spread calendario (CSV)",
+                    df_sc.to_csv(index=False).encode("utf-8"),
+                    file_name=f"spread_calendario_{d0}_{d1}.csv",
+                    mime="text/csv",
+                    help="Scarica coppia di mesi, prezzi base e spread in €/MWh per ogni transizione mese-su-mese.",
+                )
 
 # Footer
 st.markdown("---")
