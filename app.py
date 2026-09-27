@@ -810,6 +810,83 @@ def calcola_picchi(prezzi, soglia=200.0):
         columns=cols_t).head(20)
     return out
 
+def calcola_profilo_settimanale(prezzi, top_n=10):
+    """Profilo settimanale tipo: prezzo medio per giorno-settimana x ora (7x24).
+
+    La matrice giorno x ora e' lo strumento standard per pianificare i carichi
+    flessibili: mostra dove l'energia costa di solito meno (tipicamente le notti
+    del weekend) e dove di piu' (le serate feriali). A differenza del tab
+    Weekend (media lun-ven vs sab-dom), qui ogni giorno ha il suo profilo
+    orario completo, e le 'finestre' indicano le combinazioni giorno-ora piu'
+    economiche del periodo.
+
+    NaN-safe: ore con prezzo NaN ignorate; combinazioni giorno-ora senza dati
+    (periodi parziali) restano NaN nella matrice e sono escluse dai min/max.
+    Ritorna dict con 'n_ore' (ore valide), 'tot_ore', 'matrice' (DataFrame
+    7x24 con indice nomi dei giorni e colonne 0-23, prezzi medi arrotondati),
+    'media_giorno' (DataFrame Giorno, 'Prezzo €/MWh'), 'media_ora' (DataFrame
+    Ora, 'Prezzo €/MWh'), 'giorno_min'/'giorno_max' (nome, valore),
+    'ora_min'/'ora_max' (ora, valore), 'coppia_min'/'coppia_max'
+    (nome giorno, ora, valore), 'ampiezza' (max - min delle medie di matrice)
+    e 'finestre' (DataFrame Giorno, Ora, 'Prezzo €/MWh' con le top_n
+    combinazioni piu' economiche)."""
+    GIORNI = ["Lunedì", "Martedì", "Mercoledì", "Giovedì",
+              "Venerdì", "Sabato", "Domenica"]
+    cols_mg = ["Giorno", "Prezzo €/MWh"]
+    cols_mo = ["Ora", "Prezzo €/MWh"]
+    cols_f = ["Giorno", "Ora", "Prezzo €/MWh"]
+    vuoto = {"n_ore": 0, "tot_ore": 0,
+             "matrice": pd.DataFrame(index=GIORNI, columns=list(range(24))),
+             "media_giorno": pd.DataFrame(columns=cols_mg),
+             "media_ora": pd.DataFrame(columns=cols_mo),
+             "giorno_min": None, "giorno_max": None,
+             "ora_min": None, "ora_max": None,
+             "coppia_min": None, "coppia_max": None,
+             "ampiezza": None,
+             "finestre": pd.DataFrame(columns=cols_f)}
+    p = prezzi.astype(float).dropna()
+    out = dict(vuoto)
+    if p.empty:
+        return out
+    out["tot_ore"] = int(len(p))
+    idxn = p.index.tz_localize(None) if p.index.tz is not None else p.index
+    df = pd.DataFrame({"wd": idxn.weekday, "ora": idxn.hour,
+                       "prezzo": p.values})
+    out["n_ore"] = int(len(df))
+    mat = (df.groupby(["wd", "ora"])["prezzo"].mean()
+             .unstack("ora").reindex(index=range(7), columns=range(24))
+             .round(2))
+    mat.index = GIORNI
+    out["matrice"] = mat
+    s = mat.stack()
+    if s.empty:
+        return out
+    out["ampiezza"] = round(float(s.max() - s.min()), 2)
+    i_min, i_max = s.idxmin(), s.idxmax()
+    out["coppia_min"] = (i_min[0], int(i_min[1]), round(float(s.loc[i_min]), 2))
+    out["coppia_max"] = (i_max[0], int(i_max[1]), round(float(s.loc[i_max]), 2))
+    mg = mat.mean(axis=1, skipna=True).round(2)
+    mo = mat.mean(axis=0, skipna=True).round(2)
+    out["media_giorno"] = (pd.DataFrame({"Giorno": mg.index,
+                                        "Prezzo €/MWh": mg.values})
+                           .reset_index(drop=True))
+    out["media_ora"] = (pd.DataFrame({"Ora": mo.index,
+                                      "Prezzo €/MWh": mo.values})
+                        .reset_index(drop=True))
+    gm, gx = mg.idxmin(), mg.idxmax()
+    out["giorno_min"] = (gm, round(float(mg.loc[gm]), 2))
+    out["giorno_max"] = (gx, round(float(mg.loc[gx]), 2))
+    om, ox = int(mo.idxmin()), int(mo.idxmax())
+    out["ora_min"] = (om, round(float(mo.loc[om]), 2))
+    out["ora_max"] = (ox, round(float(mo.loc[ox]), 2))
+    top = s.sort_values().head(max(1, int(top_n)))
+    out["finestre"] = (pd.DataFrame(
+        [{"Giorno": ix[0], "Ora": f"{int(ix[1]):02d}:00",
+          "Prezzo €/MWh": round(float(v), 2)}
+         for ix, v in top.items()], columns=cols_f)
+        .reset_index(drop=True))
+    return out
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def generate_singularity_data():
     np.random.seed(42)
@@ -1359,7 +1436,7 @@ elif workspace == _('ws7'):
 # ==========================================
 elif workspace == _('ws8'):
     st.markdown(f"<h1>{_('ws8')}</h1>", unsafe_allow_html=True)
-    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread, shaping curva, spread weekend, price capture, volatilità realizzata, confronto anno-su-anno, analisi prezzi negativi, spread intra-day, picchi di prezzo ed export CSV.")
+    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread, shaping curva, spread weekend, price capture, volatilità realizzata, confronto anno-su-anno, analisi prezzi negativi, spread intra-day, picchi di prezzo, profilo settimanale tipo ed export CSV.")
 
     # ---------- Controlli: sorgente, periodo, impianti ----------
     st.subheader("⚙️ Sorgente dati & Timeframe")
@@ -1502,7 +1579,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -2417,6 +2494,73 @@ elif workspace == _('ws8'):
                 file_name=f"picchi_prezzo_{d0}_{d1}.csv",
                 mime="text/csv",
                 help="Scarica le 20 ore con prezzo più alto del periodo selezionato.",
+            )
+
+    with tab19:
+        titolo_sw = edu("Profilo settimanale tipo", "Il PROFILO SETTIMANALE TIPO è la media del prezzo spot per ogni combinazione giorno-della-settimana × ora (matrice 7×24): mostra a colpo d'occhio quando l'energia costa di solito meno (tipicamente le notti del weekend) e quando di più (le serate feriali). Un carico flessibile, una pompa di calore o una ricarica programmata spostano i consumi nelle caselle verdi; la manutenzione degli impianti si pianifica nelle ore rosse, quando fermarsi costa meno. A differenza del tab Weekend (media lun-ven vs sab-dom), qui ogni giorno ha il suo profilo orario completo.")
+        st.markdown(f"**{titolo_sw}**: prezzo medio per giorno della settimana × ora, le finestre più economiche e il confronto tra i profili dei singoli giorni.", unsafe_allow_html=True)
+        sw = calcola_profilo_settimanale(prezzi)
+        if sw["tot_ore"] == 0:
+            st.info("Nessun dato disponibile per il periodo selezionato.")
+        else:
+            k1, k2, k3, k4 = st.columns(4)
+            render_kpi(edu("Giorno più economico", "Giorno della settimana con il prezzo medio più basso nel periodo: il candidato naturale per spostare i consumi flessibili."), f"{sw['giorno_min'][0]}<br><small>{sw['giorno_min'][1]:,.2f} €/MWh</small>", k1)
+            render_kpi(edu("Giorno più caro", "Giorno della settimana con il prezzo medio più alto: conviene ridurre i consumi flessibili o coprirsi in anticipo."), f"{sw['giorno_max'][0]}<br><small>{sw['giorno_max'][1]:,.2f} €/MWh</small>", k2)
+            render_kpi("Ora più economica (media)", f"{sw['ora_min'][0]:02d}:00<br><small>{sw['ora_min'][1]:,.2f} €/MWh</small>", k3)
+            render_kpi("Ora più cara (media)", f"{sw['ora_max'][0]:02d}:00<br><small>{sw['ora_max'][1]:,.2f} €/MWh</small>", k4)
+            st.caption(f"💡 Ore analizzate: {sw['n_ore']:,}. La combinazione più economica è {sw['coppia_min'][0]} ore {sw['coppia_min'][1]:02d}:00 ({sw['coppia_min'][2]:,.2f} €/MWh), la più cara {sw['coppia_max'][0]} ore {sw['coppia_max'][1]:02d}:00 ({sw['coppia_max'][2]:,.2f} €/MWh): ampiezza del pattern settimanale {sw['ampiezza']:,.2f} €/MWh.")
+
+            fig_sw = go.Figure(data=go.Heatmap(
+                z=sw["matrice"].values,
+                x=[f"{h:02d}" for h in range(24)],
+                y=list(sw["matrice"].index),
+                colorscale="RdYlGn_r",
+                hovertemplate="Giorno: %{y}<br>Ora: %{x}:00<br>Prezzo medio: %{z:.2f} €/MWh<extra></extra>",
+                colorbar=dict(title="€/MWh")))
+            fig_sw.update_layout(template="plotly_dark", height=380,
+                                 title="Prezzo medio per giorno × ora (€/MWh)",
+                                 xaxis_title="Ora del giorno", yaxis_title="")
+            st.plotly_chart(fig_sw, use_container_width=True)
+
+            col_s1, col_s2 = st.columns(2)
+            with col_s1:
+                giorno_sel = st.selectbox("📅 Giorno da confrontare", list(sw["matrice"].index),
+                                          index=list(sw["matrice"].index).index("Sabato") if "Sabato" in list(sw["matrice"].index) else 0,
+                                          help="Profilo orario del giorno scelto contro la media di tutte le ore del periodo.")
+                fig_sg = go.Figure()
+                fig_sg.add_trace(go.Scatter(x=list(range(24)), y=sw["media_ora"]["Prezzo €/MWh"].tolist(),
+                                            mode="lines", name="Media tutte le ore",
+                                            line=dict(dash="dash", color="#9ca3af"),
+                                            hovertemplate="Ora: %{x}:00<br>Media: %{y:.2f} €/MWh<extra></extra>"))
+                riga_g = sw["matrice"].loc[giorno_sel].tolist()
+                fig_sg.add_trace(go.Scatter(x=list(range(24)), y=riga_g,
+                                            mode="lines+markers", name=giorno_sel,
+                                            line=dict(color="#38bdf8"),
+                                            hovertemplate=f"{giorno_sel} " + "Ora: %{x}:00<br>Prezzo: %{y:.2f} €/MWh<extra></extra>"))
+                fig_sg.update_layout(template="plotly_dark", height=360,
+                                     title=f"Profilo orario: {giorno_sel} vs media",
+                                     xaxis_title="Ora", yaxis_title="€/MWh")
+                st.plotly_chart(fig_sg, use_container_width=True)
+            with col_s2:
+                st.markdown("**Media per giorno della settimana**")
+                fig_sgd = go.Figure()
+                fig_sgd.add_trace(go.Bar(
+                    x=sw["media_giorno"]["Giorno"], y=sw["media_giorno"]["Prezzo €/MWh"],
+                    marker_color="#38bdf8",
+                    hovertemplate="Giorno: %{x}<br>Prezzo medio: %{y:.2f} €/MWh<extra></extra>"))
+                fig_sgd.update_layout(template="plotly_dark", height=360,
+                                      title="Prezzo medio per giorno",
+                                      xaxis_title="", yaxis_title="€/MWh")
+                st.plotly_chart(fig_sgd, use_container_width=True)
+
+            st.markdown("**10 finestre giorno-ora più economiche**")
+            st.dataframe(sw["finestre"], use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta finestre economiche (CSV)",
+                sw["finestre"].to_csv(index=False).encode("utf-8"),
+                file_name=f"finestre_economiche_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica le 10 combinazioni giorno-ora con prezzo medio più basso del periodo selezionato.",
             )
 
 # Footer
