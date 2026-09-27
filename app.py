@@ -1941,6 +1941,124 @@ def calcola_stress_prezzo(prezzi, mw_f1, mw_f2, mw_f3, scenari):
     return out
 
 
+def calcola_forecast_prezzo(prezzi, n_settimane=8, backtest_settimane=4):
+    """Forecast naive-stagionale del prezzo day-ahead del giorno successivo.
+
+    Per ogni ora h del giorno target (il giorno dopo l'ultimo giorno con dati
+    completi), la previsione e' la media dei prezzi registrati all'ora h nello
+    stesso giorno della settimana nelle ultime n_settimane: cattura profilo
+    giornaliero e stagionalita' settimanale senza parametri da stimare.
+    Se per una coppia (ora, weekday) ci sono meno di 2 osservazioni, ripiega
+    sulla media dell'ora h su tutto il training; in ultima istanza sulla media
+    globale del training. Vengono riportati anche min/max del campione usato
+    (banda di incertezza empirica).
+
+    Backtest walk-forward: per ciascuno degli ultimi backtest_settimane
+    giorni-target (l'ultimo giorno con dati e gli stessi weekday delle
+    settimane precedenti) la previsione viene ricalcolata usando solo i dati
+    precedenti al giorno target e confrontata col reale: MAE (errore medio
+    assoluto), RMSE (penalizza gli errori grandi) e bias medio, definito come
+    media(previsione - reale): bias positivo = il metodo tende a sovrastimare
+    (previsione da correggere al ribasso).
+
+    prezzi: Series oraria in €/MWh con indice datetime (i NaN vengono scartati).
+    n_settimane: settimane di storia per la media stagionale (>=1, default 8).
+    backtest_settimane: quante settimane indietro valutare (0 = nessun backtest).
+    Giorni 'completi' = con almeno 20 osservazioni (tollera DST da 23/25 ore).
+    Ritorna dict con 'data_target' (Timestamp o None), 'df_forecast'
+    (Ora, Fascia, Previsione (€/MWh), Min/Max campione, N campioni),
+    'df_backtest' (Data, MAE, RMSE, Bias), 'mae', 'rmse', 'bias' (medie sui
+    giorni di backtest valutabili, None se nessuno) e deterministico a parita'
+    di input. Serie vuota o senza un giorno completo -> target None e df vuoti."""
+    cols_fc = ["Ora", "Fascia", "Previsione (€/MWh)", "Min campione (€/MWh)",
+               "Max campione (€/MWh)", "N campioni"]
+    cols_bt = ["Data", "MAE (€/MWh)", "RMSE (€/MWh)", "Bias (€/MWh)"]
+    vuoto = {"data_target": None,
+             "df_forecast": pd.DataFrame(columns=cols_fc),
+             "df_backtest": pd.DataFrame(columns=cols_bt),
+             "mae": None, "rmse": None, "bias": None}
+    try:
+        p = prezzi.astype(float).dropna()
+    except Exception:
+        return dict(vuoto)
+    if len(p) == 0:
+        return dict(vuoto)
+    try:
+        n_settimane = max(1, int(n_settimane))
+        n_bt = max(0, int(backtest_settimane))
+        giorni = p.index.normalize()
+        conteggi = p.groupby(giorni).size()
+        giorni_full = sorted(d for d, c in conteggi.items() if c >= 20)
+    except Exception:
+        return dict(vuoto)
+    if not giorni_full:
+        return dict(vuoto)
+    set_full = set(giorni_full)
+
+    def _previsione_giorno(p_train, target_day):
+        wd = target_day.weekday()
+        righe = []
+        for h in range(24):
+            try:
+                f = fascia_oraria(target_day + pd.Timedelta(hours=h))
+            except Exception:
+                f = "?"
+            camp = p_train[(p_train.index.weekday == wd) & (p_train.index.hour == h)]
+            if len(camp) < 2:
+                camp = p_train[p_train.index.hour == h]
+            if len(camp) == 0:
+                camp = p_train
+            v = camp.to_numpy(dtype=float)
+            righe.append({"Ora": f"{h:02d}:00", "Fascia": f,
+                          "Previsione (€/MWh)": round(float(np.mean(v)), 2),
+                          "Min campione (€/MWh)": round(float(np.min(v)), 2),
+                          "Max campione (€/MWh)": round(float(np.max(v)), 2),
+                          "N campioni": int(len(v))})
+        return pd.DataFrame(righe, columns=cols_fc)
+
+    last_full = giorni_full[-1]
+    target = last_full + pd.Timedelta(days=1)
+    df_fc = _previsione_giorno(p[p.index.normalize() < target], target)
+
+    righe_bt, mae_t, rmse_t, bias_t = [], [], [], []
+    for k in range(n_bt):
+        bt_target = last_full - pd.Timedelta(weeks=k)
+        if bt_target not in set_full:
+            continue
+        p_train = p[p.index.normalize() < bt_target]
+        if len(p_train) == 0:
+            continue
+        fc = _previsione_giorno(p_train, bt_target)
+        reali = p[p.index.normalize() == bt_target]
+        reali_ora = reali.groupby(reali.index.hour).mean()
+        fc_ore = fc["Ora"].str.slice(0, 2).astype(int)
+        comuni = [h for h in range(24) if h in set(reali_ora.index)]
+        if len(comuni) < 12:
+            continue
+        err = np.array([float(fc.loc[fc_ore == h, "Previsione (€/MWh)"].iloc[0])
+                        - float(reali_ora.loc[h]) for h in comuni])
+        m = float(np.mean(np.abs(err)))
+        r2 = float(np.sqrt(np.mean(err ** 2)))
+        b = float(np.mean(err))
+        mae_t.append(m)
+        rmse_t.append(r2)
+        bias_t.append(b)
+        righe_bt.append({"Data": bt_target.strftime("%Y-%m-%d"),
+                         "MAE (€/MWh)": round(m, 2),
+                         "RMSE (€/MWh)": round(r2, 2),
+                         "Bias (€/MWh)": round(b, 2)})
+    df_bt = pd.DataFrame(righe_bt, columns=cols_bt)
+    out = dict(vuoto)
+    out["data_target"] = target
+    out["df_forecast"] = df_fc
+    out["df_backtest"] = df_bt
+    if mae_t:
+        out["mae"] = round(float(np.mean(mae_t)), 2)
+        out["rmse"] = round(float(np.mean(rmse_t)), 2)
+        out["bias"] = round(float(np.mean(bias_t)), 2)
+    return out
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def generate_singularity_data():
     np.random.seed(42)
@@ -2490,7 +2608,7 @@ elif workspace == _('ws7'):
 # ==========================================
 elif workspace == _('ws8'):
     st.markdown(f"<h1>{_('ws8')}</h1>", unsafe_allow_html=True)
-    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread, shaping curva, spread weekend, price capture, volatilità realizzata, confronto anno-su-anno, analisi prezzi negativi, spread intra-day, picchi di prezzo, profilo settimanale tipo, curva di durata, concentrazione del costo di fornitura, simulazione demand shifting, finestre di acquisto ottimali, stagionalità mensile, monitoraggio del budget energetico annuale, analisi di sensitività del costo al profilo di prelievo, Value-at-Risk Monte Carlo del costo di fornitura, classifica dei giorni di calendario più costosi per il profilo di prelievo, fasce tariffarie orarie ottimali derivate dal profilo di prezzo osservato, autocorrelazione del prezzo spot (persistenza e stagionalità), stress test deterministico del costo di fornitura sotto shock di prezzo ed export CSV.")
+    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread, shaping curva, spread weekend, price capture, volatilità realizzata, confronto anno-su-anno, analisi prezzi negativi, spread intra-day, picchi di prezzo, profilo settimanale tipo, curva di durata, concentrazione del costo di fornitura, simulazione demand shifting, finestre di acquisto ottimali, stagionalità mensile, monitoraggio del budget energetico annuale, analisi di sensitività del costo al profilo di prelievo, Value-at-Risk Monte Carlo del costo di fornitura, classifica dei giorni di calendario più costosi per il profilo di prelievo, fasce tariffarie orarie ottimali derivate dal profilo di prezzo osservato, autocorrelazione del prezzo spot (persistenza e stagionalità), stress test deterministico del costo di fornitura sotto shock di prezzo, previsione naive-stagionale del prezzo del giorno successivo con backtest di accuratezza ed export CSV.")
 
     # ---------- Controlli: sorgente, periodo, impianti ----------
     st.subheader("⚙️ Sorgente dati & Timeframe")
@@ -2633,7 +2751,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -4340,6 +4458,69 @@ elif workspace == _('ws8'):
                 mime="text/csv",
                 help="Scarica scenario, shock applicato, costo, delta in € e % e prezzo medio ponderato.",
             )
+
+    with tab32:
+        titolo_fc = edu("Forecast del prezzo del giorno successivo", "Previsione naive-stagionale: per ogni ora del giorno dopo l'ultimo giorno con dati completi, il prezzo previsto è la media storica di quell'ora nello stesso giorno della settimana (ultime 8 settimane di default). Cattura profilo giornaliero e stagionalità settimanale senza parametri da stimare. Il backtest walk-forward misura quanto questo metodo avrebbe sbagliato nelle ultime settimane usando solo i dati disponibili allora: MAE (errore medio assoluto), RMSE (penalizza gli errori grandi) e bias = media(previsione − reale), positivo = il metodo tende a sovrastimare. Se il bias è sistematico, la previsione va corretta di conseguenza prima di usarla per il budget.")
+        st.markdown(f"**{titolo_fc}**: previsione oraria del prezzo per il giorno dopo l'ultimo con dati completi, con misura dell'accuratezza storica (backtest).", unsafe_allow_html=True)
+
+        fc1, fc2 = st.columns(2)
+        with fc1:
+            fc_nw = st.slider("Settimane di storia per la media stagionale", min_value=1, max_value=26, value=8, key="fc_nw",
+                              help="Quante settimane indietro guardare per la media di ogni (ora, giorno della settimana). Più settimane = stima più stabile, meno reattiva ai cambi di regime.")
+        with fc2:
+            fc_bt = st.slider("Settimane di backtest", min_value=0, max_value=12, value=4, key="fc_bt",
+                              help="Su quante settimane indietro misurare l'accuratezza del metodo (walk-forward). 0 = nessun backtest.")
+
+        fc = calcola_forecast_prezzo(prezzi, n_settimane=fc_nw, backtest_settimane=fc_bt)
+        if fc["data_target"] is None:
+            st.warning("Dati insufficienti per il forecast: serve almeno un giorno con dati orari.")
+        else:
+            df_fc = fc["df_forecast"]
+            tgt = fc["data_target"]
+            k1, k2, k3, k4 = st.columns(4)
+            render_kpi(edu("Giorno previsto", "Il giorno dopo l'ultimo giorno con dati completi: la previsione copre le sue 24 ore."), tgt.strftime("%d/%m/%Y"), k1)
+            render_kpi(edu("Prezzo medio previsto", "Media delle 24 previsioni orarie: il livello atteso del prezzo per il giorno previsto."), f"{df_fc['Previsione (€/MWh)'].mean():,.2f} €/MWh", k2)
+            render_kpi(edu("MAE backtest", "Errore medio assoluto del metodo sulle settimane di backtest: di quanto, in media, la previsione si discosta dal prezzo reale."), (f"{fc['mae']:,.2f} €/MWh" if fc["mae"] is not None else "n.d."), k3)
+            if fc["bias"] is None:
+                render_kpi("Bias backtest", "n.d.", k4)
+            else:
+                segno = "🔴" if fc["bias"] > 0 else ("🟢" if fc["bias"] < 0 else "⚪")
+                render_kpi(f"{segno} Bias backtest", f"{fc['bias']:+,.2f} €/MWh", k4)
+
+            fig_fc = go.Figure()
+            fig_fc.add_trace(go.Scatter(
+                x=df_fc["Ora"], y=df_fc["Max campione (€/MWh)"], mode="lines",
+                line=dict(width=0), showlegend=False, hoverinfo="skip"))
+            fig_fc.add_trace(go.Scatter(
+                x=df_fc["Ora"], y=df_fc["Min campione (€/MWh)"], mode="lines",
+                line=dict(width=0), fill="tonexty", fillcolor="rgba(59,130,246,0.18)",
+                name="Banda min–max campione",
+                hovertemplate="Ora: %{x}<br>Min campione: %{y:.2f} €/MWh<extra></extra>"))
+            fig_fc.add_trace(go.Scatter(
+                x=df_fc["Ora"], y=df_fc["Previsione (€/MWh)"], mode="lines+markers",
+                name="Previsione", line=dict(color="#3b82f6", width=2),
+                hovertemplate="Ora: %{x}<br>Previsione: %{y:.2f} €/MWh<extra></extra>"))
+            fig_fc.update_layout(template="plotly_dark", height=380,
+                                 title=f"Previsione oraria — {tgt.strftime('%d/%m/%Y')}",
+                                 xaxis_title="Ora", yaxis_title="€/MWh")
+            st.plotly_chart(fig_fc, use_container_width=True)
+            st.caption("La banda blu è l'intervallo min–max del campione storico usato per ciascuna ora: più è larga, meno la previsione è affidabile per quell'ora.")
+
+            st.markdown("**Tabella previsione oraria**")
+            st.dataframe(df_fc, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta forecast (CSV)",
+                df_fc.to_csv(index=False).encode("utf-8"),
+                file_name=f"forecast_prezzo_{tgt.strftime('%Y%m%d')}.csv",
+                mime="text/csv",
+                help="Scarica ora, fascia, previsione, banda min–max del campione e numerosità per le 24 ore previste.",
+            )
+
+            if len(fc["df_backtest"]) > 0:
+                st.markdown("**Backtest walk-forward**")
+                st.dataframe(fc["df_backtest"], use_container_width=True, hide_index=True)
+                if fc["rmse"] is not None:
+                    st.caption(f"RMSE medio backtest: {fc['rmse']:,.2f} €/MWh. Un MAE molto inferiore alla volatilità oraria del periodo indica un metodo utile; un bias sistematico va sottratto dalla previsione prima dell'uso.")
 
 # Footer
 st.markdown("---")
