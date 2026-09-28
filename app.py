@@ -4065,6 +4065,143 @@ def calcola_margine_fornitore(prezzi, mw_f1, mw_f2, mw_f3, prezzo_offerta,
         "df_mesi": df_mesi, "df_giorni": df_giorni,
     })
     return out
+
+
+def calcola_ponte_budget(prezzi, mw_f1, mw_f2, mw_f3, prezzo_budget, volume_budget_mwh):
+    """Ponte budget -> consuntivo: scomposizione dello scostamento di costo.
+
+    Confronta il costo effettivo (spot pesato sul profilo F1/F2/F3) con un
+    budget definito da prezzo unitario e volume totale sul periodo, e
+    scompone lo scostamento in tre driver che sommano ESATTAMENTE:
+
+        scostamento = effetto prezzo + effetto volume + effetto mix
+
+    - effetto prezzo = (p_lw - p_budget) * V_budget
+      (quanto costano i prezzi diversi dal budget, a volumi di budget)
+    - effetto volume = (V_eff - V_budget) * p_budget
+      (quanto costano i volumi diversi dal budget, a prezzi di budget)
+    - effetto mix    = (p_lw - p_budget) * (V_eff - V_budget)
+      (interazione prezzo x volume: es. consumare di piu' proprio quando
+      i prezzi sono sopra budget)
+
+    dove p_lw e' il prezzo load-weighted effettivo (costo/MWh) e V_eff il
+    volume effettivo. Il volume di budget viene ripartito sui mesi per
+    giorni di calendario (pro-rata temporis), come si fa nei budget annuali.
+
+    Diverso dalle altre tab: 'Budget tracker' mostra l'andamento cumulato
+    contro una soglia ma non spiega il PERCHE'; 'Costo fornitura' mostra
+    solo l'effettivo. Qui si risponde alla domanda del controller:
+    "siamo sopra budget, ma per colpa dei prezzi, dei volumi o di entrambi?".
+
+    NaN-safe: ore con prezzo NaN escluse. Serie vuota o indice non datetime
+    -> totali neutrali e DataFrame vuoti. prezzo_budget <= 0, volume < 0 o
+    parametri non numerici -> 'errore'.
+
+    Ritorna dict con 'errore', 'mwh_eff', 'prezzo_lw' (None se mwh_eff=0),
+    'costo_eff', 'costo_budget', 'scostamento', 'scostamento_pct'
+    (None se costo_budget=0), 'eff_prezzo', 'eff_volume', 'eff_mix',
+    'driver' ('prezzo'/'volume'/'mix', il contributo maggiore in valore
+    assoluto, None se tutti nulli), 'df_mesi' (Mese, MWh effettivi,
+    MWh budget, Prezzo LW (€/MWh), Costo effettivo (€), Costo budget (€),
+    Scostamento (€), Effetto prezzo (€), Effetto volume (€), Effetto mix (€))."""
+    colonne_m = ["Mese", "MWh effettivi", "MWh budget", "Prezzo LW (\u20ac/MWh)",
+                 "Costo effettivo (\u20ac)", "Costo budget (\u20ac)", "Scostamento (\u20ac)",
+                 "Effetto prezzo (\u20ac)", "Effetto volume (\u20ac)", "Effetto mix (\u20ac)"]
+    vuoto = {"errore": None, "mwh_eff": 0.0, "prezzo_lw": None, "costo_eff": 0.0,
+             "costo_budget": 0.0, "scostamento": 0.0, "scostamento_pct": None,
+             "eff_prezzo": 0.0, "eff_volume": 0.0, "eff_mix": 0.0,
+             "driver": None, "df_mesi": pd.DataFrame(columns=colonne_m)}
+
+    try:
+        pb = float(prezzo_budget); vb = float(volume_budget_mwh)
+    except Exception:
+        out = dict(vuoto); out["errore"] = "Parametri non validi: inserisci valori numerici."
+        return out
+    if not np.isfinite(pb) or not np.isfinite(vb):
+        out = dict(vuoto); out["errore"] = "Parametri non validi: inserisci valori numerici."
+        return out
+    if pb <= 0 or vb < 0:
+        out = dict(vuoto); out["errore"] = "Prezzo budget > 0 e volume budget >= 0 richiesti."
+        return out
+
+    try:
+        p = prezzi.astype(float)
+        p = p[~p.index.duplicated(keep="first")].sort_index()
+        if not isinstance(p.index, pd.DatetimeIndex):
+            return dict(vuoto)
+    except Exception:
+        return dict(vuoto)
+    p = p.dropna()
+    if len(p) == 0:
+        return dict(vuoto)
+
+    profilo = {"F1": float(mw_f1), "F2": float(mw_f2), "F3": float(mw_f3)}
+    fasce = p.index.map(fascia_oraria)
+    mw = fasce.map(profilo).to_numpy(dtype=float)
+    px = p.to_numpy(dtype=float)
+    costo_orario = px * mw
+    mwh_eff = float(mw.sum())
+    costo_eff = float(costo_orario.sum())
+    p_lw = costo_eff / mwh_eff if mwh_eff > 0 else None
+    costo_budget = pb * vb
+    scost = costo_eff - costo_budget
+    if p_lw is None:
+        eff_p = eff_v = eff_m = 0.0
+    else:
+        eff_p = (p_lw - pb) * vb
+        eff_v = (mwh_eff - vb) * pb
+        eff_m = (p_lw - pb) * (mwh_eff - vb)
+
+    idxn = p.index.tz_localize(None) if p.index.tz is not None else p.index
+    giorni_totali = int(idxn.normalize().unique().shape[0])
+    mesi = idxn.to_period("M")
+    mesi_ord = sorted(set(mesi.tolist()))
+    righe = []
+    for mp in mesi_ord:
+        m = np.asarray(mesi == mp)
+        giorni_m = int(pd.DatetimeIndex(idxn[m]).normalize().unique().shape[0])
+        vb_m = vb * giorni_m / giorni_totali if giorni_totali > 0 else 0.0
+        mwh_m = float(mw[m].sum()); ce_m = float(costo_orario[m].sum())
+        plw_m = ce_m / mwh_m if mwh_m > 0 else None
+        cb_m = pb * vb_m
+        if plw_m is None:
+            ep_m = ev_m = em_m = 0.0
+        else:
+            ep_m = (plw_m - pb) * vb_m
+            ev_m = (mwh_m - vb_m) * pb
+            em_m = (plw_m - pb) * (mwh_m - vb_m)
+        righe.append({"Mese": str(mp), "MWh effettivi": round(mwh_m, 1),
+                      "MWh budget": round(vb_m, 1),
+                      "Prezzo LW (\u20ac/MWh)": round(plw_m, 2) if plw_m is not None else None,
+                      "Costo effettivo (\u20ac)": round(ce_m, 2),
+                      "Costo budget (\u20ac)": round(cb_m, 2),
+                      "Scostamento (\u20ac)": round(ce_m - cb_m, 2),
+                      "Effetto prezzo (\u20ac)": round(ep_m, 2),
+                      "Effetto volume (\u20ac)": round(ev_m, 2),
+                      "Effetto mix (\u20ac)": round(em_m, 2)})
+    df_mesi = pd.DataFrame(righe, columns=colonne_m)
+
+    driver = None
+    cand = [("prezzo", abs(eff_p)), ("volume", abs(eff_v)), ("mix", abs(eff_m))]
+    if any(v > 0 for _, v in cand):
+        driver = max(cand, key=lambda t: t[1])[0]
+
+    out = dict(vuoto)
+    out.update({
+        "mwh_eff": mwh_eff,
+        "prezzo_lw": round(p_lw, 2) if p_lw is not None else None,
+        "costo_eff": round(costo_eff, 2),
+        "costo_budget": round(costo_budget, 2),
+        "scostamento": round(scost, 2),
+        "scostamento_pct": round(scost / costo_budget, 4) if costo_budget > 0 else None,
+        "eff_prezzo": round(eff_p, 2), "eff_volume": round(eff_v, 2),
+        "eff_mix": round(eff_m, 2), "driver": driver, "df_mesi": df_mesi,
+    })
+    return out
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def generate_singularity_data():
     np.random.seed(42)
     days = 500
     dates = pd.date_range(end=datetime.date.today(), periods=days)
@@ -4755,7 +4892,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -7912,6 +8049,87 @@ elif workspace == _('ws8'):
                     file_name=f"margine_fornitore_{d0}_{d1}.csv",
                     mime="text/csv",
                     help="Scarica il dettaglio mensile del margine implicito del fornitore.",
+                )
+
+    with tab50:
+        titolo_pb = edu("Ponte budget-consuntivo", "Scomposizione dello scostamento tra costo effettivo e budget in tre driver che sommano esattamente: effetto PREZZO (prezzi diversi dal budget, a volumi di budget), effetto VOLUME (volumi diversi dal budget, a prezzi di budget) ed effetto MIX (interazione: consumare di piu' proprio quando i prezzi sono sopra budget). Il budget mensile e' ripartito per giorni di calendario.")
+        st.markdown(f"**{titolo_pb}**: perche' sei sopra (o sotto) budget? Prezzi, volumi o entrambi.", unsafe_allow_html=True)
+
+        b0, b1 = st.columns(2)
+        with b0:
+            pb_prezzo = st.number_input("Prezzo di budget (€/MWh)", min_value=0.0, value=110.0, step=1.0,
+                                        key="pb50_prezzo",
+                                        help="Prezzo unitario usato nel budget sul periodo selezionato.")
+        with b1:
+            pb_volume = st.number_input("Volume di budget (MWh sul periodo)", min_value=0.0, value=0.0, step=10.0,
+                                        key="pb50_volume",
+                                        help="Volume totale di budget sul periodo selezionato; ripartito sui mesi per giorni di calendario.")
+
+        pb = calcola_ponte_budget(prezzi, mw_f1, mw_f2, mw_f3, pb_prezzo, pb_volume)
+        if pb["errore"]:
+            st.warning(f"\u26a0\ufe0f {pb['errore']}")
+        elif pb["mwh_eff"] == 0:
+            st.warning("Imposta una potenza maggiore di zero in almeno una fascia (tab \U0001F4B0 Costo fornitura) per calcolare il ponte.")
+        else:
+            k1, k2, k3, k4 = st.columns(4)
+            render_kpi(edu("Costo budget", "Costo previsto: prezzo di budget per volume di budget sul periodo."),
+                       f"{pb['costo_budget']:,.0f} \u20ac", k1)
+            render_kpi(edu("Costo effettivo", "Costo reale: spot orario pesato sul tuo profilo F1/F2/F3."),
+                       f"{pb['costo_eff']:,.0f} \u20ac", k2)
+            render_kpi(edu("Scostamento", "Effettivo meno budget: positivo = sopra budget. La somma dei tre effetti lo spiega tutto."),
+                       f"{pb['scostamento']:+,.0f} \u20ac" +
+                       (f" ({pb['scostamento_pct']*100:+.1f} %)" if pb["scostamento_pct"] is not None else ""), k3)
+            render_kpi(edu("Driver principale", "Il contributo piu' grande in valore assoluto tra prezzo, volume e mix."),
+                       pb["driver"].upper() if pb["driver"] else "\u2014", k4)
+            st.caption(f"{pb['mwh_eff']:,.0f} MWh effettivi a {pb['prezzo_lw']:,.2f} \u20ac/MWh (load-weighted) "
+                       f"contro budget {pb_prezzo:,.2f} \u20ac/MWh.")
+
+            try:
+                fig_pb1 = go.Figure(go.Waterfall(
+                    name="Ponte", orientation="v",
+                    measure=["absolute", "relative", "relative", "relative", "total"],
+                    x=["Budget", "Effetto prezzo", "Effetto volume", "Effetto mix", "Effettivo"],
+                    y=[pb["costo_budget"], pb["eff_prezzo"], pb["eff_volume"], pb["eff_mix"], pb["costo_eff"]],
+                    connector={"line": {"color": "#6b7280"}},
+                    decreasing={"marker": {"color": "#22c55e"}},
+                    increasing={"marker": {"color": "#ef4444"}},
+                    totals={"marker": {"color": "#3b82f6"}},
+                    hovertemplate="%{x}: %{y:,.0f} \u20ac<extra></extra>"))
+                fig_pb1.update_layout(template="plotly_dark", height=340,
+                                      title="Ponte budget \u2192 consuntivo: da dove viene lo scostamento",
+                                      yaxis_title="\u20ac", showlegend=False)
+                st.plotly_chart(fig_pb1, use_container_width=True)
+                st.caption("Barre rosse = peggiorano lo scostamento, verdi = lo migliorano. La somma dei tre effetti centrali e' esattamente lo scostamento.")
+            except Exception:
+                st.info("Grafico waterfall non disponibile per questi dati.")
+
+            try:
+                df_pm = pb["df_mesi"]
+                fig_pb2 = go.Figure()
+                for col, colore in [("Effetto prezzo (\u20ac)", "#f59e0b"),
+                                    ("Effetto volume (\u20ac)", "#8b5cf6"),
+                                    ("Effetto mix (\u20ac)", "#06b6d4")]:
+                    fig_pb2.add_trace(go.Bar(x=df_pm["Mese"], y=df_pm[col], name=col,
+                                             marker_color=colore,
+                                             hovertemplate="Mese: %{x}<br>" + col + ": %{y:,.0f} \u20ac<extra></extra>"))
+                fig_pb2.update_layout(template="plotly_dark", height=320, barmode="relative",
+                                      title="Driver dello scostamento per mese",
+                                      xaxis_title="Mese", yaxis_title="\u20ac")
+                st.plotly_chart(fig_pb2, use_container_width=True)
+                st.caption("Ogni mese lo scostamento e' la somma dei tre effetti impilati (sopra/sotto lo zero).")
+            except Exception:
+                st.info("Grafico mensile non disponibile per questi dati.")
+
+            df_pb = pb["df_mesi"]
+            if len(df_pb):
+                st.markdown("**Dettaglio mensile**")
+                st.dataframe(df_pb, use_container_width=True, hide_index=True)
+                st.download_button(
+                    "\u2b07\ufe0f Esporta ponte budget (CSV)",
+                    df_pb.to_csv(index=False).encode("utf-8"),
+                    file_name=f"ponte_budget_{d0}_{d1}.csv",
+                    mime="text/csv",
+                    help="Scarica il dettaglio mensile del ponte budget-consuntivo.",
                 )
 
 # Footer
