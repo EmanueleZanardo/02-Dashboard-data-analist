@@ -2877,7 +2877,9 @@ def calcola_drawdown(prezzi, soglia_eur=20.0):
     DRAWDOWN = calo dal massimo corrente (running max) fino al punto di
     svolta piu' basso prima di un nuovo massimo: picco -> minimo (ore di
     calo) -> recupero al livello del picco (ore di recupero, None se non
-    recuperato entro fine serie). E' la misura da risk manager: non quanto
+    recuperato entro fine serie). Il recupero include l'ora del picco
+    successivo: e' la prima ora in cui il prezzo torna di certo al livello
+    del picco (nuovo massimo storico). E' la misura da risk manager: non quanto
     si muove il prezzo ora-su-ora (tab 'Rampe di prezzo') ne' le sequenze
     consecutive (tab 'Sequenze'), ma quanto perde un acquirente che ha
     comprato al picco e quanto tempo serve per tornare in pari.
@@ -2924,6 +2926,10 @@ def calcola_drawdown(prezzi, soglia_eur=20.0):
             return dict(vuoto)
     except Exception:
         return dict(vuoto)
+    try:
+        soglia_eur = float(soglia_eur)
+    except Exception:
+        return dict(vuoto)
 
     out = dict(vuoto)
     vals = p.to_numpy(dtype=float)
@@ -2954,9 +2960,14 @@ def calcola_drawdown(prezzi, soglia_eur=20.0):
         profondita = float(vals[pi] - vals[ti])
         if profondita <= 0:
             continue
-        # recupero: prima ora dopo il minimo con prezzo >= picco
+        # recupero: prima ora dopo il minimo con prezzo >= picco.
+        # Include l'ora del picco successivo (fine): e' la prima ora in cui
+        # il prezzo torna di certo al livello del picco (nuovo massimo
+        # storico). Prima era esclusa -> episodi di fatto recuperati
+        # risultavano "aperti" e il tempo medio di recupero restava n.d.
+        fine_rec = fine + 1 if k + 1 < len(picchi) else n
         rec_i = None
-        for j in range(ti + 1, fine):
+        for j in range(ti + 1, fine_rec):
             if vals[j] >= vals[pi]:
                 rec_i = j
                 break
@@ -2977,7 +2988,7 @@ def calcola_drawdown(prezzi, soglia_eur=20.0):
     df_ep = pd.DataFrame(episodi, columns=cols)
     out["df"] = df_ep
     out["n_episodi"] = len(episodi)
-    out["n_oltre_soglia"] = int((df_ep["Profondita' (€/MWh)"] >= float(soglia_eur)).sum()) \
+    out["n_oltre_soglia"] = int((df_ep["Profondita' (€/MWh)"] >= soglia_eur).sum()) \
         if len(df_ep) else 0
     if out["max_drawdown_eur"] is not None and len(episodi):
         picco_dd = episodi[0]["Picco (€/MWh)"]
@@ -3351,6 +3362,132 @@ def calcola_climatologia_prezzo(prezzi, soglia=100.0):
         out["top_celle"] = top
     out["eccedenza_media"] = round(float(df["ecc"].mean()), 2)
     out["eccedenza_max"] = round(float(df["ecc"].max()), 2)
+    return out
+
+
+def calcola_stabilita_profilo(prezzi, min_ore_mese=360):
+    """Stabilita' del profilo orario medio tra i mesi di calendario.
+
+    Per ogni mese con abbastanza ore osservate calcola il profilo medio
+    delle 24 ore (prezzo medio per ora del giorno), poi misura la
+    correlazione di Pearson tra i profili mensili. Se la forma della
+    giornata tipo e' stabile nel tempo, le strategie di shaping, le fasce
+    time-of-use e le coperture sagomate restano valide; se la
+    correlazione crolla, il profilo sta cambiando (stagionalita' forte,
+    cambi strutturali di mix/prezzi) e vanno ricalibrate.
+
+    Differenza rispetto agli altri tab: 'Settimana tipo', 'Stagionalita''
+    e 'Fasce ottimali' mostrano o usano i profili MEDI; 'Autocorrelazione'
+    misura la persistenza ora-su-ora; qui si misura la STABILITA' della
+    FORMA della giornata mese-su-mese: non il livello dei prezzi (due
+    mesi con livelli diversi ma stessa forma danno correlazione ~1) ma
+    quanto la sagoma oraria resta uguale nel tempo.
+
+    prezzi: Series oraria in €/MWh con indice datetime (tz-aware ok).
+    min_ore_mese: ore osservate minime per includere un mese (default 360,
+      circa meta' mese); mesi con qualche ora del giorno mai osservata
+      (profilo incompleto) o con profilo a varianza nulla (correlazione
+      non definita) sono esclusi.
+
+    NaN-safe: ore NaN ignorate. Serie vuota, indice non datetime,
+    duplicati o meno di 2 mesi validi -> KPI a None e DataFrame vuoti.
+    Mesi DST con 23/25 ore contribuiscono con le ore osservate (logica
+    posizionale per ora del giorno).
+
+    Ritorna dict con 'n_mesi', 'mesi' (etichette YYYY-MM), 'min_ore_mese',
+    'profili' (DataFrame mesi x 24, prezzi medi €/MWh per ora),
+    'corr' (DataFrame correlazioni di Pearson mesi x mesi),
+    'corr_media' (media fuori diagonale), 'corr_min' (minimo fuori
+    diagonale), 'coppia_min' ((mese1, mese2) o None), 'mese_anomalo'
+    (correlazione media piu' bassa verso gli altri mesi), 'ora_picco'
+    (DataFrame Mese, Ora di picco, Prezzo medio, Ore osservate),
+    'deriva_picco_ore' (max-min ora di picco tra i mesi), 'df_export'
+    (uguale a ora_picco)."""
+
+    cols_picco = ["Mese", "Ora di picco", "Prezzo medio (€/MWh)", "Ore osservate"]
+    vuoto = {"n_mesi": 0, "mesi": [], "min_ore_mese": None,
+             "profili": pd.DataFrame(),
+             "corr": pd.DataFrame(),
+             "corr_media": None, "corr_min": None, "coppia_min": None,
+             "mese_anomalo": None,
+             "ora_picco": pd.DataFrame(columns=cols_picco),
+             "deriva_picco_ore": None,
+             "df_export": pd.DataFrame(columns=cols_picco)}
+    try:
+        min_ore_mese = int(min_ore_mese)
+    except Exception:
+        return dict(vuoto)
+    try:
+        p = prezzi.astype(float)
+        p = p[~p.index.duplicated(keep="first")].sort_index()
+    except Exception:
+        return dict(vuoto)
+    try:
+        if not isinstance(p.index, pd.DatetimeIndex):
+            return dict(vuoto)
+    except Exception:
+        return dict(vuoto)
+    p = p.dropna()
+    if len(p) == 0:
+        return dict(vuoto)
+
+    idxn = p.index.tz_localize(None) if p.index.tz is not None else p.index
+    per = idxn.to_period("M")
+    ore = idxn.hour.to_numpy()
+    v = p.to_numpy(dtype=float)
+    profili, ore_mese = {}, {}
+    for mp in sorted(set(per.tolist())):
+        m = np.asarray(per == mp)
+        n_ore = int(m.sum())
+        if n_ore < min_ore_mese:
+            continue
+        hm = np.full(24, np.nan)
+        for h in range(24):
+            sel = v[m & (ore == h)]
+            if sel.size:
+                hm[h] = float(sel.mean())
+        if np.isnan(hm).any():
+            continue  # profilo incompleto: qualche ora mai osservata
+        if float(np.std(hm)) == 0.0:
+            continue  # profilo piatto: correlazione non definita
+        etichetta = str(mp)
+        profili[etichetta] = hm
+        ore_mese[etichetta] = n_ore
+    if len(profili) < 2:
+        return dict(vuoto)
+
+    mesi = sorted(profili)
+    P = pd.DataFrame(profili, index=list(range(24))).T  # righe=mesi, colonne=ore
+    C = P.T.corr()  # correlazione di Pearson tra mesi
+    vals_c = C.to_numpy(dtype=float)
+    mask_off = ~np.eye(len(mesi), dtype=bool)
+    off = vals_c[mask_off]
+    imin = int(np.nanargmin(off))
+    ii, jj = np.where(mask_off)
+    out = dict(vuoto)
+    out["min_ore_mese"] = min_ore_mese
+    out["n_mesi"] = len(mesi)
+    out["mesi"] = mesi
+    out["profili"] = P
+    out["corr"] = C
+    out["corr_media"] = round(float(np.nanmean(off)), 4)
+    out["corr_min"] = round(float(off[imin]), 4)
+    out["coppia_min"] = (mesi[int(ii[imin])], mesi[int(jj[imin])])
+    media_vs_altri = (np.nan_to_num(vals_c, nan=0.0) * mask_off).sum(axis=1) / mask_off.sum(axis=1)
+    out["mese_anomalo"] = mesi[int(np.nanargmin(media_vs_altri))]
+    righe = []
+    ore_picco = []
+    for mm in mesi:
+        hm = profili[mm]
+        hp = int(np.argmax(hm))
+        ore_picco.append(hp)
+        righe.append({"Mese": mm, "Ora di picco": f"{hp:02d}:00",
+                      "Prezzo medio (€/MWh)": round(float(hm.mean()), 2),
+                      "Ore osservate": int(ore_mese[mm])})
+    df_picco = pd.DataFrame(righe, columns=cols_picco)
+    out["ora_picco"] = df_picco
+    out["deriva_picco_ore"] = int(max(ore_picco) - min(ore_picco))
+    out["df_export"] = df_picco
     return out
 
 
@@ -4046,7 +4183,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -6694,6 +6831,80 @@ elif workspace == _('ws8'):
                     file_name=f"climatologia_prezzo_{soglia_cl}_{d0}_{d1}.csv",
                     mime="text/csv",
                     help="Scarica le 20 combinazioni giorno/ora con la piu' alta probabilita' di superare la soglia.",
+                )
+
+    with tab45:
+        titolo_sp = edu("Stabilità del profilo orario", "La STABILITA' DEL PROFILO misura quanto la FORMA della giornata tipo (il profilo medio delle 24 ore) resta uguale da un mese all'altro: per ogni mese si calcola il prezzo medio per ora del giorno e si misura la correlazione di Pearson tra i profili mensili. Correlazione vicina a 1 = la sagoma oraria non cambia (shaping, fasce time-of-use e coperture sagomate restano validi); correlazione che crolla = il profilo sta cambiando (stagionalità forte o cambi strutturali) e le strategie sagomate vanno ricalibrate. Nota: la correlazione ignora il LIVELLO dei prezzi — due mesi con livelli diversi ma stessa forma danno correlazione ~1. A differenza di 'Settimana tipo' e 'Stagionalità' (che mostrano i profili medi) e di 'Autocorrelazione' (persistenza ora-su-ora), qui la domanda è: 'la giornata tipo di domani avrà la stessa forma di quella di ieri?'.")
+        st.markdown(f"**{titolo_sp}**: quanto la forma della giornata tipo resta stabile tra i mesi (correlazione dei profili orari medi mensili).", unsafe_allow_html=True)
+
+        sp_min_ore = st.slider("Ore minime osservate per mese", min_value=100, max_value=720, value=360, step=20, key="sp45_min_ore",
+                               help="Un mese entra nel confronto solo se ha almeno queste ore osservate (720 = mese intero). Mesi con ore mancanti in qualche fascia oraria o con profilo piatto sono esclusi comunque.")
+        sp = calcola_stabilita_profilo(prezzi, min_ore_mese=int(sp_min_ore))
+        if sp["n_mesi"] < 2:
+            st.warning("Servono almeno 2 mesi con dati sufficienti per misurare la stabilità del profilo (aumenta il periodo o abbassa la soglia di ore minime).")
+        else:
+            c1, c2, c3, c4 = st.columns(4)
+            render_kpi(edu("Correlazione media tra mesi", "Media delle correlazioni di Pearson tra i profili orari medi dei mesi: vicina a 1 = la forma della giornata tipo è stabile nel tempo, le strategie di shaping restano valide."), f"{sp['corr_media']:.3f}<br><small>Pearson sui profili 24h</small>", c1)
+            cm1, cm2 = sp["coppia_min"]
+            render_kpi(edu("Coppia meno correlata", "I due mesi con i profili orari più diversi tra loro: il punto di rottura della stabilità. Se la correlazione è bassa, il profilo è cambiato proprio tra questi due mesi."), f"{sp['corr_min']:.3f}<br><small>{cm1} vs {cm2}</small>", c2)
+            render_kpi(edu("Mese più anomalo", "Il mese il cui profilo orario è in media più diverso da tutti gli altri: il candidato da analizzare per capire cosa è cambiato (stagione, mix, prezzi)."), f"{sp['mese_anomalo']}<br><small>profilo più diverso</small>", c3)
+            render_kpi(edu("Deriva ora di picco", "Distanza in ore tra l'ora di picco più anticipata e quella più ritardata tra i mesi: dice se il momento più caro della giornata si sta spostando."), f"{sp['deriva_picco_ore']} ore<br><small>max-min ora di picco</small>", c4)
+
+            try:
+                C = sp["corr"]
+                zmin_sp = min(0.0, float(sp["corr_min"]))
+                fig_sp1 = go.Figure(data=go.Heatmap(
+                    z=C.to_numpy(), x=C.columns.tolist(), y=C.index.tolist(),
+                    colorscale="RdYlGn", zmin=zmin_sp, zmax=1.0,
+                    colorbar=dict(title="Correlazione"),
+                    hovertemplate="Mese: %{y} vs %{x}<br>Correlazione: %{z:.3f}<extra></extra>"))
+                fig_sp1.update_layout(template="plotly_dark", height=420,
+                                      title="Stabilità del profilo: correlazione tra i profili orari medi mensili",
+                                      xaxis_title="Mese", yaxis_title="Mese")
+                st.plotly_chart(fig_sp1, use_container_width=True)
+                st.caption("Verde = mesi con la stessa forma di giornata tipo; celle gialle/rosse = il profilo è cambiato tra quei due mesi.")
+            except Exception:
+                st.info("Heatmap di correlazione non disponibile per questi dati.")
+
+            try:
+                P = sp["profili"]
+                fig_sp2 = go.Figure()
+                for mm in P.index:
+                    fig_sp2.add_trace(go.Scatter(x=[f"{h:02d}:00" for h in range(24)], y=P.loc[mm].to_numpy(),
+                                                 mode="lines+markers", name=str(mm),
+                                                 hovertemplate="Ora: %{x}<br>Prezzo medio: %{y:,.2f} €/MWh<extra></extra>"))
+                fig_sp2.update_layout(template="plotly_dark", height=360,
+                                      title="Profili orari medi per mese (€/MWh)",
+                                      xaxis_title="Ora del giorno", yaxis_title="€/MWh",
+                                      legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+                st.plotly_chart(fig_sp2, use_container_width=True)
+                st.caption("Se le curve si sovrappongono, la forma della giornata è stabile; curve che si discostano segnalano i mesi anomali.")
+            except Exception:
+                st.info("Profili mensili non disponibili per questi dati.")
+
+            try:
+                df_pk = sp["ora_picco"]
+                ore_num = [int(str(x).split(":")[0]) for x in df_pk["Ora di picco"]]
+                fig_sp3 = go.Figure()
+                fig_sp3.add_trace(go.Bar(x=df_pk["Mese"], y=ore_num, marker_color="#f59e0b",
+                                         hovertemplate="Mese: %{x}<br>Ora di picco: %{y}:00<extra></extra>"))
+                fig_sp3.update_layout(template="plotly_dark", height=300,
+                                      title="Ora di picco del prezzo medio per mese",
+                                      xaxis_title="Mese", yaxis_title="Ora di picco")
+                st.plotly_chart(fig_sp3, use_container_width=True)
+            except Exception:
+                st.info("Grafico ora di picco non disponibile per questi dati.")
+
+            df_sp = sp["df_export"]
+            if len(df_sp):
+                st.markdown("**Ora di picco e prezzo medio per mese**")
+                st.dataframe(df_sp, use_container_width=True, hide_index=True)
+                st.download_button(
+                    "⬇️ Esporta stabilità profilo (CSV)",
+                    df_sp.to_csv(index=False).encode("utf-8"),
+                    file_name=f"stabilita_profilo_{d0}_{d1}.csv",
+                    mime="text/csv",
+                    help="Scarica ora di picco, prezzo medio e ore osservate per mese.",
                 )
 
 # Footer
