@@ -4637,6 +4637,107 @@ def calcola_shape_premium(prezzi, mw_f1, mw_f2, mw_f3):
     return out
 
 
+def calcola_co2(prezzi, mw_f1, mw_f2, mw_f3, eua_eur_t=75.0, em_t_mwh=0.45,
+                pass_pct=100.0):
+    """Costo CO2 implicito nel prezzo spot (pass-through delle quote EUA).
+
+    Nelle ore in cui l'impianto marginale e' fossile, il prezzo spot incorpora
+    il costo della CO2: comp_CO2 = prezzo_EUA x fattore_emissivo_marginale
+    x coefficiente_di_pass-through. Con gli slider rispondi a: "quanta parte
+    del prezzo che pago e' CO2?" e "se l'EUA raddoppia, quanto mi costa?".
+
+    Fattori indicativi impianto marginale: CCGT a gas 0.35-0.45 tCO2/MWh,
+    carbone 0.85-1.1 tCO2/MWh. Il pass-through (quota del costo CO2 che si
+    trasferisce sul prezzo) in letteratura UE vale 0.6-1.0; qui e' uno slider
+    libero 0-150% per fare anche scenari estremi.
+
+    Ritorna dict con 'errore', 'ore', 'componente_mwh' (€/MWh, costante sul
+    periodo a EUA/fattore/pass fissi), 'prezzo_medio', 'quota_pct' (% sul
+    prezzo medio; None se prezzo medio <= 0), 'prezzo_netto_co2' (spot medio
+    al netto della componente), 'energia_profilo_mwh', 'costo_co2_profilo_eur',
+    'df_mesi' (Mese, Prezzo medio, Componente CO2, Quota CO2 %, Costo CO2
+    profilo €), 'df_sens' (EUA €/t, Componente €/MWh, Quota %, Costo profilo €)
+    su scala [25, 50, 75, 100, 125, 150, 200].
+
+    NaN-safe: serie vuota / indice non datetime / parametri non validi ->
+    neutro (ore = 0). Profilo a zero -> energia e costo profilo 0, perche'
+    la quota CO2 sul prezzo resta comunque informativa."""
+
+    colonne_m = ["Mese", "Prezzo medio (€/MWh)", "Componente CO2 (€/MWh)",
+                 "Quota CO2 (%)", "Costo CO2 profilo (€)"]
+    colonne_s = ["EUA (€/t)", "Componente CO2 (€/MWh)", "Quota sul prezzo (%)",
+                 "Costo CO2 profilo (€)"]
+    vuoto = {"errore": None, "ore": 0, "componente_mwh": None,
+             "prezzo_medio": None, "quota_pct": None,
+             "prezzo_netto_co2": None, "energia_profilo_mwh": 0.0,
+             "costo_co2_profilo_eur": None,
+             "df_mesi": pd.DataFrame(columns=colonne_m),
+             "df_sens": pd.DataFrame(columns=colonne_s)}
+
+    try:
+        p = prezzi.astype(float)
+        p = p[~p.index.duplicated(keep="first")].sort_index()
+        if not isinstance(p.index, pd.DatetimeIndex):
+            return dict(vuoto)
+    except Exception:
+        return dict(vuoto)
+    p = p.dropna()
+    if len(p) == 0:
+        return dict(vuoto)
+    try:
+        mw = {"F1": float(mw_f1), "F2": float(mw_f2), "F3": float(mw_f3)}
+        eua = float(eua_eur_t)
+        em = float(em_t_mwh)
+        pth = float(pass_pct)
+    except Exception:
+        return dict(vuoto)
+    if eua < 0 or em < 0 or pth < 0:
+        return dict(vuoto)
+
+    fasce = p.index.map(fascia_oraria)
+    programma = pd.Series([mw.get(fx, 0.0) for fx in fasce], index=p.index)
+    energia_prof = float(programma.sum())
+    if energia_prof < 0:
+        return dict(vuoto)
+
+    comp = eua * em * pth / 100.0
+    pm = float(p.mean())
+    quota = (comp / pm * 100.0) if pm > 0 else None
+    netto = pm - comp
+    costo_prof = energia_prof * comp if energia_prof > 0 else 0.0
+
+    mesi = p.index.to_period("M")
+    righe_m = []
+    for per, grp in p.groupby(mesi):
+        pm_m = float(grp.mean())
+        quota_m = (comp / pm_m * 100.0) if pm_m > 0 else None
+        prog_m = float(programma.loc[grp.index].sum())
+        righe_m.append({"Mese": str(per),
+                        "Prezzo medio (€/MWh)": round(pm_m, 2),
+                        "Componente CO2 (€/MWh)": round(comp, 2),
+                        "Quota CO2 (%)": round(quota_m, 1) if quota_m is not None else None,
+                        "Costo CO2 profilo (€)": round(prog_m * comp, 0)})
+    df_mesi = pd.DataFrame(righe_m, columns=colonne_m)
+
+    righe_s = []
+    for eua_s in (25.0, 50.0, 75.0, 100.0, 125.0, 150.0, 200.0):
+        comp_s = eua_s * em * pth / 100.0
+        righe_s.append({"EUA (€/t)": eua_s,
+                        "Componente CO2 (€/MWh)": round(comp_s, 2),
+                        "Quota sul prezzo (%)": round(comp_s / pm * 100.0, 1) if pm > 0 else None,
+                        "Costo CO2 profilo (€)": round(energia_prof * comp_s, 0)})
+    df_sens = pd.DataFrame(righe_s, columns=colonne_s)
+
+    return {"errore": None, "ore": int(len(p)),
+            "componente_mwh": round(comp, 3),
+            "prezzo_medio": round(pm, 2),
+            "quota_pct": round(quota, 2) if quota is not None else None,
+            "prezzo_netto_co2": round(netto, 2),
+            "energia_profilo_mwh": round(energia_prof, 0),
+            "costo_co2_profilo_eur": round(costo_prof, 0),
+            "df_mesi": df_mesi, "df_sens": df_sens}
+
+
 def calcola_sbilanciamento(prezzi, mw_f1, mw_f2, mw_f3, err_pct=10.0,
                            pen_def_pct=20.0, pen_sur_pct=20.0, seed=42):
     """Costo dello sbilanciamento programma/consuntivo (dual pricing).
@@ -5472,7 +5573,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -8994,6 +9095,73 @@ elif workspace == _('ws8'):
                 help="Scarica il dettaglio mensile: energia programma, deficit/surplus, costo sbilanciamento e costo programma.",
             )
             st.caption("💡 Se il costo supera l'1–2% del programma, l'errore di forecast è un driver di costo: investi in previsione del carico prima che in coperture di prezzo. Con penalità 0/0 il costo è solo il mark-to-market del volume errato a spot.")
+
+    with tab55:
+        titolo_co2 = edu("Costo CO2", "PASS-THROUGH EUA: nelle ore in cui l'impianto marginale brucia gas o carbone, il prezzo spot include il costo delle quote CO2 (EU ETS): componente = prezzo EUA × fattore emissivo dell'impianto marginale × coefficiente di pass-through. Con prezzo EUA intorno ai 75 €/t e un marginale CCGT a gas (0,4 tCO2/MWh), la CO2 vale oltre 30 €/MWh: è una voce di costo strutturale della fornitura, non un'inefficienza. Il pass-through (0,6-1,0 in letteratura UE) misura quanta parte del costo CO2 si trasferisce davvero sul prezzo: qui è uno slider libero 0-150% per fare scenari, anche estremi.")
+        st.markdown(f"**{titolo_co2}**: quanta parte del prezzo spot è costo CO2?", unsafe_allow_html=True)
+        st.caption("Prezzo EUA × fattore emissivo marginale × pass-through. La quota si applica al prezzo spot e al tuo profilo F1/F2/F3 (tab 💰 Costo fornitura).")
+
+        c_co2a, c_co2b, c_co2c = st.columns(3)
+        eua_in = c_co2a.slider("Prezzo EUA (€/tCO2)", min_value=0.0, max_value=250.0, value=75.0, step=5.0,
+                              key="co2_eua", help="Prezzo della quota EU ETS. Ultimi anni: 60-100 €/t.")
+        em_in = c_co2b.slider("Fattore emissivo marginale (tCO2/MWh)", min_value=0.0, max_value=1.20, value=0.45, step=0.05,
+                             key="co2_em", help="CCGT a gas: 0,35-0,45; turbogas: ~0,55; carbone: 0,85-1,10.")
+        pt_in = c_co2c.slider("Pass-through CO2 sul prezzo (%)", min_value=0.0, max_value=150.0, value=100.0, step=5.0,
+                             key="co2_pt", help="Quota del costo CO2 che si trasferisce sul prezzo spot. 100% = pass-through pieno.")
+
+        r_co2 = calcola_co2(prezzi, mw_f1, mw_f2, mw_f3, eua_eur_t=eua_in,
+                            em_t_mwh=em_in, pass_pct=pt_in)
+        if r_co2["ore"] == 0:
+            st.warning("Seleziona un periodo con dati (la quota CO2 si calcola sul prezzo spot del periodo).")
+        else:
+            k1, k2, k3, k4 = st.columns(4)
+            render_kpi(edu("Componente CO2", "Costo CO2 per MWh con i parametri scelti: prezzo EUA × fattore marginale × pass-through. È la parte 'carbon' del prezzo spot."),
+                       f"{r_co2['componente_mwh']:,.2f} \u20ac/MWh", k1)
+            quota_txt = f"{r_co2['quota_pct']:,.2f} %" if r_co2["quota_pct"] is not None else "n/d"
+            render_kpi(edu("Quota CO2 sul prezzo", "Parte del prezzo spot medio del periodo spiegata dalla CO2. Con EUA alti e marginale a gas supera il 30%: una quota rilevante di ogni €/MWh."),
+                       quota_txt, k2)
+            render_kpi(edu("Costo CO2 sul profilo", "Costo CO2 totale sul tuo profilo F1/F2/F3 del periodo: energia × componente. È la voce CO2 che il fornitore ti addebita dentro il prezzo."),
+                       f"{r_co2['costo_co2_profilo_eur']:,.0f} \u20ac", k3)
+            render_kpi(edu("Prezzo medio al netto CO2", "Prezzo spot medio del periodo meno la componente CO2: il 'clean spark spread proxy' — cosa costerebbe il MWh senza il carbon price."),
+                       f"{r_co2['prezzo_netto_co2']:,.2f} \u20ac/MWh", k4)
+
+            st.markdown("**Componente CO2 per mese**")
+            df_c2m = r_co2["df_mesi"].copy()
+            df_c2m["Prezzo al netto CO2 (€/MWh)"] = df_c2m["Prezzo medio (€/MWh)"] - df_c2m["Componente CO2 (€/MWh)"]
+            fig_c2 = go.Figure()
+            fig_c2.add_trace(go.Bar(x=df_c2m["Mese"], y=df_c2m["Prezzo al netto CO2 (€/MWh)"],
+                                   name="Prezzo al netto CO2", marker_color="#3b82f6",
+                                   hovertemplate="%{x}<br>Al netto CO2: %{y:,.2f} €/MWh<extra></extra>"))
+            fig_c2.add_trace(go.Bar(x=df_c2m["Mese"], y=df_c2m["Componente CO2 (€/MWh)"],
+                                   name="Componente CO2", marker_color="#f59e0b",
+                                   hovertemplate="%{x}<br>CO2: %{y:,.2f} €/MWh<extra></extra>"))
+            fig_c2.update_layout(template="plotly_dark", height=360, barmode="stack",
+                                title="Prezzo spot mensile scomposto: netto + componente CO2 (€/MWh)",
+                                xaxis_title="Mese", yaxis_title="€/MWh")
+            st.plotly_chart(fig_c2, use_container_width=True)
+
+            st.markdown("**Sensitività al prezzo EUA**")
+            df_c2s = r_co2["df_sens"]
+            fig_c2s = go.Figure()
+            fig_c2s.add_trace(go.Bar(x=df_c2s["EUA (€/t)"].astype(str), y=df_c2s["Quota sul prezzo (%)"],
+                                    name="Quota CO2 %", marker_color="#10b981",
+                                    hovertemplate="EUA %{x} €/t<br>Componente: €%{customdata:,.2f}/MWh<br>Quota: %{y:,.1f}%<extra></extra>",
+                                    customdata=df_c2s["Componente CO2 (€/MWh)"]))
+            fig_c2s.update_layout(template="plotly_dark", height=330,
+                                 title=f"Quota CO2 sul prezzo medio per prezzo EUA (fattore {em_in:.2f} t/MWh, pass-through {pt_in:.0f}%)",
+                                 xaxis_title="Prezzo EUA (€/t)", yaxis_title="% del prezzo medio")
+            st.plotly_chart(fig_c2s, use_container_width=True)
+
+            st.markdown("**Dettaglio mensile**")
+            st.dataframe(df_c2m, use_container_width=True, hide_index=True)
+            st.download_button(
+                "\u2b07\ufe0f Esporta componente CO2 (CSV)",
+                r_co2["df_mesi"].to_csv(index=False).encode("utf-8"),
+                file_name=f"costo_co2_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica il dettaglio mensile: prezzo medio, componente CO2, quota % e costo CO2 sul profilo.",
+            )
+            st.caption("💡 Con EUA a 100+ €/t il marginale a carbone (0,9 t/MWh) porta la CO2 oltre 90 €/MWh: confronta la quota con il margine fornitore (tab 🧮) e lo shape premium (tab 📏) per capire quanto del prezzo è 'mercato' e quanto è politica climatica.")
 
 # Footer
 
