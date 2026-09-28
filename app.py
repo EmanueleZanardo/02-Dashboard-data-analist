@@ -4357,6 +4357,157 @@ def calcola_driver_costo(prezzi, mw_f1, mw_f2, mw_f3):
     return out
 
 
+def calcola_hedge_ratio(prezzi, mw_f1, mw_f2, mw_f3, window_giorni=30):
+    """Hedge ratio ottimale (minima varianza) del costo di fornitura.
+
+    Calcola il costo unitario giornaliero di fornitura s_t (spot orario
+    pesato sul profilo F1/F2/F3, stessa logica della tab 'Costo fornitura',
+    diviso per l'energia giornaliera prelevata) e il forward sintetico
+    f_t = media mobile a `window_giorni` giorni di s, nota il giorno prima
+    (proxy DIDATTICA: l'app non dispone di una vera curva forward di mercato).
+
+    Domanda del buyer: che quota h della fornitura conviene bloccare al
+    prezzo fisso f_t per minimizzare la varianza del costo unitario?
+    La copertura fisica equivale a s_c(t) = (1-h)*s_t + h*f_t = s_t - h*(s_t-f_t):
+    risposta OLS (minimum-variance hedge ratio): regressione di s_t sullo
+    spread (s_t - f_t)  ->  h* = Cov(s, s-f)/Var(s-f).
+    Efficacia della copertura = 1 - Var(s_coperto)/Var(s) = R^2 della
+    regressione (quota di varianza eliminata usando h*).
+
+    Differenza dalle altre tab: 'MtM hedging' valuta il mark-to-market di
+    contratti gia' stipulati; 'Fisso vs indicizzato' confronta due prezzi
+    dati; 'VaR costo' misura il rischio senza coprirlo. Qui si calcola la
+    DIMENSIONE ottimale della copertura sul forward disponibile.
+
+    NaN-safe: ore con prezzo NaN escluse; giorni con energia nulla esclusi.
+    Serie vuota / indice non datetime / meno di window+1 giorni con forward
+    valido / varianza nulla di s o di f -> h_star None (neutrali).
+
+    Ritorna dict con 'errore', 'giorni' (giorni con s e f validi),
+    's_medio' (€/MWh), 'f_medio' (€/MWh), 'h_star' (ratio ottimale, puo'
+    superare 1 o essere negativo: e' il risultato OLS; None se non
+    calcolabile), 'intercetta' (a), 'efficacia' (R^2 in [0,1]),
+    'std_spot' (std dev di s), 'std_coperto' (std dev con h*),
+    'df_giorni' (Data, s, f, coperto), 'df_mesi' (Mese, Giorni,
+    s medio (€/MWh), f medio (€/MWh), Std s, Std coperto)."""
+
+    colonne_g = ["Data", "s (€/MWh)", "f (€/MWh)", "spread (€/MWh)", "coperto (€/MWh)"]
+    colonne_m = ["Mese", "Giorni", "s medio (€/MWh)", "f medio (€/MWh)",
+                 "Std s (€/MWh)", "Std coperto (€/MWh)"]
+    vuoto = {"errore": None, "giorni": 0, "s_medio": None, "f_medio": None,
+             "h_star": None, "intercetta": None, "efficacia": 0.0,
+             "std_spot": None, "std_coperto": None,
+             "df_giorni": pd.DataFrame(columns=colonne_g),
+             "df_mesi": pd.DataFrame(columns=colonne_m)}
+
+    try:
+        p = prezzi.astype(float)
+        p = p[~p.index.duplicated(keep="first")].sort_index()
+        if not isinstance(p.index, pd.DatetimeIndex):
+            return dict(vuoto)
+    except Exception:
+        return dict(vuoto)
+    p = p.dropna()
+    if len(p) == 0:
+        return dict(vuoto)
+    try:
+        profilo = {"F1": float(mw_f1), "F2": float(mw_f2), "F3": float(mw_f3)}
+        w = int(window_giorni)
+    except Exception:
+        return dict(vuoto)
+    if w < 2:
+        return dict(vuoto)
+
+    fasce = p.index.map(fascia_oraria)
+    mw_ora = fasce.map(profilo).to_numpy(dtype=float)
+    prezzi_v = p.to_numpy(dtype=float)
+    giorni_idx = p.index.normalize()  # tz-safe: normalize conserva il tz
+    costo_g = pd.Series(prezzi_v * mw_ora, index=giorni_idx).groupby(level=0).sum()
+    energia_g = pd.Series(mw_ora, index=giorni_idx).groupby(level=0).sum()
+    # giorni di calendario completi (anche senza ore con dati -> s NaN)
+    pieno = pd.date_range(costo_g.index.min(), costo_g.index.max(), freq="D",
+                          tz=costo_g.index.tz)
+    costo_g = costo_g.reindex(pieno)
+    energia_g = energia_g.reindex(pieno).fillna(0.0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        s = costo_g / energia_g.replace(0.0, np.nan)  # €/MWh
+    s = s.dropna()
+    if len(s) < w + 1:
+        out = dict(vuoto)
+        out["giorni"] = int(len(s))
+        return out
+
+    f = s.rolling(w, min_periods=w).mean().shift(1)  # nota il giorno prima
+    df = pd.DataFrame({"s": s, "f": f}).dropna()
+    n = len(df)
+    if n < 2:
+        out = dict(vuoto)
+        out["giorni"] = int(len(s))
+        return out
+
+    ys = df["s"].to_numpy(dtype=float)
+    xf = df["f"].to_numpy(dtype=float)
+    # Spread spot-forward: la copertura fisica "blocca h al forward" equivale a
+    # s_coperto = (1-h)*s + h*f = s - h*(s-f). La varianza e' minima per
+    # h* = Cov(s, s-f)/Var(s-f) (regressione OLS di s sullo spread).
+    # (Regredire s su f darebbe un R^2 alto ma fuorviante: con h*=1 il costo
+    # coperto sarebbe f, che ha quasi la stessa varianza di s.)
+    g = ys - xf
+    var_s = float(np.var(ys, ddof=1)) if n > 1 else 0.0
+    var_g = float(np.var(g, ddof=1)) if n > 1 else 0.0
+    if var_s <= 0.0 or var_g <= 0.0:
+        out = dict(vuoto)
+        out["giorni"] = n
+        return out
+
+    X = np.column_stack([np.ones(n), g])
+    coef, *_ = np.linalg.lstsq(X, ys, rcond=None)
+    a, h = float(coef[0]), float(coef[1])
+    coperto = ys - h * g  # == (1-h)*s + h*f : il costo effettivamente pagato
+    fitted = a + h * g  # valori fittati della regressione (l'intercetta conta!)
+    ss_res = float(((ys - fitted) ** 2).sum())
+    ss_tot = float(((ys - ys.mean()) ** 2).sum())
+    r2 = max(0.0, min(1.0, 1.0 - ss_res / ss_tot)) if ss_tot > 0 else 0.0
+
+    std_s = float(np.std(ys, ddof=1))
+    std_c = float(np.std(coperto, ddof=1))
+
+    df_g = pd.DataFrame({
+        "Data": df.index.strftime("%Y-%m-%d"),
+        "s (€/MWh)": np.round(ys, 2),
+        "f (€/MWh)": np.round(xf, 2),
+        "spread (€/MWh)": np.round(g, 2),
+        "coperto (€/MWh)": np.round(coperto, 2),
+    })
+    ym = df.index.strftime("%Y-%m")
+    g = df.groupby(ym)
+    cop_s = pd.Series(coperto, index=df.index).groupby(ym)
+    df_m = pd.DataFrame({
+        "Mese": g.size().index,
+        "Giorni": g.size().to_numpy(),
+        "s medio (€/MWh)": g["s"].mean().to_numpy().round(2),
+        "f medio (€/MWh)": g["f"].mean().to_numpy().round(2),
+        "Std s (€/MWh)": g["s"].std(ddof=1).to_numpy().round(2),
+        "Std coperto (€/MWh)": cop_s.std(ddof=1).to_numpy().round(2),
+    })
+    df_m = df_m[colonne_m].sort_values("Mese").reset_index(drop=True)
+
+    out = dict(vuoto)
+    out.update({
+        "giorni": n,
+        "s_medio": round(float(ys.mean()), 2),
+        "f_medio": round(float(xf.mean()), 2),
+        "h_star": round(h, 4),
+        "intercetta": round(a, 4),
+        "efficacia": round(r2, 4),
+        "std_spot": round(std_s, 2),
+        "std_coperto": round(std_c, 2),
+        "df_giorni": df_g,
+        "df_mesi": df_m,
+    })
+    return out
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def generate_singularity_data():
     np.random.seed(42)
@@ -5049,7 +5200,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -8347,6 +8498,79 @@ elif workspace == _('ws8'):
                 file_name=f"driver_costo_{d0}_{d1}.csv",
                 mime="text/csv",
                 help="Scarica il dettaglio mensile dei driver del costo.",
+            )
+
+    with tab52:
+        titolo_hr = edu("Hedge ratio ottimale", "Quota della fornitura da bloccare a PREZZO FISSO per minimizzare la varianza del costo unitario (minimum-variance hedge ratio). Metodo: regressione OLS del costo unitario giornaliero s (spot orario pesato sul tuo profilo F1/F2/F3) sullo spread spot-forward (s - f), dove f = media mobile a 30 giorni di s nota il giorno prima. Il costo coperto = (1-h)\u00b7s + h\u00b7f e l'efficacia (R\u00b2) dice quanta varianza sparisce con il ratio ottimale. Nota: f e' una PROXY didattica, non una vera curva forward di mercato.")
+        st.markdown(f"**{titolo_hr}**: quanta fornitura bloccare a prezzo fisso per stabilizzare il costo?", unsafe_allow_html=True)
+        st.caption("Costo unitario: stessa logica della tab \U0001F4B0 Costo fornitura (spot orario pesato sul profilo F1/F2/F3), diviso per l'energia giornaliera.")
+
+        hr = calcola_hedge_ratio(prezzi, mw_f1, mw_f2, mw_f3)
+        if hr["giorni"] == 0:
+            st.warning("Imposta una potenza maggiore di zero in almeno una fascia (tab \U0001F4B0 Costo fornitura) e seleziona un periodo con dati.")
+        elif hr["giorni"] < 31:
+            st.warning(f"Solo {hr['giorni']} giorni utilizzabili: servono almeno 31 giorni (30 di storia + 1) per calcolare il forward sintetico.")
+        elif hr["h_star"] is None:
+            st.info("Costo unitario o forward sintetico senza varianza sul periodo: hedge ratio non calcolabile.")
+        else:
+            h_star = hr["h_star"]
+            k1, k2, k3, k4 = st.columns(4)
+            render_kpi(edu("Hedge ratio ottimale", "Quota di fornitura da fissare al forward sintetico per la minima varianza del costo unitario. Puo' superare il 100% o essere negativa: e' il risultato della regressione OLS."),
+                       f"{h_star*100:.1f} %", k1)
+            render_kpi(edu("Efficacia copertura", "R\u00b2 della regressione: quota di varianza del costo unitario eliminata usando l'hedge ratio ottimale."),
+                       f"{hr['efficacia']*100:.1f} %", k2)
+            render_kpi(edu("Volatilita' non coperta", "Deviazione standard del costo unitario giornaliero senza copertura."),
+                       f"{hr['std_spot']:,.2f} \u20ac/MWh", k3)
+            render_kpi(edu("Volatilita' con copertura", "Deviazione standard del costo unitario usando l'hedge ratio ottimale."),
+                       f"{hr['std_coperto']:,.2f} \u20ac/MWh", k4)
+
+            h_man = st.slider(edu("Copertura manuale", "Prova una copertura diversa da quella ottimale: il costo coperto = (1-h)\u00b7spot + h\u00b7forward. Confrontalo con l'ottimo OLS."),
+                              min_value=0, max_value=150, value=int(round(h_star * 100)),
+                              format="%d %%")
+            df_g = hr["df_giorni"]
+            s_v = df_g["s (\u20ac/MWh)"].to_numpy(dtype=float)
+            f_v = df_g["f (\u20ac/MWh)"].to_numpy(dtype=float)
+            g_v = df_g["spread (\u20ac/MWh)"].to_numpy(dtype=float)
+            cop_man = (1.0 - h_man / 100.0) * s_v + (h_man / 100.0) * f_v
+            std_man = float(np.std(cop_man, ddof=1)) if len(cop_man) > 1 else 0.0
+            delta = std_man - hr["std_coperto"]
+            st.info(f"Copertura manuale {h_man}%: volatilita' {std_man:,.2f} \u20ac/MWh "
+                    f"({delta:+,.2f} \u20ac/MWh vs ottimale {h_star*100:.1f}%).")
+
+            x_line = np.linspace(g_v.min(), g_v.max(), 100)
+            y_line = hr["intercetta"] + h_star * x_line
+            fig_sc = go.Figure()
+            fig_sc.add_trace(go.Scatter(x=g_v, y=s_v, mode="markers", name="Giorni",
+                                        marker=dict(size=5, opacity=0.55, color="#38bdf8"),
+                                        hovertemplate="Spread: %{x:.2f} \u20ac/MWh<br>Spot: %{y:.2f} \u20ac/MWh<extra></extra>"))
+            fig_sc.add_trace(go.Scatter(x=x_line, y=y_line, mode="lines", name=f"OLS (h*={h_star*100:.1f}%)",
+                                        line=dict(color="#f59e0b", width=2)))
+            fig_sc.update_layout(template="plotly_dark", height=380,
+                                 title="Costo unitario spot vs spread spot-forward (retta OLS)",
+                                 xaxis_title="Spread spot-forward (\u20ac/MWh)", yaxis_title="Costo unitario spot (\u20ac/MWh)")
+            st.plotly_chart(fig_sc, use_container_width=True)
+
+            fig_ts = go.Figure()
+            fig_ts.add_trace(go.Scatter(x=df_g["Data"], y=s_v, mode="lines", name="Spot (non coperto)",
+                                        line=dict(color="#ef4444", width=1.5)))
+            fig_ts.add_trace(go.Scatter(x=df_g["Data"], y=df_g["coperto (\u20ac/MWh)"].to_numpy(dtype=float),
+                                        mode="lines", name=f"Coperto h*={h_star*100:.1f}%",
+                                        line=dict(color="#10b981", width=1.5)))
+            fig_ts.add_trace(go.Scatter(x=df_g["Data"], y=f_v, mode="lines", name="Forward sintetico",
+                                        line=dict(color="#9ca3af", width=1, dash="dot")))
+            fig_ts.update_layout(template="plotly_dark", height=380,
+                                 title="Costo unitario giornaliero: spot, forward sintetico e costo coperto",
+                                 xaxis_title="Data", yaxis_title="\u20ac/MWh")
+            st.plotly_chart(fig_ts, use_container_width=True)
+
+            st.markdown("**Dettaglio mensile**")
+            st.dataframe(hr["df_mesi"], use_container_width=True, hide_index=True)
+            st.download_button(
+                "\u2b07\ufe0f Esporta hedge ratio (CSV)",
+                hr["df_giorni"].to_csv(index=False).encode("utf-8"),
+                file_name=f"hedge_ratio_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica il dettaglio giornaliero: costo unitario spot, forward sintetico e costo coperto con l'hedge ratio ottimale.",
             )
 
 # Footer
