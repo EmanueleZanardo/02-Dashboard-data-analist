@@ -4637,6 +4637,149 @@ def calcola_shape_premium(prezzi, mw_f1, mw_f2, mw_f3):
     return out
 
 
+def calcola_sbilanciamento(prezzi, mw_f1, mw_f2, mw_f3, err_pct=10.0,
+                           pen_def_pct=20.0, pen_sur_pct=20.0, seed=42):
+    """Costo dello sbilanciamento programma/consuntivo (dual pricing).
+
+    Un buyer nomina un PROGRAMMA di prelievo (qui: il profilo F1/F2/F3) e poi
+    preleva il CONSUNTIVO. Lo scostamento orario e' lo SBILANCIAMENTO, che il
+    TSO regola a prezzi penalizzanti (dual pricing semplificato):
+        deficit (prelevi PIU' del programma) -> paghi spot*(1+pen_def%)
+        surplus (prelevi MENO del programma) -> vendi a  spot*(1-pen_sur%)
+    costo_sbil_h = max(sbil_h,0)*p_def_h + min(sbil_h,0)*p_sur_h
+    Il surplus da' un contributo NEGATIVO = ricavo (vendita a prezzo ridotto).
+
+    Il consuntivo e' simulato in modo DETERMINISTICO (seed fisso): per ogni
+    giorno di calendario un errore relativo err_d ~ N(0, err_pct/100),
+    applicato a tutte le ore del giorno:
+        consuntivo_h = max(programma_h * (1 + err_d), 0)
+    E' una proxy DIDATTICA dell'errore di previsione: l'app non dispone dei
+    veri dati di misura del cliente. Lo slider 'errore di previsione %'
+    risponde alla domanda: quanto mi costa sbagliare la previsione di X%?
+
+    Differenza dalle altre tab: 'Costo fornitura' e 'Ponte budget' lavorano
+    sul programma; 'VaR costo' misura il rischio prezzo senza sbilanciamenti;
+    'Stress test' muove i prezzi ma non i volumi. Qui il driver e' l'errore
+    sui VOLUMI (previsione del carico), con penalita' di sbilanciamento.
+
+    NaN-safe: ore con prezzo NaN escluse; profilo tutto a zero / serie vuota
+    / indice non datetime / parametri non validi -> neutro (giorni = 0).
+    err_pct = 0 -> consuntivo = programma -> costo sbilanciamento
+    esattamente 0 (invariante testata).
+
+    Ritorna dict con 'errore', 'giorni', 'ore', 'energia_prog_mwh',
+    'energia_cons_mwh', 'costo_programma' (a spot, €), 'costo_sbil_eur',
+    'costo_sbil_mwh' (€ per MWh programmata), 'pct_su_programma' (None se
+    costo_programma = 0), 'deficit_mwh', 'surplus_mwh', 'df_giorni'
+    (Data, Energia programma, Energia consuntivo, Sbilanciamento,
+    Costo sbilanciamento €), 'df_mesi' (Mese, Giorni, Energia programma,
+    Deficit, Surplus, Costo sbilanciamento €, Costo programma €)."""
+
+    colonne_g = ["Data", "Energia programma (MWh)", "Energia consuntivo (MWh)",
+                 "Sbilanciamento (MWh)", "Costo sbilanciamento (€)"]
+    colonne_m = ["Mese", "Giorni", "Energia programma (MWh)", "Deficit (MWh)",
+                 "Surplus (MWh)", "Costo sbilanciamento (€)", "Costo programma (€)"]
+    vuoto = {"errore": None, "giorni": 0, "ore": 0, "energia_prog_mwh": 0.0,
+             "energia_cons_mwh": 0.0, "costo_programma": None,
+             "costo_sbil_eur": None, "costo_sbil_mwh": None,
+             "pct_su_programma": None, "deficit_mwh": 0.0, "surplus_mwh": 0.0,
+             "df_giorni": pd.DataFrame(columns=colonne_g),
+             "df_mesi": pd.DataFrame(columns=colonne_m)}
+
+    try:
+        p = prezzi.astype(float)
+        p = p[~p.index.duplicated(keep="first")].sort_index()
+        if not isinstance(p.index, pd.DatetimeIndex):
+            return dict(vuoto)
+    except Exception:
+        return dict(vuoto)
+    p = p.dropna()
+    if len(p) == 0:
+        return dict(vuoto)
+    try:
+        mw = {"F1": float(mw_f1), "F2": float(mw_f2), "F3": float(mw_f3)}
+        err = float(err_pct)
+        pdp = float(pen_def_pct)
+        psp = float(pen_sur_pct)
+    except Exception:
+        return dict(vuoto)
+    if err < 0 or pdp < 0 or psp < 0:
+        return dict(vuoto)
+
+    fasce = p.index.map(fascia_oraria)
+    programma = pd.Series([mw.get(fx, 0.0) for fx in fasce], index=p.index)
+    if float(programma.sum()) <= 0:
+        return dict(vuoto)
+
+    giorni_cal = p.index.normalize().unique().sort_values()
+    n_giorni = len(giorni_cal)
+    rng = np.random.default_rng(int(seed))
+    err_g = rng.normal(0.0, err / 100.0, size=n_giorni) if err > 0 else np.zeros(n_giorni)
+    err_ora = pd.Series(err_g, index=giorni_cal).reindex(p.index.normalize()).to_numpy(dtype=float)
+
+    consuntivo = np.maximum(programma.to_numpy(dtype=float) * (1.0 + err_ora), 0.0)
+    prog_v = programma.to_numpy(dtype=float)
+    spot_v = p.to_numpy(dtype=float)
+    sbil = consuntivo - prog_v
+    p_def = spot_v * (1.0 + pdp / 100.0)
+    p_sur = spot_v * (1.0 - psp / 100.0)
+    costo_sbil_h = np.maximum(sbil, 0.0) * p_def + np.minimum(sbil, 0.0) * p_sur
+    costo_prog_h = prog_v * spot_v
+
+    ore = len(p)
+    energia_prog = float(prog_v.sum())
+    energia_cons = float(consuntivo.sum())
+    costo_programma = float(costo_prog_h.sum())
+    costo_sbil = float(costo_sbil_h.sum())
+    deficit_mwh = float(np.maximum(sbil, 0.0).sum())
+    surplus_mwh = float(np.minimum(sbil, 0.0).sum())
+
+    idx_g = p.index.normalize()
+    righe_g = []
+    for g in giorni_cal:
+        m = idx_g == g
+        righe_g.append({
+            "Data": g.date().isoformat(),
+            "Energia programma (MWh)": round(float(prog_v[m].sum()), 1),
+            "Energia consuntivo (MWh)": round(float(consuntivo[m].sum()), 1),
+            "Sbilanciamento (MWh)": round(float(sbil[m].sum()), 2),
+            "Costo sbilanciamento (€)": round(float(costo_sbil_h[m].sum()), 0),
+        })
+    df_g = pd.DataFrame(righe_g, columns=colonne_g)
+
+    mesi = p.index.to_period("M").astype(str)
+    righe_m = []
+    for mese in sorted(set(mesi)):
+        m = mesi == mese
+        n_gm = int((idx_g[m].unique().size))
+        righe_m.append({
+            "Mese": mese, "Giorni": n_gm,
+            "Energia programma (MWh)": round(float(prog_v[m].sum()), 1),
+            "Deficit (MWh)": round(float(np.maximum(sbil[m], 0.0).sum()), 1),
+            "Surplus (MWh)": round(float(np.minimum(sbil[m], 0.0).sum()), 1),
+            "Costo sbilanciamento (€)": round(float(costo_sbil_h[m].sum()), 0),
+            "Costo programma (€)": round(float(costo_prog_h[m].sum()), 0),
+        })
+    df_m = pd.DataFrame(righe_m, columns=colonne_m)
+
+    out = dict(vuoto)
+    out.update({
+        "giorni": int(n_giorni),
+        "ore": int(ore),
+        "energia_prog_mwh": round(energia_prog, 1),
+        "energia_cons_mwh": round(energia_cons, 1),
+        "costo_programma": round(costo_programma, 0),
+        "costo_sbil_eur": round(costo_sbil, 0),
+        "costo_sbil_mwh": round(costo_sbil / energia_prog, 3) if energia_prog else None,
+        "pct_su_programma": round(costo_sbil / costo_programma * 100.0, 2) if costo_programma else None,
+        "deficit_mwh": round(deficit_mwh, 1),
+        "surplus_mwh": round(surplus_mwh, 1),
+        "df_giorni": df_g,
+        "df_mesi": df_m,
+    })
+    return out
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def generate_singularity_data():
     np.random.seed(42)
@@ -5329,7 +5472,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -8780,6 +8923,77 @@ elif workspace == _('ws8'):
                 help="Scarica il dettaglio mensile: energia, prezzo profilo, prezzo baseload e shape premium.",
             )
             st.caption("💡 Premium positivo alto = profilo caro (tanto F1): valuta demand shifting (tab 🔄) o coperture. Premium negativo = il profilo già 'batte' il baseload.")
+
+    with tab54:
+        titolo_sb = edu("Sbilanciamento", "SBILANCIAMENTO programma/consuntivo: nomini un programma di prelievo (qui il tuo profilo F1/F2/F3) e poi prelevi il consuntivo; la differenza oraria è lo sbilanciamento, regolato dal TSO a prezzi penalizzanti (dual pricing): il deficit (prelevi PIÙ del programma) si paga a spot maggiorato, il surplus (prelevi MENO) si vende a spot scontato. È un costo 'nascosto' della fornitura: non dipende dal prezzo in sé ma da quanto sbagli la PREVISIONE del carico. Il consuntivo qui è simulato in modo deterministico (seed fisso): ogni giorno ha un errore relativo casuale N(0, errore%) applicato a tutte le ore — una proxy didattica dell'errore di forecast, perché l'app non ha i tuoi veri dati di misura.")
+        st.markdown(f"**{titolo_sb}**: quanto ti costa sbagliare la previsione del carico?", unsafe_allow_html=True)
+        st.caption("Programma = profilo MW per fascia (stesso della tab 💰 Costo fornitura). Consuntivo = programma × (1 + errore giornaliero casuale, seed 42). Dual pricing: deficit a spot×(1+penalità%), surplus a spot×(1−penalità%).")
+
+        c_sb1, c_sb2, c_sb3 = st.columns(3)
+        err_pct_in = c_sb1.slider("Errore di previsione (± %)", min_value=0.0, max_value=50.0, value=10.0, step=1.0,
+                                  key="sb_err", help="Deviazione standard dell'errore relativo giornaliero sul programma.")
+        pen_def_in = c_sb2.slider("Penalità deficit (%)", min_value=0.0, max_value=100.0, value=20.0, step=5.0,
+                                  key="sb_pend", help="Maggiorazione sul prezzo spot per il deficit (prelievo oltre il programma).")
+        pen_sur_in = c_sb3.slider("Penalità surplus (%)", min_value=0.0, max_value=100.0, value=20.0, step=5.0,
+                                  key="sb_pens", help="Sconto sul prezzo spot per il surplus (prelievo sotto il programma).")
+
+        sb = calcola_sbilanciamento(prezzi, mw_f1, mw_f2, mw_f3, err_pct=err_pct_in,
+                                    pen_def_pct=pen_def_in, pen_sur_pct=pen_sur_in)
+        if sb["giorni"] == 0:
+            st.warning("Imposta una potenza maggiore di zero in almeno una fascia (tab 💰 Costo fornitura) e seleziona un periodo con dati.")
+        else:
+            s1, s2, s3, s4 = st.columns(4)
+            costo_txt = f"{sb['costo_sbil_eur']:+,.0f} \u20ac"
+            render_kpi(edu("Costo sbilanciamento", "Costo netto dello sbilanciamento sul periodo (dual pricing). Deficit pagato a spot maggiorato, surplus venduto a spot scontato: il surplus dà un contributo negativo (ricavo)."),
+                       costo_txt, s1)
+            mwh_txt = f"{sb['costo_sbil_mwh']:+,.2f} \u20ac/MWh" if sb["costo_sbil_mwh"] is not None else "n/d"
+            render_kpi(edu("Costo per MWh programmata", "Costo dello sbilanciamento rapportato all'energia del programma: il 'premio di imprecisione' per ogni MWh nominato."),
+                       mwh_txt, s2)
+            pct_sb = sb["pct_su_programma"]
+            pct_txt = f"{pct_sb:+,.2f} %" if pct_sb is not None else "n/d"
+            render_kpi(edu("% sul costo programma", "Costo dello sbilanciamento in percentuale del costo del programma a spot: dice quanto pesa l'errore di previsione sul conto totale."),
+                       pct_txt, s3)
+            vol_txt = (f"+{sb['deficit_mwh']:,.0f} / {sb['surplus_mwh']:,.0f} MWh<br>"
+                       f"<small>deficit / surplus su {sb['energia_prog_mwh']:,.0f} MWh programmate</small>")
+            render_kpi(edu("Volumi sbilanciati", "MWh totali di deficit (prelievo oltre il programma, segno +) e di surplus (prelievo sotto il programma, segno −)."),
+                       vol_txt, s4)
+
+            st.markdown("**Andamento mensile**")
+            df_sbm = sb["df_mesi"]
+            fig_sb_m = go.Figure()
+            fig_sb_m.add_trace(go.Bar(x=df_sbm["Mese"], y=df_sbm["Costo sbilanciamento (€)"],
+                                      name="Costo sbilanciamento €", marker_color="#f59e0b",
+                                      hovertemplate="%{x}<br>Costo: %{y:+,.0f} €<extra></extra>"))
+            fig_sb_m.update_layout(template="plotly_dark", height=340,
+                                   title="Costo dello sbilanciamento per mese (€)",
+                                   xaxis_title="Mese", yaxis_title="€")
+            fig_sb_m.add_hline(y=0, line_color="#6b7280", line_width=1)
+            st.plotly_chart(fig_sb_m, use_container_width=True)
+
+            st.markdown("**Distribuzione giornaliera dello sbilanciamento**")
+            df_sbg = sb["df_giorni"]
+            fig_sb_d = go.Figure()
+            fig_sb_d.add_trace(go.Bar(x=df_sbg["Data"], y=df_sbg["Sbilanciamento (MWh)"],
+                                      name="Sbilanciamento MWh",
+                                      marker_color=["#ef4444" if v > 0 else "#3b82f6" for v in df_sbg["Sbilanciamento (MWh)"]],
+                                      hovertemplate="%{x}<br>Sbilanciamento: %{y:+.2f} MWh<br>Costo: €%{customdata:+,.0f}<extra></extra>",
+                                      customdata=df_sbg["Costo sbilanciamento (€)"]))
+            fig_sb_d.update_layout(template="plotly_dark", height=340,
+                                   title="Sbilanciamento giornaliero (MWh): rosso = deficit, blu = surplus",
+                                   xaxis_title="Giorno", yaxis_title="MWh")
+            fig_sb_d.add_hline(y=0, line_color="#6b7280", line_width=1)
+            st.plotly_chart(fig_sb_d, use_container_width=True)
+
+            st.markdown("**Dettaglio mensile**")
+            st.dataframe(df_sbm, use_container_width=True, hide_index=True)
+            st.download_button(
+                "\u2b07\ufe0f Esporta sbilanciamento (CSV)",
+                df_sbm.to_csv(index=False).encode("utf-8"),
+                file_name=f"sbilanciamento_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica il dettaglio mensile: energia programma, deficit/surplus, costo sbilanciamento e costo programma.",
+            )
+            st.caption("💡 Se il costo supera l'1–2% del programma, l'errore di forecast è un driver di costo: investi in previsione del carico prima che in coperture di prezzo. Con penalità 0/0 il costo è solo il mark-to-market del volume errato a spot.")
 
 # Footer
 
