@@ -533,6 +533,151 @@ def calcola_efficienza_profilo(prezzi, mw_f1, mw_f2, mw_f3):
     return out
 
 
+def calcola_finestra_ottimale(prezzi, mw_f1, mw_f2, mw_f3, n_ore=4):
+    """Finestra oraria CONTIGUA piu' economica di ogni giorno (demand response realistica).
+
+    Domanda operativa: "se potessi concentrare il consumo di ogni giorno in
+    un blocco unico di N ore contigue (vincolo realistico di un processo
+    industriale, che non si puo' spezzettare a piacimento), quando
+    converrebbe farlo e quanto risparmierei?"
+
+    Metodo (tutto deterministico a parita' di input):
+    - ore con prezzo NaN scartate; timestamp duplicati: primo tenuto;
+    - carico orario = MW della fascia di ciascuna ora (via fascia_oraria,
+      stesso profilo piatto per fascia degli altri tab);
+    - per ogni giorno di calendario con energia > 0 si valutano TUTTE le
+      finestre di n_ore ore di orologio contigue interamente coperte da
+      prezzi validi (sliding window 00-0N, 01-0N+1, ...); a parita' di costo
+      vince la finestra che inizia prima;
+    - dentro la finestra migliore l'energia del giorno viene distribuita
+      uniformemente (potenza costante = E_giorno / n_ore): il costo della
+      finestra e' (E_giorno / n_ore) * somma(prezzi della finestra);
+    - si registra l'ora di inizio della finestra migliore di ogni giorno
+      (la "finestra piu' ricorrente" e' l'orario su cui pianificare il
+      processo flessibile) e il risparmio giorno per giorno.
+
+    Differenza dagli altri tab: Efficienza profilo calcola il minimo
+    teorico riallocando l'energia sulle ore piu' economiche ANCHE NON
+    ADIACENTI (limite superiore irrealistico); Valore flessibilita'
+    TAGLIA carico nelle ore piu' care (l'energia si perde); Shifting carico
+    simula uno spostamento fisso F1->F3. Qui l'energia si CONSERVA ma deve
+    stare in UN blocco contiguo: e' il business case prudente e realizzabile
+    della demand response a blocco unico. Il risparmio qui e' sempre <= del
+    "risparmio max teorico" della tab Efficienza profilo; la differenza e'
+    il prezzo del vincolo di contiguita'.
+
+    NaN-safe: serie vuota, MW tutti a zero/non validi, nessun giorno con
+    energia > 0 o con almeno una finestra completa -> statistiche neutrali.
+    n_ore viene normalizzato a intero in [1, 12].
+
+    Ritorna dict con 'giorni', 'n_ore', 'energia_mwh', 'costo_reale' (EUR),
+    'costo_finestra' (EUR), 'risparmio_eur' (EUR), 'risparmio_pct' (% sul
+    costo reale, None se costo <= 0), 'finestra_top' ((ora_inizio,
+    n_giorni, pct_giorni) o None), 'dist_ore' (dict ora_inizio -> n_giorni),
+    'df_mesi' ('Mese', 'Giorni', 'Risparmio (\u20ac)', 'Risparmio %',
+    "Finestra piu' frequente" come "HH:00-HH:00").
+    """
+    try:
+        n_ore = int(n_ore)
+    except (TypeError, ValueError):
+        n_ore = 4
+    n_ore = max(1, min(12, n_ore))
+    cols_m = ["Mese", "Giorni", "Risparmio (\u20ac)", "Risparmio %",
+              "Finestra piu' frequente"]
+    vuoto = {"giorni": 0, "n_ore": n_ore, "energia_mwh": 0.0,
+             "costo_reale": 0.0, "costo_finestra": 0.0,
+             "risparmio_eur": 0.0, "risparmio_pct": None,
+             "finestra_top": None, "dist_ore": {},
+             "df_mesi": pd.DataFrame(columns=cols_m)}
+    try:
+        p = prezzi.astype(float).dropna()
+        p = p[~p.index.duplicated(keep="first")].sort_index()
+    except Exception:
+        return dict(vuoto)
+    if len(p) == 0:
+        return dict(vuoto)
+    try:
+        mws = [max(0.0, float(x)) for x in (mw_f1, mw_f2, mw_f3)]
+    except (TypeError, ValueError):
+        mws = [0.0, 0.0, 0.0]
+    if sum(mws) <= 0:
+        return dict(vuoto)
+    mw_of = {"F1": mws[0], "F2": mws[1], "F3": mws[2]}
+    ore = p.index
+    fasce = ore.map(fascia_oraria)
+    prezzi_v = p.to_numpy(dtype=float)
+    carico = np.array([mw_of[fx] for fx in fasce], dtype=float)
+    ora_h = ore.hour.to_numpy()
+    giorni_idx = pd.DatetimeIndex(ore).normalize()
+
+    giorni_ok = 0
+    e_tot = c_reale = c_fin = 0.0
+    cnt_ore = {}
+    per_mese = {}
+    for giorno in sorted(set(giorni_idx)):
+        mask = (giorni_idx == giorno)
+        # 24 slot di orologio: NaN dove l'ora manca (es. giorni con DST)
+        prz_g = np.full(24, np.nan)
+        crg_g = np.zeros(24)
+        hh = ora_h[mask]
+        prz_g[hh] = prezzi_v[mask]
+        crg_g[hh] = carico[mask]
+        e_g = float(np.sum(crg_g))
+        if e_g <= 0:
+            continue
+        c_g = float(np.nansum(prz_g * crg_g))
+        # sliding window: n_ore ore di orologio contigue, tutte con prezzo
+        best = None
+        for s in range(0, 24 - n_ore + 1):
+            w = prz_g[s:s + n_ore]
+            if np.isnan(w).any():
+                continue
+            cw = (e_g / n_ore) * float(np.sum(w))
+            if best is None or cw < best[1]:
+                best = (s, cw)
+        if best is None:
+            continue
+        s_best, c_best = best
+        giorni_ok += 1
+        e_tot += e_g
+        c_reale += c_g
+        c_fin += c_best
+        cnt_ore[s_best] = cnt_ore.get(s_best, 0) + 1
+        m = giorno.strftime("%Y-%m")
+        agg = per_mese.setdefault(m, [0, 0.0, 0.0, {}])
+        agg[0] += 1
+        agg[1] += c_g - c_best
+        agg[2] += c_g
+        agg[3][s_best] = agg[3].get(s_best, 0) + 1
+
+    out = dict(vuoto)
+    if giorni_ok == 0:
+        return out
+    out["giorni"] = giorni_ok
+    out["energia_mwh"] = e_tot
+    out["costo_reale"] = c_reale
+    out["costo_finestra"] = c_fin
+    out["risparmio_eur"] = c_reale - c_fin
+    if c_reale > 0:
+        out["risparmio_pct"] = (c_reale - c_fin) / c_reale * 100.0
+    out["dist_ore"] = {h: cnt_ore.get(h, 0) for h in range(24 - n_ore + 1)}
+    if cnt_ore:
+        s_top = max(cnt_ore, key=lambda h: (cnt_ore[h], -h))
+        out["finestra_top"] = (s_top, cnt_ore[s_top],
+                               cnt_ore[s_top] / giorni_ok * 100.0)
+    righe_m = []
+    for m in sorted(per_mese):
+        n_g, risp_m, cre_m, cnt_m = per_mese[m]
+        sm = max(cnt_m, key=lambda h: (cnt_m[h], -h)) if cnt_m else None
+        fin_txt = (f"{sm:02d}:00-{(sm + n_ore) % 24:02d}:00"
+                   if sm is not None else "n/d")
+        righe_m.append({"Mese": m, "Giorni": n_g,
+                        "Risparmio (\u20ac)": round(risp_m, 0),
+                        "Risparmio %": (round(risp_m / cre_m * 100.0, 1)
+                                        if cre_m > 0 else None),
+                        "Finestra piu' frequente": fin_txt})
+    out["df_mesi"] = pd.DataFrame(righe_m, columns=cols_m)
+    return out
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -6286,7 +6431,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -10292,6 +10437,73 @@ elif workspace == _('ws8'):
                 help="Scarica il dettaglio mensile: efficienza del profilo, costo reale, minimo teorico e risparmio massimo.",
             )
             st.caption("\U0001f4a1 Efficienza alta ma risparmio max piccolo \u2192 il profilo \u00e8 gi\u00e0 ottimizzato, non c'\u00e8 quasi nulla da guadagnare con lo shifting. Efficienza bassa + risparmio max grande \u2192 vai alla tab \U0001f504 Shifting carico per quantificare la demand response. Correlazione positiva \u2192 il carico segue i prezzi al contrario: primo candidato alla revisione del profilo.")
+
+    with tab62:
+        titolo_fo = edu("Finestra ottimale", "La finestra CONTIGUA di N ore pi\u00f9 economica di OGNI giorno: se potessi concentrare il consumo giornaliero in un blocco unico di N ore (vincolo realistico dei processi industriali, che non si possono spezzettare a piacimento), quando converrebbe farlo e quanto risparmieresti? Complementare alla tab \U0001f9e0 Efficienza profilo: l\u00ec il minimo teorico sparpaglia l'energia sulle ore pi\u00f9 economiche anche non adiacenti (irrealistico), qui il blocco deve essere contiguo (realistico). Il risparmio stimato \u00e8 quindi il limite superiore PRATICO di qualsiasi demand response a blocco unico.")
+        st.markdown(f"**{titolo_fo}**: quando far girare il blocco di carico?", unsafe_allow_html=True)
+        st.caption("Profilo MW per fascia: stesso della tab \U0001f4b0 Costo fornitura.")
+
+        n_ore_fo = st.slider("Durata della finestra (ore contigue)", 1, 12, 4, step=1,
+                            help="Ore contigue del blocco di carico flessibile: 4h = tipico processo spostabile, 8h = intero turno di lavoro. Per ogni giorno viene cercata la finestra di N ore consecutive pi\u00f9 economica.")
+        fo = calcola_finestra_ottimale(prezzi, mw_f1, mw_f2, mw_f3, n_ore_fo)
+        if fo["giorni"] == 0:
+            st.info("Imposta una potenza maggiore di zero in almeno una fascia (tab \U0001f4b0 Costo fornitura) e seleziona un periodo con dati.")
+        else:
+            c1, c2, c3, c4 = st.columns(4)
+            risp_fo = fo["risparmio_eur"]
+            pct_fo = fo["risparmio_pct"]
+            risp_fo_txt = f"{risp_fo:,.0f} \u20ac<br><small>{pct_fo:.1f}% del costo</small>" if pct_fo is not None else f"{risp_fo:,.0f} \u20ac"
+            render_kpi(edu("Risparmio con finestra contigua", "Euro risparmiabili concentrando ogni giorno l'energia in un blocco unico di N ore contigue sulle ore pi\u00f9 economiche. Business case prudente della demand response: pi\u00f9 basso del 'risparmio max teorico' della tab \U0001f9e0 Efficienza profilo, ma realizzabile con un processo a blocco unico."),
+                       risp_fo_txt, c1)
+            ft = fo["finestra_top"]
+            if ft is not None:
+                s_top, cnt_top, pct_top = ft
+                fin_txt = f"{s_top:02d}:00-{(s_top + n_ore_fo) % 24:02d}:00<br><small>migliore nel {pct_top:.0f}% dei giorni</small>"
+            else:
+                fin_txt = "n/d"
+            render_kpi(edu("Finestra pi\u00f9 ricorrente", "Il blocco di N ore che risulta il pi\u00f9 economico nel maggior numero di giorni: l'orario 'sicuro' su cui pianificare il processo flessibile."),
+                       fin_txt, c2)
+            render_kpi(edu("Costo reale vs finestra", "Costo di fornitura del periodo contro il costo con blocco ottimale giornaliero."),
+                       f"{fo['costo_reale']:,.0f} \u20ac<br><small>finestra {fo['costo_finestra']:,.0f} \u20ac</small>", c3)
+            render_kpi(edu("Giorni analizzati", "Giorni con consumi e almeno una finestra completa di prezzi validi."),
+                       f"{fo['giorni']}<br><small>{fo['energia_mwh']:,.0f} MWh</small>", c4)
+
+            st.markdown("**Distribuzione dell'ora di inizio ottimale** (quante volte ogni ora apre la finestra pi\u00f9 economica)")
+            dist_fo = fo["dist_ore"]
+            ore_fo_x = sorted(dist_fo)
+            fig_fo = go.Figure()
+            fig_fo.add_trace(go.Bar(
+                x=[f"{h:02d}:00" for h in ore_fo_x],
+                y=[dist_fo[h] for h in ore_fo_x],
+                marker_color="#8b5cf6",
+                hovertemplate="Inizio %{x}<br>Giorni: %{y}<extra></extra>"))
+            fig_fo.update_layout(template="plotly_dark", height=340,
+                                 title=f"Ora di inizio della finestra ottimale di {n_ore_fo}h",
+                                 xaxis_title="Inizio finestra", yaxis_title="Giorni")
+            st.plotly_chart(fig_fo, use_container_width=True)
+
+            st.markdown("**Risparmio mensile con finestra contigua** (\u20ac)")
+            df_fom = fo["df_mesi"]
+            fig_fo2 = go.Figure()
+            fig_fo2.add_trace(go.Bar(x=df_fom["Mese"], y=df_fom["Risparmio (\u20ac)"],
+                                    marker_color="#10b981",
+                                    hovertemplate="Mese %{x}<br>Risparmio: \u20ac%{y:,.0f}<br>Finestra: %{customdata}<extra></extra>",
+                                    customdata=df_fom["Finestra pi\u00f9 frequente"]))
+            fig_fo2.update_layout(template="plotly_dark", height=340,
+                                  title="Risparmio mensile (\u20ac)",
+                                  xaxis_title="Mese", yaxis_title="\u20ac")
+            st.plotly_chart(fig_fo2, use_container_width=True)
+
+            st.markdown("**Dettaglio mensile**")
+            st.dataframe(df_fom, use_container_width=True, hide_index=True)
+            st.download_button(
+                "\u2b07\ufe0f Esporta finestra ottimale (CSV)",
+                df_fom.to_csv(index=False).encode("utf-8"),
+                file_name=f"finestra_ottimale_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica il dettaglio mensile: risparmio con finestra contigua e finestra pi\u00f9 frequente.",
+            )
+            st.caption("\U0001f4a1 Finestra ricorrente stabile (es. sempre 02:00-06:00) \u2192 pianifica il processo flessibile su quell'orario. Finestra che cambia spesso \u2192 serve automazione day-ahead, non un orario fisso. Confronta il risparmio qui con il 'risparmio max teorico' della tab \U0001f9e0 Efficienza profilo: la differenza \u00e8 il prezzo del vincolo di contiguit\u00e0.")
 
 # Footer
 
