@@ -4508,6 +4508,135 @@ def calcola_hedge_ratio(prezzi, mw_f1, mw_f2, mw_f3, window_giorni=30):
     return out
 
 
+def calcola_shape_premium(prezzi, mw_f1, mw_f2, mw_f3):
+    """Shape premium del profilo di prelievo rispetto al baseload.
+
+    Per un energy analyst che quota una fornitura, il prezzo non e' mai il
+    baseload: il costo dipende da QUANDO si consuma. Lo SHAPE PREMIUM misura
+    quanto il tuo profilo F1/F2/F3 costa in piu' (o in meno) rispetto a un
+    prelievo piatto costante su tutte le ore del periodo:
+
+        prezzo_profilo  = sum(prezzo_h * MW_h) / sum(MW_h)   (medio ponderato
+                        sulle sole ore in cui si consuma)
+        prezzo_baseload = media(prezzo_h) su TUTTE le ore del periodo
+                        (il benchmark: prelievo piatto costante su ogni ora)
+        premium (€/MWh) = prezzo_profilo - prezzo_baseload
+        premium (€)     = premium * energia_totale
+
+    Scomposizione esatta per fascia: premium = somma_f [ quota_energia_f
+    * (prezzo_medio_f - prezzo_baseload) ]. Dice quale fascia 'costa' lo
+    shape: tipicamente F1 aggiunge premium, F3 lo riduce.
+
+    Differenza dalle altre tab: 'Costo fornitura' calcola il costo ASSOLUTO
+    sul profilo; qui si isola il SOVRAPPREZZO del profilo rispetto al flat,
+    che e' il numero che il desk usa per quotare lo shape in un contratto.
+    'Price capture' fa la stessa cosa dal lato generazione (prezzo catturato
+    vs baseload); qui siamo dal lato consumo/fornitura.
+
+    NaN-safe: ore con prezzo NaN escluse; profilo tutto a zero / serie vuota
+    / indice non datetime / baseload nullo -> neutro (energia_mwh = 0).
+
+    Ritorna dict con 'errore', 'ore', 'energia_mwh', 'prezzo_profilo',
+    'prezzo_baseload', 'premium_mwh', 'premium_eur', 'premium_pct'
+    (None se baseload = 0), 'df_mesi' (Mese, Ore, Energia, Prezzo profilo,
+    Prezzo baseload, Premium €/MWh, Premium €), 'df_fasce' (Fascia, Ore,
+    Energia MWh, Quota energia %, Prezzo medio €/MWh, Contributo premium
+    €/MWh: la somma della colonna e' ESATTAMENTE premium_mwh)."""
+
+    colonne_m = ["Mese", "Ore", "Energia (MWh)", "Prezzo profilo (€/MWh)",
+                 "Prezzo baseload (€/MWh)", "Premium (€/MWh)", "Premium (€)"]
+    colonne_f = ["Fascia", "Ore", "Energia (MWh)", "Quota energia (%)",
+                 "Prezzo medio (€/MWh)", "Contributo premium (€/MWh)"]
+    vuoto = {"errore": None, "ore": 0, "energia_mwh": 0.0,
+             "prezzo_profilo": None, "prezzo_baseload": None,
+             "premium_mwh": None, "premium_eur": None, "premium_pct": None,
+             "df_mesi": pd.DataFrame(columns=colonne_m),
+             "df_fasce": pd.DataFrame(columns=colonne_f)}
+
+    try:
+        p = prezzi.astype(float)
+        p = p[~p.index.duplicated(keep="first")].sort_index()
+        if not isinstance(p.index, pd.DatetimeIndex):
+            return dict(vuoto)
+    except Exception:
+        return dict(vuoto)
+    p = p.dropna()
+    if len(p) == 0:
+        return dict(vuoto)
+    try:
+        mw = {"F1": float(mw_f1), "F2": float(mw_f2), "F3": float(mw_f3)}
+    except Exception:
+        return dict(vuoto)
+
+    fasce = p.index.map(fascia_oraria)
+    df = pd.DataFrame({"prezzo": p.to_numpy(dtype=float),
+                       "fascia": fasce,
+                       "mw": [mw.get(fx, 0.0) for fx in fasce]},
+                      index=p.index)
+    df = df[df["mw"] > 0]
+    n = len(df)
+    if n == 0:
+        return dict(vuoto)
+    energia = float(df["mw"].sum())
+    costo = float((df["prezzo"] * df["mw"]).sum())
+    prezzo_profilo = costo / energia
+    # Baseload = media semplice su TUTTE le ore valide del periodo
+    # (il benchmark di un prelievo piatto), non solo sulle ore consumate.
+    prezzo_baseload = float(p.mean())
+    premium_mwh = prezzo_profilo - prezzo_baseload
+    premium_eur = premium_mwh * energia
+    premium_pct = (premium_mwh / prezzo_baseload * 100.0) if prezzo_baseload != 0 else None
+
+    righe_f = []
+    for fx in ["F1", "F2", "F3"]:
+        d = df[df["fascia"] == fx]
+        ore_f = len(d)
+        e_f = float(d["mw"].sum()) if ore_f else 0.0
+        p_f = float(d["prezzo"].mean()) if ore_f else 0.0
+        quota = e_f / energia * 100.0 if energia else 0.0
+        contributo = (e_f / energia) * (p_f - prezzo_baseload) if energia else 0.0
+        righe_f.append({"Fascia": fx, "Ore": ore_f,
+                        "Energia (MWh)": round(e_f, 1),
+                        "Quota energia (%)": round(quota, 1),
+                        "Prezzo medio (€/MWh)": round(p_f, 2),
+                        "Contributo premium (€/MWh)": round(contributo, 3)})
+    df_f = pd.DataFrame(righe_f, columns=colonne_f)
+
+    righe_m = []
+    df_idx = df.copy()
+    df_idx["mese"] = df_idx.index.to_period("M").astype(str)
+    # baseload mensile su TUTTE le ore del mese (coerente con prezzo_baseload)
+    pb_mesi = p.groupby(p.index.to_period("M").astype(str)).mean()
+    for mese, d in df_idx.groupby("mese"):
+        ore_m = len(d)
+        e_m = float(d["mw"].sum())
+        c_m = float((d["prezzo"] * d["mw"]).sum())
+        pp_m = c_m / e_m if e_m else 0.0
+        pb_m = float(pb_mesi.get(mese, np.nan))
+        pr_m = pp_m - pb_m
+        righe_m.append({"Mese": mese, "Ore": ore_m,
+                        "Energia (MWh)": round(e_m, 1),
+                        "Prezzo profilo (€/MWh)": round(pp_m, 2),
+                        "Prezzo baseload (€/MWh)": round(pb_m, 2),
+                        "Premium (€/MWh)": round(pr_m, 2),
+                        "Premium (€)": round(pr_m * e_m, 0)})
+    df_m = pd.DataFrame(righe_m, columns=colonne_m).sort_values("Mese").reset_index(drop=True)
+
+    out = dict(vuoto)
+    out.update({
+        "ore": n,
+        "energia_mwh": round(energia, 1),
+        "prezzo_profilo": round(prezzo_profilo, 2),
+        "prezzo_baseload": round(prezzo_baseload, 2),
+        "premium_mwh": round(premium_mwh, 3),
+        "premium_eur": round(premium_eur, 0),
+        "premium_pct": round(premium_pct, 2) if premium_pct is not None else None,
+        "df_mesi": df_m,
+        "df_fasce": df_f,
+    })
+    return out
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def generate_singularity_data():
     np.random.seed(42)
@@ -5200,7 +5329,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -8572,6 +8701,85 @@ elif workspace == _('ws8'):
                 mime="text/csv",
                 help="Scarica il dettaglio giornaliero: costo unitario spot, forward sintetico e costo coperto con l'hedge ratio ottimale.",
             )
+
+    with tab53:
+        titolo_sp = edu("Shape premium", "SOVRAPPREZZO DEL PROFILO rispetto a un prelievo piatto (baseload). Prezzo profilo = media spot ponderata sul tuo profilo F1/F2/F3; prezzo baseload = media spot semplice su tutte le ore del periodo. Il premium (€/MWh e € totali) è il numero che il desk usa per quotare lo 'shape' in un contratto di fornitura: un profilo concentrato in F1 (ore care) paga premium positivo, uno spostato in F3 (ore economiche) ha premium negativo = sconto. La scomposizione per fascia dice chi genera il premium: la somma dei contributi è esattamente il premium totale.")
+        st.markdown(f"**{titolo_sp}**: quanto costa il TUO profilo in più (o in meno) del baseload piatto?", unsafe_allow_html=True)
+        st.caption("Profilo MW per fascia: stesso della tab 💰 Costo fornitura. Baseload = media semplice dello spot su tutte le ore del periodo.")
+
+        sp = calcola_shape_premium(prezzi, mw_f1, mw_f2, mw_f3)
+        if sp["ore"] == 0:
+            st.warning("Imposta una potenza maggiore di zero in almeno una fascia (tab 💰 Costo fornitura) e seleziona un periodo con dati.")
+        else:
+            s1, s2, s3, s4 = st.columns(4)
+            prem_txt = f"{sp['premium_mwh']:+,.2f} \u20ac/MWh"
+            render_kpi(edu("Shape premium", "Prezzo medio ponderato sul profilo MENO prezzo baseload. Positivo = il profilo costa più del flat; negativo = il profilo costa meno (sconto di shape)."),
+                       prem_txt, s1)
+            eur_txt = f"{sp['premium_eur']:+,.0f} \u20ac"
+            render_kpi(edu("Premium totale", "Shape premium in euro sul periodo: premium €/MWh × energia prelevata. È il sovrapprezzo (o lo sconto) che il profilo aggiunge rispetto a un prelievo piatto."),
+                       eur_txt, s2)
+            pct = sp["premium_pct"]
+            pct_txt = f"{pct:+,.2f} %" if pct is not None else "n/d"
+            render_kpi(edu("Premium % sul baseload", "Shape premium rapportato al prezzo baseload: dice in percentuale quanto il profilo si discosta dal flat."),
+                       pct_txt, s3)
+            prof_txt = (f"{sp['prezzo_profilo']:,.2f} vs {sp['prezzo_baseload']:,.2f} \u20ac/MWh<br>"
+                        f"<small>su {sp['energia_mwh']:,.0f} MWh in {sp['ore']:,} h</small>")
+            render_kpi(edu("Prezzo profilo vs baseload", "Prezzo medio ponderato sul tuo profilo contro il prezzo medio semplice su tutte le ore (baseload). La differenza è lo shape premium."),
+                       prof_txt, s4)
+
+            st.markdown("**Scomposizione per fascia** (la somma dei contributi = premium totale)")
+            df_f = sp["df_fasce"]
+            st.dataframe(df_f, use_container_width=True, hide_index=True)
+            colori_f = {"F1": "#ef4444", "F2": "#eab308", "F3": "#3b82f6"}
+            fig_sp_f = go.Figure()
+            fig_sp_f.add_trace(go.Bar(
+                x=df_f["Fascia"], y=df_f["Contributo premium (\u20ac/MWh)"],
+                marker_color=[colori_f.get(fx, "#9ca3af") for fx in df_f["Fascia"]],
+                text=[f"{v:+.3f}" for v in df_f["Contributo premium (\u20ac/MWh)"]],
+                textposition="outside",
+                hovertemplate="Fascia %{x}<br>Contributo: %{y:+.3f} \u20ac/MWh<extra></extra>",
+            ))
+            fig_sp_f.update_layout(template="plotly_dark", height=340,
+                                   title="Contributo di ogni fascia allo shape premium (€/MWh)",
+                                   xaxis_title="Fascia", yaxis_title="Contributo (€/MWh)")
+            fig_sp_f.add_hline(y=0, line_color="#6b7280", line_width=1)
+            st.plotly_chart(fig_sp_f, use_container_width=True)
+
+            st.markdown("**Andamento mensile**")
+            df_m = sp["df_mesi"]
+            fig_sp_m = go.Figure()
+            fig_sp_m.add_trace(go.Bar(x=df_m["Mese"], y=df_m["Premium (\u20ac/MWh)"],
+                                      name="Premium €/MWh", marker_color="#38bdf8",
+                                      hovertemplate="%{x}<br>Premium: %{y:+.2f} \u20ac/MWh<extra></extra>"))
+            fig_sp_m.update_layout(template="plotly_dark", height=340,
+                                   title="Shape premium mensile (€/MWh)",
+                                   xaxis_title="Mese", yaxis_title="€/MWh")
+            fig_sp_m.add_hline(y=0, line_color="#6b7280", line_width=1)
+            st.plotly_chart(fig_sp_m, use_container_width=True)
+
+            fig_sp_c = go.Figure()
+            fig_sp_c.add_trace(go.Scatter(x=df_m["Mese"], y=df_m["Prezzo profilo (\u20ac/MWh)"],
+                                          mode="lines+markers", name="Prezzo profilo",
+                                          line=dict(color="#f59e0b", width=2)))
+            fig_sp_c.add_trace(go.Scatter(x=df_m["Mese"], y=df_m["Prezzo baseload (\u20ac/MWh)"],
+                                          mode="lines+markers", name="Prezzo baseload",
+                                          line=dict(color="#9ca3af", width=2, dash="dash")))
+            fig_sp_c.update_layout(template="plotly_dark", height=340,
+                                   title="Prezzo profilo vs baseload, per mese (€/MWh)",
+                                   xaxis_title="Mese", yaxis_title="€/MWh",
+                                   legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+            st.plotly_chart(fig_sp_c, use_container_width=True)
+
+            st.markdown("**Dettaglio mensile**")
+            st.dataframe(df_m, use_container_width=True, hide_index=True)
+            st.download_button(
+                "\u2b07\ufe0f Esporta shape premium (CSV)",
+                df_m.to_csv(index=False).encode("utf-8"),
+                file_name=f"shape_premium_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica il dettaglio mensile: energia, prezzo profilo, prezzo baseload e shape premium.",
+            )
+            st.caption("💡 Premium positivo alto = profilo caro (tanto F1): valuta demand shifting (tab 🔄) o coperture. Premium negativo = il profilo già 'batte' il baseload.")
 
 # Footer
 
