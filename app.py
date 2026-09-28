@@ -3933,8 +3933,138 @@ def calcola_stima_bolletta(prezzi, mw_f1, mw_f2, mw_f3,
     return out
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
-def generate_singularity_data():
+def calcola_margine_fornitore(prezzi, mw_f1, mw_f2, mw_f3, prezzo_offerta,
+                              spread=0.0, perdite_pct=0.0, dispacciamento=4.0,
+                              oneri=14.0):
+    """Margine IMPLICITO del fornitore su un'offerta a prezzo fisso.
+
+    Il fornitore offre prezzo_offerta EUR/MWh fisso; qui si stima quanto gli
+    resta in tasca dopo i costi: il costo base e' lo spot ponderato sul
+    profilo F1/F2/F3 dell'utente (stessa logica della tab 'Costo fornitura')
+    piu' lo spread di acquisto e gli add-on passanti parametrizzabili
+    (perdite di rete % sull'energia, dispacciamento e oneri in EUR/MWh).
+
+    margine = ricavo offerta - costo totale
+    prezzo di pareggio = costo totale / MWh (offerta a margine zero)
+
+    Diverso dalle altre tab: 'Fisso vs indicizzato' confronta per il
+    COMPRATORE due strategie di acquisto; qui la prospettiva e' quella del
+    VENDITORE — strumento di negoziazione: se il margine implicito e' alto,
+    c'e' spazio per trattare il prezzo.
+
+    NaN-safe: ore con prezzo NaN escluse. Serie vuota o indice non datetime
+    -> totali neutrali e DataFrame vuoti. prezzo_offerta <= 0 o parametri
+    non numerici/negativi -> 'errore'.
+
+    Ritorna dict con 'errore', 'mwh', 'n_mesi', 'costo_energia_eur',
+    'costo_tot_eur', 'ricavo_offerta_eur', 'margine_eur',
+    'margine_eur_mwh' (None se mwh=0), 'margine_pct' (None se ricavo=0),
+    'pareggio_eur_mwh' (prezzo offerta a margine zero), 'df_mesi'
+    (Mese, MWh, Costo energia (EUR), Add-on (EUR), Costo totale (EUR),
+    Ricavo offerta (EUR), Margine (EUR), Margine (EUR/MWh)), 'df_giorni'
+    (Giorno, Costo cumulato (EUR), Ricavo cumulato (EUR),
+    Margine cumulato (EUR))."""
+    colonne_m = ["Mese", "MWh", "Costo energia (\u20ac)", "Add-on (\u20ac)",
+                 "Costo totale (\u20ac)", "Ricavo offerta (\u20ac)",
+                 "Margine (\u20ac)", "Margine (\u20ac/MWh)"]
+    colonne_g = ["Giorno", "Costo cumulato (\u20ac)", "Ricavo cumulato (\u20ac)",
+                 "Margine cumulato (\u20ac)"]
+    vuoto = {"errore": None, "mwh": 0.0, "n_mesi": 0,
+             "costo_energia_eur": 0.0, "costo_tot_eur": 0.0,
+             "ricavo_offerta_eur": 0.0, "margine_eur": 0.0,
+             "margine_eur_mwh": None, "margine_pct": None,
+             "pareggio_eur_mwh": None,
+             "df_mesi": pd.DataFrame(columns=colonne_m),
+             "df_giorni": pd.DataFrame(columns=colonne_g)}
+
+    try:
+        po = float(prezzo_offerta); sp = float(spread)
+        pp = float(perdite_pct); dp = float(dispacciamento); on = float(oneri)
+    except Exception:
+        out = dict(vuoto); out["errore"] = "Parametri non validi: inserisci valori numerici."
+        return out
+    if any(not np.isfinite(x) for x in (po, sp, pp, dp, on)):
+        out = dict(vuoto); out["errore"] = "Parametri non validi: inserisci valori numerici."
+        return out
+    if po <= 0 or any(x < 0 for x in (sp, pp, dp, on)):
+        out = dict(vuoto); out["errore"] = "Prezzo offerta > 0 richiesto; gli altri parametri non possono essere negativi."
+        return out
+
+    try:
+        p = prezzi.astype(float)
+        p = p[~p.index.duplicated(keep="first")].sort_index()
+        if not isinstance(p.index, pd.DatetimeIndex):
+            return dict(vuoto)
+    except Exception:
+        return dict(vuoto)
+    p = p.dropna()
+    if len(p) == 0:
+        return dict(vuoto)
+
+    profilo = {"F1": float(mw_f1), "F2": float(mw_f2), "F3": float(mw_f3)}
+    fasce = p.index.map(fascia_oraria)
+    mw = fasce.map(profilo).to_numpy(dtype=float)
+    px = p.to_numpy(dtype=float)
+    mwh = float(mw.sum())
+
+    energia = (px + sp) * mw
+    perdite = energia * (pp / 100.0)
+    addon = perdite + mw * (dp + on)
+    costo_tot = energia + addon
+    ricavo = mw * po
+    margine = ricavo - costo_tot
+
+    idxn = p.index.tz_localize(None) if p.index.tz is not None else p.index
+    mesi = idxn.to_period("M")
+    mesi_ord = sorted(set(mesi.tolist()))
+
+    righe = []
+    for mp in mesi_ord:
+        m = np.asarray(mesi == mp)
+        e_mwh = float(mw[m].sum())
+        e_en = float(energia[m].sum()); e_ao = float(addon[m].sum())
+        e_co = float(costo_tot[m].sum()); e_rv = float(ricavo[m].sum())
+        e_ma = float(margine[m].sum())
+        righe.append({"Mese": str(mp), "MWh": round(e_mwh, 1),
+                      "Costo energia (\u20ac)": round(e_en, 2),
+                      "Add-on (\u20ac)": round(e_ao, 2),
+                      "Costo totale (\u20ac)": round(e_co, 2),
+                      "Ricavo offerta (\u20ac)": round(e_rv, 2),
+                      "Margine (\u20ac)": round(e_ma, 2),
+                      "Margine (\u20ac/MWh)": round(e_ma / e_mwh, 2) if e_mwh > 0 else None})
+    df_mesi = pd.DataFrame(righe, columns=colonne_m)
+
+    giorni = idxn.normalize()
+    df_d = pd.DataFrame({"giorno": giorni, "co": costo_tot, "rv": ricavo}
+                        ).groupby("giorno")[["co", "rv"]].sum()
+    cum_co = cum_rv = 0.0
+    righe_g = []
+    for g, r in df_d.iterrows():
+        cum_co += float(r["co"]); cum_rv += float(r["rv"])
+        righe_g.append({"Giorno": str(g.date()),
+                        "Costo cumulato (\u20ac)": round(cum_co, 2),
+                        "Ricavo cumulato (\u20ac)": round(cum_rv, 2),
+                        "Margine cumulato (\u20ac)": round(cum_rv - cum_co, 2)})
+    df_giorni = pd.DataFrame(righe_g, columns=colonne_g)
+
+    costo_energia_eur = float(energia.sum())
+    costo_tot_eur = float(costo_tot.sum())
+    ricavo_eur = float(ricavo.sum())
+    margine_eur = float(margine.sum())
+
+    out = dict(vuoto)
+    out.update({
+        "mwh": mwh, "n_mesi": len(mesi_ord),
+        "costo_energia_eur": round(costo_energia_eur, 2),
+        "costo_tot_eur": round(costo_tot_eur, 2),
+        "ricavo_offerta_eur": round(ricavo_eur, 2),
+        "margine_eur": round(margine_eur, 2),
+        "margine_eur_mwh": round(margine_eur / mwh, 2) if mwh > 0 else None,
+        "margine_pct": round(margine_eur / ricavo_eur, 4) if ricavo_eur > 0 else None,
+        "pareggio_eur_mwh": round(costo_tot_eur / mwh, 2) if mwh > 0 else None,
+        "df_mesi": df_mesi, "df_giorni": df_giorni,
+    })
+    return out
     np.random.seed(42)
     days = 500
     dates = pd.date_range(end=datetime.date.today(), periods=days)
@@ -4625,7 +4755,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -7687,6 +7817,101 @@ elif workspace == _('ws8'):
                     file_name=f"stima_bolletta_{d0}_{d1}.csv",
                     mime="text/csv",
                     help="Scarica il dettaglio mensile della bolletta stimata.",
+                )
+
+    with tab49:
+        titolo_mf = edu("Margine fornitore", "Margine IMPLICITO del fornitore su un'offerta a prezzo fisso: il ricavo dell'offerta meno il costo all-in stimato (spot ponderato sul tuo profilo F1/F2/F3 + spread + perdite, dispacciamento e oneri). Prospettiva del venditore, utile per negoziare: se il margine implicito e' alto, c'e' spazio per trattare. Diverso dalla tab 'Fisso vs indicizzato' (scelta del compratore) e da 'Stima bolletta' (totale fattura con IVA).")
+        st.markdown(f"**{titolo_mf}**: quanto guadagna il fornitore sulla tua offerta a prezzo fisso.", unsafe_allow_html=True)
+
+        m0, m1, m2 = st.columns(3)
+        with m0:
+            mf_prezzo = st.number_input("Prezzo offerta fornitore (€/MWh)", min_value=0.0, value=135.0, step=1.0,
+                                        key="mf49_prezzo",
+                                        help="Prezzo fisso offerto dal fornitore per tutta la fornitura.")
+        with m1:
+            mf_spread = st.number_input("Spread di acquisto (€/MWh)", min_value=0.0, value=2.0, step=0.5,
+                                        key="mf49_spread",
+                                        help="Markup che il fornitore paga sopra lo spot per approvvigionarsi.")
+        with m2:
+            mf_perd = st.number_input("Perdite di rete (% su energia)", min_value=0.0, value=0.0, step=0.1,
+                                      key="mf49_perd",
+                                      help="0 % se le perdite sono gia' incluse nel prezzo offerto; 10.4 % se la fornitura e' in bassa tensione e scorporate.")
+        m3, m4 = st.columns(2)
+        with m3:
+            mf_disp = st.number_input("Dispacciamento (€/MWh)", min_value=0.0, value=4.0, step=0.5,
+                                      key="mf49_disp",
+                                      help="Corrispettivi di dispacciamento che il fornitore sostiene.")
+        with m4:
+            mf_oneri = st.number_input("Oneri di sistema (€/MWh)", min_value=0.0, value=14.0, step=1.0,
+                                       key="mf49_oneri",
+                                       help="Oneri generali di sistema a carico del fornitore sulla componente energia.")
+
+        mf = calcola_margine_fornitore(prezzi, mw_f1, mw_f2, mw_f3, mf_prezzo,
+                                       spread=mf_spread, perdite_pct=mf_perd,
+                                       dispacciamento=mf_disp, oneri=mf_oneri)
+        if mf["errore"]:
+            st.warning(f"\u26a0\ufe0f {mf['errore']}")
+        elif mf["mwh"] == 0:
+            st.warning("Imposta una potenza maggiore di zero in almeno una fascia (tab \U0001F4B0 Costo fornitura) per calcolare il margine.")
+        else:
+            k1, k2, k3, k4 = st.columns(4)
+            render_kpi(edu("Margine fornitore", "Quanto resta al fornitore per ogni MWh venduto: ricavo offerta meno costo all-in stimato."),
+                       f"{mf['margine_eur_mwh']:,.2f} \u20ac/MWh" if mf["margine_eur_mwh"] is not None else "\u2014", k1)
+            render_kpi(edu("Margine % sull'offerta", "Percentuale del prezzo offerto che e' margine del fornitore: misura il tuo spazio di trattativa."),
+                       f"{mf['margine_pct']*100:.1f} %" if mf["margine_pct"] is not None else "\u2014", k2)
+            render_kpi(edu("Margine totale", "Euro di margine implicito del fornitore sul periodo, ai tuoi volumi: quanto paghi sopra il costo stimato."),
+                       f"{mf['margine_eur']:,.0f} \u20ac", k3)
+            render_kpi(edu("Prezzo di pareggio", "Prezzo offerta a margine zero: sotto questo livello il fornitore ci rimette. E' il tuo obiettivo di trattativa."),
+                       f"{mf['pareggio_eur_mwh']:,.2f} \u20ac/MWh" if mf["pareggio_eur_mwh"] is not None else "\u2014", k4)
+            st.caption(f"{mf['mwh']:,.0f} MWh in {mf['n_mesi']} mesi — costo energia {mf['costo_energia_eur']:,.0f} \u20ac, "
+                       f"costo totale {mf['costo_tot_eur']:,.0f} \u20ac, ricavo offerta {mf['ricavo_offerta_eur']:,.0f} \u20ac.")
+
+            try:
+                df_mm = mf["df_mesi"]
+                fig_mf1 = go.Figure()
+                fig_mf1.add_trace(go.Bar(x=df_mm["Mese"], y=df_mm["Costo totale (\u20ac)"], name="Costo totale",
+                                         marker_color="#3b82f6",
+                                         hovertemplate="Mese: %{x}<br>Costo: %{y:,.0f} \u20ac<extra></extra>"))
+                fig_mf1.add_trace(go.Bar(x=df_mm["Mese"], y=df_mm["Margine (\u20ac)"], name="Margine fornitore",
+                                         marker_color="#22c55e",
+                                         hovertemplate="Mese: %{x}<br>Margine: %{y:,.0f} \u20ac<extra></extra>"))
+                fig_mf1.update_layout(template="plotly_dark", height=340, barmode="stack",
+                                      title="Ricavo offerta mensile: costo vs margine fornitore",
+                                      xaxis_title="Mese", yaxis_title="\u20ac")
+                st.plotly_chart(fig_mf1, use_container_width=True)
+                st.caption("La parte verde e' quanto guadagna il fornitore ogni mese sulla tua offerta.")
+            except Exception:
+                st.info("Grafico mensile non disponibile per questi dati.")
+
+            try:
+                df_mg = mf["df_giorni"]
+                fig_mf2 = go.Figure()
+                fig_mf2.add_trace(go.Scatter(x=df_mg["Giorno"], y=df_mg["Costo cumulato (\u20ac)"],
+                                             mode="lines", name="Costo cumulato",
+                                             line=dict(color="#3b82f6"),
+                                             hovertemplate="Giorno: %{x}<br>Costo: %{y:,.0f} \u20ac<extra></extra>"))
+                fig_mf2.add_trace(go.Scatter(x=df_mg["Giorno"], y=df_mg["Ricavo cumulato (\u20ac)"],
+                                             mode="lines", name="Ricavo offerta cumulato", fill="tonexty",
+                                             line=dict(color="#22c55e"),
+                                             hovertemplate="Giorno: %{x}<br>Ricavo: %{y:,.0f} \u20ac<extra></extra>"))
+                fig_mf2.update_layout(template="plotly_dark", height=300,
+                                      title="Cumulata nel tempo: costo vs ricavo offerta",
+                                      xaxis_title="Giorno", yaxis_title="\u20ac cumulati")
+                st.plotly_chart(fig_mf2, use_container_width=True)
+                st.caption("La distanza tra le due curve e' il margine del fornitore accumulato giorno per giorno.")
+            except Exception:
+                st.info("Curva cumulata non disponibile per questi dati.")
+
+            df_mf = mf["df_mesi"]
+            if len(df_mf):
+                st.markdown("**Dettaglio mensile**")
+                st.dataframe(df_mf, use_container_width=True, hide_index=True)
+                st.download_button(
+                    "\u2b07\ufe0f Esporta margine fornitore (CSV)",
+                    df_mf.to_csv(index=False).encode("utf-8"),
+                    file_name=f"margine_fornitore_{d0}_{d1}.csv",
+                    mime="text/csv",
+                    help="Scarica il dettaglio mensile del margine implicito del fornitore.",
                 )
 
 # Footer
