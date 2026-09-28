@@ -680,6 +680,102 @@ def calcola_finestra_ottimale(prezzi, mw_f1, mw_f2, mw_f3, n_ore=4):
     return out
 
 
+def calcola_margine_impianto(prezzi, mc, cap):
+    """Margine di contribuzione orario di un impianto dispacciabile.
+
+    Domanda operativa: "quanto margine cattura davvero ciascun impianto
+    (e in quali ore/mesi)?" — complementare al blocco "Marginal cost &
+    produzione stimata" che mostra solo un totale di periodo: qui il
+    margine si scompone per mese e si misura quanto e' CONCENTRATO nelle
+    poche ore migliori (Pareto), che decide se l'impianto si usa a ciclo
+    continuo o come punta.
+
+    Metodo (tutto deterministico a parita' di input):
+    - ore con prezzo NaN scartate; timestamp duplicati: primo tenuto,
+      serie ordinata per tempo;
+    - margine_orario = max(0, prezzo - costo_marginale) x capacita' (EUR/h):
+      modello "sempre disponibile a piena potenza quando in-the-money",
+      coerente con la produzione stimata del blocco impianti;
+    - ore in-the-money (ITM): prezzo > costo marginale;
+    - Pareto: le ore ITM vengono ordinate per margine decrescente;
+      pareto_top10_pct = quota del margine totale prodotta dal miglior 10%
+      delle ore ITM (almeno 1 ora): alto = impianto da "poche ore d'oro",
+      basso = margine distribuito uniformemente (baseload);
+    - aggregazione mensile su 'YYYY-MM'.
+
+    Differenza dagli altri tab: Shaping curva e MtM hedging guardano il
+    prezzo puro; qui si guarda il margine di CONTRIBUZIONE per asset,
+    cioe' la grandezza che decide dispacciamento e valore dell'impianto.
+
+    NaN-safe: serie vuota, meno di 1 ora valida, capacita' <= 0 o mc non
+    valido -> statistiche vuote ma strutture con le colonne giuste.
+
+    Ritorna dict con 'ore_itm' (int), 'ore_totali' (int), 'utilizzo_pct'
+    (None se ore_totali == 0), 'margine_eur' (float), 'margine_medio_itm'
+    (€/MWh sulle ore ITM, None se nessuna), 'pareto_top10_pct' (None se
+    nessuna ora ITM), 'serie' (Series €/h sulle ore valide),
+    'df_mesi' ('Mese', 'Ore ITM', 'Utilizzo %', 'Margine (\\u20ac)',
+    'Margine medio ITM (\\u20ac/MWh)')."""
+    cols_m = ["Mese", "Ore ITM", "Utilizzo %", "Margine (\u20ac)",
+              "Margine medio ITM (\u20ac/MWh)"]
+    vuoto = {
+        "ore_itm": 0, "ore_totali": 0, "utilizzo_pct": None,
+        "margine_eur": 0.0, "margine_medio_itm": None,
+        "pareto_top10_pct": None,
+        "serie": pd.Series(dtype=float),
+        "df_mesi": pd.DataFrame({c: [] for c in cols_m}),
+    }
+    try:
+        mc = float(mc)
+        cap = float(cap)
+    except (TypeError, ValueError):
+        return dict(vuoto)
+    if cap <= 0:
+        return dict(vuoto)
+    p = prezzi.astype(float)
+    p = p[~p.index.duplicated(keep="first")].sort_index().dropna()
+    if len(p) == 0:
+        return dict(vuoto)
+    margine = np.maximum(0.0, p.to_numpy(dtype=float) - mc) * cap
+    itm = p.to_numpy(dtype=float) > mc
+    n_itm = int(itm.sum())
+    n_tot = len(p)
+    marg_tot = float(margine.sum())
+    out = dict(vuoto)
+    out["ore_itm"] = n_itm
+    out["ore_totali"] = n_tot
+    out["utilizzo_pct"] = round(n_itm / n_tot * 100.0, 2)
+    out["margine_eur"] = round(marg_tot, 2)
+    out["serie"] = pd.Series(margine, index=p.index, name="margine_eur_h")
+    if n_itm:
+        out["margine_medio_itm"] = round(float(margine[itm].mean() / cap)
+                                        if cap > 0 else 0.0, 2)
+        marg_itm_ord = np.sort(margine[itm])[::-1]
+        k = max(1, int(np.ceil(len(marg_itm_ord) * 0.10)))
+        out["pareto_top10_pct"] = (round(float(marg_itm_ord[:k].sum()
+                                              / marg_tot * 100.0), 1)
+                                   if marg_tot > 0 else 0.0)
+    idxn = p.index.tz_localize(None) if p.index.tz is not None else p.index
+    mesi = idxn.strftime("%Y-%m")
+    righe_m = []
+    for m in sorted(set(mesi)):
+        mask_m = (mesi == m)
+        h_m = int(mask_m.sum())
+        itm_m = int(itm[mask_m].sum())
+        mg_m = float(margine[mask_m].sum())
+        righe_m.append({
+            "Mese": m,
+            "Ore ITM": itm_m,
+            "Utilizzo %": round(itm_m / h_m * 100.0, 2) if h_m else None,
+            "Margine (\u20ac)": round(mg_m, 0),
+            "Margine medio ITM (\u20ac/MWh)": (
+                round(float(margine[mask_m][itm[mask_m]].mean() / cap), 2)
+                if itm_m else None),
+        })
+    out["df_mesi"] = pd.DataFrame(righe_m, columns=cols_m)
+    return out
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def generate_mock_hourly(start_date, end_date):
     """Serie oraria sintetica ma realistica del prezzo Swissix (€/MWh):
@@ -6288,7 +6384,7 @@ elif workspace == _('ws7'):
 # ==========================================
 elif workspace == _('ws8'):
     st.markdown(f"<h1>{_('ws8')}</h1>", unsafe_allow_html=True)
-    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread, shaping curva, spread weekend, price capture, volatilità realizzata, confronto anno-su-anno, analisi prezzi negativi, spread intra-day, picchi di prezzo, profilo settimanale tipo, curva di durata, concentrazione del costo di fornitura, simulazione demand shifting, finestre di acquisto ottimali, stagionalità mensile, monitoraggio del budget energetico annuale, analisi di sensitività del costo al profilo di prelievo, Value-at-Risk Monte Carlo del costo di fornitura, classifica dei giorni di calendario più costosi per il profilo di prelievo, fasce tariffarie orarie ottimali derivate dal profilo di prezzo osservato, autocorrelazione del prezzo spot (persistenza e stagionalità), stress test deterministico del costo di fornitura sotto shock di prezzo, previsione naive-stagionale del prezzo del giorno successivo con backtest di accuratezza, decomposizione stagionale del prezzo (trend + pattern giornaliero/settimanale + residuo) con export CSV.")
+    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread, shaping curva, spread weekend, price capture, volatilità realizzata, confronto anno-su-anno, analisi prezzi negativi, spread intra-day, picchi di prezzo, profilo settimanale tipo, curva di durata, concentrazione del costo di fornitura, simulazione demand shifting, finestre di acquisto ottimali, stagionalità mensile, monitoraggio del budget energetico annuale, analisi di sensitività del costo al profilo di prelievo, Value-at-Risk Monte Carlo del costo di fornitura, classifica dei giorni di calendario più costosi per il profilo di prelievo, fasce tariffarie orarie ottimali derivate dal profilo di prezzo osservato, autocorrelazione del prezzo spot (persistenza e stagionalità), stress test deterministico del costo di fornitura sotto shock di prezzo, previsione naive-stagionale del prezzo del giorno successivo con backtest di accuratezza, decomposizione stagionale del prezzo (trend + pattern giornaliero/settimanale + residuo) con export CSV, margine di contribuzione per impianto con scomposizione mensile e analisi di concentrazione del margine.")
 
     # ---------- Controlli: sorgente, periodo, impianti ----------
     st.subheader("⚙️ Sorgente dati & Timeframe")
@@ -6431,7 +6527,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -10504,6 +10600,72 @@ elif workspace == _('ws8'):
                 help="Scarica il dettaglio mensile: risparmio con finestra contigua e finestra pi\u00f9 frequente.",
             )
             st.caption("\U0001f4a1 Finestra ricorrente stabile (es. sempre 02:00-06:00) \u2192 pianifica il processo flessibile su quell'orario. Finestra che cambia spesso \u2192 serve automazione day-ahead, non un orario fisso. Confronta il risparmio qui con il 'risparmio max teorico' della tab \U0001f9e0 Efficienza profilo: la differenza \u00e8 il prezzo del vincolo di contiguit\u00e0.")
+
+    with tab63:
+        titolo_mi = edu("Margine per impianto", "Il MARGINE DI CONTRIBUZIONE di ogni impianto: max(0, prezzo - costo marginale) \u00d7 capacit\u00e0, ora per ora. Stesso modello del blocco 'Marginal cost & produzione stimata' (sempre a piena potenza quando in-the-money), ma qui si scompone il margine per MESE e si misura quanto \u00e8 CONCENTRATO nelle ore migliori: se il miglior 10% delle ore produce l'80% del margine, l'impianto vive di poche ore d'oro e conviene usarlo come punta; se il margine \u00e8 distribuito, ha senso il ciclo continuo. Complementare alla tab \u26a1 Potenza di picco (lato consumo): qui siamo dal lato PRODUZIONE, e il margine decide il dispacciamento.")
+        st.markdown(titolo_mi, unsafe_allow_html=True)
+        if not assets_sel:
+            st.info("Seleziona almeno un impianto dai filtri in alto per vedere il margine di contribuzione.")
+        else:
+            righe_cmp = []
+            for nome in assets_sel:
+                mc, cap, col = ASSETS[nome]
+                righe_cmp.append((nome, mc, cap, col, calcola_margine_impianto(prezzi, mc, cap)))
+            righe_cmp.sort(key=lambda r: r[4]["margine_eur"], reverse=True)
+            tab_cmp = pd.DataFrame([{
+                "Impianto": nome,
+                "Costo marginale (\u20ac/MWh)": round(mc, 1),
+                "Capacit\u00e0 (MW)": cap,
+                "Ore ITM": mi["ore_itm"],
+                "Utilizzo %": mi["utilizzo_pct"],
+                "Margine totale (\u20ac)": f"{mi['margine_eur']:,.0f}",
+                "Margine medio ITM (\u20ac/MWh)": mi["margine_medio_itm"],
+                "Pareto top-10% ore": (f"{mi['pareto_top10_pct']:.1f} %" if mi["pareto_top10_pct"] is not None else "n/d"),
+            } for nome, mc, cap, col, mi in righe_cmp])
+            st.markdown("**Confronto impianti** (ordinati per margine totale)")
+            st.dataframe(tab_cmp, use_container_width=True, hide_index=True)
+
+            for nome, mc, cap, col, mi in righe_cmp:
+                st.markdown(f"### {nome}")
+                c1, c2, c3, c4 = st.columns(4)
+                render_kpi("Margine totale (\u20ac)", f"{mi['margine_eur']:,.0f}", c1)
+                render_kpi("Ore in-the-money", f"{mi['ore_itm']} / {mi['ore_totali']}", c2)
+                render_kpi("Utilizzo ITM %", f"{mi['utilizzo_pct']:.1f} %" if mi["utilizzo_pct"] is not None else "n/d", c3)
+                mm_itm = mi["margine_medio_itm"]
+                render_kpi("Margine medio ITM (\u20ac/MWh)", f"{mm_itm:,.2f}" if mm_itm is not None else "n/d", c4)
+                par = mi["pareto_top10_pct"]
+                if par is not None:
+                    if par >= 50:
+                        par_txt = f"{par:.1f} % — impianto da poche ore d'oro: conviene usarlo come punta."
+                    elif par >= 25:
+                        par_txt = f"{par:.1f} % — margine concentrato ma non estremo."
+                    else:
+                        par_txt = f"{par:.1f} % — margine distribuito: ha senso il ciclo continuo."
+                    st.info(f"\U0001f4ca Pareto: il miglior 10% delle ore in-the-money produce il {par_txt}")
+
+                df_mim = mi["df_mesi"]
+                if not df_mim.empty:
+                    fig_mi = go.Figure()
+                    fig_mi.add_trace(go.Bar(
+                        x=df_mim["Mese"], y=df_mim["Margine (\u20ac)"],
+                        marker_color=col, name="Margine (\u20ac)",
+                        hovertemplate="Mese %{x}<br>Margine: \u20ac%{y:,.0f}<br>Ore ITM: %{customdata}<extra></extra>",
+                        customdata=df_mim["Ore ITM"]))
+                    fig_mi.update_layout(template="plotly_dark", height=340,
+                                         title=f"Margine mensile — {nome}",
+                                         xaxis_title="Mese", yaxis_title="\u20ac")
+                    st.plotly_chart(fig_mi, use_container_width=True)
+                    st.markdown("**Dettaglio mensile**")
+                    st.dataframe(df_mim, use_container_width=True, hide_index=True)
+                    st.download_button(
+                        f"\u2b07\ufe0f Esporta margine {nome} (CSV)",
+                        df_mim.to_csv(index=False).encode("utf-8"),
+                        file_name=f"margine_impianto_{d0}_{d1}.csv",
+                        mime="text/csv",
+                        help="Scarica il dettaglio mensile: ore in-the-money, utilizzo e margine di contribuzione.",
+                        key=f"csv_mi_{nome}",
+                    )
+            st.caption("\U0001f4a1 Modello 'sempre a piena potenza quando il prezzo supera il costo marginale': margine ottimistico (ignora rampe, start-up, minimi tecnici). Confronta il margine totale con il ricavo baseload del KPI in alto: la differenza \u00e8 il valore del dispacciamento ottimale.")
 
 # Footer
 
