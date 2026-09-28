@@ -939,6 +939,123 @@ def calcola_margine_impianto(prezzi, mc, cap):
     return out
 
 
+def calcola_correlazione_impianti(prezzi, impianti):
+    """Correlazione dei margini orari tra impianti (diversificazione del portafoglio).
+
+    Domanda operativa: "i miei impianti guadagnano nelle STESSE ore o in ore
+    DIVERSE?" — un portafoglio dove tutti gli impianti sono in-the-money
+    insieme nelle poche ore di picco e' concentrato (cannibalizzazione del
+    margine), uno con margini decorrelati smussa i ricavi nel tempo.
+
+    Metodo (tutto deterministico a parita' di input):
+    - margine orario di ciascun impianto = max(0, prezzo - mc) x cap, come in
+      calcola_margine_impianto (stesso modello "sempre a piena potenza se ITM");
+    - ore valide = intersezione delle ore con prezzo non-NaN, timestamp
+      duplicati scartati (primo tenuto), serie ordinata;
+    - matrice di correlazione di Pearson sui margini orari (€/h); una serie
+      a varianza nulla (impianto mai ITM o sempre al massimo) non ha
+      correlazione definita -> NaN nella matrice;
+    - ore "tutti ITM" / "nessuno ITM" sul vettore congiunto;
+    - concentrazione: quota del margine combinato generata dal miglior 10%
+      delle ore (per margine combinato).
+
+    Differenza dagli altri tab: Margine per impianto (tab 63) analizza ogni
+    asset in isolamento; qui si analizza il PORTAFOGLIO: correlazioni a
+    coppie, ore di co-movimento, concentrazione congiunta.
+
+    NaN-safe: meno di 2 impianti validi, zero ore valide o cap<=0/mc non
+    valido -> impianti scartati; se restano <2 impianti -> dict con flag
+    'ok' False e strutture vuote con le colonne giuste.
+
+    impianti: lista di tuple (nome, mc, cap).
+
+    Ritorna dict con 'ok' (bool), 'nomi' (list), 'corr' (DataFrame matrice),
+    'coppie' (list di dict nome_a/nome_b/corr, ordinate per corr decrescente,
+    NaN in coda), 'corr_media' (float o None), 'ore_totali', 'ore_tutti_itm',
+    'ore_nessuno_itm', 'pct_tutti_itm', 'pct_nessuno_itm' (None se 0 ore),
+    'margine_totale' (float €), 'concentrazione_top10_pct' (None se margine 0),
+    'df_mesi' ('Mese', 'Margine combinato (€)', 'Ore tutti ITM',
+    'Ore nessuno ITM')."""
+    cols_m = ["Mese", "Margine combinato (€)", "Ore tutti ITM",
+              "Ore nessuno ITM"]
+    vuoto = {
+        "ok": False, "nomi": [], "corr": pd.DataFrame(),
+        "coppie": [], "corr_media": None, "ore_totali": 0,
+        "ore_tutti_itm": 0, "ore_nessuno_itm": 0, "pct_tutti_itm": None,
+        "pct_nessuno_itm": None, "margine_totale": 0.0,
+        "concentrazione_top10_pct": None,
+        "df_mesi": pd.DataFrame({c: [] for c in cols_m}),
+    }
+    try:
+        p = prezzi.astype(float)
+        p = p[~p.index.duplicated(keep="first")].sort_index().dropna()
+    except Exception:
+        return dict(vuoto)
+    if len(p) == 0:
+        return dict(vuoto)
+    pv = p.to_numpy(dtype=float)
+    serie = {}
+    for item in impianti:
+        try:
+            nome, mc, cap = item
+            mc = float(mc)
+            cap = float(cap)
+        except (TypeError, ValueError):
+            continue
+        if cap <= 0:
+            continue
+        serie[str(nome)] = np.maximum(0.0, pv - mc) * cap
+    nomi = list(serie.keys())
+    if len(nomi) < 2:
+        return dict(vuoto)
+    df_s = pd.DataFrame(serie)
+    mat = df_s.corr(method="pearson")
+    coppie = []
+    for i in range(len(nomi)):
+        for j in range(i + 1, len(nomi)):
+            c = mat.iloc[i, j]
+            coppie.append({"nome_a": nomi[i], "nome_b": nomi[j],
+                           "corr": (None if pd.isna(c) else round(float(c), 3))})
+    coppie.sort(key=lambda r: (r["corr"] is None, -(r["corr"] or 0.0)))
+    validi = [c for c in mat.to_numpy().ravel()
+              if not pd.isna(c)]
+    # escludi la diagonale (=1.0) dalla media
+    off = [mat.iloc[i, j] for i in range(len(nomi))
+           for j in range(len(nomi)) if i != j and not pd.isna(mat.iloc[i, j])]
+    corr_media = (round(float(np.mean(off)), 3) if off else None)
+    itm_mat = df_s.to_numpy() > 0.0
+    n_tot = len(df_s)
+    n_all = int(itm_mat.all(axis=1).sum())
+    n_none = int((~itm_mat.any(axis=1)).sum())
+    marg_tot = float(df_s.to_numpy().sum())
+    comb = df_s.sum(axis=1).to_numpy()
+    k = max(1, int(round(n_tot * 0.10)))
+    conc = None
+    if marg_tot > 0:
+        top = np.sort(comb)[-k:].sum()
+        conc = round(top / marg_tot * 100.0, 2)
+    idxn = p.index.tz_localize(None) if p.index.tz is not None else p.index
+    mesi = idxn.strftime("%Y-%m")
+    righe_m = []
+    for m in sorted(set(mesi)):
+        mask_m = (mesi == m)
+        righe_m.append({
+            "Mese": m,
+            "Margine combinato (€)": round(float(comb[mask_m].sum()), 0),
+            "Ore tutti ITM": int(itm_mat[mask_m].all(axis=1).sum()),
+            "Ore nessuno ITM": int((~itm_mat[mask_m].any(axis=1)).sum()),
+        })
+    return {
+        "ok": True, "nomi": nomi, "corr": mat.round(3), "coppie": coppie,
+        "corr_media": corr_media, "ore_totali": n_tot,
+        "ore_tutti_itm": n_all, "ore_nessuno_itm": n_none,
+        "pct_tutti_itm": round(n_all / n_tot * 100.0, 2) if n_tot else None,
+        "pct_nessuno_itm": round(n_none / n_tot * 100.0, 2) if n_tot else None,
+        "margine_totale": marg_tot, "concentrazione_top10_pct": conc,
+        "df_mesi": pd.DataFrame(righe_m, columns=cols_m),
+    }
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def generate_mock_hourly(start_date, end_date):
     """Serie oraria sintetica ma realistica del prezzo Swissix (€/MWh):
@@ -6690,7 +6807,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -10932,6 +11049,73 @@ elif workspace == _('ws8'):
                 st.metric(f"Risparmio stimato spostando il {q_pc}% del carico critico",
                           f"\u20ac{risp_pc:,.0f}")
             st.caption("\U0001f4a1 Le ore critiche sono selezionate sul PREZZO di sistema, non sul tuo costo: se prelevi molto proprio in quelle ore, un programma di demand response o una copertura mirata valgono pi\u00f9 che altrove.")
+
+    with tab65:
+        titolo_ci = edu("Correlazione impianti", "I margini dei tuoi impianti si muovono INSIEME o si COMPENSANO? Due impianti sempre in-the-money nelle stesse ore concentrano il ricavo nelle poche ore di picco (cannibalizzazione): il portafoglio vive o muore con gli spike. Impianti decorrelati smussano i ricavi nel tempo: è la DIVERSIFICAZIONE dal lato produzione. Diverso dalla tab 💹 Margine per impianto (ogni asset in isolamento): qui si misura il COMPORTAMENTO CONGIUNTO — correlazioni a coppie, ore in cui tutti/nessuno guadagnano, concentrazione del margine combinato.")
+        st.markdown(titolo_ci, unsafe_allow_html=True)
+        if len(assets_sel) < 2:
+            st.info("Seleziona almeno due impianti dai filtri in alto per vedere la correlazione del portafoglio.")
+        else:
+            ci = calcola_correlazione_impianti(
+                prezzi, [(nome, ASSETS[nome][0], ASSETS[nome][1]) for nome in assets_sel])
+            if not ci["ok"]:
+                st.warning("Dati insufficienti per calcolare la correlazione (servono almeno 2 impianti validi e prezzi orari).")
+            else:
+                c1, c2, c3, c4 = st.columns(4)
+                cm_txt = f"{ci['corr_media']:.2f}" if ci["corr_media"] is not None else "n/d"
+                if ci["corr_media"] is not None:
+                    cm_txt += (" — portafoglio concentrato" if ci["corr_media"] >= 0.7
+                               else " — diversificazione parziale" if ci["corr_media"] >= 0.3
+                               else " — portafoglio diversificato")
+                render_kpi(edu("Correlazione media di coppia", "Media delle correlazioni di Pearson tra i margini orari (€/h) di tutte le coppie di impianti. Vicina a 1 = gli impianti guadagnano nelle stesse ore (concentrazione); vicina a 0 = si compensano (diversificazione)."),
+                           cm_txt, c1)
+                coppie_v = [c for c in ci["coppie"] if c["corr"] is not None]
+                if coppie_v:
+                    mx, mn = coppie_v[0], coppie_v[-1]
+                    render_kpi(edu("Coppia più correlata", "La coppia di impianti i cui margini orari si muovono più in sintonia: il cuore concentrato del portafoglio."),
+                               f"{mx['corr']:.2f}<br><small>{mx['nome_a']} ↔ {mx['nome_b']}</small>", c2)
+                    render_kpi(edu("Coppia meno correlata", "La coppia con margini più decorrelati: quella che smussa di più i ricavi del portafoglio."),
+                               f"{mn['corr']:.2f}<br><small>{mn['nome_a']} ↔ {mn['nome_b']}</small>", c3)
+                else:
+                    render_kpi("Coppia più correlata", "n/d", c2)
+                    render_kpi("Coppia meno correlata", "n/d", c3)
+                render_kpi(edu("Ore con tutti/nessuno ITM", "Quota di ore in cui TUTTI gli impianti sono in-the-money (co-movimento massimo) contro ore in cui NESSUNO lo è: misura quanto il portafoglio dipende dalle stesse condizioni di mercato."),
+                           f"{ci['pct_tutti_itm']:.1f} % tutti<br><small>{ci['pct_nessuno_itm']:.1f} % nessuno</small>", c4)
+                if ci["concentrazione_top10_pct"] is not None:
+                    st.info(f"📊 Concentrazione: il miglior 10% delle ore genera il {ci['concentrazione_top10_pct']:.1f} % del margine combinato "
+                            f"(€{ci['margine_totale']:,.0f} nel periodo). Sopra il 50% il portafoglio dipende dalle poche ore d'oro: valuta coperture o un asset decorrelato.")
+
+                st.markdown("**Matrice di correlazione dei margini orari**")
+                mat_ci = ci["corr"]
+                nomi_ci = ci["nomi"]
+                fig_ci = go.Figure(data=go.Heatmap(
+                    z=mat_ci.to_numpy(), x=nomi_ci, y=nomi_ci,
+                    colorscale="RdBu", zmin=-1, zmax=1, reversescale=True,
+                    text=mat_ci.to_numpy().round(2), texttemplate="%{text}",
+                    hovertemplate="%{y} ↔ %{x}<br>Corr: %{z:.3f}<extra></extra>"))
+                fig_ci.update_layout(template="plotly_dark", height=420,
+                                     title="Correlazione dei margini orari (€/h) tra impianti")
+                st.plotly_chart(fig_ci, use_container_width=True)
+
+                st.markdown("**Dettaglio per coppia**")
+                df_cic = pd.DataFrame([{
+                    "Impianto A": c["nome_a"], "Impianto B": c["nome_b"],
+                    "Correlazione": (f"{c['corr']:.3f}" if c["corr"] is not None else "n/d"),
+                } for c in ci["coppie"]])
+                st.dataframe(df_cic, use_container_width=True, hide_index=True)
+
+                st.markdown("**Dettaglio mensile**")
+                df_cim = ci["df_mesi"]
+                st.dataframe(df_cim, use_container_width=True, hide_index=True)
+                st.download_button(
+                    "⬇️ Esporta correlazione impianti (CSV)",
+                    df_cim.to_csv(index=False).encode("utf-8"),
+                    file_name=f"correlazione_impianti_{d0}_{d1}.csv",
+                    mime="text/csv",
+                    help="Scarica il dettaglio mensile: margine combinato e ore in cui tutti/nessun impianto è in-the-money.",
+                    key="csv_ci_mesi",
+                )
+            st.caption("💡 Correlazione alta + concentrazione alta = il portafoglio è un 'picco puro': considera di aggiungere un asset con profilo diverso (es. baseload contro punta) per stabilizzare i ricavi. Correlazione bassa = la diversificazione sta già funzionando.")
 
 # Footer
 
