@@ -4881,6 +4881,85 @@ def calcola_sbilanciamento(prezzi, mw_f1, mw_f2, mw_f3, err_pct=10.0,
     return out
 
 
+def calcola_expected_shortfall(prezzi, mw_f1, mw_f2, mw_f3, n_scenari=1000,
+                               livelli=(0.95, 0.99), seed=42):
+    """Expected Shortfall (CVaR) del COSTO di fornitura via Monte Carlo.
+
+    Complemento del tab VaR: il VaR_95 dice "nel 95% degli scenari il costo
+    resta SOTTO X", ma non dice quanto si perde nel 5% peggiore. L'Expected
+    Shortfall (ES, o Conditional VaR) e' la perdita MEDIA condizionata a stare
+    nella coda: ES_95 = E[costo | costo >= VaR_95].
+
+    Gli scenari sono gli stessi del tab VaR (block bootstrap di giornate da
+    24h con seed fisso -> deterministici e riproducibili): lo stesso vettore
+    'scenari' di calcola_var_costo, quindi VaR ed ES sono coerenti tra i tab.
+
+    A differenza del VaR, l'ES e' una misura di rischio COERENTE (subadditiva)
+    e cattura lo spessore della coda: ES/VaR vicino a 1 -> coda sottile
+    (oltre la soglia non si va molto piu' in la'); ES/VaR >> 1 -> coda spessa,
+    gli scenari estremi sono molto piu' costosi della soglia.
+
+    NaN-safe: delega a calcola_var_costo (stesse regole: serie vuota, MW a 0,
+    n_scenari <= 0 -> dict vuoto con KPI a None, DataFrame con le colonne
+    giuste, array vuoti). Livelli non validi (non in (0,1)) ignorati; se
+    nessuno e' valido, ritorna comunque base + scenari senza righe di livello.
+
+    Ritorna dict con 'n_scenari', 'ore', 'mwh', 'costo_spot', 'costo_atteso',
+    'livelli' (dict livello float -> {'var', 'es', 'tail_ratio', 'n_coda'}),
+    'df_livelli' (Livello %, VaR €, ES €, ES/VaR, Scenari in coda),
+    'df_coda95' (Costo € degli scenari sopra il VaR 95%, ordinati desc),
+    'scenari' (np.array dei costi per scenario), 'coda95' (np.array coda 95%).
+    """
+    cols_l = ["Livello %", "VaR (€)", "ES (€)", "ES/VaR", "Scenari in coda"]
+    cols_c = ["Costo (€)"]
+    vuoto = {"n_scenari": 0, "ore": 0, "mwh": 0.0, "costo_spot": None,
+             "costo_atteso": None, "livelli": {},
+             "df_livelli": pd.DataFrame(columns=cols_l),
+             "df_coda95": pd.DataFrame(columns=cols_c),
+             "scenari": np.array([], dtype=float),
+             "coda95": np.array([], dtype=float)}
+    base = calcola_var_costo(prezzi, mw_f1, mw_f2, mw_f3,
+                             n_scenari=n_scenari, seed=seed)
+    if base["n_scenari"] == 0:
+        return vuoto
+    costi = base["scenari"]
+    liv_norm = []
+    for lv in (livelli or ()):
+        try:
+            f = float(lv)
+        except (TypeError, ValueError):
+            continue
+        if 0.0 < f < 1.0 and f not in liv_norm:
+            liv_norm.append(f)
+    out = dict(vuoto)
+    out.update({"n_scenari": base["n_scenari"], "ore": base["ore"],
+                "mwh": base["mwh"], "costo_spot": base["costo_spot"],
+                "costo_atteso": base["costo_atteso"], "scenari": costi})
+    if not liv_norm:
+        return out
+    liv_map = {}
+    righe = []
+    for lv in sorted(liv_norm):
+        var = float(np.quantile(costi, lv))
+        coda = costi[costi >= var]
+        es = float(coda.mean()) if len(coda) else var
+        n_coda = int(len(coda))
+        tr = round(es / var, 3) if var > 0 else None
+        liv_map[lv] = {"var": round(var, 2), "es": round(es, 2),
+                       "tail_ratio": tr, "n_coda": n_coda}
+        righe.append({"Livello %": f"{lv * 100:.0f}%", "VaR (€)": round(var, 2),
+                      "ES (€)": round(es, 2), "ES/VaR": tr,
+                      "Scenari in coda": n_coda})
+    coda95 = np.sort(costi[costi >= float(np.quantile(costi, 0.95))])[::-1]
+    out.update({"livelli": liv_map,
+                "df_livelli": pd.DataFrame(righe, columns=cols_l)
+                              .reset_index(drop=True),
+                "df_coda95": pd.DataFrame({"Costo (€)": np.round(coda95, 2)},
+                                          columns=cols_c).reset_index(drop=True),
+                "coda95": coda95})
+    return out
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def generate_singularity_data():
     np.random.seed(42)
@@ -5573,7 +5652,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -9162,6 +9241,80 @@ elif workspace == _('ws8'):
                 help="Scarica il dettaglio mensile: prezzo medio, componente CO2, quota % e costo CO2 sul profilo.",
             )
             st.caption("💡 Con EUA a 100+ €/t il marginale a carbone (0,9 t/MWh) porta la CO2 oltre 90 €/MWh: confronta la quota con il margine fornitore (tab 🧮) e lo shape premium (tab 📏) per capire quanto del prezzo è 'mercato' e quanto è politica climatica.")
+
+    with tab56:
+        titolo_es = edu("Expected Shortfall", "Il VaR_95 ti dice: 'nel 95% degli scenari il costo resta SOTTO X'. Ma quanto perdi nel 5% peggiore? L'EXPECTED SHORTFALL (o Conditional VaR) è la perdita MEDIA condizionata a stare nella coda: ES_95 = media dei costi degli scenari sopra il VaR_95. È una misura di rischio COERENTE (a differenza del VaR è subadditiva) e cattura lo spessore della coda: il rapporto ES/VaR vicino a 1 significa coda sottile (oltre la soglia non si va molto più in là), ES/VaR >> 1 significa coda spessa — gli scenari estremi sono molto più costosi della soglia. Gli scenari sono gli stessi del tab VaR (block bootstrap di giornate da 24h, seed 42): VaR ed ES sono coerenti tra i due tab.")
+        st.markdown(f"**{titolo_es}**: quanto costa davvero la coda peggiore?", unsafe_allow_html=True)
+        st.caption("Stessi scenari del tab 🎲 VaR (block bootstrap 24h, seed 42). ES = media degli scenari sopra il VaR.")
+
+        n_scen_es = st.number_input("Scenari Monte Carlo", min_value=100, max_value=5000,
+                                    value=1000, step=100, key="es_nscen",
+                                    help="Numero di scenari di costo simulati (stessa meccanica del tab VaR).")
+
+        r_es = calcola_expected_shortfall(prezzi, mw_f1, mw_f2, mw_f3,
+                                          n_scenari=int(n_scen_es),
+                                          livelli=(0.95, 0.99), seed=42)
+        if r_es["n_scenari"] == 0:
+            st.warning("Seleziona un periodo con dati e un profilo di prelievo > 0 (tab 💰 Costo fornitura).")
+        else:
+            l95, l99 = r_es["livelli"][0.95], r_es["livelli"][0.99]
+            k1, k2, k3, k4 = st.columns(4)
+            render_kpi(edu("Costo atteso", "Media dei costi su tutti gli scenari: il budget 'centrale' del periodo."), f"{r_es['costo_atteso']:,.0f} €", k1)
+            render_kpi(edu("VaR 95%", "Soglia del costo: nel 95% degli scenari il costo resta sotto questo livello."), f"{l95['var']:,.0f} €", k2)
+            render_kpi(edu("Expected Shortfall 95%", "Costo MEDIO nel 5% peggiore degli scenari: la perdita condizionata alla coda. È il numero che conta per il dimensionamento delle coperture."), f"{l95['es']:,.0f} €", k3)
+            render_kpi(edu("Expected Shortfall 99%", "Costo medio nell'1% peggiore: la coda estrema, scenari da stress test reale."), f"{l99['es']:,.0f} €", k4)
+            j1, j2, j3, j4 = st.columns(4)
+            tr_txt = f"{l95['tail_ratio']:.2f}×" if l95["tail_ratio"] is not None else "n/d"
+            render_kpi(edu("ES/VaR 95% (coda)", "Spessore della coda: 1,0x = oltre la soglia non si sale più; 1,3-1,5x+ = coda spessa, gli estremi costano molto più della soglia."), tr_txt, j1)
+            render_kpi(edu("Costo spot del periodo", "Costo del profilo sui prezzi osservati: il riferimento storico."), f"{r_es['costo_spot']:,.0f} €", j2)
+            render_kpi(edu("Scenari in coda 95%", "Quanti scenari su N finiscono sopra il VaR 95%: ~5% per costruzione, il campione su cui si calcola l'ES."), f"{l95['n_coda']}", j3)
+            render_kpi(edu("Peggior scenario", "Il costo massimo simulato: lo scenario peggiore in assoluto tra gli N."), f"{float(r_es['scenari'].max()):,.0f} €", j4)
+
+            st.markdown("**Distribuzione degli scenari: la coda sopra il VaR 95%**")
+            fig_es = go.Figure()
+            fig_es.add_trace(go.Histogram(x=r_es["scenari"], nbinsx=50,
+                                          name="Tutti gli scenari", marker_color="rgba(59,130,246,0.55)",
+                                          hovertemplate="Costo: €%{x:,.0f}<br>Scenari: %{y}<extra></extra>"))
+            fig_es.add_trace(go.Histogram(x=r_es["coda95"], nbinsx=20,
+                                          name="Coda sopra VaR 95%", marker_color="rgba(239,68,68,0.75)",
+                                          hovertemplate="Costo: €%{x:,.0f}<br>Scenari: %{y}<extra></extra>"))
+            fig_es.add_vline(x=r_es["costo_atteso"], line_dash="dot", line_color="#3b82f6",
+                             annotation_text=f"Atteso {r_es['costo_atteso']:,.0f} €", annotation_position="top left")
+            fig_es.add_vline(x=l95["var"], line_dash="dash", line_color="#eab308",
+                             annotation_text=f"VaR 95% {l95['var']:,.0f} €", annotation_position="top right")
+            fig_es.add_vline(x=l95["es"], line_dash="solid", line_color="#ef4444",
+                             annotation_text=f"ES 95% {l95['es']:,.0f} €", annotation_position="bottom right")
+            fig_es.update_layout(template="plotly_dark", height=380, barmode="overlay",
+                                 title="Costo del profilo negli scenari: atteso / VaR 95% / ES 95% (coda in rosso)",
+                                 xaxis_title="Costo scenario (€)", yaxis_title="N. scenari")
+            st.plotly_chart(fig_es, use_container_width=True)
+
+            st.markdown("**VaR vs Expected Shortfall per livello di confidenza**")
+            df_lv = r_es["df_livelli"]
+            fig_esb = go.Figure()
+            fig_esb.add_trace(go.Bar(x=df_lv["Livello %"], y=df_lv["VaR (€)"],
+                                     name="VaR", marker_color="#eab308",
+                                     hovertemplate="%{x}<br>VaR: €%{y:,.0f}<extra></extra>"))
+            fig_esb.add_trace(go.Bar(x=df_lv["Livello %"], y=df_lv["ES (€)"],
+                                     name="Expected Shortfall", marker_color="#ef4444",
+                                     hovertemplate="%{x}<br>ES: €%{y:,.0f}<extra></extra>"))
+            fig_esb.update_layout(template="plotly_dark", height=330, barmode="group",
+                                  title="VaR (soglia) vs ES (media della coda): più la barra rossa supera la gialla, più la coda è spessa",
+                                  xaxis_title="Livello di confidenza", yaxis_title="€")
+            st.plotly_chart(fig_esb, use_container_width=True)
+
+            st.markdown("**Tabella VaR / ES**")
+            st.dataframe(df_lv, use_container_width=True, hide_index=True)
+            st.markdown("**Scenari in coda 95% (ordinati dal peggiore)**")
+            st.dataframe(r_es["df_coda95"], use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta coda 95% (CSV)",
+                r_es["df_coda95"].to_csv(index=False).encode("utf-8"),
+                file_name=f"expected_shortfall_coda_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica gli scenari sopra il VaR 95% ordinati dal peggiore: la coda su cui si calcola l'ES.",
+            )
+            st.caption("💡 Se ES95/VaR95 supera ~1,3 la coda è spessa: il VaR da solo sottostima il rischio — dimensiona le coperture sull'ES, non sul VaR. Confronta con lo stress test (tab 🧪) e il Cap & Floor (tab 🛡️) per coprire proprio quella coda.")
 
 # Footer
 
