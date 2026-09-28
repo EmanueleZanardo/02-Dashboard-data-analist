@@ -4637,43 +4637,44 @@ def calcola_shape_premium(prezzi, mw_f1, mw_f2, mw_f3):
     return out
 
 
-def calcola_co2(prezzi, mw_f1, mw_f2, mw_f3, eua_eur_t=75.0, em_t_mwh=0.45,
-                pass_pct=100.0):
-    """Costo CO2 implicito nel prezzo spot (pass-through delle quote EUA).
+def calcola_concentrazione_fasce(prezzi, mw_f1, mw_f2, mw_f3, n_punti=20):
+    """Concentrazione del costo di fornitura DENTRO ciascuna fascia F1/F2/F3.
 
-    Nelle ore in cui l'impianto marginale e' fossile, il prezzo spot incorpora
-    il costo della CO2: comp_CO2 = prezzo_EUA x fattore_emissivo_marginale
-    x coefficiente_di_pass-through. Con gli slider rispondi a: "quanta parte
-    del prezzo che pago e' CO2?" e "se l'EUA raddoppia, quanto mi costa?".
+    Il tab "Concentrazione costo" guarda la concentrazione sul periodo intero;
+    qui si guarda DENTRO ogni fascia: una F1 con il costo concentrato in poche
+    ore di spike chiede strumenti diversi (cap, flessibilita', demand response)
+    rispetto a una F1 con costo distribuito uniformemente (quota fissa o
+    baseload). Il prezzo non e' l'unico driver: il costo orario e'
+    prezzo x MW della fascia, ma a MW costanti per fascia la concentrazione
+    del costo segue quella dei prezzi della fascia.
 
-    Fattori indicativi impianto marginale: CCGT a gas 0.35-0.45 tCO2/MWh,
-    carbone 0.85-1.1 tCO2/MWh. Il pass-through (quota del costo CO2 che si
-    trasferisce sul prezzo) in letteratura UE vale 0.6-1.0; qui e' uno slider
-    libero 0-150% per fare anche scenari estremi.
+    Per ogni fascia con potenza > 0 e almeno un'ora valida (ordinando le ore
+    dal prezzo piu' alto):
+      - ore, energia (MWh), costo totale (€), prezzo P10/P50/P90, skewness
+      - quota_top10_pct: quota del costo della fascia generata dal 10% piu'
+        caro delle sue ore (10% = uniforme; vicino a 100% = tutto in poche ore)
+      - ore_50pct: numero minimo di ore (le piu' care) che accumulano il 50%
+        del costo della fascia
+      - curva di concentrazione (df_curva: Fascia, Quota ore %, Quota costo
+        cumulata %): Lorenz del costo per fascia, ultimo punto = 100/100.
 
-    Ritorna dict con 'errore', 'ore', 'componente_mwh' (€/MWh, costante sul
-    periodo a EUA/fattore/pass fissi), 'prezzo_medio', 'quota_pct' (% sul
-    prezzo medio; None se prezzo medio <= 0), 'prezzo_netto_co2' (spot medio
-    al netto della componente), 'energia_profilo_mwh', 'costo_co2_profilo_eur',
-    'df_mesi' (Mese, Prezzo medio, Componente CO2, Quota CO2 %, Costo CO2
-    profilo €), 'df_sens' (EUA €/t, Componente €/MWh, Quota %, Costo profilo €)
-    su scala [25, 50, 75, 100, 125, 150, 200].
+    NaN-safe: prezzi NaN scartati; serie vuota / indice non datetime /
+    profilo tutto a zero / costo totale <= 0 (es. prezzi negativi) -> metriche
+    a None per la fascia (niente senso nella concentrazione con costi negativi).
 
-    NaN-safe: serie vuota / indice non datetime / parametri non validi ->
-    neutro (ore = 0). Profilo a zero -> energia e costo profilo 0, perche'
-    la quota CO2 sul prezzo resta comunque informativa."""
+    Ritorna dict con 'errore' (None), 'fasce' (dict F1/F2/F3 -> dict con
+    'ore', 'energia_mwh', 'costo_eur', 'p10', 'p50', 'p90', 'skew',
+    'quota_top10_pct', 'ore_50pct'), 'df_curva' (Fascia, Quota ore (%),
+    Quota costo cumulata (%)) e 'fascia_piu_concentrata' (None se nessuna)."""
 
-    colonne_m = ["Mese", "Prezzo medio (€/MWh)", "Componente CO2 (€/MWh)",
-                 "Quota CO2 (%)", "Costo CO2 profilo (€)"]
-    colonne_s = ["EUA (€/t)", "Componente CO2 (€/MWh)", "Quota sul prezzo (%)",
-                 "Costo CO2 profilo (€)"]
-    vuoto = {"errore": None, "ore": 0, "componente_mwh": None,
-             "prezzo_medio": None, "quota_pct": None,
-             "prezzo_netto_co2": None, "energia_profilo_mwh": 0.0,
-             "costo_co2_profilo_eur": None,
-             "df_mesi": pd.DataFrame(columns=colonne_m),
-             "df_sens": pd.DataFrame(columns=colonne_s)}
-
+    vuoto_f = {"ore": 0, "energia_mwh": 0.0, "costo_eur": 0.0, "p10": None,
+               "p50": None, "p90": None, "skew": None, "quota_top10_pct": None,
+               "ore_50pct": None}
+    vuoto = {"errore": None,
+             "fasce": {fx: dict(vuoto_f) for fx in ("F1", "F2", "F3")},
+             "df_curva": pd.DataFrame(columns=["Fascia", "Quota ore (%)",
+                                               "Quota costo cumulata (%)"]),
+             "fascia_piu_concentrata": None}
     try:
         p = prezzi.astype(float)
         p = p[~p.index.duplicated(keep="first")].sort_index()
@@ -4686,392 +4687,51 @@ def calcola_co2(prezzi, mw_f1, mw_f2, mw_f3, eua_eur_t=75.0, em_t_mwh=0.45,
         return dict(vuoto)
     try:
         mw = {"F1": float(mw_f1), "F2": float(mw_f2), "F3": float(mw_f3)}
-        eua = float(eua_eur_t)
-        em = float(em_t_mwh)
-        pth = float(pass_pct)
     except Exception:
         return dict(vuoto)
-    if eua < 0 or em < 0 or pth < 0:
-        return dict(vuoto)
 
-    fasce = p.index.map(fascia_oraria)
-    programma = pd.Series([mw.get(fx, 0.0) for fx in fasce], index=p.index)
-    energia_prof = float(programma.sum())
-    if energia_prof < 0:
-        return dict(vuoto)
-
-    comp = eua * em * pth / 100.0
-    pm = float(p.mean())
-    quota = (comp / pm * 100.0) if pm > 0 else None
-    netto = pm - comp
-    costo_prof = energia_prof * comp if energia_prof > 0 else 0.0
-
-    mesi = p.index.to_period("M")
-    righe_m = []
-    for per, grp in p.groupby(mesi):
-        pm_m = float(grp.mean())
-        quota_m = (comp / pm_m * 100.0) if pm_m > 0 else None
-        prog_m = float(programma.loc[grp.index].sum())
-        righe_m.append({"Mese": str(per),
-                        "Prezzo medio (€/MWh)": round(pm_m, 2),
-                        "Componente CO2 (€/MWh)": round(comp, 2),
-                        "Quota CO2 (%)": round(quota_m, 1) if quota_m is not None else None,
-                        "Costo CO2 profilo (€)": round(prog_m * comp, 0)})
-    df_mesi = pd.DataFrame(righe_m, columns=colonne_m)
-
-    righe_s = []
-    for eua_s in (25.0, 50.0, 75.0, 100.0, 125.0, 150.0, 200.0):
-        comp_s = eua_s * em * pth / 100.0
-        righe_s.append({"EUA (€/t)": eua_s,
-                        "Componente CO2 (€/MWh)": round(comp_s, 2),
-                        "Quota sul prezzo (%)": round(comp_s / pm * 100.0, 1) if pm > 0 else None,
-                        "Costo CO2 profilo (€)": round(energia_prof * comp_s, 0)})
-    df_sens = pd.DataFrame(righe_s, columns=colonne_s)
-
-    return {"errore": None, "ore": int(len(p)),
-            "componente_mwh": round(comp, 3),
-            "prezzo_medio": round(pm, 2),
-            "quota_pct": round(quota, 2) if quota is not None else None,
-            "prezzo_netto_co2": round(netto, 2),
-            "energia_profilo_mwh": round(energia_prof, 0),
-            "costo_co2_profilo_eur": round(costo_prof, 0),
-            "df_mesi": df_mesi, "df_sens": df_sens}
-
-
-def calcola_sbilanciamento(prezzi, mw_f1, mw_f2, mw_f3, err_pct=10.0,
-                           pen_def_pct=20.0, pen_sur_pct=20.0, seed=42):
-    """Costo dello sbilanciamento programma/consuntivo (dual pricing).
-
-    Un buyer nomina un PROGRAMMA di prelievo (qui: il profilo F1/F2/F3) e poi
-    preleva il CONSUNTIVO. Lo scostamento orario e' lo SBILANCIAMENTO, che il
-    TSO regola a prezzi penalizzanti (dual pricing semplificato):
-        deficit (prelevi PIU' del programma) -> paghi spot*(1+pen_def%)
-        surplus (prelevi MENO del programma) -> vendi a  spot*(1-pen_sur%)
-    costo_sbil_h = max(sbil_h,0)*p_def_h + min(sbil_h,0)*p_sur_h
-    Il surplus da' un contributo NEGATIVO = ricavo (vendita a prezzo ridotto).
-
-    Il consuntivo e' simulato in modo DETERMINISTICO (seed fisso): per ogni
-    giorno di calendario un errore relativo err_d ~ N(0, err_pct/100),
-    applicato a tutte le ore del giorno:
-        consuntivo_h = max(programma_h * (1 + err_d), 0)
-    E' una proxy DIDATTICA dell'errore di previsione: l'app non dispone dei
-    veri dati di misura del cliente. Lo slider 'errore di previsione %'
-    risponde alla domanda: quanto mi costa sbagliare la previsione di X%?
-
-    Differenza dalle altre tab: 'Costo fornitura' e 'Ponte budget' lavorano
-    sul programma; 'VaR costo' misura il rischio prezzo senza sbilanciamenti;
-    'Stress test' muove i prezzi ma non i volumi. Qui il driver e' l'errore
-    sui VOLUMI (previsione del carico), con penalita' di sbilanciamento.
-
-    NaN-safe: ore con prezzo NaN escluse; profilo tutto a zero / serie vuota
-    / indice non datetime / parametri non validi -> neutro (giorni = 0).
-    err_pct = 0 -> consuntivo = programma -> costo sbilanciamento
-    esattamente 0 (invariante testata).
-
-    Ritorna dict con 'errore', 'giorni', 'ore', 'energia_prog_mwh',
-    'energia_cons_mwh', 'costo_programma' (a spot, €), 'costo_sbil_eur',
-    'costo_sbil_mwh' (€ per MWh programmata), 'pct_su_programma' (None se
-    costo_programma = 0), 'deficit_mwh', 'surplus_mwh', 'df_giorni'
-    (Data, Energia programma, Energia consuntivo, Sbilanciamento,
-    Costo sbilanciamento €), 'df_mesi' (Mese, Giorni, Energia programma,
-    Deficit, Surplus, Costo sbilanciamento €, Costo programma €)."""
-
-    colonne_g = ["Data", "Energia programma (MWh)", "Energia consuntivo (MWh)",
-                 "Sbilanciamento (MWh)", "Costo sbilanciamento (€)"]
-    colonne_m = ["Mese", "Giorni", "Energia programma (MWh)", "Deficit (MWh)",
-                 "Surplus (MWh)", "Costo sbilanciamento (€)", "Costo programma (€)"]
-    vuoto = {"errore": None, "giorni": 0, "ore": 0, "energia_prog_mwh": 0.0,
-             "energia_cons_mwh": 0.0, "costo_programma": None,
-             "costo_sbil_eur": None, "costo_sbil_mwh": None,
-             "pct_su_programma": None, "deficit_mwh": 0.0, "surplus_mwh": 0.0,
-             "df_giorni": pd.DataFrame(columns=colonne_g),
-             "df_mesi": pd.DataFrame(columns=colonne_m)}
-
-    try:
-        p = prezzi.astype(float)
-        p = p[~p.index.duplicated(keep="first")].sort_index()
-        if not isinstance(p.index, pd.DatetimeIndex):
-            return dict(vuoto)
-    except Exception:
-        return dict(vuoto)
-    p = p.dropna()
-    if len(p) == 0:
-        return dict(vuoto)
-    try:
-        mw = {"F1": float(mw_f1), "F2": float(mw_f2), "F3": float(mw_f3)}
-        err = float(err_pct)
-        pdp = float(pen_def_pct)
-        psp = float(pen_sur_pct)
-    except Exception:
-        return dict(vuoto)
-    if err < 0 or pdp < 0 or psp < 0:
-        return dict(vuoto)
-
-    fasce = p.index.map(fascia_oraria)
-    programma = pd.Series([mw.get(fx, 0.0) for fx in fasce], index=p.index)
-    if float(programma.sum()) <= 0:
-        return dict(vuoto)
-
-    giorni_cal = p.index.normalize().unique().sort_values()
-    n_giorni = len(giorni_cal)
-    rng = np.random.default_rng(int(seed))
-    err_g = rng.normal(0.0, err / 100.0, size=n_giorni) if err > 0 else np.zeros(n_giorni)
-    err_ora = pd.Series(err_g, index=giorni_cal).reindex(p.index.normalize()).to_numpy(dtype=float)
-
-    consuntivo = np.maximum(programma.to_numpy(dtype=float) * (1.0 + err_ora), 0.0)
-    prog_v = programma.to_numpy(dtype=float)
-    spot_v = p.to_numpy(dtype=float)
-    sbil = consuntivo - prog_v
-    p_def = spot_v * (1.0 + pdp / 100.0)
-    p_sur = spot_v * (1.0 - psp / 100.0)
-    costo_sbil_h = np.maximum(sbil, 0.0) * p_def + np.minimum(sbil, 0.0) * p_sur
-    costo_prog_h = prog_v * spot_v
-
-    ore = len(p)
-    energia_prog = float(prog_v.sum())
-    energia_cons = float(consuntivo.sum())
-    costo_programma = float(costo_prog_h.sum())
-    costo_sbil = float(costo_sbil_h.sum())
-    deficit_mwh = float(np.maximum(sbil, 0.0).sum())
-    surplus_mwh = float(np.minimum(sbil, 0.0).sum())
-
-    idx_g = p.index.normalize()
-    righe_g = []
-    for g in giorni_cal:
-        m = idx_g == g
-        righe_g.append({
-            "Data": g.date().isoformat(),
-            "Energia programma (MWh)": round(float(prog_v[m].sum()), 1),
-            "Energia consuntivo (MWh)": round(float(consuntivo[m].sum()), 1),
-            "Sbilanciamento (MWh)": round(float(sbil[m].sum()), 2),
-            "Costo sbilanciamento (€)": round(float(costo_sbil_h[m].sum()), 0),
-        })
-    df_g = pd.DataFrame(righe_g, columns=colonne_g)
-
-    mesi = p.index.to_period("M").astype(str)
-    righe_m = []
-    for mese in sorted(set(mesi)):
-        m = mesi == mese
-        n_gm = int((idx_g[m].unique().size))
-        righe_m.append({
-            "Mese": mese, "Giorni": n_gm,
-            "Energia programma (MWh)": round(float(prog_v[m].sum()), 1),
-            "Deficit (MWh)": round(float(np.maximum(sbil[m], 0.0).sum()), 1),
-            "Surplus (MWh)": round(float(np.minimum(sbil[m], 0.0).sum()), 1),
-            "Costo sbilanciamento (€)": round(float(costo_sbil_h[m].sum()), 0),
-            "Costo programma (€)": round(float(costo_prog_h[m].sum()), 0),
-        })
-    df_m = pd.DataFrame(righe_m, columns=colonne_m)
-
-    out = dict(vuoto)
-    out.update({
-        "giorni": int(n_giorni),
-        "ore": int(ore),
-        "energia_prog_mwh": round(energia_prog, 1),
-        "energia_cons_mwh": round(energia_cons, 1),
-        "costo_programma": round(costo_programma, 0),
-        "costo_sbil_eur": round(costo_sbil, 0),
-        "costo_sbil_mwh": round(costo_sbil / energia_prog, 3) if energia_prog else None,
-        "pct_su_programma": round(costo_sbil / costo_programma * 100.0, 2) if costo_programma else None,
-        "deficit_mwh": round(deficit_mwh, 1),
-        "surplus_mwh": round(surplus_mwh, 1),
-        "df_giorni": df_g,
-        "df_mesi": df_m,
-    })
-    return out
-
-
-def calcola_potenza_picco(prezzi, mw_f1, mw_f2, mw_f3, cap_mw,
-                          costo_potenza_eur_kw_anno):
-    """Ottimizzazione della potenza impegnata (demand charge / quota potenza).
-
-    Il profilo di carico dell'app e' piatto per fascia (MW costanti in
-    F1/F2/F3): il picco di prelievo e' quindi il massimo dei tre MW. La
-    potenza impegnata (contrattuale) va dimensionata sul picco: ogni kW
-    impegnato costa una quota fissa annua (in Italia la "quota potenza" di
-    trasporto/oneri, tipicamente 25-60 EUR/kW/anno per la BT; in Svizzera il
-    Leistungspreis segue la stessa logica). Ridurre la potenza impegnata da
-    'picco' a 'cap' fa risparmiare (picco - cap) x 1000 x costo_potenza EUR
-    all'anno, MA nelle ore in cui il carico supera il cap bisogna gestire
-    l'eccedenza (taglio, spostamento o accumulo): qui si quantifica quanta
-    energia e' "sopra il cap".
-
-    A differenza del tab "Valore della flessibilita'" (curtailment nelle ore
-    piu' care per risparmiare sull'ENERGIA), qui il risparmio e' sulla
-    POTENZA impegnata: non dipende dai prezzi ma solo dal profilo di carico
-    e dal costo EUR/kW/anno. I due risparmi si sommano.
-
-    Metodo (tutto deterministico a parita' di input):
-    - carico orario = MW della fascia di ciascuna ora (via fascia_oraria);
-    - picco = max del carico orario; fascia_picco = fascia con MW massimo
-      (a pari merito vince F1, poi F2, poi F3);
-    - ore_sopra = ore con carico > cap; mwh_sopra = somma(carico - cap)
-      sulle ore sopra il cap = energia da gestire (tagliare/spostare);
-    - risparmio_annuo = max(0, picco - cap) x 1000 x costo_potenza;
-    - soglia_convenienza = risparmio_annuo / mwh_sopra: quanto "vale" ogni
-      MWh gestito (tagliato o spostato) per giustificare la riduzione di
-      potenza. Se spostare/tagliare costa MENO della soglia, la riduzione
-      conviene; se costa di piu', no.
-
-    prezzi: Series oraria (indice datetime; i valori di prezzo NON sono
-    usati, serve solo la dimensione/posizione temporale delle ore).
-    cap_mw: potenza impegnata obiettivo in MW (>= 0; se >= picco, nessun
-    effetto). costo_potenza_eur_kw_anno: quota potenza in EUR/kW/anno.
-
-    NaN-safe: serie vuota, MW tutti a zero, cap/costo non validi ->
-    statistiche neutrali con DataFrame dalle colonne giuste. Picco = 0 ->
-    df_sens vuoto (nessun cap ha senso).
-
-    Ritorna dict con 'ore', 'picco_mw', 'cap_mw', 'fascia_picco',
-    'ore_sopra', 'pct_ore_sopra' (% ore sopra il cap, None se ore = 0),
-    'mwh_sopra', 'risparmio_annuo' (EUR/anno), 'soglia_convenienza'
-    (EUR/MWh gestito, None se mwh_sopra = 0), 'df_mesi' ('Mese',
-    'Picco (MW)', 'Ore sopra cap', 'MWh sopra cap'), 'df_sens' ('Cap (MW)',
-    'Risparmio (€/anno)', 'MWh da gestire').
-    """
-    cols_m = ["Mese", "Picco (MW)", "Ore sopra cap", "MWh sopra cap"]
-    cols_s = ["Cap (MW)", "Risparmio (€/anno)", "MWh da gestire"]
-    vuoto = {"ore": 0, "picco_mw": 0.0, "cap_mw": 0.0, "fascia_picco": None,
-             "ore_sopra": 0, "pct_ore_sopra": None, "mwh_sopra": 0.0,
-             "risparmio_annuo": 0.0, "soglia_convenienza": None,
-             "df_mesi": pd.DataFrame(columns=cols_m),
-             "df_sens": pd.DataFrame(columns=cols_s)}
-    try:
-        p = prezzi.astype(float).dropna()
-        p = p[~p.index.duplicated(keep="first")].sort_index()
-    except Exception:
-        return dict(vuoto)
-    if len(p) == 0:
-        return dict(vuoto)
-    try:
-        cap = max(0.0, float(cap_mw))
-    except (TypeError, ValueError):
-        cap = 0.0
-    try:
-        costo = max(0.0, float(costo_potenza_eur_kw_anno))
-    except (TypeError, ValueError):
-        costo = 0.0
-    out = dict(vuoto)
-    out["ore"] = len(p)
-    out["cap_mw"] = round(cap, 3)
-    try:
-        fasce = p.index.map(fascia_oraria)
-    except Exception:
-        return out
-    mw_map = {"F1": max(0.0, float(mw_f1)), "F2": max(0.0, float(mw_f2)),
-              "F3": max(0.0, float(mw_f3))}
-    carico = fasce.map(mw_map).to_numpy(dtype=float)
-    picco = float(carico.max())
-    out["picco_mw"] = round(picco, 3)
-    for f in ("F1", "F2", "F3"):
-        if mw_map[f] >= picco and picco > 0:
-            out["fascia_picco"] = f
-            break
-    sopra = np.clip(carico - cap, 0.0, None)
-    out["ore_sopra"] = int((sopra > 0).sum())
-    out["pct_ore_sopra"] = round(100.0 * out["ore_sopra"] / len(p), 2)
-    out["mwh_sopra"] = round(float(sopra.sum()), 2)
-    riduzione = max(0.0, picco - cap)
-    out["risparmio_annuo"] = round(riduzione * 1000.0 * costo, 2)
-    if out["mwh_sopra"] > 0:
-        out["soglia_convenienza"] = round(
-            out["risparmio_annuo"] / out["mwh_sopra"], 2)
-    mesi = p.index.to_period("M").astype(str)
-    righe = []
-    for m in sorted(set(mesi)):
-        idx = mesi == m
-        righe.append({"Mese": m, "Picco (MW)": round(float(carico[idx].max()), 3),
-                      "Ore sopra cap": int((sopra[idx] > 0).sum()),
-                      "MWh sopra cap": round(float(sopra[idx].sum()), 2)})
-    out["df_mesi"] = pd.DataFrame(righe, columns=cols_m)
-    if picco > 0:
-        righe_s = []
-        for c in np.linspace(0.0, picco, 21):
-            rid = max(0.0, picco - float(c))
-            righe_s.append({"Cap (MW)": round(float(c), 3),
-                            "Risparmio (€/anno)": round(rid * 1000.0 * costo, 2),
-                            "MWh da gestire": round(float(np.clip(carico - c, 0.0, None).sum()), 2)})
-        out["df_sens"] = pd.DataFrame(righe_s, columns=cols_s)
-    return out
-
-
-def calcola_expected_shortfall(prezzi, mw_f1, mw_f2, mw_f3, n_scenari=1000,
-                               livelli=(0.95, 0.99), seed=42):
-    """Expected Shortfall (CVaR) del COSTO di fornitura via Monte Carlo.
-
-    Complemento del tab VaR: il VaR_95 dice "nel 95% degli scenari il costo
-    resta SOTTO X", ma non dice quanto si perde nel 5% peggiore. L'Expected
-    Shortfall (ES, o Conditional VaR) e' la perdita MEDIA condizionata a stare
-    nella coda: ES_95 = E[costo | costo >= VaR_95].
-
-    Gli scenari sono gli stessi del tab VaR (block bootstrap di giornate da
-    24h con seed fisso -> deterministici e riproducibili): lo stesso vettore
-    'scenari' di calcola_var_costo, quindi VaR ed ES sono coerenti tra i tab.
-
-    A differenza del VaR, l'ES e' una misura di rischio COERENTE (subadditiva)
-    e cattura lo spessore della coda: ES/VaR vicino a 1 -> coda sottile
-    (oltre la soglia non si va molto piu' in la'); ES/VaR >> 1 -> coda spessa,
-    gli scenari estremi sono molto piu' costosi della soglia.
-
-    NaN-safe: delega a calcola_var_costo (stesse regole: serie vuota, MW a 0,
-    n_scenari <= 0 -> dict vuoto con KPI a None, DataFrame con le colonne
-    giuste, array vuoti). Livelli non validi (non in (0,1)) ignorati; se
-    nessuno e' valido, ritorna comunque base + scenari senza righe di livello.
-
-    Ritorna dict con 'n_scenari', 'ore', 'mwh', 'costo_spot', 'costo_atteso',
-    'livelli' (dict livello float -> {'var', 'es', 'tail_ratio', 'n_coda'}),
-    'df_livelli' (Livello %, VaR €, ES €, ES/VaR, Scenari in coda),
-    'df_coda95' (Costo € degli scenari sopra il VaR 95%, ordinati desc),
-    'scenari' (np.array dei costi per scenario), 'coda95' (np.array coda 95%).
-    """
-    cols_l = ["Livello %", "VaR (€)", "ES (€)", "ES/VaR", "Scenari in coda"]
-    cols_c = ["Costo (€)"]
-    vuoto = {"n_scenari": 0, "ore": 0, "mwh": 0.0, "costo_spot": None,
-             "costo_atteso": None, "livelli": {},
-             "df_livelli": pd.DataFrame(columns=cols_l),
-             "df_coda95": pd.DataFrame(columns=cols_c),
-             "scenari": np.array([], dtype=float),
-             "coda95": np.array([], dtype=float)}
-    base = calcola_var_costo(prezzi, mw_f1, mw_f2, mw_f3,
-                             n_scenari=n_scenari, seed=seed)
-    if base["n_scenari"] == 0:
-        return vuoto
-    costi = base["scenari"]
-    liv_norm = []
-    for lv in (livelli or ()):
-        try:
-            f = float(lv)
-        except (TypeError, ValueError):
+    fx_map = p.index.map(fascia_oraria)
+    righe_curva = []
+    for fx in ("F1", "F2", "F3"):
+        mwi = mw.get(fx, 0.0)
+        v = p[fx_map == fx].to_numpy(dtype=float)
+        n = len(v)
+        if n == 0 or mwi <= 0:
             continue
-        if 0.0 < f < 1.0 and f not in liv_norm:
-            liv_norm.append(f)
-    out = dict(vuoto)
-    out.update({"n_scenari": base["n_scenari"], "ore": base["ore"],
-                "mwh": base["mwh"], "costo_spot": base["costo_spot"],
-                "costo_atteso": base["costo_atteso"], "scenari": costi})
-    if not liv_norm:
-        return out
-    liv_map = {}
-    righe = []
-    for lv in sorted(liv_norm):
-        var = float(np.quantile(costi, lv))
-        coda = costi[costi >= var]
-        es = float(coda.mean()) if len(coda) else var
-        n_coda = int(len(coda))
-        tr = round(es / var, 3) if var > 0 else None
-        liv_map[lv] = {"var": round(var, 2), "es": round(es, 2),
-                       "tail_ratio": tr, "n_coda": n_coda}
-        righe.append({"Livello %": f"{lv * 100:.0f}%", "VaR (€)": round(var, 2),
-                      "ES (€)": round(es, 2), "ES/VaR": tr,
-                      "Scenari in coda": n_coda})
-    coda95 = np.sort(costi[costi >= float(np.quantile(costi, 0.95))])[::-1]
-    out.update({"livelli": liv_map,
-                "df_livelli": pd.DataFrame(righe, columns=cols_l)
-                              .reset_index(drop=True),
-                "df_coda95": pd.DataFrame({"Costo (€)": np.round(coda95, 2)},
-                                          columns=cols_c).reset_index(drop=True),
-                "coda95": coda95})
-    return out
+        costi = v * mwi
+        tot = float(costi.sum())
+        e_mwh = float(mwi * n)
+        s = pd.Series(v)
+        entry = dict(vuoto["fasce"][fx])
+        entry.update({"ore": n, "energia_mwh": e_mwh, "costo_eur": tot,
+                      "p10": float(np.percentile(v, 10)),
+                      "p50": float(np.percentile(v, 50)),
+                      "p90": float(np.percentile(v, 90)),
+                      "skew": float(s.skew()) if n >= 3 else None})
+        if tot > 0:
+            ord_c = np.sort(costi)[::-1]
+            cum = np.cumsum(ord_c) / tot
+            k10 = max(1, int(np.ceil(0.1 * n)))
+            entry["quota_top10_pct"] = float(cum[k10 - 1] * 100.0)
+            idx50 = np.argmax(cum >= 0.5)
+            entry["ore_50pct"] = int(idx50 + 1)
+            for j in range(1, n_punti + 1):
+                q = j / n_punti
+                kj = max(1, int(np.ceil(q * n)))
+                righe_curva.append({"Fascia": fx, "Quota ore (%)": q * 100.0,
+                                    "Quota costo cumulata (%)":
+                                        float(cum[kj - 1] * 100.0)})
+        vuoto["fasce"][fx] = entry
+
+    vuoto["df_curva"] = pd.DataFrame(righe_curva,
+                                     columns=["Fascia", "Quota ore (%)",
+                                              "Quota costo cumulata (%)"])
+    cand = [(fx, vuoto["fasce"][fx]["quota_top10_pct"])
+            for fx in ("F1", "F2", "F3")
+            if vuoto["fasce"][fx]["quota_top10_pct"] is not None]
+    if cand:
+        vuoto["fascia_piu_concentrata"] = max(cand, key=lambda t: t[1])[0]
+    return vuoto
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -5130,141 +4790,6 @@ with st.sidebar:
         st.session_state.messages.append({"role": "user", "content": prompt})
         st.session_state.messages.append({"role": "assistant", "content": f"Elaborazione: '{prompt}'. Il modello indica delta-hedging."})
         st.rerun()
-
-def calcola_costo_turni(prezzi, mw_f1, mw_f2, mw_f3):
-    """Costo di fornitura scomposto per turno di produzione industriale.
-
-    Molti clienti industriali lavorano su 3 turni da 8 ore: Notte 22-06,
-    Mattina 06-14, Pomeriggio 14-22. Il prezzo spot (e quindi il costo di
-    fornitura a prezzo variabile) cambia molto tra notte e giorno: questo
-    tab dice all'energy manager quanto costa far girare ciascun turno e
-    quale turno e' il piu' caro in EUR/MWh — informazione operativa per
-    spostare produzione, manutenzione o fermi sui turni piu' economici.
-
-    Il profilo di carico dell'app e' piatto per fascia (MW costanti in
-    F1/F2/F3): il carico orario e' il MW della fascia di ciascuna ora (via
-    fascia_oraria). Il costo orario e' prezzo x carico; ogni ora cade in
-    esattamente un turno.
-
-    Metodo (tutto deterministico a parita' di input):
-    - turno(h): 22,23,0-5 -> "Notte (22-06)"; 6-13 -> "Mattina (06-14)";
-      14-21 -> "Pomeriggio (14-22)";
-    - per turno: ore, MWh = somma carico, costo = somma(prezzo x carico),
-      prezzo medio = costo / MWh (None se MWh = 0), % costo = costo /
-      costo totale x 100 (0.0 se costo totale = 0);
-    - KPI: turno piu' costoso (max costo), turno piu' caro in EUR/MWh
-      (max prezzo medio tra i turni con MWh > 0), quota % del turno di
-      punta sul totale;
-    - df_mesi: per mese di calendario, costo EUR per turno (somme
-      esatte: la somma su turni e mesi = costo totale).
-
-    NaN-safe: serie vuota, MW tutti a zero o non validi -> statistiche
-    neutrali con DataFrame dalle colonne giuste.
-
-    Ritorna dict con 'ore', 'mwh_totale', 'costo_totale', 'turno_piu_costoso',
-    'turno_piu_caro_mwh', 'pct_turno_punta' (None se costo_totale = 0),
-    'df_turni' ('Turno', 'Ore', 'MWh', 'Costo (€)', 'Prezzo medio (€/MWh)',
-    '% costo'), 'df_mesi' ('Mese', 'Notte (€)', 'Mattina (€)',
-    'Pomeriggio (€)').
-    """
-    turni = ["Notte (22-06)", "Mattina (06-14)", "Pomeriggio (14-22)"]
-    cols_t = ["Turno", "Ore", "MWh", "Costo (€)", "Prezzo medio (€/MWh)", "% costo"]
-    cols_m = ["Mese", "Notte (€)", "Mattina (€)", "Pomeriggio (€)"]
-
-    def turno_di(h):
-        if h >= 22 or h < 6:
-            return "Notte (22-06)"
-        if h < 14:
-            return "Mattina (06-14)"
-        return "Pomeriggio (14-22)"
-
-    vuoto = {"ore": 0, "mwh_totale": 0.0, "costo_totale": 0.0,
-             "turno_piu_costoso": None, "turno_piu_caro_mwh": None,
-             "pct_turno_punta": None,
-             "df_turni": pd.DataFrame([{"Turno": t, "Ore": 0, "MWh": 0.0,
-                                        "Costo (€)": 0.0,
-                                        "Prezzo medio (€/MWh)": None,
-                                        "% costo": 0.0} for t in turni]),
-             "df_mesi": pd.DataFrame(columns=cols_m)}
-    try:
-        p = prezzi.astype(float).dropna()
-        p = p[~p.index.duplicated(keep="first")].sort_index()
-    except Exception:
-        return dict(vuoto)
-    if len(p) == 0:
-        return dict(vuoto)
-    try:
-        mws = [max(0.0, float(x)) for x in (mw_f1, mw_f2, mw_f3)]
-    except (TypeError, ValueError):
-        mws = [0.0, 0.0, 0.0]
-    out = dict(vuoto)
-    out["ore"] = len(p)
-    try:
-        ore_turno = pd.Series([turno_di(ts.hour) for ts in p.index],
-                              index=p.index, dtype="string")
-        carico = p.index.map(fascia_oraria).map(
-            {"F1": mws[0], "F2": mws[1], "F3": mws[2]}).astype(float)
-    except Exception:
-        return out
-    costo_orario = (p.values * carico.values)
-    df_h = pd.DataFrame({"turno": ore_turno.values, "mwh": carico.values,
-                         "costo": costo_orario})
-    g = df_h.groupby("turno", observed=True)
-    righe = []
-    costi = {}
-    for t in turni:
-        if t in g.groups:
-            gg = g.get_group(t)
-            ore_t = int(len(gg))
-            mwh_t = float(gg["mwh"].sum())
-            costo_t = float(gg["costo"].sum())
-        else:
-            ore_t, mwh_t, costo_t = 0, 0.0, 0.0
-        pm = (costo_t / mwh_t) if mwh_t > 0 else None
-        costi[t] = costo_t
-        righe.append({"Turno": t, "Ore": ore_t, "MWh": round(mwh_t, 3),
-                      "Costo (€)": round(costo_t, 2),
-                      "Prezzo medio (€/MWh)": (round(pm, 2) if pm is not None else None),
-                      "% costo": 0.0})
-    costo_tot = float(df_h["costo"].sum())
-    mwh_tot = float(df_h["mwh"].sum())
-    for rg in righe:
-        rg["% costo"] = round(rg["Costo (€)"] / costo_tot * 100.0, 1) if costo_tot > 0 else 0.0
-    # Chiudi l'arrotondamento a 1 decimale: la somma deve fare 100.0
-    if costo_tot > 0:
-        residuo = round(100.0 - sum(rg["% costo"] for rg in righe), 1)
-        if abs(residuo) > 0.0:
-            tmax_r = max(turni, key=lambda t: costi[t])
-            for rg in righe:
-                if rg["Turno"] == tmax_r:
-                    rg["% costo"] = round(rg["% costo"] + residuo, 1)
-                    break
-    out["df_turni"] = pd.DataFrame(righe, columns=cols_t)
-    out["mwh_totale"] = round(mwh_tot, 3)
-    out["costo_totale"] = round(costo_tot, 2)
-    if costo_tot > 0:
-        tmax = max(turni, key=lambda t: costi[t])
-        out["turno_piu_costoso"] = tmax
-        out["pct_turno_punta"] = round(costi[tmax] / costo_tot * 100.0, 1)
-        pm_vals = {r["Turno"]: r["Prezzo medio (€/MWh)"] for r in righe
-                   if r["Prezzo medio (€/MWh)"] is not None}
-        out["turno_piu_caro_mwh"] = max(pm_vals, key=pm_vals.get) if pm_vals else None
-    # Dettaglio mensile: costo per turno, mese di calendario
-    try:
-        df_h["mese"] = pd.PeriodIndex(p.index, freq="M").astype(str)
-        dm = (df_h.groupby(["mese", "turno"], observed=True)["costo"]
-              .sum().unstack(fill_value=0.0))
-        for t in turni:
-            if t not in dm.columns:
-                dm[t] = 0.0
-        dm = dm[turni].reset_index()
-        dm.columns = ["Mese", "Notte (€)", "Mattina (€)", "Pomeriggio (€)"]
-        for c in ["Notte (€)", "Mattina (€)", "Pomeriggio (€)"]:
-            dm[c] = dm[c].round(2)
-        out["df_mesi"] = dm.sort_values("Mese").reset_index(drop=True)
-    except Exception:
-        pass
-    return out
 
 def render_kpi(title, value, col):
     col.markdown(f"<div class='metric-container'><div class='metric-label'>{title}</div><div class='metric-val'>{value}</div></div>", unsafe_allow_html=True)
@@ -5901,7 +5426,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "🧲 Concentrazione per fascia"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -9354,350 +8879,92 @@ elif workspace == _('ws8'):
             st.caption("💡 Premium positivo alto = profilo caro (tanto F1): valuta demand shifting (tab 🔄) o coperture. Premium negativo = il profilo già 'batte' il baseload.")
 
     with tab54:
-        titolo_sb = edu("Sbilanciamento", "SBILANCIAMENTO programma/consuntivo: nomini un programma di prelievo (qui il tuo profilo F1/F2/F3) e poi prelevi il consuntivo; la differenza oraria è lo sbilanciamento, regolato dal TSO a prezzi penalizzanti (dual pricing): il deficit (prelevi PIÙ del programma) si paga a spot maggiorato, il surplus (prelevi MENO) si vende a spot scontato. È un costo 'nascosto' della fornitura: non dipende dal prezzo in sé ma da quanto sbagli la PREVISIONE del carico. Il consuntivo qui è simulato in modo deterministico (seed fisso): ogni giorno ha un errore relativo casuale N(0, errore%) applicato a tutte le ore — una proxy didattica dell'errore di forecast, perché l'app non ha i tuoi veri dati di misura.")
-        st.markdown(f"**{titolo_sb}**: quanto ti costa sbagliare la previsione del carico?", unsafe_allow_html=True)
-        st.caption("Programma = profilo MW per fascia (stesso della tab 💰 Costo fornitura). Consuntivo = programma × (1 + errore giornaliero casuale, seed 42). Dual pricing: deficit a spot×(1+penalità%), surplus a spot×(1−penalità%).")
+        titolo_cf = edu("Concentrazione per fascia", "DOVE si forma il costo DENTRO ciascuna fascia F1/F2/F3. Le ore di ogni fascia sono ordinate dal prezzo più alto: se il 10% più caro delle ore F1 genera il 60% del costo F1, la fascia è 'spiky' e convengono cap, flessibilità o demand response sulle ore di picco; se genera ~10%, il costo è uniforme e conviene una quota fissa o il baseload. A differenza del tab 🎯 Concentrazione costo (periodo intero), qui ogni fascia ha la sua curva: F1 può essere spiky mentre F3 è piatta. Le metriche usano prezzo × MW della fascia; con costi totali negativi (prezzi negativi) la concentrazione non ha senso e resta n/d.")
+        st.markdown(f"**{titolo_cf}**: il costo di F1/F2/F3 si concentra in poche ore care o è distribuito?", unsafe_allow_html=True)
+        st.caption("Profilo MW per fascia: stesso della tab 💰 Costo fornitura.")
 
-        c_sb1, c_sb2, c_sb3 = st.columns(3)
-        err_pct_in = c_sb1.slider("Errore di previsione (± %)", min_value=0.0, max_value=50.0, value=10.0, step=1.0,
-                                  key="sb_err", help="Deviazione standard dell'errore relativo giornaliero sul programma.")
-        pen_def_in = c_sb2.slider("Penalità deficit (%)", min_value=0.0, max_value=100.0, value=20.0, step=5.0,
-                                  key="sb_pend", help="Maggiorazione sul prezzo spot per il deficit (prelievo oltre il programma).")
-        pen_sur_in = c_sb3.slider("Penalità surplus (%)", min_value=0.0, max_value=100.0, value=20.0, step=5.0,
-                                  key="sb_pens", help="Sconto sul prezzo spot per il surplus (prelievo sotto il programma).")
-
-        sb = calcola_sbilanciamento(prezzi, mw_f1, mw_f2, mw_f3, err_pct=err_pct_in,
-                                    pen_def_pct=pen_def_in, pen_sur_pct=pen_sur_in)
-        if sb["giorni"] == 0:
-            st.warning("Imposta una potenza maggiore di zero in almeno una fascia (tab 💰 Costo fornitura) e seleziona un periodo con dati.")
+        cf = calcola_concentrazione_fasce(prezzi, mw_f1, mw_f2, mw_f3)
+        if cf["fascia_piu_concentrata"] is None:
+            st.info("Imposta una potenza maggiore di zero in almeno una fascia (tab 💰 Costo fornitura) e seleziona un periodo con dati e costi positivi.")
         else:
-            s1, s2, s3, s4 = st.columns(4)
-            costo_txt = f"{sb['costo_sbil_eur']:+,.0f} \u20ac"
-            render_kpi(edu("Costo sbilanciamento", "Costo netto dello sbilanciamento sul periodo (dual pricing). Deficit pagato a spot maggiorato, surplus venduto a spot scontato: il surplus dà un contributo negativo (ricavo)."),
-                       costo_txt, s1)
-            mwh_txt = f"{sb['costo_sbil_mwh']:+,.2f} \u20ac/MWh" if sb["costo_sbil_mwh"] is not None else "n/d"
-            render_kpi(edu("Costo per MWh programmata", "Costo dello sbilanciamento rapportato all'energia del programma: il 'premio di imprecisione' per ogni MWh nominato."),
-                       mwh_txt, s2)
-            pct_sb = sb["pct_su_programma"]
-            pct_txt = f"{pct_sb:+,.2f} %" if pct_sb is not None else "n/d"
-            render_kpi(edu("% sul costo programma", "Costo dello sbilanciamento in percentuale del costo del programma a spot: dice quanto pesa l'errore di previsione sul conto totale."),
-                       pct_txt, s3)
-            vol_txt = (f"+{sb['deficit_mwh']:,.0f} / {sb['surplus_mwh']:,.0f} MWh<br>"
-                       f"<small>deficit / surplus su {sb['energia_prog_mwh']:,.0f} MWh programmate</small>")
-            render_kpi(edu("Volumi sbilanciati", "MWh totali di deficit (prelievo oltre il programma, segno +) e di surplus (prelievo sotto il programma, segno −)."),
-                       vol_txt, s4)
+            fpc = cf["fascia_piu_concentrata"]
+            e_fpc = cf["fasce"][fpc]
+            c1, c2, c3, c4 = st.columns(4)
+            render_kpi(edu("Fascia più concentrata", "La fascia dove il costo è più concentrato nelle ore più care: il 10% più caro delle sue ore genera la quota di costo più alta. È il punto dove cap e flessibilità rendono di più."),
+                       f"{fpc}<br><small>top-10% ore → {e_fpc['quota_top10_pct']:.1f}% del costo</small>", c1)
+            render_kpi(edu("Ore per il 50% del costo", f"Nella fascia {fpc}, quante ore (le più care) bastano per accumulare metà del suo costo. Poche ore = costo 'spiky'."),
+                       f"{e_fpc['ore_50pct']} ore<br><small>su {e_fpc['ore']} ore in {fpc}</small>", c2)
+            skew_max = max(((fx, cf["fasce"][fx]["skew"]) for fx in ("F1", "F2", "F3")
+                            if cf["fasce"][fx]["skew"] is not None), key=lambda t: t[1])
+            render_kpi(edu("Fascia più asimmetrica", "Skewness dei prezzi della fascia: alta = coda destra lunga, cioè poche ore molto più care della media. Coerente con alta concentrazione."),
+                       f"{skew_max[0]}<br><small>skew {skew_max[1]:+.2f}</small>", c3)
+            tot_cf = sum(cf["fasce"][fx]["costo_eur"] for fx in ("F1", "F2", "F3"))
+            render_kpi(edu("Costo totale periodo", "Costo di fornitura del profilo sul periodo selezionato (stesso numero della tab 💰 Costo fornitura)."),
+                       f"{tot_cf:,.0f} €", c4)
 
-            st.markdown("**Andamento mensile**")
-            df_sbm = sb["df_mesi"]
-            fig_sb_m = go.Figure()
-            fig_sb_m.add_trace(go.Bar(x=df_sbm["Mese"], y=df_sbm["Costo sbilanciamento (€)"],
-                                      name="Costo sbilanciamento €", marker_color="#f59e0b",
-                                      hovertemplate="%{x}<br>Costo: %{y:+,.0f} €<extra></extra>"))
-            fig_sb_m.update_layout(template="plotly_dark", height=340,
-                                   title="Costo dello sbilanciamento per mese (€)",
-                                   xaxis_title="Mese", yaxis_title="€")
-            fig_sb_m.add_hline(y=0, line_color="#6b7280", line_width=1)
-            st.plotly_chart(fig_sb_m, use_container_width=True)
+            st.markdown("**Distribuzione dei prezzi per fascia** (box plot: dove stanno le ore care)")
+            fx_map = prezzi.index.map(fascia_oraria)
+            colori_cf = {"F1": "#ef4444", "F2": "#eab308", "F3": "#3b82f6"}
+            fig_cf_box = go.Figure()
+            for fx in ("F1", "F2", "F3"):
+                pv = prezzi[fx_map == fx].dropna().to_numpy(dtype=float)
+                if len(pv) == 0:
+                    continue
+                fig_cf_box.add_trace(go.Box(y=pv, name=fx, marker_color=colori_cf[fx],
+                                            boxpoints="outliers",
+                                            hovertemplate=f"Fascia {fx}<br>Prezzo: %{{y:,.2f}} €/MWh<extra></extra>"))
+            fig_cf_box.update_layout(template="plotly_dark", height=360,
+                                     title="Distribuzione dei prezzi orari per fascia (€/MWh)",
+                                     yaxis_title="€/MWh", showlegend=False)
+            st.plotly_chart(fig_cf_box, use_container_width=True)
 
-            st.markdown("**Distribuzione giornaliera dello sbilanciamento**")
-            df_sbg = sb["df_giorni"]
-            fig_sb_d = go.Figure()
-            fig_sb_d.add_trace(go.Bar(x=df_sbg["Data"], y=df_sbg["Sbilanciamento (MWh)"],
-                                      name="Sbilanciamento MWh",
-                                      marker_color=["#ef4444" if v > 0 else "#3b82f6" for v in df_sbg["Sbilanciamento (MWh)"]],
-                                      hovertemplate="%{x}<br>Sbilanciamento: %{y:+.2f} MWh<br>Costo: €%{customdata:+,.0f}<extra></extra>",
-                                      customdata=df_sbg["Costo sbilanciamento (€)"]))
-            fig_sb_d.update_layout(template="plotly_dark", height=340,
-                                   title="Sbilanciamento giornaliero (MWh): rosso = deficit, blu = surplus",
-                                   xaxis_title="Giorno", yaxis_title="MWh")
-            fig_sb_d.add_hline(y=0, line_color="#6b7280", line_width=1)
-            st.plotly_chart(fig_sb_d, use_container_width=True)
+            st.markdown("**Curve di concentrazione** (ore ordinate dal prezzo più alto: la diagonale = costo uniforme)")
+            df_cv = cf["df_curva"]
+            fig_cf_cur = go.Figure()
+            for fx in ("F1", "F2", "F3"):
+                d = df_cv[df_cv["Fascia"] == fx]
+                if d.empty:
+                    continue
+                fig_cf_cur.add_trace(go.Scatter(
+                    x=d["Quota ore (%)"], y=d["Quota costo cumulata (%)"],
+                    mode="lines+markers", name=fx,
+                    line=dict(color=colori_cf[fx], width=2.5),
+                    hovertemplate=f"Fascia {fx}<br>Ore: %{{x:.1f}}%<br>Costo cumulato: %{{y:.1f}}%<extra></extra>"))
+            fig_cf_cur.add_trace(go.Scatter(x=[0, 100], y=[0, 100], mode="lines",
+                                            name="Uniforme", line=dict(color="#6b7280", width=1, dash="dash"),
+                                            hoverinfo="skip"))
+            fig_cf_cur.update_layout(template="plotly_dark", height=380,
+                                     title="Concentrazione del costo per fascia (curva di Lorenz)",
+                                     xaxis_title="Quota delle ore più care (%)",
+                                     yaxis_title="Quota cumulata del costo (%)",
+                                     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+            st.plotly_chart(fig_cf_cur, use_container_width=True)
 
-            st.markdown("**Dettaglio mensile**")
-            st.dataframe(df_sbm, use_container_width=True, hide_index=True)
+            st.markdown("**Dettaglio per fascia**")
+            righe = []
+            for fx in ("F1", "F2", "F3"):
+                e = cf["fasce"][fx]
+                righe.append({
+                    "Fascia": fx, "Ore": e["ore"],
+                    "Energia (MWh)": round(e["energia_mwh"], 1),
+                    "Costo (€)": round(e["costo_eur"], 0),
+                    "P10 (€/MWh)": round(e["p10"], 2) if e["p10"] is not None else "n/d",
+                    "P50 (€/MWh)": round(e["p50"], 2) if e["p50"] is not None else "n/d",
+                    "P90 (€/MWh)": round(e["p90"], 2) if e["p90"] is not None else "n/d",
+                    "Skew": round(e["skew"], 2) if e["skew"] is not None else "n/d",
+                    "Top-10% ore → costo (%)": round(e["quota_top10_pct"], 1) if e["quota_top10_pct"] is not None else "n/d",
+                    "Ore per 50% costo": e["ore_50pct"] if e["ore_50pct"] is not None else "n/d",
+                })
+            df_cf_det = pd.DataFrame(righe)
+            st.dataframe(df_cf_det, use_container_width=True, hide_index=True)
             st.download_button(
-                "\u2b07\ufe0f Esporta sbilanciamento (CSV)",
-                df_sbm.to_csv(index=False).encode("utf-8"),
-                file_name=f"sbilanciamento_{d0}_{d1}.csv",
+                "⬇️ Esporta concentrazione per fascia (CSV)",
+                df_cv.to_csv(index=False).encode("utf-8"),
+                file_name=f"concentrazione_fasce_{d0}_{d1}.csv",
                 mime="text/csv",
-                help="Scarica il dettaglio mensile: energia programma, deficit/surplus, costo sbilanciamento e costo programma.",
+                help="Scarica le curve di concentrazione per fascia: quota ore vs quota costo cumulata.",
             )
-            st.caption("💡 Se il costo supera l'1–2% del programma, l'errore di forecast è un driver di costo: investi in previsione del carico prima che in coperture di prezzo. Con penalità 0/0 il costo è solo il mark-to-market del volume errato a spot.")
-
-    with tab55:
-        titolo_co2 = edu("Costo CO2", "PASS-THROUGH EUA: nelle ore in cui l'impianto marginale brucia gas o carbone, il prezzo spot include il costo delle quote CO2 (EU ETS): componente = prezzo EUA × fattore emissivo dell'impianto marginale × coefficiente di pass-through. Con prezzo EUA intorno ai 75 €/t e un marginale CCGT a gas (0,4 tCO2/MWh), la CO2 vale oltre 30 €/MWh: è una voce di costo strutturale della fornitura, non un'inefficienza. Il pass-through (0,6-1,0 in letteratura UE) misura quanta parte del costo CO2 si trasferisce davvero sul prezzo: qui è uno slider libero 0-150% per fare scenari, anche estremi.")
-        st.markdown(f"**{titolo_co2}**: quanta parte del prezzo spot è costo CO2?", unsafe_allow_html=True)
-        st.caption("Prezzo EUA × fattore emissivo marginale × pass-through. La quota si applica al prezzo spot e al tuo profilo F1/F2/F3 (tab 💰 Costo fornitura).")
-
-        c_co2a, c_co2b, c_co2c = st.columns(3)
-        eua_in = c_co2a.slider("Prezzo EUA (€/tCO2)", min_value=0.0, max_value=250.0, value=75.0, step=5.0,
-                              key="co2_eua", help="Prezzo della quota EU ETS. Ultimi anni: 60-100 €/t.")
-        em_in = c_co2b.slider("Fattore emissivo marginale (tCO2/MWh)", min_value=0.0, max_value=1.20, value=0.45, step=0.05,
-                             key="co2_em", help="CCGT a gas: 0,35-0,45; turbogas: ~0,55; carbone: 0,85-1,10.")
-        pt_in = c_co2c.slider("Pass-through CO2 sul prezzo (%)", min_value=0.0, max_value=150.0, value=100.0, step=5.0,
-                             key="co2_pt", help="Quota del costo CO2 che si trasferisce sul prezzo spot. 100% = pass-through pieno.")
-
-        r_co2 = calcola_co2(prezzi, mw_f1, mw_f2, mw_f3, eua_eur_t=eua_in,
-                            em_t_mwh=em_in, pass_pct=pt_in)
-        if r_co2["ore"] == 0:
-            st.warning("Seleziona un periodo con dati (la quota CO2 si calcola sul prezzo spot del periodo).")
-        else:
-            k1, k2, k3, k4 = st.columns(4)
-            render_kpi(edu("Componente CO2", "Costo CO2 per MWh con i parametri scelti: prezzo EUA × fattore marginale × pass-through. È la parte 'carbon' del prezzo spot."),
-                       f"{r_co2['componente_mwh']:,.2f} \u20ac/MWh", k1)
-            quota_txt = f"{r_co2['quota_pct']:,.2f} %" if r_co2["quota_pct"] is not None else "n/d"
-            render_kpi(edu("Quota CO2 sul prezzo", "Parte del prezzo spot medio del periodo spiegata dalla CO2. Con EUA alti e marginale a gas supera il 30%: una quota rilevante di ogni €/MWh."),
-                       quota_txt, k2)
-            render_kpi(edu("Costo CO2 sul profilo", "Costo CO2 totale sul tuo profilo F1/F2/F3 del periodo: energia × componente. È la voce CO2 che il fornitore ti addebita dentro il prezzo."),
-                       f"{r_co2['costo_co2_profilo_eur']:,.0f} \u20ac", k3)
-            render_kpi(edu("Prezzo medio al netto CO2", "Prezzo spot medio del periodo meno la componente CO2: il 'clean spark spread proxy' — cosa costerebbe il MWh senza il carbon price."),
-                       f"{r_co2['prezzo_netto_co2']:,.2f} \u20ac/MWh", k4)
-
-            st.markdown("**Componente CO2 per mese**")
-            df_c2m = r_co2["df_mesi"].copy()
-            df_c2m["Prezzo al netto CO2 (€/MWh)"] = df_c2m["Prezzo medio (€/MWh)"] - df_c2m["Componente CO2 (€/MWh)"]
-            fig_c2 = go.Figure()
-            fig_c2.add_trace(go.Bar(x=df_c2m["Mese"], y=df_c2m["Prezzo al netto CO2 (€/MWh)"],
-                                   name="Prezzo al netto CO2", marker_color="#3b82f6",
-                                   hovertemplate="%{x}<br>Al netto CO2: %{y:,.2f} €/MWh<extra></extra>"))
-            fig_c2.add_trace(go.Bar(x=df_c2m["Mese"], y=df_c2m["Componente CO2 (€/MWh)"],
-                                   name="Componente CO2", marker_color="#f59e0b",
-                                   hovertemplate="%{x}<br>CO2: %{y:,.2f} €/MWh<extra></extra>"))
-            fig_c2.update_layout(template="plotly_dark", height=360, barmode="stack",
-                                title="Prezzo spot mensile scomposto: netto + componente CO2 (€/MWh)",
-                                xaxis_title="Mese", yaxis_title="€/MWh")
-            st.plotly_chart(fig_c2, use_container_width=True)
-
-            st.markdown("**Sensitività al prezzo EUA**")
-            df_c2s = r_co2["df_sens"]
-            fig_c2s = go.Figure()
-            fig_c2s.add_trace(go.Bar(x=df_c2s["EUA (€/t)"].astype(str), y=df_c2s["Quota sul prezzo (%)"],
-                                    name="Quota CO2 %", marker_color="#10b981",
-                                    hovertemplate="EUA %{x} €/t<br>Componente: €%{customdata:,.2f}/MWh<br>Quota: %{y:,.1f}%<extra></extra>",
-                                    customdata=df_c2s["Componente CO2 (€/MWh)"]))
-            fig_c2s.update_layout(template="plotly_dark", height=330,
-                                 title=f"Quota CO2 sul prezzo medio per prezzo EUA (fattore {em_in:.2f} t/MWh, pass-through {pt_in:.0f}%)",
-                                 xaxis_title="Prezzo EUA (€/t)", yaxis_title="% del prezzo medio")
-            st.plotly_chart(fig_c2s, use_container_width=True)
-
-            st.markdown("**Dettaglio mensile**")
-            st.dataframe(df_c2m, use_container_width=True, hide_index=True)
-            st.download_button(
-                "\u2b07\ufe0f Esporta componente CO2 (CSV)",
-                r_co2["df_mesi"].to_csv(index=False).encode("utf-8"),
-                file_name=f"costo_co2_{d0}_{d1}.csv",
-                mime="text/csv",
-                help="Scarica il dettaglio mensile: prezzo medio, componente CO2, quota % e costo CO2 sul profilo.",
-            )
-            st.caption("💡 Con EUA a 100+ €/t il marginale a carbone (0,9 t/MWh) porta la CO2 oltre 90 €/MWh: confronta la quota con il margine fornitore (tab 🧮) e lo shape premium (tab 📏) per capire quanto del prezzo è 'mercato' e quanto è politica climatica.")
-
-    with tab56:
-        titolo_es = edu("Expected Shortfall", "Il VaR_95 ti dice: 'nel 95% degli scenari il costo resta SOTTO X'. Ma quanto perdi nel 5% peggiore? L'EXPECTED SHORTFALL (o Conditional VaR) è la perdita MEDIA condizionata a stare nella coda: ES_95 = media dei costi degli scenari sopra il VaR_95. È una misura di rischio COERENTE (a differenza del VaR è subadditiva) e cattura lo spessore della coda: il rapporto ES/VaR vicino a 1 significa coda sottile (oltre la soglia non si va molto più in là), ES/VaR >> 1 significa coda spessa — gli scenari estremi sono molto più costosi della soglia. Gli scenari sono gli stessi del tab VaR (block bootstrap di giornate da 24h, seed 42): VaR ed ES sono coerenti tra i due tab.")
-        st.markdown(f"**{titolo_es}**: quanto costa davvero la coda peggiore?", unsafe_allow_html=True)
-        st.caption("Stessi scenari del tab 🎲 VaR (block bootstrap 24h, seed 42). ES = media degli scenari sopra il VaR.")
-
-        n_scen_es = st.number_input("Scenari Monte Carlo", min_value=100, max_value=5000,
-                                    value=1000, step=100, key="es_nscen",
-                                    help="Numero di scenari di costo simulati (stessa meccanica del tab VaR).")
-
-        r_es = calcola_expected_shortfall(prezzi, mw_f1, mw_f2, mw_f3,
-                                          n_scenari=int(n_scen_es),
-                                          livelli=(0.95, 0.99), seed=42)
-        if r_es["n_scenari"] == 0:
-            st.warning("Seleziona un periodo con dati e un profilo di prelievo > 0 (tab 💰 Costo fornitura).")
-        else:
-            l95, l99 = r_es["livelli"][0.95], r_es["livelli"][0.99]
-            k1, k2, k3, k4 = st.columns(4)
-            render_kpi(edu("Costo atteso", "Media dei costi su tutti gli scenari: il budget 'centrale' del periodo."), f"{r_es['costo_atteso']:,.0f} €", k1)
-            render_kpi(edu("VaR 95%", "Soglia del costo: nel 95% degli scenari il costo resta sotto questo livello."), f"{l95['var']:,.0f} €", k2)
-            render_kpi(edu("Expected Shortfall 95%", "Costo MEDIO nel 5% peggiore degli scenari: la perdita condizionata alla coda. È il numero che conta per il dimensionamento delle coperture."), f"{l95['es']:,.0f} €", k3)
-            render_kpi(edu("Expected Shortfall 99%", "Costo medio nell'1% peggiore: la coda estrema, scenari da stress test reale."), f"{l99['es']:,.0f} €", k4)
-            j1, j2, j3, j4 = st.columns(4)
-            tr_txt = f"{l95['tail_ratio']:.2f}×" if l95["tail_ratio"] is not None else "n/d"
-            render_kpi(edu("ES/VaR 95% (coda)", "Spessore della coda: 1,0x = oltre la soglia non si sale più; 1,3-1,5x+ = coda spessa, gli estremi costano molto più della soglia."), tr_txt, j1)
-            render_kpi(edu("Costo spot del periodo", "Costo del profilo sui prezzi osservati: il riferimento storico."), f"{r_es['costo_spot']:,.0f} €", j2)
-            render_kpi(edu("Scenari in coda 95%", "Quanti scenari su N finiscono sopra il VaR 95%: ~5% per costruzione, il campione su cui si calcola l'ES."), f"{l95['n_coda']}", j3)
-            render_kpi(edu("Peggior scenario", "Il costo massimo simulato: lo scenario peggiore in assoluto tra gli N."), f"{float(r_es['scenari'].max()):,.0f} €", j4)
-
-            st.markdown("**Distribuzione degli scenari: la coda sopra il VaR 95%**")
-            fig_es = go.Figure()
-            fig_es.add_trace(go.Histogram(x=r_es["scenari"], nbinsx=50,
-                                          name="Tutti gli scenari", marker_color="rgba(59,130,246,0.55)",
-                                          hovertemplate="Costo: €%{x:,.0f}<br>Scenari: %{y}<extra></extra>"))
-            fig_es.add_trace(go.Histogram(x=r_es["coda95"], nbinsx=20,
-                                          name="Coda sopra VaR 95%", marker_color="rgba(239,68,68,0.75)",
-                                          hovertemplate="Costo: €%{x:,.0f}<br>Scenari: %{y}<extra></extra>"))
-            fig_es.add_vline(x=r_es["costo_atteso"], line_dash="dot", line_color="#3b82f6",
-                             annotation_text=f"Atteso {r_es['costo_atteso']:,.0f} €", annotation_position="top left")
-            fig_es.add_vline(x=l95["var"], line_dash="dash", line_color="#eab308",
-                             annotation_text=f"VaR 95% {l95['var']:,.0f} €", annotation_position="top right")
-            fig_es.add_vline(x=l95["es"], line_dash="solid", line_color="#ef4444",
-                             annotation_text=f"ES 95% {l95['es']:,.0f} €", annotation_position="bottom right")
-            fig_es.update_layout(template="plotly_dark", height=380, barmode="overlay",
-                                 title="Costo del profilo negli scenari: atteso / VaR 95% / ES 95% (coda in rosso)",
-                                 xaxis_title="Costo scenario (€)", yaxis_title="N. scenari")
-            st.plotly_chart(fig_es, use_container_width=True)
-
-            st.markdown("**VaR vs Expected Shortfall per livello di confidenza**")
-            df_lv = r_es["df_livelli"]
-            fig_esb = go.Figure()
-            fig_esb.add_trace(go.Bar(x=df_lv["Livello %"], y=df_lv["VaR (€)"],
-                                     name="VaR", marker_color="#eab308",
-                                     hovertemplate="%{x}<br>VaR: €%{y:,.0f}<extra></extra>"))
-            fig_esb.add_trace(go.Bar(x=df_lv["Livello %"], y=df_lv["ES (€)"],
-                                     name="Expected Shortfall", marker_color="#ef4444",
-                                     hovertemplate="%{x}<br>ES: €%{y:,.0f}<extra></extra>"))
-            fig_esb.update_layout(template="plotly_dark", height=330, barmode="group",
-                                  title="VaR (soglia) vs ES (media della coda): più la barra rossa supera la gialla, più la coda è spessa",
-                                  xaxis_title="Livello di confidenza", yaxis_title="€")
-            st.plotly_chart(fig_esb, use_container_width=True)
-
-            st.markdown("**Tabella VaR / ES**")
-            st.dataframe(df_lv, use_container_width=True, hide_index=True)
-            st.markdown("**Scenari in coda 95% (ordinati dal peggiore)**")
-            st.dataframe(r_es["df_coda95"], use_container_width=True, hide_index=True)
-            st.download_button(
-                "⬇️ Esporta coda 95% (CSV)",
-                r_es["df_coda95"].to_csv(index=False).encode("utf-8"),
-                file_name=f"expected_shortfall_coda_{d0}_{d1}.csv",
-                mime="text/csv",
-                help="Scarica gli scenari sopra il VaR 95% ordinati dal peggiore: la coda su cui si calcola l'ES.",
-            )
-            st.caption("💡 Se ES95/VaR95 supera ~1,3 la coda è spessa: il VaR da solo sottostima il rischio — dimensiona le coperture sull'ES, non sul VaR. Confronta con lo stress test (tab 🧪) e il Cap & Floor (tab 🛡️) per coprire proprio quella coda.")
-
-    with tab57:
-        titolo_pp = edu("Potenza di picco", "La POTENZA IMPEGNATA (contrattuale) è la potenza massima che puoi prelevare: va dimensionata sul picco del tuo carico. Ogni kW impegnato costa una quota fissa ANNUA — in Italia la 'quota potenza' di trasporto/oneri (25-60 €/kW/anno in BT), in Svizzera il Leistungspreis segue la stessa logica — che paghi anche se non usi mai quel kW. Se il tuo picco è 2 MW ma impegni 1,5 MW, risparmi 500 kW × quota ogni anno: il prezzo da pagare è gestire le ore in cui il carico supera 1,5 MW (taglio, spostamento o accumulo). Questo tab quantifica il risparmio e l'energia 'sopra il cap' da gestire. A differenza del tab 💡 Valore flessibilità (che taglia nelle ore più care per risparmiare sull'ENERGIA), qui il risparmio è sulla POTENZA e non dipende dai prezzi: i due risparmi si sommano.")
-        st.markdown(f"**{titolo_pp}**: quanta potenza impegnata ti serve davvero?", unsafe_allow_html=True)
-        st.caption("Profilo di carico = MW per fascia (tab 💰 Costo fornitura). La quota potenza si paga per ogni kW impegnato, usata o no.")
-
-        r_pp0 = calcola_potenza_picco(prezzi, mw_f1, mw_f2, mw_f3, cap_mw=0.0,
-                                      costo_potenza_eur_kw_anno=0.0)
-        picco = r_pp0["picco_mw"]
-        if r_pp0["ore"] == 0 or picco <= 0:
-            st.warning("Seleziona un periodo con dati e una potenza maggiore di zero in almeno una fascia (tab 💰 Costo fornitura).")
-        else:
-            c_pp1, c_pp2 = st.columns(2)
-            cap_in = c_pp1.slider("Potenza impegnata obiettivo (MW)", min_value=0.0,
-                                  max_value=float(picco), value=round(float(picco) * 0.8, 2),
-                                  step=0.05, key="pp_cap",
-                                  help="Potenza contrattuale: sotto questo livello il carico va gestito (taglio/spostamento).")
-            costo_kw_in = c_pp2.slider("Quota potenza (€/kW/anno)", min_value=0.0,
-                                       max_value=150.0, value=45.0, step=5.0, key="pp_costokw",
-                                       help="Costo annuo per ogni kW di potenza impegnata (quota potenza / Leistungspreis).")
-
-            r_pp = calcola_potenza_picco(prezzi, mw_f1, mw_f2, mw_f3, cap_mw=cap_in,
-                                         costo_potenza_eur_kw_anno=costo_kw_in)
-            k1, k2, k3, k4 = st.columns(4)
-            render_kpi(edu("Picco attuale", "Massimo del carico orario del periodo (MW per fascia): la potenza impegnata minima se non vuoi gestire nessuna ora."),
-                       f"{r_pp['picco_mw']:,.2f} MW", k1)
-            render_kpi(edu("Potenza impegnata obiettivo", "Il cap che hai scelto con lo slider: da qui in giù si paga la quota, sopra bisogna gestire il carico."),
-                       f"{r_pp['cap_mw']:,.2f} MW", k2)
-            render_kpi(edu("Risparmio quota potenza", "Risparmio ANNUO sulla quota potenza: (picco − cap) × 1000 × €/kW/anno. È un risparmio strutturale, indipendente dai prezzi dell'energia."),
-                       f"{r_pp['risparmio_annuo']:,.0f} €/anno", k3)
-            fascia_txt = r_pp["fascia_picco"] if r_pp["fascia_picco"] else "n/d"
-            render_kpi(edu("Fascia del picco", "La fascia oraria che determina il picco: è lì che devi intervenire (taglio/spostamento) per tenere il carico sotto il cap."),
-                       fascia_txt, k4)
-            j1, j2, j3, j4 = st.columns(4)
-            render_kpi(edu("Ore sopra il cap", "Ore del periodo in cui il carico supera la potenza obiettivo: le ore da gestire con taglio, spostamento o accumulo."),
-                       f"{r_pp['ore_sopra']:,}", j1)
-            render_kpi(edu("% ore sopra il cap", "Quota del periodo sopra il cap. Sotto il 5-10% il cap è gestibile con interventi mirati; sopra il 30% stai tagliando troppo carico."),
-                       f"{r_pp['pct_ore_sopra']:,.1f} %", j2)
-            render_kpi(edu("Energia da gestire", "MWh totali sopra il cap nel periodo: l'energia da tagliare, spostare in altre ore o coprire con accumulo/batteria."),
-                       f"{r_pp['mwh_sopra']:,.0f} MWh", j3)
-            soglia_txt = f"{r_pp['soglia_convenienza']:,.2f} €/MWh" if r_pp["soglia_convenienza"] is not None else "n/d"
-            render_kpi(edu("Soglia di convenienza", "Risparmio annuo diviso per i MWh da gestire: quanto 'vale' ogni MWh spostato/tagliato. Se gestire 1 MWh ti costa MENO della soglia, ridurre la potenza conviene; se costa di più, no."),
-                       soglia_txt, j4)
-
-            st.markdown("**Sensitività: risparmio vs energia da gestire al variare del cap**")
-            df_pps = r_pp["df_sens"]
-            fig_pp = go.Figure()
-            fig_pp.add_trace(go.Bar(x=df_pps["Cap (MW)"], y=df_pps["Risparmio (€/anno)"],
-                                    name="Risparmio €/anno", marker_color="#10b981",
-                                    hovertemplate="Cap %{x:.2f} MW<br>Risparmio: €%{y:,.0f}/anno<extra></extra>"))
-            fig_pp.add_trace(go.Scatter(x=df_pps["Cap (MW)"], y=df_pps["MWh da gestire"],
-                                        name="MWh da gestire", mode="lines+markers",
-                                        marker_color="#f59e0b", yaxis="y2",
-                                        hovertemplate="Cap %{x:.2f} MW<br>Da gestire: %{y:,.0f} MWh<extra></extra>"))
-            fig_pp.update_layout(template="plotly_dark", height=360,
-                                 title="Più abbassi il cap, più risparmi — ma più energia devi gestire",
-                                 xaxis_title="Cap di potenza impegnata (MW)",
-                                 yaxis_title="Risparmio (€/anno)",
-                                 yaxis2=dict(title="MWh da gestire", overlaying="y", side="right"))
-            sel = df_pps.iloc[(df_pps["Cap (MW)"] - cap_in).abs().argmin()]
-            fig_pp.add_vline(x=float(sel["Cap (MW)"]), line_dash="dash", line_color="#e5e7eb",
-                             annotation_text=f"cap scelto {float(sel['Cap (MW)']):.2f} MW",
-                             annotation_position="top right")
-            st.plotly_chart(fig_pp, use_container_width=True)
-
-            st.markdown("**Dettaglio mensile**")
-            st.dataframe(r_pp["df_mesi"], use_container_width=True, hide_index=True)
-            st.download_button(
-                "⬇️ Esporta potenza di picco (CSV)",
-                r_pp["df_mesi"].to_csv(index=False).encode("utf-8"),
-                file_name=f"potenza_picco_{d0}_{d1}.csv",
-                mime="text/csv",
-                help="Scarica il dettaglio mensile: picco MW, ore sopra il cap e MWh da gestire.",
-            )
-            st.caption("💡 La quota potenza si paga anche sui kW mai usati: se il picco sta in F1, sposta i carichi flessibili in F2/F3 (tab 🔄 Shifting carico) e abbassa il cap senza tagliare energia. Confronta la soglia di convenienza con il costo del kWh da batteria (tab 🔋 Arbitraggio Batteria) per decidere se coprire i picchi con accumulo.")
-
-    with tab58:
-        titolo_ct = edu("Costo per turno", "Molti clienti industriali lavorano su 3 turni da 8 ore: NOTTE 22-06, MATTINA 06-14, POMERIGGIO 14-22. Il prezzo spot cambia molto tra notte e giorno, quindi far girare la produzione in un turno invece che in un altro costa cifre diverse: questo tab dice quanto costa l'energia di CIASCUN turno (MWh, euro, euro/MWh, quota % sul totale). Il turno più caro in €/MWh è dove vale la pena spostare produzione, manutenzione o fermi programmati. Il carico è quello del tab 💰 Costo fornitura (MW per fascia); i prezzi sono quelli del periodo selezionato.")
-        st.markdown(f"**{titolo_ct}**: quanto costa far girare ciascun turno?", unsafe_allow_html=True)
-        st.caption("Turni standard da 8 ore: Notte 22-06 · Mattina 06-14 · Pomeriggio 14-22.")
-
-        r_ct = calcola_costo_turni(prezzi, mw_f1, mw_f2, mw_f3)
-        if r_ct["ore"] == 0 or r_ct["mwh_totale"] <= 0:
-            st.warning("Seleziona un periodo con dati e una potenza maggiore di zero in almeno una fascia (tab 💰 Costo fornitura).")
-        else:
-            k1, k2, k3, k4 = st.columns(4)
-            render_kpi(edu("Turno più costoso", "Il turno che assorbe più euro in totale: lì c'è la spesa maggiore da ottimizzare."),
-                       r_ct["turno_piu_costoso"] or "n/d", k1)
-            render_kpi(edu("Turno più caro (€/MWh)", "Il turno con il prezzo medio più alto: il più penalizzante in cui consumare. Spostare produzione qui è dove il risparmio per MWh è massimo."),
-                       r_ct["turno_piu_caro_mwh"] or "n/d", k2)
-            pct_txt = f"{r_ct['pct_turno_punta']:,.1f} %" if r_ct["pct_turno_punta"] is not None else "n/d"
-            render_kpi(edu("Quota del turno di punta", "Percentuale del costo totale assorbita dal turno più costoso: più è alta, più concentrare l'attenzione su quel turno paga."),
-                       pct_txt, k3)
-            render_kpi(edu("Costo totale periodo", "Somma dei costi dei tre turni = costo di fornitura totale del periodo."),
-                       f"{r_ct['costo_totale']:,.0f} €", k4)
-
-            df_ct = r_ct["df_turni"]
-            fig_ct = go.Figure()
-            fig_ct.add_trace(go.Bar(x=df_ct["Turno"], y=df_ct["Costo (€)"],
-                                    name="Costo €", marker_color="#3b82f6",
-                                    hovertemplate="%{x}<br>Costo: €%{y:,.0f}<extra></extra>"))
-            fig_ct.add_trace(go.Scatter(x=df_ct["Turno"], y=df_ct["Prezzo medio (€/MWh)"],
-                                        name="Prezzo medio €/MWh", mode="lines+markers",
-                                        marker_color="#f59e0b", yaxis="y2",
-                                        hovertemplate="%{x}<br>Prezzo medio: €%{y:,.2f}/MWh<extra></extra>"))
-            fig_ct.update_layout(template="plotly_dark", height=360,
-                                 title="Costo per turno e prezzo medio del turno",
-                                 xaxis_title="Turno", yaxis_title="Costo (€)",
-                                 yaxis2=dict(title="Prezzo medio (€/MWh)", overlaying="y", side="right"))
-            st.plotly_chart(fig_ct, use_container_width=True)
-
-            st.markdown("**Dettaglio per turno**")
-            st.dataframe(df_ct, use_container_width=True, hide_index=True)
-
-            st.markdown("**Dettaglio mensile (€)**")
-            df_ctm = r_ct["df_mesi"]
-            fig_ctm = go.Figure()
-            for c, col_c in [("Notte (€)", "#1d4ed8"), ("Mattina (€)", "#f59e0b"), ("Pomeriggio (€)", "#10b981")]:
-                fig_ctm.add_trace(go.Bar(x=df_ctm["Mese"], y=df_ctm[c], name=c.replace(" (€)", ""),
-                                         marker_color=col_c,
-                                         hovertemplate="%{x}<br>%{fullData.name}: €%{y:,.0f}<extra></extra>"))
-            fig_ctm.update_layout(template="plotly_dark", height=360, barmode="stack",
-                                  title="Costo mensile per turno (impilato)",
-                                  xaxis_title="Mese", yaxis_title="Costo (€)")
-            st.plotly_chart(fig_ctm, use_container_width=True)
-            st.dataframe(df_ctm, use_container_width=True, hide_index=True)
-            st.download_button(
-                "⬇️ Esporta costo per turno (CSV)",
-                df_ctm.to_csv(index=False).encode("utf-8"),
-                file_name=f"costo_turni_{d0}_{d1}.csv",
-                mime="text/csv",
-                help="Scarica il dettaglio mensile: costo in euro per ciascun turno.",
-            )
-            st.caption("💡 Se il turno di notte è il più caro in €/MWh, valuta di spostare fermi/manutenzione nelle ore notturne (tab 🔄 Shifting carico) o di ridurre il carico notturno con la batteria (tab 🔋 Arbitraggio Batteria).")
+            st.caption("💡 F1 molto concentrata → valuta cap sulle ore di picco (tab 🛡️) o shifting verso F3 (tab 🔄). Fascia piatta → la quota fissa costa poco di più del rischio che copre.")
 
 # Footer
 
