@@ -4200,6 +4200,163 @@ def calcola_ponte_budget(prezzi, mw_f1, mw_f2, mw_f3, prezzo_budget, volume_budg
     return out
 
 
+def calcola_driver_costo(prezzi, mw_f1, mw_f2, mw_f3):
+    """Driver del costo: scomposizione della varianza del costo giornaliero.
+
+    Calcola il costo giornaliero di fornitura (spot orario pesato sul profilo
+    F1/F2/F3, stessa logica della tab 'Costo fornitura') e ne scompone la
+    varianza con un'ANOVA a due vie senza interazione (tipo I, sequenziale):
+
+        Var(costo_giornaliero) = MESE + SETTIMANA|mese + RESIDUO
+
+    - MESE: stagionalita' (quanto del costo e' spiegato dal mese di calendario)
+    - SETTIMANA: pattern settimanale (lunedi' vs domenica, ...) al netto del mese
+    - RESIDUO: tutto il resto (spike, eventi, rumore non di calendario)
+
+    Le tre quote (eta^2) sommano ESATTAMENTE a 1 quando la varianza totale > 0.
+    Risponde alla domanda del controller: "cosa muove il mio costo, la
+    stagione o il giorno della settimana?".
+
+    Differenza dalle altre tab: 'Stagionalita'' mostra i profili medi mensili
+    ma non quantifica QUANTO spiegano; 'Settimana tipo' mostra il pattern
+    settimanale dei prezzi ma non del COSTO (che dipende anche dal profilo
+    di prelievo); 'Sensitivita' profilo' varia il profilo a prezzi fissi.
+    Qui si misura, sui dati reali, il peso di ciascun driver di calendario.
+
+    NaN-safe: ore con prezzo NaN escluse. Serie vuota o indice non datetime
+    -> totali neutrali e DataFrame vuoti. Meno di 2 giorni -> varianza nulla,
+    driver None.
+
+    Ritorna dict con 'errore', 'giorni' (n. giorni di calendario),
+    'costo_medio_giorno' (None se giorni=0), 'eta2_mese', 'eta2_settimana',
+    'eta2_residuo' (quote in [0,1], somma 1 se varianza > 0), 'driver'
+    ('mese'/'settimana'/'residuo', la quota maggiore; None se varianza nulla),
+    'mese_max' ("YYYY-MM" del mese col costo medio piu' alto, None se n<1),
+    'giorno_max' (nome italiano del weekday col costo medio piu' alto),
+    'df_mesi' (Mese, Giorni, Costo medio (€/giorno), Costo totale (€),
+    Scost. vs media (%)), 'df_settimana' (Giorno, Costo medio (€/giorno),
+    Scost. vs media (%), ordinato lunedi'->domenica)."""
+    colonne_m = ["Mese", "Giorni", "Costo medio (\u20ac/giorno)",
+                 "Costo totale (\u20ac)", "Scost. vs media (%)"]
+    colonne_s = ["Giorno", "Costo medio (\u20ac/giorno)", "Scost. vs media (%)"]
+    nomi_wd = ["Luned\u00ec", "Marted\u00ec", "Mercoled\u00ec", "Gioved\u00ec",
+               "Venerd\u00ec", "Sabato", "Domenica"]
+    vuoto = {"errore": None, "giorni": 0, "costo_medio_giorno": None,
+             "eta2_mese": 0.0, "eta2_settimana": 0.0, "eta2_residuo": 0.0,
+             "driver": None, "mese_max": None, "giorno_max": None,
+             "df_mesi": pd.DataFrame(columns=colonne_m),
+             "df_settimana": pd.DataFrame(columns=colonne_s)}
+
+    try:
+        p = prezzi.astype(float)
+        p = p[~p.index.duplicated(keep="first")].sort_index()
+        if not isinstance(p.index, pd.DatetimeIndex):
+            return dict(vuoto)
+    except Exception:
+        return dict(vuoto)
+    p = p.dropna()
+    if len(p) == 0:
+        return dict(vuoto)
+
+    try:
+        profilo = {"F1": float(mw_f1), "F2": float(mw_f2), "F3": float(mw_f3)}
+    except Exception:
+        return dict(vuoto)
+    fasce = p.index.map(fascia_oraria)
+    mw_ora = fasce.map(profilo).to_numpy(dtype=float)
+    costo_orario = p.to_numpy(dtype=float) * mw_ora  # EUR/ora
+
+    giorni_idx = p.index.normalize()  # tz-safe: normalize conserva il tz
+    d = pd.Series(costo_orario, index=giorni_idx).groupby(level=0).sum()
+    d = d.sort_index()
+    n = len(d)
+    if n == 0:
+        return dict(vuoto)
+
+    mu = float(d.mean())
+    ss_tot = float(((d - mu) ** 2).sum())
+
+    mesi = d.index.month.to_numpy()
+    wd = d.index.weekday.to_numpy()
+    ym = d.index.strftime("%Y-%m").to_numpy()
+
+    # Effetto MESE (between-month SS, one-way)
+    mu_mese = d.groupby(ym).transform("mean")
+    ss_mese = float((((mu_mese - mu) ** 2)).sum())
+
+    # Effetto SETTIMANA al netto del mese: OLS a due vie senza interazione
+    # (tipo I, sequenziale). Il fit additivo mese+weekday e' la proiezione
+    # ortogonale -> SS_modello <= SS_totale sempre; la quota settimana e'
+    # SS_modello - SS_mese (>= 0). Niente backfitting approssimato.
+    y = d.to_numpy(dtype=float)
+    ym_codes = pd.factorize(ym)[0]
+    m_uniq = int(ym_codes.max()) + 1
+    n_par = 1 + max(0, m_uniq - 1) + 6  # intercetta + dummy mese + dummy weekday
+    X = np.zeros((n, n_par))
+    X[:, 0] = 1.0
+    for j in range(m_uniq - 1):
+        X[:, 1 + j] = (ym_codes == j)
+    for j in range(6):
+        X[:, 1 + max(0, m_uniq - 1) + j] = (wd == j)
+    coef, *_ = np.linalg.lstsq(X, y, rcond=None)
+    fitted = X @ coef
+    ss_mod = float(((fitted - mu) ** 2).sum())
+    ss_sett = max(0.0, min(ss_mod, ss_tot) - ss_mese)
+    ss_sett = max(0.0, ss_sett)
+
+    if ss_tot > 0:
+        e_m = min(1.0, max(0.0, ss_mese / ss_tot))
+        e_s = min(1.0, max(0.0, ss_sett / ss_tot))
+        e_r = min(1.0, max(0.0, 1.0 - e_m - e_s))
+        quote = [("mese", e_m), ("settimana", e_s), ("residuo", e_r)]
+        driver = max(quote, key=lambda q: q[1])[0]
+    else:
+        e_m = e_s = e_r = 0.0
+        driver = None
+
+    # Tabelle di dettaglio
+    g_mesi = d.groupby(ym)
+    df_mesi = pd.DataFrame({
+        "Mese": g_mesi.size().index,
+        "Giorni": g_mesi.size().to_numpy(),
+        "Costo medio (\u20ac/giorno)": g_mesi.mean().to_numpy().round(2),
+        "Costo totale (\u20ac)": g_mesi.sum().to_numpy().round(2),
+    })
+    if mu != 0:
+        df_mesi["Scost. vs media (%)"] = ((df_mesi["Costo medio (\u20ac/giorno)"] / mu - 1) * 100).round(1)
+    else:
+        df_mesi["Scost. vs media (%)"] = 0.0
+    df_mesi = df_mesi[colonne_m].sort_values("Mese").reset_index(drop=True)
+
+    g_wd = d.groupby(wd)
+    media_wd = g_wd.mean().reindex(range(7))
+    df_sett = pd.DataFrame({
+        "Giorno": nomi_wd,
+        "Costo medio (\u20ac/giorno)": media_wd.to_numpy().round(2),
+    })
+    if mu != 0:
+        df_sett["Scost. vs media (%)"] = ((df_sett["Costo medio (\u20ac/giorno)"] / mu - 1) * 100).round(1)
+    else:
+        df_sett["Scost. vs media (%)"] = 0.0
+    df_sett = df_sett[colonne_s]
+
+    mese_max = df_mesi.loc[df_mesi["Costo medio (\u20ac/giorno)"].idxmax(), "Mese"] if n > 0 else None
+    giorno_max = None
+    if media_wd.notna().any():
+        giorno_max = nomi_wd[int(media_wd.idxmax())]
+
+    out = dict(vuoto)
+    out.update({
+        "giorni": n,
+        "costo_medio_giorno": round(mu, 2),
+        "eta2_mese": e_m, "eta2_settimana": e_s,
+        "eta2_residuo": e_r,
+        "driver": driver, "mese_max": mese_max, "giorno_max": giorno_max,
+        "df_mesi": df_mesi, "df_settimana": df_sett,
+    })
+    return out
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def generate_singularity_data():
     np.random.seed(42)
@@ -4892,7 +5049,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -8131,6 +8288,66 @@ elif workspace == _('ws8'):
                     mime="text/csv",
                     help="Scarica il dettaglio mensile del ponte budget-consuntivo.",
                 )
+
+    with tab51:
+        titolo_dc = edu("Driver del costo", "Scompone la VARIANZA del costo giornaliero di fornitura (stessa logica della tab \U0001F4B0 Costo fornitura: spot orario pesato sul tuo profilo F1/F2/F3) in tre driver che sommano al 100%: MESE (stagionalita'), SETTIMANA (pattern lunedi'-domenica al netto del mese) e RESIDUO (spike, eventi, rumore non di calendario). Metodo: ANOVA a due vie senza interazione, quote eta-quadro sequenziali (OLS).")
+        st.markdown(f"**{titolo_dc}**: cosa muove davvero il tuo costo — la stagione, il giorno della settimana, o il resto?", unsafe_allow_html=True)
+        st.caption("Profilo di prelievo: quello impostato nel tab \U0001F4B0 Costo fornitura (MW per fascia F1/F2/F3).")
+
+        dc = calcola_driver_costo(prezzi, mw_f1, mw_f2, mw_f3)
+        if dc["giorni"] == 0:
+            st.warning("Imposta una potenza maggiore di zero in almeno una fascia (tab \U0001F4B0 Costo fornitura) e seleziona un periodo con dati.")
+        elif dc["giorni"] < 14:
+            st.warning(f"Solo {dc['giorni']} giorni di dati: servono almeno 14 giorni per una scomposizione significativa.")
+        elif dc["driver"] is None:
+            st.info("Costo giornaliero costante sul periodo: nessuna varianza da scomporre.")
+        else:
+            nomi_driver = {"mese": "MESE \U0001F4C5", "settimana": "SETTIMANA \U0001F5D3\uFE0F", "residuo": "RESIDUO \U0001F3B2"}
+            qmax = max(dc["eta2_mese"], dc["eta2_settimana"], dc["eta2_residuo"])
+            k1, k2, k3, k4 = st.columns(4)
+            render_kpi(edu("Costo medio giornaliero", "Costo medio al giorno sul periodo: spot orario pesato sul profilo F1/F2/F3."),
+                       f"{dc['costo_medio_giorno']:,.0f} \u20ac", k1)
+            render_kpi(edu("Driver principale", "Il driver che spiega la quota maggiore della varianza del costo giornaliero."),
+                       f"{nomi_driver.get(dc['driver'], chr(8212))} ({qmax*100:.0f}%)", k2)
+            render_kpi(edu("Residuo non spiegato", "Quota di varianza non legata al calendario: spike, eventi, rumore."),
+                       f"{dc['eta2_residuo']*100:.1f} %", k3)
+            render_kpi(edu("Mese piu' costoso", "Mese col costo medio giornaliero piu' alto nel periodo."),
+                       dc["mese_max"] or chr(8212), k4)
+
+            df_q = pd.DataFrame({
+                "Driver": ["Mese (stagionalita')", "Settimana (lun-dom)", "Residuo (non calendario)"],
+                "Quota %": [dc["eta2_mese"] * 100, dc["eta2_settimana"] * 100, dc["eta2_residuo"] * 100]})
+            fig_q = px.bar(df_q, x="Quota %", y="Driver", orientation="h", text="Quota %",
+                           title="Quanto spiega ciascun driver (eta\u00b2, somma 100%)")
+            fig_q.update_traces(texttemplate="%{text:.1f}%", textposition="outside")
+            fig_q.update_layout(xaxis_range=[0, max(10.0, df_q["Quota %"].max() * 1.25)])
+            st.plotly_chart(fig_q, use_container_width=True)
+
+            c1, c2 = st.columns(2)
+            with c1:
+                fig_m = px.bar(dc["df_mesi"], x="Mese", y="Costo medio (\u20ac/giorno)",
+                               title="Costo medio giornaliero per mese",
+                               text="Costo medio (\u20ac/giorno)")
+                fig_m.update_traces(texttemplate="%{text:,.0f}", textposition="outside")
+                st.plotly_chart(fig_m, use_container_width=True)
+            with c2:
+                fig_s = px.bar(dc["df_settimana"], x="Giorno", y="Costo medio (\u20ac/giorno)",
+                               title="Costo medio giornaliero per giorno della settimana",
+                               text="Costo medio (\u20ac/giorno)")
+                fig_s.update_traces(texttemplate="%{text:,.0f}", textposition="outside")
+                st.plotly_chart(fig_s, use_container_width=True)
+
+            st.markdown("**Dettaglio mensile**")
+            st.dataframe(dc["df_mesi"], use_container_width=True, hide_index=True)
+            st.markdown("**Dettaglio settimanale**")
+            st.dataframe(dc["df_settimana"], use_container_width=True, hide_index=True)
+            st.download_button(
+                "\u2b07\ufe0f Esporta driver del costo (CSV)",
+                dc["df_mesi"].to_csv(index=False).encode("utf-8"),
+                file_name=f"driver_costo_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica il dettaglio mensile dei driver del costo.",
+            )
 
 # Footer
 
