@@ -3784,6 +3784,155 @@ def calcola_valutazione_cap_floor(prezzi, mw_f1, mw_f2, mw_f3,
     return out
 
 
+def calcola_stima_bolletta(prezzi, mw_f1, mw_f2, mw_f3,
+                           perdite_pct=10.4, dispacciamento=4.0, pcv_mese=11.0,
+                           oneri=14.0, accisa=22.7, iva_pct=22.0):
+    """Ricostruzione STIMATA della bolletta elettrica italiana per una fornitura
+    a prezzo indicizzato (spot + spread = componente energia), partendo dal
+    profilo di carico F1/F2/F3.
+
+    Componenti (tutte parametrizzabili dall'utente):
+    - Energia: prezzo orario (spot) * MW della fascia -> la materia energia
+    - Perdite di rete: % sulla componente energia (default 10.4 % = BT)
+    - Dispacciamento (corrispettivi Terna/disaccoppiamento): EUR/MWh
+    - PCV (prezzo commercializzazione vendita): EUR/mese, spalmato sui mesi del periodo
+    - Oneri di sistema (ASOS/ARIM ecc.): EUR/MWh
+    - Accisa: EUR/MWh (default 22.7 = 0.0227 EUR/kWh, usi non domestici/non agevolati)
+    - IVA: % sull'imponibile (default 22 %)
+
+    Differenza dalle altre tab: 'Costo fornitura' e 'Fisso vs indicizzato'
+    guardano solo la materia energia; qui si stima il TOTALE fattura con
+    tutti gli oneri parafiscali, per rispondere a "quanto pago davvero?".
+
+    NaN-safe: ore con prezzo NaN escluse. Serie vuota o indice non datetime
+    -> totali a zero e DataFrame vuoti. Parametri non numerici o negativi
+    -> 'errore'.
+
+    Ritorna dict con 'errore', 'mwh', 'n_mesi', totali per voce ('energia_eur',
+    'perdite_eur', 'disp_eur', 'pcv_eur', 'oneri_eur', 'accisa_eur',
+    'imponibile_eur', 'iva_eur', 'totale_eur'), 'eur_mwh_allin',
+    'quota_energia_pct' (energia / totale), 'extra_vs_energia'
+    (totale - energia), 'df_mesi' (Mese, MWh, Energia (EUR), Perdite (EUR),
+    Dispacciamento (EUR), PCV (EUR), Oneri (EUR), Accisa (EUR),
+    Imponibile (EUR), IVA (EUR), Totale (EUR), EUR/MWh), 'df_giorni'
+    (Giorno, Energia cumulata (EUR), Totale cumulato (EUR))."""
+    colonne_m = ["Mese", "MWh", "Energia (\u20ac)", "Perdite (\u20ac)",
+                 "Dispacciamento (\u20ac)", "PCV (\u20ac)", "Oneri (\u20ac)",
+                 "Accisa (\u20ac)", "Imponibile (\u20ac)", "IVA (\u20ac)",
+                 "Totale (\u20ac)", "\u20ac/MWh"]
+    colonne_g = ["Giorno", "Energia cumulata (\u20ac)", "Totale cumulato (\u20ac)"]
+    vuoto = {"errore": None, "mwh": 0.0, "n_mesi": 0,
+             "energia_eur": 0.0, "perdite_eur": 0.0, "disp_eur": 0.0,
+             "pcv_eur": 0.0, "oneri_eur": 0.0, "accisa_eur": 0.0,
+             "imponibile_eur": 0.0, "iva_eur": 0.0, "totale_eur": 0.0,
+             "eur_mwh_allin": None, "quota_energia_pct": None,
+             "extra_vs_energia": 0.0,
+             "df_mesi": pd.DataFrame(columns=colonne_m),
+             "df_giorni": pd.DataFrame(columns=colonne_g)}
+
+    try:
+        pp = float(perdite_pct); dp = float(dispacciamento); pv = float(pcv_mese)
+        on = float(oneri); ac = float(accisa); iv = float(iva_pct)
+    except Exception:
+        out = dict(vuoto); out["errore"] = "Parametri non validi: inserisci valori numerici."
+        return out
+    if any(not np.isfinite(x) for x in (pp, dp, pv, on, ac, iv)):
+        out = dict(vuoto); out["errore"] = "Parametri non validi: inserisci valori numerici."
+        return out
+    if any(x < 0 for x in (pp, dp, pv, on, ac, iv)):
+        out = dict(vuoto); out["errore"] = "I parametri non possono essere negativi."
+        return out
+
+    try:
+        p = prezzi.astype(float)
+        p = p[~p.index.duplicated(keep="first")].sort_index()
+        if not isinstance(p.index, pd.DatetimeIndex):
+            return dict(vuoto)
+    except Exception:
+        return dict(vuoto)
+    p = p.dropna()
+    if len(p) == 0:
+        return dict(vuoto)
+
+    profilo = {"F1": float(mw_f1), "F2": float(mw_f2), "F3": float(mw_f3)}
+    fasce = p.index.map(fascia_oraria)
+    mw = fasce.map(profilo).to_numpy(dtype=float)
+    px = p.to_numpy(dtype=float)
+    mwh = float(mw.sum())
+
+    energia = px * mw
+    perdite = energia * (pp / 100.0)
+    disp = mw * dp
+    oneri_v = mw * on
+    accisa_v = mw * ac
+
+    idxn = p.index.tz_localize(None) if p.index.tz is not None else p.index
+    mesi = idxn.to_period("M")
+    mesi_ord = sorted(set(mesi.tolist()))
+    n_mesi = len(mesi_ord)
+    pcv_m = (pv * n_mesi) if n_mesi else 0.0
+
+    righe = []
+    for mp in mesi_ord:
+        m = np.asarray(mesi == mp)
+        e_mwh = float(mw[m].sum())
+        e_en = float(energia[m].sum()); e_pe = float(perdite[m].sum())
+        e_dp = float(disp[m].sum()); e_on = float(oneri_v[m].sum())
+        e_ac = float(accisa_v[m].sum())
+        imp = e_en + e_pe + e_dp + pv + e_on + e_ac
+        iva_m = imp * (iv / 100.0)
+        tot_m = imp + iva_m
+        righe.append({"Mese": str(mp), "MWh": round(e_mwh, 1),
+                      "Energia (\u20ac)": round(e_en, 2), "Perdite (\u20ac)": round(e_pe, 2),
+                      "Dispacciamento (\u20ac)": round(e_dp, 2), "PCV (\u20ac)": round(pv, 2),
+                      "Oneri (\u20ac)": round(e_on, 2), "Accisa (\u20ac)": round(e_ac, 2),
+                      "Imponibile (\u20ac)": round(imp, 2), "IVA (\u20ac)": round(iva_m, 2),
+                      "Totale (\u20ac)": round(tot_m, 2),
+                      "\u20ac/MWh": round(tot_m / e_mwh, 2) if e_mwh > 0 else None})
+    df_mesi = pd.DataFrame(righe, columns=colonne_m)
+
+    giorni = idxn.normalize()
+    df_d = pd.DataFrame({"giorno": giorni, "en": energia,
+                         "pe": perdite, "dp": disp, "on": oneri_v, "ac": accisa_v}
+                        ).groupby("giorno")[["en", "pe", "dp", "on", "ac"]].sum()
+    cum_en = cum_tot = 0.0
+    righe_g = []
+    # PCV spalmata pro-rata sui giorni osservati (pcv_m = pv * n_mesi)
+    pcv_g = pcv_m / max(len(df_d), 1) if len(df_d) else 0.0
+    for g, r in df_d.iterrows():
+        cum_en += float(r["en"])
+        imp_g = float(r["en"] + r["pe"] + r["dp"] + r["on"] + r["ac"]) + pcv_g
+        cum_tot += imp_g * (1.0 + iv / 100.0)
+        righe_g.append({"Giorno": str(g.date()),
+                        "Energia cumulata (\u20ac)": round(cum_en, 2),
+                        "Totale cumulato (\u20ac)": round(cum_tot, 2)})
+    df_giorni = pd.DataFrame(righe_g, columns=colonne_g)
+
+    energia_eur = float(energia.sum())
+    perdite_eur = float(perdite.sum())
+    disp_eur = float(disp.sum())
+    oneri_eur = float(oneri_v.sum())
+    accisa_eur = float(accisa_v.sum())
+    imponibile = energia_eur + perdite_eur + disp_eur + pcv_m + oneri_eur + accisa_eur
+    iva_eur = imponibile * (iv / 100.0)
+    totale = imponibile + iva_eur
+
+    out = dict(vuoto)
+    out.update({
+        "mwh": mwh, "n_mesi": n_mesi,
+        "energia_eur": round(energia_eur, 2), "perdite_eur": round(perdite_eur, 2),
+        "disp_eur": round(disp_eur, 2), "pcv_eur": round(pcv_m, 2),
+        "oneri_eur": round(oneri_eur, 2), "accisa_eur": round(accisa_eur, 2),
+        "imponibile_eur": round(imponibile, 2), "iva_eur": round(iva_eur, 2),
+        "totale_eur": round(totale, 2),
+        "eur_mwh_allin": round(totale / mwh, 2) if mwh > 0 else None,
+        "quota_energia_pct": round(energia_eur / totale, 4) if totale > 0 else None,
+        "extra_vs_energia": round(totale - energia_eur, 2),
+        "df_mesi": df_mesi, "df_giorni": df_giorni,
+    })
+    return out
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def generate_singularity_data():
     np.random.seed(42)
@@ -4476,7 +4625,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -7424,6 +7573,120 @@ elif workspace == _('ws8'):
                     file_name=f"cap_floor_{d0}_{d1}.csv",
                     mime="text/csv",
                     help="Scarica il payoff mensile di cap e floor.",
+                )
+
+    with tab48:
+        titolo_bo = edu("Stima bolletta", "Ricostruzione STIMATA della bolletta elettrica italiana per una fornitura a prezzo indicizzato: parte dal costo della materia energia (spot x profilo F1/F2/F3) e aggiunge tutte le voci parafiscali — perdite di rete, dispacciamento, PCV, oneri di sistema, accisa e IVA. Serve a rispondere alla domanda \"quanto pago davvero?\": la materia energia e' spesso meno della meta' del totale. Diverso dalla tab 'Costo fornitura' (solo energia) e da 'Fisso vs indicizzato' (confronto di prezzi di acquisto): qui si sommano i costi che il fornitore gira in fattura oltre l'energia.")
+        st.markdown(f"**{titolo_bo}**: dalla materia energia al totale fattura, con tutte le voci della bolletta italiana.", unsafe_allow_html=True)
+
+        b0, b1, b2 = st.columns(3)
+        with b0:
+            bo_perd = st.number_input("Perdite di rete (% su energia)", min_value=0.0, value=10.4, step=0.1,
+                                     key="bo48_perd",
+                                     help="Perdite di rete: 10.4 % per la bassa tensione, 3.8 % media, 2.0 % alta.")
+        with b1:
+            bo_disp = st.number_input("Dispacciamento (€/MWh)", min_value=0.0, value=4.0, step=0.5,
+                                     key="bo48_disp",
+                                     help="Corrispettivi di dispacciamento (Terna) e sbilanciamento effettivo.")
+        with b2:
+            bo_pcv = st.number_input("PCV (€/mese)", min_value=0.0, value=11.0, step=1.0,
+                                    key="bo48_pcv",
+                                    help="Prezzo commercializzazione vendita: quota fissa mensile del fornitore.")
+        b3, b4, b5 = st.columns(3)
+        with b3:
+            bo_oneri = st.number_input("Oneri di sistema (€/MWh)", min_value=0.0, value=14.0, step=1.0,
+                                      key="bo48_oneri",
+                                      help="Oneri generali di sistema (ASOS, ARIM e altre componenti parafiscali).")
+        with b4:
+            bo_acc = st.number_input("Accisa (€/MWh)", min_value=0.0, value=22.7, step=0.1,
+                                    key="bo48_acc",
+                                    help="Accisa sull'energia elettrica: 22.7 €/MWh = 0.0227 €/kWh (usi non agevolati).")
+        with b5:
+            bo_iva = st.number_input("IVA (%)", min_value=0.0, value=22.0, step=1.0,
+                                    key="bo48_iva",
+                                    help="IVA sull'imponibile: 22 % standard, 10 % per usi domestici agevolati.")
+
+        bo = calcola_stima_bolletta(prezzi, mw_f1, mw_f2, mw_f3,
+                                    perdite_pct=bo_perd, dispacciamento=bo_disp, pcv_mese=bo_pcv,
+                                    oneri=bo_oneri, accisa=bo_acc, iva_pct=bo_iva)
+        if bo["errore"]:
+            st.warning(f"⚠️ {bo['errore']}")
+        elif bo["mwh"] == 0:
+            st.warning("Imposta una potenza maggiore di zero in almeno una fascia (tab 💰 Costo fornitura) per stimare la bolletta.")
+        else:
+            k1, k2, k3, k4 = st.columns(4)
+            render_kpi(edu("Totale bolletta stimata", "Quanto pagheresti in totale nel periodo: energia + tutte le voci parafiscali + IVA."),
+                       f"{bo['totale_eur']:,.0f} €", k1)
+            render_kpi(edu("€/MWh all-in", "Costo medio per MWh consumato includendo tutto: e' il numero da confrontare con le offerte dei fornitori."),
+                       f"{bo['eur_mwh_allin']:,.2f} €/MWh", k2)
+            render_kpi(edu("Quota materia energia", "Percentuale del totale che e' vera energia: il resto sono oneri, accise e IVA."),
+                       f"{bo['quota_energia_pct']*100:.1f} %" if bo["quota_energia_pct"] is not None else "—", k3)
+            render_kpi(edu("Extra oltre l'energia", "Euro in piu' rispetto al solo costo della materia energia: misura il peso della parafiscalita'."),
+                       f"{bo['extra_vs_energia']:,.0f} €", k4)
+            st.caption(f"Energia {bo['mwh']:,.0f} MWh in {bo['n_mesi']} mesi — materia energia {bo['energia_eur']:,.0f} €, "
+                       f"perdite {bo['perdite_eur']:,.0f} €, dispacciamento {bo['disp_eur']:,.0f} €, PCV {bo['pcv_eur']:,.0f} €, "
+                       f"oneri {bo['oneri_eur']:,.0f} €, accisa {bo['accisa_eur']:,.0f} €, IVA {bo['iva_eur']:,.0f} €.")
+
+            voci = [("Energia (€)", "#3b82f6"), ("Perdite (€)", "#f59e0b"),
+                    ("Dispacciamento (€)", "#a855f7"), ("PCV (€)", "#64748b"),
+                    ("Oneri (€)", "#ef4444"), ("Accisa (€)", "#ec4899"), ("IVA (€)", "#22c55e")]
+            try:
+                df_bm = bo["df_mesi"]
+                fig_bo1 = go.Figure()
+                for col_voce, colore in voci:
+                    fig_bo1.add_trace(go.Bar(x=df_bm["Mese"], y=df_bm[col_voce], name=col_voce.replace(" (€)", ""),
+                                             marker_color=colore,
+                                             hovertemplate="Mese: %{x}<br>%{fullData.name}: %{y:,.0f} €<extra></extra>"))
+                fig_bo1.update_layout(template="plotly_dark", height=340, barmode="stack",
+                                      title="Bolletta mensile per voce (stacked)",
+                                      xaxis_title="Mese", yaxis_title="€")
+                st.plotly_chart(fig_bo1, use_container_width=True)
+                st.caption("La parte blu e' la materia energia: tutto il resto e' parafiscalita' e IVA.")
+            except Exception:
+                st.info("Grafico mensile non disponibile per questi dati.")
+
+            try:
+                tot_voci = [(n.replace(" (€)", ""), bo[{"Energia (€)": "energia_eur", "Perdite (€)": "perdite_eur",
+                                                       "Dispacciamento (€)": "disp_eur", "PCV (€)": "pcv_eur",
+                                                       "Oneri (€)": "oneri_eur", "Accisa (€)": "accisa_eur",
+                                                       "IVA (€)": "iva_eur"}[c]]) for c, n in voci]
+                fig_bo2 = go.Figure(data=[go.Pie(labels=[t[0] for t in tot_voci], values=[t[1] for t in tot_voci],
+                                                 hole=0.45, hovertemplate="%{label}: %{value:,.0f} € (%{percent})<extra></extra>")])
+                fig_bo2.update_layout(template="plotly_dark", height=340,
+                                      title="Ripartizione del totale per voce")
+                st.plotly_chart(fig_bo2, use_container_width=True)
+            except Exception:
+                st.info("Ripartizione non disponibile per questi dati.")
+
+            try:
+                df_bg = bo["df_giorni"]
+                fig_bo3 = go.Figure()
+                fig_bo3.add_trace(go.Scatter(x=df_bg["Giorno"], y=df_bg["Energia cumulata (€)"],
+                                             mode="lines", name="Energia cumulata",
+                                             line=dict(color="#3b82f6"),
+                                             hovertemplate="Giorno: %{x}<br>Energia: %{y:,.0f} €<extra></extra>"))
+                fig_bo3.add_trace(go.Scatter(x=df_bg["Giorno"], y=df_bg["Totale cumulato (€)"],
+                                             mode="lines", name="Bolletta cumulata", fill="tozeroy",
+                                             line=dict(color="#22c55e"),
+                                             hovertemplate="Giorno: %{x}<br>Totale: %{y:,.0f} €<extra></extra>"))
+                fig_bo3.update_layout(template="plotly_dark", height=300,
+                                      title="Cumulata nel tempo: energia vs bolletta totale",
+                                      xaxis_title="Giorno", yaxis_title="€ cumulati")
+                st.plotly_chart(fig_bo3, use_container_width=True)
+                st.caption("La distanza tra le due curve e' il costo della parafiscalita' accumulato giorno per giorno.")
+            except Exception:
+                st.info("Curva cumulata non disponibile per questi dati.")
+
+            df_bo = bo["df_mesi"]
+            if len(df_bo):
+                st.markdown("**Dettaglio mensile**")
+                st.dataframe(df_bo, use_container_width=True, hide_index=True)
+                st.download_button(
+                    "⬇️ Esporta stima bolletta (CSV)",
+                    df_bo.to_csv(index=False).encode("utf-8"),
+                    file_name=f"stima_bolletta_{d0}_{d1}.csv",
+                    mime="text/csv",
+                    help="Scarica il dettaglio mensile della bolletta stimata.",
                 )
 
 # Footer
