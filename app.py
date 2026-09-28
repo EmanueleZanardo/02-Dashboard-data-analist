@@ -3491,6 +3491,136 @@ def calcola_stabilita_profilo(prezzi, min_ore_mese=360):
     return out
 
 
+def calcola_confronto_fisso_indicizzato(prezzi, mw_f1, mw_f2, mw_f3, prezzo_fisso,
+                                       spread_indicizzato=0.0, quota_fissa=1.0):
+    """Confronto procurement: contratto a prezzo fisso (anche parziale) vs acquisto indicizzato allo spot.
+
+    Il buyer d'energia chiede sempre: "conviene di piu' il fisso del fornitore
+    o restare indicizzato allo spot?". Questo helper quantifica la risposta sul
+    periodo di dati selezionato, con la stessa logica di costo di
+    calcola_costo_fornitura (potenza per fascia F1/F2/F3).
+
+    - indicizzato: costo_orario = (prezzo_spot + spread_indicizzato) * potenza_fascia
+      (lo spread copre il margine del fornitore, es. 2-5 €/MWh)
+    - fisso: costo_orario = prezzo_fisso * potenza_fascia
+    - blended: quota_fissa * fisso + (1 - quota_fissa) * indicizzato
+      (quota_fissa 100% = tutto fisso; 60% = hedging parziale)
+
+    Differenza rispetto alla tab 'Costo fornitura': li' il confronto con la
+    tariffa flat e' un semplice delta totale; qui si misura QUANTO fisso
+    comprare (quota %), il prezzo di BREAK-EVEN (il prezzo fisso massimo che
+    batterebbe ancora l'indicizzato), e il delta per mese e cumulato nel tempo.
+
+    NaN-safe: ore con prezzo NaN escluse da tutti i totali. Serie vuota o
+    indice non datetime -> KPI a None e DataFrame vuoti.
+    Mesi DST con 23/25 ore: i conteggi mensili usano le ore osservate.
+
+    Ritorna dict con 'mwh', 'totale_indicizzato', 'totale_fisso',
+    'totale_blended', 'pmp_indicizzato' (prezzo medio ponderato indicizzato,
+    spread incluso), 'pmp_blended', 'break_even' (prezzo fisso al
+    pareggio con l'indicizzato), 'risparmio' (indicizzato - blended: quanto
+    si risparmia col contratto, puo' essere negativo), 'risparmio_pct',
+    'quota_ore_sotto' (frazione ore in cui spot+spread < prezzo_fisso),
+    'df_mesi' (Mese, Costo indicizzato (€), Costo contratto (€),
+    Delta contratto-indicizzato (€), PMP indicizzato (€/MWh), Ore osservate),
+    'df_giorni' (Giorno, Delta cumulato contratto-indicizzato (€)),
+    'mese_peggiore' ((etichetta mese, delta) o None: il mese in cui il
+    contratto ha perso di piu' vs indicizzato)."""
+    colonne_m = ["Mese", "Costo indicizzato (€)", "Costo contratto (€)",
+                 "Delta contratto-indicizzato (€)", "PMP indicizzato (€/MWh)", "Ore osservate"]
+    colonne_g = ["Giorno", "Delta cumulato contratto-indicizzato (€)"]
+    vuoto = {"mwh": 0.0, "totale_indicizzato": None, "totale_fisso": None,
+             "totale_blended": None, "pmp_indicizzato": None, "pmp_blended": None,
+             "break_even": None, "risparmio": None, "risparmio_pct": None,
+             "quota_ore_sotto": None, "df_mesi": pd.DataFrame(columns=colonne_m),
+             "df_giorni": pd.DataFrame(columns=colonne_g), "mese_peggiore": None}
+    try:
+        pf = float(prezzo_fisso)
+        sp = float(spread_indicizzato)
+        q = max(0.0, min(1.0, float(quota_fissa)))
+    except Exception:
+        return dict(vuoto)
+    try:
+        p = prezzi.astype(float)
+        p = p[~p.index.duplicated(keep="first")].sort_index()
+        if not isinstance(p.index, pd.DatetimeIndex):
+            return dict(vuoto)
+    except Exception:
+        return dict(vuoto)
+    p = p.dropna()
+    if len(p) == 0:
+        return dict(vuoto)
+
+    profilo = {"F1": float(mw_f1), "F2": float(mw_f2), "F3": float(mw_f3)}
+    fasce = p.index.map(fascia_oraria)
+    mw = fasce.map(profilo).to_numpy(dtype=float)
+    spot = p.to_numpy(dtype=float)
+    costo_idx = (spot + sp) * mw
+    costo_fis = pf * mw
+    costo_bl = q * costo_fis + (1.0 - q) * costo_idx
+    delta = costo_bl - costo_idx  # >0: il contratto costa di piu' dell'indicizzato
+
+    tot_idx = float(costo_idx.sum())
+    tot_fis = float(costo_fis.sum())
+    tot_bl = float(costo_bl.sum())
+    mwh = float(mw.sum())
+    pmp_idx = tot_idx / mwh if mwh > 0 else float("nan")
+    pmp_bl = tot_bl / mwh if mwh > 0 else float("nan")
+    risparmio = tot_idx - tot_bl
+    risparmio_pct = risparmio / tot_idx * 100.0 if tot_idx != 0 else float("nan")
+    quota_sotto = float(np.mean((spot + sp) < pf))
+
+    idxn = p.index.tz_localize(None) if p.index.tz is not None else p.index
+    mesi = idxn.to_period("M")
+    righe = []
+    for mp in sorted(set(mesi.tolist())):
+        m = np.asarray(mesi == mp)
+        n_ore = int(m.sum())
+        e_mwh = float(mw[m].sum())
+        ti = float(costo_idx[m].sum())
+        tb = float(costo_bl[m].sum())
+        pm = ti / e_mwh if e_mwh > 0 else float("nan")
+        righe.append({"Mese": str(mp), "Costo indicizzato (€)": round(ti, 2),
+                      "Costo contratto (€)": round(tb, 2),
+                      "Delta contratto-indicizzato (€)": round(tb - ti, 2),
+                      "PMP indicizzato (€/MWh)": (None if np.isnan(pm) else round(pm, 2)),
+                      "Ore osservate": n_ore})
+    df_mesi = pd.DataFrame(righe, columns=colonne_m)
+
+    giorni = idxn.normalize()
+    df_d = pd.DataFrame({"giorno": giorni, "delta": delta}).groupby("giorno")["delta"].sum()
+    cum = float(0.0)
+    righe_g = []
+    for g, d in df_d.items():
+        cum += float(d)
+        righe_g.append({"Giorno": str(g.date()),
+                        "Delta cumulato contratto-indicizzato (€)": round(cum, 2)})
+    df_giorni = pd.DataFrame(righe_g, columns=colonne_g)
+
+    mese_peggiore = None
+    if len(df_mesi):
+        r = df_mesi.loc[df_mesi["Delta contratto-indicizzato (€)"].idxmax()]
+        mese_peggiore = (str(r["Mese"]), float(r["Delta contratto-indicizzato (€)"]))
+
+    out = dict(vuoto)
+    out.update({
+        "mwh": mwh,
+        "totale_indicizzato": round(tot_idx, 2),
+        "totale_fisso": round(tot_fis, 2),
+        "totale_blended": round(tot_bl, 2),
+        "pmp_indicizzato": (None if np.isnan(pmp_idx) else round(pmp_idx, 2)),
+        "pmp_blended": (None if np.isnan(pmp_bl) else round(pmp_bl, 2)),
+        "break_even": (None if (np.isnan(pmp_idx)) else round(pmp_idx, 2)),
+        "risparmio": round(risparmio, 2),
+        "risparmio_pct": (None if np.isnan(risparmio_pct) else round(risparmio_pct, 2)),
+        "quota_ore_sotto": round(quota_sotto, 4),
+        "df_mesi": df_mesi,
+        "df_giorni": df_giorni,
+        "mese_peggiore": mese_peggiore,
+    })
+    return out
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def generate_singularity_data():
     np.random.seed(42)
@@ -4183,7 +4313,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -6905,6 +7035,108 @@ elif workspace == _('ws8'):
                     file_name=f"stabilita_profilo_{d0}_{d1}.csv",
                     mime="text/csv",
                     help="Scarica ora di picco, prezzo medio e ore osservate per mese.",
+                )
+
+    with tab46:
+        titolo_fi = edu("Fisso vs indicizzato", "Confronta sul periodo selezionato il COSTO di un contratto a PREZZO FISSO (totale o parziale, con spread sul lato indicizzato) contro l'acquisto INDICIZZATO allo spot. Il helper calcola il break-even — il prezzo fisso massimo che batterebbe ancora lo spot — e il delta mese per mese e cumulato nel tempo. Diverso dalla tab 'Costo fornitura', dove la tariffa flat è un semplice delta totale: qui decidi QUANTA quota comprare a fisso e vedi QUANDO il contratto vince o perde.")
+        st.markdown(f"**{titolo_fi}**: contratto a prezzo fisso (anche parziale) contro indicizzato spot sul tuo profilo F1/F2/F3.", unsafe_allow_html=True)
+
+        fi1, fi2, fi3, fi4 = st.columns(4)
+        with fi1:
+            fi_prezzo = st.number_input("Prezzo fisso offerto (€/MWh)", min_value=0.0, value=100.0, step=1.0,
+                                        key="fi46_prezzo",
+                                        help="Prezzo fisso tutto incluso dell'offerta del fornitore (€/MWh).")
+        with fi2:
+            fi_spread = st.number_input("Spread indicizzato (€/MWh)", min_value=0.0, value=3.0, step=0.5,
+                                        key="fi46_spread",
+                                        help="Margine del fornitore sopra lo spot se resti indicizzato (es. 2-5 €/MWh).")
+        with fi3:
+            fi_quota = st.slider("Quota coperta a fisso (%)", min_value=0, max_value=100, value=100, step=5,
+                                 key="fi46_quota",
+                                 help="100% = tutto il profilo a prezzo fisso; meno di 100% = copertura parziale (hedging).")
+        with fi4:
+            st.markdown("<div style='padding-top: 28px;'></div>", unsafe_allow_html=True)
+            st.caption(f"Profilo: F1 {float(mw_f1):.1f} MW, F2 {float(mw_f2):.1f} MW, F3 {float(mw_f3):.1f} MW — imposti le potenze nella tab 💰 Costo fornitura.")
+
+        fi = calcola_confronto_fisso_indicizzato(prezzi, mw_f1, mw_f2, mw_f3, fi_prezzo,
+                                                spread_indicizzato=fi_spread, quota_fissa=fi_quota / 100.0)
+        if fi["mwh"] == 0:
+            st.warning("Imposta una potenza maggiore di zero in almeno una fascia (tab 💰 Costo fornitura) per calcolare il confronto.")
+        else:
+            seg_fi = "🟢" if fi["risparmio"] > 0 else ("🔴" if fi["risparmio"] < 0 else "⚪")
+            pct_fi = fi["risparmio_pct"]
+            pct_txt = f" ({pct_fi:+.1f} %)" if pct_fi is not None else ""
+            c1, c2, c3, c4 = st.columns(4)
+            render_kpi(edu("Costo indicizzato totale", "Quanto costerebbe il profilo comprando tutto allo spot (più spread) nel periodo selezionato."), f"{fi['totale_indicizzato']:,.0f} €", c1)
+            render_kpi(edu("Costo contratto (fisso + indicizzato)", "Costo totale con la quota coperta a fisso e il resto indicizzato allo spot."), f"{fi['totale_blended']:,.0f} €", c2)
+            render_kpi(edu(f"{seg_fi} Risparmio del contratto", "Differenza indicizzato meno contratto: positivo = il contratto fa risparmiare; negativo = conviene restare indicizzati."), f"{fi['risparmio']:+,.0f} €{pct_txt}", c3)
+            render_kpi(edu("Break-even del fisso", "Il prezzo fisso massimo che pareggerebbe l'indicizzato: se l'offerta è sotto questo valore, il fisso vince; se sopra, conviene l'indicizzato."), f"{fi['break_even']:,.2f} €/MWh", c4)
+            st.caption(f"Energia {fi['mwh']:,.0f} MWh — prezzo medio ponderato indicizzato (spread incluso): {fi['pmp_indicizzato']:,.2f} €/MWh; "
+                       f"contratto blended: {fi['pmp_blended']:,.2f} €/MWh. "
+                       f"Spot+spread sotto il fisso in {fi['quota_ore_sotto']*100:.1f}% delle ore.")
+            if fi["mese_peggiore"] is not None:
+                mm, dv = fi["mese_peggiore"]
+                st.caption(f"Mese peggiore per il contratto: {mm} (+{dv:,.0f} € vs indicizzato).")
+
+            try:
+                df_g = fi["df_giorni"]
+                fig_fi1 = go.Figure()
+                fig_fi1.add_trace(go.Scatter(x=df_g["Giorno"], y=df_g["Delta cumulato contratto-indicizzato (€)"],
+                                             mode="lines", name="Delta cumulato",
+                                             fill="tozeroy",
+                                             hovertemplate="Giorno: %{x}<br>Delta cumulato: %{y:,.0f} €<extra></extra>"))
+                fig_fi1.update_layout(template="plotly_dark", height=340,
+                                      title="Delta cumulato contratto vs indicizzato (sopra lo zero = il contratto costa di più)",
+                                      xaxis_title="Giorno", yaxis_title="€ cumulati")
+                fig_fi1.add_hline(y=0, line_dash="dash", line_color="gray")
+                st.plotly_chart(fig_fi1, use_container_width=True)
+                st.caption("Curva che sale = nel periodo il fisso sta perdendo contro lo spot; curva che scende = il fisso sta vincendo. Il valore finale è il risparmio (negato).")
+            except Exception:
+                st.info("Curva cumulata non disponibile per questi dati.")
+
+            try:
+                df_m = fi["df_mesi"]
+                colori = ["#22c55e" if v < 0 else "#ef4444" for v in df_m["Delta contratto-indicizzato (€)"]]
+                fig_fi2 = go.Figure()
+                fig_fi2.add_trace(go.Bar(x=df_m["Mese"], y=df_m["Delta contratto-indicizzato (€)"],
+                                         marker_color=colori,
+                                         hovertemplate="Mese: %{x}<br>Delta: %{y:,.0f} €<extra></extra>"))
+                fig_fi2.update_layout(template="plotly_dark", height=300,
+                                      title="Delta mensile contratto − indicizzato (verde = il contratto risparmia)",
+                                      xaxis_title="Mese", yaxis_title="€")
+                st.plotly_chart(fig_fi2, use_container_width=True)
+            except Exception:
+                st.info("Grafico mensile non disponibile per questi dati.")
+
+            try:
+                spot_fi = prezzi.dropna()
+                fig_fi3 = go.Figure()
+                fig_fi3.add_trace(go.Histogram(x=spot_fi.values, nbinsx=60, name="Ore spot",
+                                                hovertemplate="Prezzo: %{x:,.0f} €/MWh<br>Ore: %{y}<extra></extra>"))
+                fig_fi3.add_vline(x=fi_prezzo, line_dash="dash", line_color="#f59e0b",
+                                  annotation_text=f"Fisso {fi_prezzo:.0f} €/MWh", annotation_position="top right")
+                if fi["pmp_indicizzato"] is not None:
+                    fig_fi3.add_vline(x=fi["pmp_indicizzato"], line_dash="dash", line_color="#3B82F6",
+                                      annotation_text=f"PMP indicizzato {fi['pmp_indicizzato']:.0f} €/MWh",
+                                      annotation_position="top left")
+                fig_fi3.update_layout(template="plotly_dark", height=320,
+                                      title="Distribuzione dei prezzi spot orari vs prezzo fisso",
+                                      xaxis_title="€/MWh", yaxis_title="Ore")
+                st.plotly_chart(fig_fi3, use_container_width=True)
+                st.caption("Se la massa dell'istogramma sta a sinistra della linea arancione, lo spot batte spesso il fisso (e viceversa).")
+            except Exception:
+                st.info("Istogramma non disponibile per questi dati.")
+
+            df_fi = fi["df_mesi"]
+            if len(df_fi):
+                st.markdown("**Dettaglio mensile**")
+                st.dataframe(df_fi, use_container_width=True, hide_index=True)
+                st.download_button(
+                    "⬇️ Esporta fisso vs indicizzato (CSV)",
+                    df_fi.to_csv(index=False).encode("utf-8"),
+                    file_name=f"fisso_vs_indicizzato_{d0}_{d1}.csv",
+                    mime="text/csv",
+                    help="Scarica il confronto mensile fisso vs indicizzato.",
                 )
 
 # Footer
