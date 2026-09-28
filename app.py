@@ -3621,6 +3621,169 @@ def calcola_confronto_fisso_indicizzato(prezzi, mw_f1, mw_f2, mw_f3, prezzo_fiss
     return out
 
 
+def calcola_valutazione_cap_floor(prezzi, mw_f1, mw_f2, mw_f3,
+                                  cap_strike=None, floor_strike=None, spread=0.0):
+    """Valutazione del premio equo di un CAP e/o un FLOOR sul prezzo orario.
+
+    Strumento di structuring per il procurement: il buyer compra allo spot
+    (+ spread del fornitore) ma si copre con un CAP a strike K (se lo spot
+    supera K paga K) e/o un FLOOR a strike F (se scende sotto F paga F). Il
+    helper calcola il PREMIO EQUO di ciascuna protezione in EUR/MWh sul
+    profilo di carico F1/F2/F3, come media storica del payoff orario
+    (approccio attuariale: nessun modello di volatilita', solo la storia
+    dei prezzi del periodo selezionato).
+
+    - cap:   payoff_orario = max(0, (spot + spread) - cap_strike) * MW_ora
+    - floor: payoff_orario = max(0, floor_strike - (spot + spread)) * MW_ora
+    - collar = cap + floor insieme; richiede floor_strike < cap_strike,
+      altrimenti collar non valido (ritorna neutro con 'errore').
+
+    Differenza dalle altre tab: 'Fisso vs indicizzato' confronta due prezzi
+    di acquisto, 'Valore flessibilita'' taglia carico fisico; qui si PREZZA
+    una protezione finanziaria — il premio che il fornitore dovrebbe chiedere
+    per lo strike scelto — utile per negoziare lo strike o decidere se il
+    premio offerto conviene.
+
+    Strike None = protezione disattivata; almeno una deve essere attiva,
+    altrimenti ritorna neutro con 'errore'.
+
+    NaN-safe: ore con prezzo NaN escluse da tutti i totali. Serie vuota o
+    indice non datetime -> KPI a None e DataFrame vuoti. Mesi DST con 23/25
+    ore: i conteggi mensili usano le ore osservate.
+
+    Ritorna dict con 'mwh', 'premio_cap_eur_mwh' (None se cap inattivo o
+    mwh=0), 'premio_floor_eur_mwh', 'premio_cap_tot_eur',
+    'premio_floor_tot_eur', 'ore_cap_pct' (frazione ore con payoff cap > 0,
+    None se cap inattivo), 'ore_floor_pct', 'payout_medio_ora_cap' (EUR/h
+    sulle sole ore esercitate, None se cap inattivo),
+    'payout_medio_ora_floor', 'costo_netto_protetto' (EUR: costo spot+spread
+    meno i payoff incassati), 'df_mesi' (Mese, Payout cap (EUR), Payout
+    floor (EUR), Ore osservate, PMP netto (EUR/MWh)), 'df_giorni' (Giorno,
+    Payout cap cumulato (EUR), Payout floor cumulato (EUR)), 'mese_max_cap'
+    ((etichetta mese, payout) o None), 'errore' (None o stringa)."""
+    colonne_m = ["Mese", "Payout cap (\u20ac)", "Payout floor (\u20ac)", "Ore osservate",
+                 "PMP netto (\u20ac/MWh)"]
+    colonne_g = ["Giorno", "Payout cap cumulato (\u20ac)", "Payout floor cumulato (\u20ac)"]
+    vuoto = {"mwh": 0.0, "premio_cap_eur_mwh": None, "premio_floor_eur_mwh": None,
+             "premio_cap_tot_eur": None, "premio_floor_tot_eur": None,
+             "ore_cap_pct": None, "ore_floor_pct": None,
+             "payout_medio_ora_cap": None, "payout_medio_ora_floor": None,
+             "costo_netto_protetto": None,
+             "df_mesi": pd.DataFrame(columns=colonne_m),
+             "df_giorni": pd.DataFrame(columns=colonne_g),
+             "mese_max_cap": None, "errore": None}
+
+    def _strike(v):
+        if v is None:
+            return None
+        x = float(v)
+        if not np.isfinite(x):
+            raise ValueError("strike non finito")
+        return x
+
+    try:
+        cap = _strike(cap_strike)
+        flr = _strike(floor_strike)
+        sp = float(spread)
+        if not np.isfinite(sp):
+            raise ValueError("spread non finito")
+    except Exception:
+        out = dict(vuoto)
+        out["errore"] = "Strike o spread non validi: inserisci valori numerici."
+        return out
+    if cap is None and flr is None:
+        out = dict(vuoto)
+        out["errore"] = ("Nessuna protezione attiva: imposta almeno uno strike "
+                         "(cap e/o floor).")
+        return out
+    if cap is not None and flr is not None and flr >= cap:
+        out = dict(vuoto)
+        out["errore"] = ("Collar non valido: lo strike del floor deve essere "
+                         "sotto lo strike del cap.")
+        return out
+
+    try:
+        p = prezzi.astype(float)
+        p = p[~p.index.duplicated(keep="first")].sort_index()
+        if not isinstance(p.index, pd.DatetimeIndex):
+            return dict(vuoto)
+    except Exception:
+        return dict(vuoto)
+    p = p.dropna()
+    if len(p) == 0:
+        return dict(vuoto)
+
+    profilo = {"F1": float(mw_f1), "F2": float(mw_f2), "F3": float(mw_f3)}
+    fasce = p.index.map(fascia_oraria)
+    mw = fasce.map(profilo).to_numpy(dtype=float)
+    net = p.to_numpy(dtype=float) + sp
+    mwh = float(mw.sum())
+
+    pay_cap = np.maximum(0.0, net - cap) * mw if cap is not None else np.zeros_like(net)
+    pay_flr = np.maximum(0.0, flr - net) * mw if flr is not None else np.zeros_like(net)
+    tot_cap = float(pay_cap.sum())
+    tot_flr = float(pay_flr.sum())
+
+    def _pct(pay):
+        return float(np.mean(pay > 0.0))
+
+    def _medio_ora(pay, tot):
+        n_ex = int((pay > 0.0).sum())
+        return (tot / n_ex) if n_ex > 0 else 0.0
+
+    premio_cap = (tot_cap / mwh) if (cap is not None and mwh > 0) else None
+    premio_flr = (tot_flr / mwh) if (flr is not None and mwh > 0) else None
+    netto = float(((net * mw) - pay_cap - pay_flr).sum())
+
+    idxn = p.index.tz_localize(None) if p.index.tz is not None else p.index
+    mesi = idxn.to_period("M")
+    righe = []
+    for mp in sorted(set(mesi.tolist())):
+        m = np.asarray(mesi == mp)
+        e_mwh = float(mw[m].sum())
+        pm = float(((net * mw)[m].sum()) / e_mwh) if e_mwh > 0 else float("nan")
+        righe.append({"Mese": str(mp), "Payout cap (\u20ac)": round(float(pay_cap[m].sum()), 2),
+                      "Payout floor (\u20ac)": round(float(pay_flr[m].sum()), 2),
+                      "Ore osservate": int(m.sum()),
+                      "PMP netto (\u20ac/MWh)": (None if np.isnan(pm) else round(pm, 2))})
+    df_mesi = pd.DataFrame(righe, columns=colonne_m)
+
+    giorni = idxn.normalize()
+    df_d = pd.DataFrame({"giorno": giorni, "pc": pay_cap, "pf": pay_flr}).groupby("giorno")[["pc", "pf"]].sum()
+    cum_c = cum_f = 0.0
+    righe_g = []
+    for g, r in df_d.iterrows():
+        cum_c += float(r["pc"])
+        cum_f += float(r["pf"])
+        righe_g.append({"Giorno": str(g.date()),
+                        "Payout cap cumulato (\u20ac)": round(cum_c, 2),
+                        "Payout floor cumulato (\u20ac)": round(cum_f, 2)})
+    df_giorni = pd.DataFrame(righe_g, columns=colonne_g)
+
+    mese_max_cap = None
+    if cap is not None and len(df_mesi):
+        r = df_mesi.loc[df_mesi["Payout cap (\u20ac)"].idxmax()]
+        mese_max_cap = (str(r["Mese"]), float(r["Payout cap (\u20ac)"]))
+
+    out = dict(vuoto)
+    out.update({
+        "mwh": mwh,
+        "premio_cap_eur_mwh": (None if premio_cap is None else round(premio_cap, 4)),
+        "premio_floor_eur_mwh": (None if premio_flr is None else round(premio_flr, 4)),
+        "premio_cap_tot_eur": round(tot_cap, 2) if cap is not None else None,
+        "premio_floor_tot_eur": round(tot_flr, 2) if flr is not None else None,
+        "ore_cap_pct": round(_pct(pay_cap), 4) if cap is not None else None,
+        "ore_floor_pct": round(_pct(pay_flr), 4) if flr is not None else None,
+        "payout_medio_ora_cap": round(_medio_ora(pay_cap, tot_cap), 2) if cap is not None else None,
+        "payout_medio_ora_floor": round(_medio_ora(pay_flr, tot_flr), 2) if flr is not None else None,
+        "costo_netto_protetto": round(netto, 2),
+        "df_mesi": df_mesi,
+        "df_giorni": df_giorni,
+        "mese_max_cap": mese_max_cap,
+    })
+    return out
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def generate_singularity_data():
     np.random.seed(42)
@@ -4313,7 +4476,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -7137,6 +7300,130 @@ elif workspace == _('ws8'):
                     file_name=f"fisso_vs_indicizzato_{d0}_{d1}.csv",
                     mime="text/csv",
                     help="Scarica il confronto mensile fisso vs indicizzato.",
+                )
+
+    with tab47:
+        titolo_cf = edu("Cap & Floor", "Prezza una PROTEZIONE sul prezzo spot: un CAP a strike K (se lo spot+spread supera K, paghi K) e/o un FLOOR a strike F (se scende sotto F, paghi F). Il helper calcola il PREMIO EQUO in €/MWh sul tuo profilo F1/F2/F3 come media storica del payoff orario — è il prezzo che il fornitore dovrebbe chiedere per la protezione: utile per negoziare lo strike o decidere se accettare il premio offerto. Diverso dalla tab 'Fisso vs indicizzato' (confronto tra due prezzi di acquisto) e da 'Valore flessibilità' (taglio fisico del carico): qui non cambi né prezzo base né consumi, compri solo un'assicurazione sul prezzo.")
+        st.markdown(f"**{titolo_cf}**: premio equo di cap/floor sul profilo di carico (approccio attuariale sui prezzi storici).", unsafe_allow_html=True)
+
+        cf0, cf1, cf2, cf3, cf4 = st.columns(5)
+        with cf0:
+            cf_cap_on = st.checkbox("CAP attivo", value=True, key="cf47_cap_on",
+                                    help="Protezione contro i picchi: se lo spot+spread supera lo strike del cap, paghi lo strike.")
+        with cf1:
+            cf_cap = st.number_input("Strike cap (€/MWh)", min_value=0.0, value=120.0, step=5.0,
+                                     key="cf47_cap", disabled=not cf_cap_on,
+                                     help="Prezzo massimo che pagheresti con la protezione cap.")
+        with cf2:
+            cf_flr_on = st.checkbox("FLOOR attivo", value=False, key="cf47_flr_on",
+                                    help="Protezione contro i crolli (utile se rivendi energia): se lo spot+spread scende sotto lo strike del floor, paghi lo strike.")
+        with cf3:
+            cf_flr = st.number_input("Strike floor (€/MWh)", min_value=0.0, value=40.0, step=5.0,
+                                     key="cf47_flr", disabled=not cf_flr_on,
+                                     help="Prezzo minimo garantito con la protezione floor.")
+        with cf4:
+            cf_spread = st.number_input("Spread sopra lo spot (€/MWh)", min_value=0.0, value=3.0, step=0.5,
+                                        key="cf47_spread",
+                                        help="Margine del fornitore sopra lo spot, incluso nel prezzo su cui scatta la protezione.")
+
+        cf = calcola_valutazione_cap_floor(prezzi, mw_f1, mw_f2, mw_f3,
+                                           cap_strike=cf_cap if cf_cap_on else None,
+                                           floor_strike=cf_flr if cf_flr_on else None,
+                                           spread=cf_spread)
+        if cf["errore"]:
+            st.warning(f"⚠️ {cf['errore']}")
+        elif cf["mwh"] == 0:
+            st.warning("Imposta una potenza maggiore di zero in almeno una fascia (tab 💰 Costo fornitura) per valutare le protezioni.")
+        else:
+            def _fmt_cf(v, fmt):
+                return fmt.format(v) if v is not None else "—"
+            k1, k2, k3, k4 = st.columns(4)
+            render_kpi(edu("Premio equo CAP", "Quanto dovrebbe costare il cap in €/MWh sul tuo profilo: media storica del payoff orario. Se il fornitore chiede di più, la protezione è cara; se chiede di meno, è un affare."),
+                       _fmt_cf(cf["premio_cap_eur_mwh"], "{:,.2f} €/MWh"), k1)
+            render_kpi(edu("Premio equo FLOOR", "Quanto dovrebbe costare il floor in €/MWh sul tuo profilo: media storica del payoff orario."),
+                       _fmt_cf(cf["premio_floor_eur_mwh"], "{:,.2f} €/MWh"), k2)
+            tot_pay = (cf["premio_cap_tot_eur"] or 0.0) + (cf["premio_floor_tot_eur"] or 0.0)
+            render_kpi(edu("Payoff totale nel periodo", "Somma dei payoff che le protezioni avrebbero pagato nel periodo selezionato: è il premio equo totale in euro."),
+                       f"{tot_pay:,.0f} €", k3)
+            ore_ex = []
+            if cf["ore_cap_pct"] is not None:
+                ore_ex.append(f"cap {cf['ore_cap_pct']*100:.1f}%")
+            if cf["ore_floor_pct"] is not None:
+                ore_ex.append(f"floor {cf['ore_floor_pct']*100:.1f}%")
+            render_kpi(edu("Ore con esercizio", "Quota di ore in cui la protezione è scattata (payoff > 0)."),
+                       ", ".join(ore_ex) if ore_ex else "—", k4)
+            st.caption(f"Energia {cf['mwh']:,.0f} MWh — costo netto protetto (spot+spread meno payoff): {cf['costo_netto_protetto']:,.0f} €. "
+                       f"Payoff medio per ora esercitata: cap {_fmt_cf(cf['payout_medio_ora_cap'], '{:,.0f} €/h')}, "
+                       f"floor {_fmt_cf(cf['payout_medio_ora_floor'], '{:,.0f} €/h')}.")
+            if cf["mese_max_cap"] is not None:
+                mm, pv = cf["mese_max_cap"]
+                st.caption(f"Mese con il payoff cap più alto: {mm} ({pv:,.0f} €).")
+
+            try:
+                spot_cf = (prezzi.dropna() + cf_spread).values
+                fig_cf1 = go.Figure()
+                fig_cf1.add_trace(go.Histogram(x=spot_cf, nbinsx=60, name="Ore (spot+spread)",
+                                               hovertemplate="Prezzo: %{x:,.0f} €/MWh<br>Ore: %{y}<extra></extra>"))
+                if cf_cap_on:
+                    fig_cf1.add_vline(x=cf_cap, line_dash="dash", line_color="#ef4444",
+                                      annotation_text=f"Cap {cf_cap:.0f} €/MWh", annotation_position="top right")
+                if cf_flr_on:
+                    fig_cf1.add_vline(x=cf_flr, line_dash="dash", line_color="#22c55e",
+                                      annotation_text=f"Floor {cf_flr:.0f} €/MWh", annotation_position="top left")
+                fig_cf1.update_layout(template="plotly_dark", height=320,
+                                      title="Distribuzione dei prezzi orari (spot+spread) vs strike",
+                                      xaxis_title="€/MWh", yaxis_title="Ore")
+                st.plotly_chart(fig_cf1, use_container_width=True)
+                st.caption("La coda a destra della linea rossa è ciò che il cap taglia; la coda a sinistra della linea verde è ciò che il floor rialza.")
+            except Exception:
+                st.info("Istogramma non disponibile per questi dati.")
+
+            try:
+                df_cm = cf["df_mesi"]
+                fig_cf2 = go.Figure()
+                if cf_cap_on:
+                    fig_cf2.add_trace(go.Bar(x=df_cm["Mese"], y=df_cm["Payout cap (€)"],
+                                             name="Payout cap", marker_color="#ef4444",
+                                             hovertemplate="Mese: %{x}<br>Payout cap: %{y:,.0f} €<extra></extra>"))
+                if cf_flr_on:
+                    fig_cf2.add_trace(go.Bar(x=df_cm["Mese"], y=df_cm["Payout floor (€)"],
+                                             name="Payout floor", marker_color="#22c55e",
+                                             hovertemplate="Mese: %{x}<br>Payout floor: %{y:,.0f} €<extra></extra>"))
+                fig_cf2.update_layout(template="plotly_dark", height=300, barmode="group",
+                                      title="Payoff mensile delle protezioni (dove il premio equo si concentra)",
+                                      xaxis_title="Mese", yaxis_title="€")
+                st.plotly_chart(fig_cf2, use_container_width=True)
+            except Exception:
+                st.info("Grafico mensile non disponibile per questi dati.")
+
+            try:
+                df_cg = cf["df_giorni"]
+                fig_cf3 = go.Figure()
+                if cf_cap_on:
+                    fig_cf3.add_trace(go.Scatter(x=df_cg["Giorno"], y=df_cg["Payout cap cumulato (€)"],
+                                                 mode="lines", name="Cap cumulato", fill="tozeroy",
+                                                 hovertemplate="Giorno: %{x}<br>Cap cumulato: %{y:,.0f} €<extra></extra>"))
+                if cf_flr_on:
+                    fig_cf3.add_trace(go.Scatter(x=df_cg["Giorno"], y=df_cg["Payout floor cumulato (€)"],
+                                                 mode="lines", name="Floor cumulato", fill="tozeroy",
+                                                 hovertemplate="Giorno: %{x}<br>Floor cumulato: %{y:,.0f} €<extra></extra>"))
+                fig_cf3.update_layout(template="plotly_dark", height=300,
+                                      title="Payoff cumulato nel tempo (il valore finale è il premio equo totale)",
+                                      xaxis_title="Giorno", yaxis_title="€ cumulati")
+                st.plotly_chart(fig_cf3, use_container_width=True)
+            except Exception:
+                st.info("Curva cumulata non disponibile per questi dati.")
+
+            df_cf = cf["df_mesi"]
+            if len(df_cf):
+                st.markdown("**Dettaglio mensile**")
+                st.dataframe(df_cf, use_container_width=True, hide_index=True)
+                st.download_button(
+                    "⬇️ Esporta cap & floor (CSV)",
+                    df_cf.to_csv(index=False).encode("utf-8"),
+                    file_name=f"cap_floor_{d0}_{d1}.csv",
+                    mime="text/csv",
+                    help="Scarica il payoff mensile di cap e floor.",
                 )
 
 # Footer
