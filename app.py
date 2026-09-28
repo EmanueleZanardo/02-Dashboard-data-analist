@@ -3129,6 +3129,120 @@ def calcola_mean_reversion(prezzi, min_coppie=50):
     return out
 
 
+def calcola_strip_forward(prezzi, freq="ME", ora_peak_inizio=8, ora_peak_fine=20):
+    """Strip forward impliciti dal day-ahead storico.
+
+    Dallo storico dei prezzi orari calcola, per ogni periodo di consegna
+    (mese / trimestre / anno), il prezzo "implicito" di un contratto
+    forward su quel periodo:
+      - BASE: media di tutte le ore del periodo
+      - PEAK: media delle ore lun-ven dalle ore_peak_inizio alle ore_peak_fine
+        (escluse), default 8:00-20:00
+      - OFFPEAK: media di tutte le altre ore
+      - SPREAD peak-offpeak e PREMIO peak vs base (%).
+
+    Uso operativo: confrontare le quotazioni dei broker (che quotano strip
+    mensili/trimestrali/annuali base e peak) con il valore "implicito"
+    dello storico — se il forward quotato e' sopra lo strip implicito, il
+    mercato prezza un premio di rischio; se sotto, un'opportunita'.
+
+    Differenza rispetto agli altri tab: 'Base/Peak mensile' mostra i prezzi
+    base/peak mese per mese come indicatore storico; qui il framing e'
+    contrattuale (strip = prodotto forward scambiato sul mercato) con
+    spread e premio peak vs base, su tre granularita' (mese/trimestre/anno).
+
+    NaN-safe: ore NaN ignorate, ore duplicate rimosse (prima occorrenza).
+    Serie vuota, indice non datetime -> n_strip 0 e df vuoto. Weekday-only
+    peak con dati solo weekend -> Peak NaN sullo strip (non errore).
+    Mesi DST con 23/25 ore: conteggio ore effettive, media sulle ore
+    osservate. Base = 0 -> premio NaN (evita divisione per zero).
+    freq deve essere 'ME', 'QE' o 'YE', altrimenti ValueError.
+
+    Ritorna dict con 'freq', 'n_strip', 'n_ore', 'df' (colonne: 'Strip',
+    'Ore', 'Base (€/MWh)', 'Peak (€/MWh)', 'Offpeak (€/MWh)',
+    'Spread peak-offpeak (€/MWh)', 'Premio peak vs base (%)'),
+    'base_medio', 'premio_peak_medio', 'spread_medio'."""
+
+    cols = ["Strip", "Ore", "Base (€/MWh)", "Peak (€/MWh)",
+            "Offpeak (€/MWh)", "Spread peak-offpeak (€/MWh)",
+            "Premio peak vs base (%)"]
+    vuoto = {"freq": freq, "n_strip": 0, "n_ore": 0,
+             "df": pd.DataFrame(columns=cols), "base_medio": None,
+             "premio_peak_medio": None, "spread_medio": None}
+    if freq not in ("ME", "QE", "YE"):
+        raise ValueError("freq deve essere 'ME', 'QE' o 'YE'")
+    try:
+        p = prezzi.astype(float)
+        p = p[~p.index.duplicated(keep="first")].sort_index()
+    except Exception:
+        return dict(vuoto)
+    if len(p) == 0:
+        return dict(vuoto)
+    try:
+        if not isinstance(p.index, pd.DatetimeIndex):
+            return dict(vuoto)
+    except Exception:
+        return dict(vuoto)
+    if not (0 <= ora_peak_inizio < ora_peak_fine <= 24):
+        raise ValueError("finestra peak non valida")
+
+    idx = p.index
+    is_peak = ((idx.dayofweek < 5)
+               & (idx.hour >= ora_peak_inizio)
+               & (idx.hour < ora_peak_fine))
+    # Compatibilita' pandas: alias 'ME'/'QE'/'YE' (pandas>=2.2) con fallback
+    # a 'M'/'Q'/'Y' per le versioni precedenti.
+    _freq_fallback = {"ME": "M", "QE": "Q", "YE": "Y"}
+
+    def _rs(s):
+        try:
+            return s.resample(freq)
+        except ValueError:
+            return s.resample(_freq_fallback[freq])
+
+    # Media sulle ore valide (NaN ignorate): il count usa le ore osservate
+    base = _rs(p).mean()
+    ore = _rs(p).count()
+    peak = _rs(p[is_peak]).mean().reindex(base.index)
+    offp = _rs(p[~is_peak]).mean().reindex(base.index)
+
+    if freq == "ME":
+        labels = [f"{t.year:04d}-{t.month:02d}" for t in base.index]
+    elif freq == "QE":
+        labels = [f"{t.year:04d}-Q{t.quarter}" for t in base.index]
+    else:
+        labels = [f"{t.year:04d}" for t in base.index]
+
+    righe = []
+    for lab, b, pk, of, n in zip(labels, base.to_numpy(), peak.to_numpy(),
+                                 offp.to_numpy(), ore.to_numpy()):
+        if not np.isfinite(b) or n == 0:
+            continue
+        spread = pk - of if (np.isfinite(pk) and np.isfinite(of)) else np.nan
+        premio = (pk - b) / b * 100.0 if (np.isfinite(pk) and b != 0) else np.nan
+        righe.append({
+            "Strip": lab,
+            "Ore": int(n),
+            "Base (€/MWh)": round(float(b), 2),
+            "Peak (€/MWh)": round(float(pk), 2) if np.isfinite(pk) else np.nan,
+            "Offpeak (€/MWh)": round(float(of), 2) if np.isfinite(of) else np.nan,
+            "Spread peak-offpeak (€/MWh)": round(float(spread), 2) if np.isfinite(spread) else np.nan,
+            "Premio peak vs base (%)": round(float(premio), 2) if np.isfinite(premio) else np.nan,
+        })
+    df = pd.DataFrame(righe, columns=cols)
+    out = dict(vuoto)
+    out["n_strip"] = len(df)
+    out["n_ore"] = int(ore.sum())
+    out["df"] = df
+    if len(df):
+        out["base_medio"] = round(float(df["Base (€/MWh)"].mean()), 2)
+        prem = df["Premio peak vs base (%)"].dropna()
+        spr = df["Spread peak-offpeak (€/MWh)"].dropna()
+        out["premio_peak_medio"] = round(float(prem.mean()), 2) if len(prem) else None
+        out["spread_medio"] = round(float(spr.mean()), 2) if len(spr) else None
+    return out
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def generate_singularity_data():
     np.random.seed(42)
@@ -3821,7 +3935,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -6331,6 +6445,73 @@ elif workspace == _('ws8'):
                 )
             else:
                 st.info("Serie troppo corta per la scomposizione mensile (servono mesi con almeno 100 ore valide).")
+
+    with tab43:
+        titolo_sf = edu("Strip forward impliciti", "Gli STRIP FORWARD sono i contratti standard scambiati sul mercato elettrico: un 'strip mensile base' e' il prezzo medio di tutte le ore di quel mese di consegna, uno 'strip peak' la media delle ore lun-ven 8:00-20:00, 'offpeak' il resto. I broker quotano questi strip per i mesi/trimestri/anni futuri. Qui li calcoliamo sullo storico day-ahead ('impliciti'): confrontare la quotazione del broker con lo strip implicito dice se il mercato sta prezzando un premio di rischio (quotazione sopra lo storico) o uno sconto. Lo SPREAD peak-offpeak e il PREMIO peak vs base misurano quanto costa di piu' l'energia nelle ore lavorative: piu' e' alto, piu' conviene spostare i consumi (shifting) o coprire il peak separatamente.")
+        st.markdown(f"**{titolo_sf}**: prezzi forward impliciti per periodo di consegna (base / peak / offpeak) calcolati sullo storico day-ahead.", unsafe_allow_html=True)
+
+        freq_map = {"Mensile": "ME", "Trimestrale": "QE", "Annuale": "YE"}
+        freq_label = st.radio("Granularita' strip", list(freq_map.keys()), horizontal=True,
+                              help="Mensile = 12 strip/anno (come le quotazioni M+1, M+2...), Trimestrale = Q1-Q4, Annuale = Cal.")
+        sf = calcola_strip_forward(prezzi, freq=freq_map[freq_label])
+        df_sf = sf["df"]
+        if len(df_sf) == 0:
+            st.warning("Dati insufficienti per calcolare gli strip (serve almeno uno strip con ore valide).")
+        else:
+            c1, c2, c3, c4 = st.columns(4)
+            prem_txt = f"{sf['premio_peak_medio']:+.1f} %" if sf["premio_peak_medio"] is not None else "n.d."
+            spr_txt = f"{sf['spread_medio']:,.2f} €/MWh" if sf["spread_medio"] is not None else "n.d."
+            render_kpi(edu("Strip calcolati", "Numero di periodi di consegna (mesi/trimestri/anni) con dati sufficienti nello storico."), f"{sf['n_strip']}<br><small>{sf['n_ore']:,} ore totali</small>", c1)
+            render_kpi(edu("Base medio", "Media dei prezzi base di tutti gli strip: il livello medio del mercato sul periodo analizzato."), f"{sf['base_medio']:,.2f} €/MWh", c2)
+            render_kpi(edu("Premio peak medio", "Quanto costa in piu' (in %) l'energia peak rispetto al base, mediato sugli strip. Un premio alto = ore lavorative molto piu' care: candidati per shifting o coperture peak."), f"{prem_txt}<br><small>peak vs base</small>", c3)
+            render_kpi(edu("Spread peak-offpeak medio", "Differenza media in €/MWh tra strip peak e offpeak: il valore economico di spostare 1 MWh dalle ore di punta alle ore fuori punta."), f"{spr_txt}<br><small>per MWh spostato</small>", c4)
+
+            try:
+                fig_sf1 = go.Figure()
+                fig_sf1.add_trace(go.Bar(x=df_sf["Strip"], y=df_sf["Base (€/MWh)"], name="Base",
+                                         marker_color="#3b82f6",
+                                         hovertemplate="%{x}<br>Base: %{y:,.2f} €/MWh<extra></extra>"))
+                fig_sf1.add_trace(go.Bar(x=df_sf["Strip"], y=df_sf["Peak (€/MWh)"], name="Peak",
+                                         marker_color="#ef4444",
+                                         hovertemplate="%{x}<br>Peak: %{y:,.2f} €/MWh<extra></extra>"))
+                fig_sf1.add_trace(go.Bar(x=df_sf["Strip"], y=df_sf["Offpeak (€/MWh)"], name="Offpeak",
+                                         marker_color="#22c55e",
+                                         hovertemplate="%{x}<br>Offpeak: %{y:,.2f} €/MWh<extra></extra>"))
+                fig_sf1.update_layout(template="plotly_dark", height=380, barmode="group",
+                                      title="Strip forward impliciti: base vs peak vs offpeak",
+                                      xaxis_title="Periodo di consegna", yaxis_title="Prezzo (€/MWh)",
+                                      legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+                st.plotly_chart(fig_sf1, use_container_width=True)
+                st.caption("Confronta queste barre con le quotazioni dei broker per gli stessi periodi: quotazione sopra la barra = premio di rischio del mercato.")
+            except Exception:
+                st.info("Grafico strip non disponibile per questi dati.")
+
+            try:
+                df_spr = df_sf.dropna(subset=["Spread peak-offpeak (€/MWh)"])
+                if len(df_spr):
+                    fig_sf2 = go.Figure()
+                    fig_sf2.add_trace(go.Scatter(x=df_spr["Strip"], y=df_spr["Spread peak-offpeak (€/MWh)"],
+                                                 mode="lines+markers", name="Spread peak-offpeak",
+                                                 line=dict(color="#f59e0b", width=2),
+                                                 fill="tozeroy", fillcolor="rgba(245,158,11,0.15)",
+                                                 hovertemplate="%{x}<br>Spread: %{y:,.2f} €/MWh<extra></extra>"))
+                    fig_sf2.update_layout(template="plotly_dark", height=280,
+                                          title="Spread peak-offpeak per strip: dove conviene di piu' lo shifting",
+                                          xaxis_title="Periodo di consegna", yaxis_title="€/MWh",
+                                          legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+                    st.plotly_chart(fig_sf2, use_container_width=True)
+                    st.caption("Picchi dello spread = periodi in cui spostare consumi dalle ore di punta rende di piu'.")
+            except Exception:
+                st.info("Grafico spread non disponibile per questi dati.")
+
+            st.dataframe(df_sf, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta strip forward (CSV)",
+                df_sf.to_csv(index=False).encode("utf-8"),
+                file_name=f"strip_forward_{freq_map[freq_label].lower()}_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica base, peak, offpeak, spread e premio per ogni strip: il benchmark per confrontare le quotazioni dei broker.",
+            )
 
 # Footer
 st.markdown("---")
