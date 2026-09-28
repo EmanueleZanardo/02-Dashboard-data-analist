@@ -150,6 +150,169 @@ def get_entsoe_key():
     except Exception:
         return None
 
+def calcola_picchi_coincidenti(prezzi, mw_f1, mw_f2, mw_f3, n_ore=20):
+    """Esposizione del carico ai picchi di prezzo di SISTEMA (coincident peaks).
+
+    Domanda operativa: "quando il mercato tocca i suoi prezzi piu' alti,
+    quanto carico sto prelevando?" — e' l'esposizione che, nei mercati con
+    corrispettivi di capacita'/potenza legati ai picchi di sistema (es. logica
+    PJM 5CP, triadi UK), decide quanto costa NON staccare il carico nelle ore
+    di stress. Complementare alla tab Ora di punta (ogni giorno la sua ora
+    piu' cara) e a Top ore di costo (le ore piu' care per ME, costo = prezzo x
+    mio carico): qui la selezione e' sul PREZZO DI SISTEMA, cioe' sulle ore
+    in cui il mercato e' in stress indipendentemente dal mio profilo.
+
+    Il profilo di carico dell'app e' piatto per fascia (MW costanti in
+    F1/F2/F3): il carico orario e' il MW della fascia di ciascuna ora (via
+    fascia_oraria).
+
+    Metodo (tutto deterministico a parita' di input):
+    - ore con prezzo NaN scartate; timestamp duplicati: primo tenuto,
+      serie ordinata per tempo;
+    - ore critiche = le n_ore ore con prezzo piu' alto (n clampato a
+      1..ore disponibili; pari merito -> vince l'ora piu' vecchia, argsort
+      stabile sul prezzo decrescente);
+    - carico medio e MWh nelle ore critiche vs media di periodo;
+    - what-if: spostare una quota q del carico delle ore critiche verso ore
+      "medie" fa risparmiare q x MWh_critici x max(0, prezzo_medio_critiche
+      - prezzo_medio_periodo): stima conservativa, ignora vincoli di
+      flessibilita' reali.
+
+    Differenza dagli altri tab: Picchi di prezzo analizza gli eventi di
+    scarsita' lato mercato (soglie, cluster); qui si misura l'ESPOSIZIONE
+    DEL CARICO a quegli eventi.
+
+    NaN-safe: serie vuota, MW tutti a zero/non validi -> statistiche
+    neutrali con DataFrame dalle colonne giuste. Se il costo totale del
+    periodo e' <= 0 la quota percentuale e' None.
+
+    Ritorna dict con 'n_ore' (ore critiche selezionate), 'tot_ore',
+    'prezzo_medio_critiche' / 'prezzo_medio_periodo' (EUR/MWh),
+    'mw_medio_critiche' / 'mw_medio_periodo' (MW), 'mwh_critiche',
+    'costo_critiche' / 'costo_totale' (EUR), 'quota_costo_pct',
+    'prezzo_max' + 'data_max' (Data, Ora) dell'ora piu' cara,
+    'df_top' ('Data', 'Ora', 'Prezzo (EUR/MWh)', 'Fascia', 'MW', 'Costo (EUR)',
+    ordinate dal prezzo piu' alto), 'df_mesi' ('Mese', 'Ore critiche',
+    'Prezzo medio critiche (EUR/MWh)', 'Carico medio (MW)', 'MWh critici',
+    'Costo (EUR)', 'Quota costo %' sul costo delle ore critiche),
+    'df_ore' ('Ora', 'Ore critiche', 'Carico medio (MW)') e 'df_whatif'
+    ('Quota spostata %', 'MWh spostati', 'Risparmio stimato (EUR)')."""
+    cols_top = ["Data", "Ora", "Prezzo (\u20ac/MWh)", "Fascia", "MW",
+                "Costo (\u20ac)"]
+    cols_m = ["Mese", "Ore critiche", "Prezzo medio critiche (\u20ac/MWh)",
+              "Carico medio (MW)", "MWh critici", "Costo (\u20ac)",
+              "Quota costo %"]
+    cols_o = ["Ora", "Ore critiche", "Carico medio (MW)"]
+    cols_w = ["Quota spostata %", "MWh spostati", "Risparmio stimato (\u20ac)"]
+    vuoto = {
+        "n_ore": 0, "tot_ore": 0,
+        "prezzo_medio_critiche": None, "prezzo_medio_periodo": None,
+        "mw_medio_critiche": None, "mw_medio_periodo": None,
+        "mwh_critiche": 0.0, "costo_critiche": 0.0, "costo_totale": 0.0,
+        "quota_costo_pct": None, "prezzo_max": None, "data_max": None,
+        "df_top": pd.DataFrame(columns=cols_top),
+        "df_mesi": pd.DataFrame(columns=cols_m),
+        "df_ore": pd.DataFrame(columns=cols_o),
+        "df_whatif": pd.DataFrame(columns=cols_w),
+    }
+    try:
+        mws = [float(mw_f1), float(mw_f2), float(mw_f3)]
+    except (TypeError, ValueError):
+        mws = [0.0, 0.0, 0.0]
+    p = prezzi.astype(float)
+    p = p[~p.index.duplicated(keep="first")].sort_index().dropna()
+    if len(p) == 0 or all(m <= 0 for m in mws):
+        return dict(vuoto)
+    try:
+        n = max(1, min(int(n_ore), len(p)))
+    except (TypeError, ValueError):
+        n = min(20, len(p))
+    mw_map = {"F1": mws[0], "F2": mws[1], "F3": mws[2]}
+    fasce = p.index.map(fascia_oraria)
+    mw_h = np.array([mw_map.get(f, 0.0) for f in fasce], dtype=float)
+    pv = p.to_numpy(dtype=float)
+    costo_h = pv * mw_h
+    idx_top = np.argsort(-pv, kind="stable")[:n]
+    pz_c = pv[idx_top]
+    mw_c = mw_h[idx_top]
+    co_c = costo_h[idx_top]
+    idx_c = p.index[idx_top]
+
+    out = dict(vuoto)
+    out["n_ore"] = n
+    out["tot_ore"] = len(p)
+    pmc = float(pz_c.mean())
+    pmp = float(pv.mean())
+    out["prezzo_medio_critiche"] = round(pmc, 2)
+    out["prezzo_medio_periodo"] = round(pmp, 2)
+    out["mw_medio_critiche"] = round(float(mw_c.mean()), 3)
+    out["mw_medio_periodo"] = round(float(mw_h.mean()), 3)
+    mwh_c = float(mw_c.sum())
+    out["mwh_critiche"] = round(mwh_c, 1)
+    costo_c = float(co_c.sum())
+    costo_t = float(costo_h.sum())
+    out["costo_critiche"] = round(costo_c, 2)
+    out["costo_totale"] = round(costo_t, 2)
+    out["quota_costo_pct"] = (round(costo_c / costo_t * 100.0, 2)
+                              if costo_t > 0 else None)
+    out["prezzo_max"] = round(float(pz_c[0]), 2)
+    ts_max = idx_c[0]
+    out["data_max"] = (ts_max.strftime("%Y-%m-%d"),
+                       f"{int(ts_max.hour):02d}:00")
+
+    data_s = idx_c.strftime("%Y-%m-%d")
+    ora_s = idx_c.hour.map(lambda h: f"{int(h):02d}:00")
+    fasce_c = [fasce[i] for i in idx_top]
+    out["df_top"] = pd.DataFrame({
+        "Data": data_s, "Ora": ora_s,
+        "Prezzo (\u20ac/MWh)": np.round(pz_c, 2),
+        "Fascia": fasce_c, "MW": np.round(mw_c, 3),
+        "Costo (\u20ac)": np.round(co_c, 0),
+    }, columns=cols_top)
+
+    idxn = idx_c.tz_localize(None) if idx_c.tz is not None else idx_c
+    mesi = idxn.strftime("%Y-%m")
+    righe_m = []
+    for m in sorted(set(mesi)):
+        mask = (mesi == m)
+        cm = float(co_c[mask].sum())
+        righe_m.append({
+            "Mese": m,
+            "Ore critiche": int(mask.sum()),
+            "Prezzo medio critiche (\u20ac/MWh)": round(float(pz_c[mask].mean()), 2),
+            "Carico medio (MW)": round(float(mw_c[mask].mean()), 3),
+            "MWh critici": round(float(mw_c[mask].sum()), 1),
+            "Costo (\u20ac)": round(cm, 0),
+            "Quota costo %": (round(cm / costo_c * 100.0, 1)
+                              if costo_c > 0 else None),
+        })
+    out["df_mesi"] = pd.DataFrame(righe_m, columns=cols_m)
+
+    ore_c = idx_c.hour.to_numpy()
+    righe_o = []
+    for h in range(24):
+        mask = (ore_c == h)
+        if mask.sum():
+            righe_o.append({
+                "Ora": f"{h:02d}:00",
+                "Ore critiche": int(mask.sum()),
+                "Carico medio (MW)": round(float(mw_c[mask].mean()), 3),
+            })
+    out["df_ore"] = pd.DataFrame(righe_o, columns=cols_o)
+
+    spread = max(0.0, pmc - pmp)
+    righe_w = []
+    for q in (10, 25, 50, 75):
+        mwh_sp = mwh_c * q / 100.0
+        righe_w.append({
+            "Quota spostata %": q,
+            "MWh spostati": round(mwh_sp, 1),
+            "Risparmio stimato (\u20ac)": round(mwh_sp * spread, 0),
+        })
+    out["df_whatif"] = pd.DataFrame(righe_w, columns=cols_w)
+    return out
+
+
 def calcola_concentrazione_fasce(prezzi, mw_f1, mw_f2, mw_f3, n_punti=20):
     """Concentrazione del costo di fornitura DENTRO ciascuna fascia F1/F2/F3.
 
@@ -6527,7 +6690,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -10666,6 +10829,109 @@ elif workspace == _('ws8'):
                         key=f"csv_mi_{nome}",
                     )
             st.caption("\U0001f4a1 Modello 'sempre a piena potenza quando il prezzo supera il costo marginale': margine ottimistico (ignora rampe, start-up, minimi tecnici). Confronta il margine totale con il ricavo baseload del KPI in alto: la differenza \u00e8 il valore del dispacciamento ottimale.")
+
+    with tab64:
+        titolo_pc = edu("Picchi coincidenti", "Le ORE PIU' CARE DEL MERCATO (picchi di prezzo di sistema) e quanto carico prelevi proprio in quelle ore: \u00e8 l'esposizione che nei mercati con corrispettivi di capacit\u00e0/potenza legati ai picchi di sistema decide quanto costa NON staccare il carico nelle ore di stress. Diverso dalla tab \u23f0 Ora di punta (ogni giorno la sua ora pi\u00f9 cara) e da \U0001f550 Top ore di costo (le ore pi\u00f9 care per il TUO costo = prezzo \u00d7 tuo carico): qui la selezione \u00e8 sul PREZZO DI SISTEMA, indipendente dal tuo profilo.")
+        st.markdown(titolo_pc, unsafe_allow_html=True)
+        n_pc = st.slider("\u26a1 Ore di picco di sistema da analizzare", 5, 100, 20,
+                         help="Le N ore con il prezzo pi\u00f9 alto del periodo: sono le ore di stress del mercato.",
+                         key="slider_pc_n")
+        pc = calcola_picchi_coincidenti(prezzi, mw_f1, mw_f2, mw_f3, n_pc)
+        if pc["n_ore"] == 0:
+            st.info("Nessun dato valido: serie prezzi vuota o carichi F1/F2/F3 a zero.")
+        else:
+            c1, c2, c3, c4 = st.columns(4)
+            render_kpi("Prezzo medio ore critiche (\u20ac/MWh)", f"{pc['prezzo_medio_critiche']:,.2f}", c1)
+            render_kpi("Prezzo medio periodo (\u20ac/MWh)", f"{pc['prezzo_medio_periodo']:,.2f}", c2)
+            render_kpi("MW medio ore critiche", f"{pc['mw_medio_critiche']:,.3f}", c3)
+            render_kpi("MW medio periodo", f"{pc['mw_medio_periodo']:,.3f}", c4)
+            d1, d2, d3, d4 = st.columns(4)
+            render_kpi("MWh nelle ore critiche", f"{pc['mwh_critiche']:,.1f}", d1)
+            render_kpi("Costo ore critiche (\u20ac)", f"{pc['costo_critiche']:,.0f}", d2)
+            qc = pc["quota_costo_pct"]
+            render_kpi("Quota del costo totale", f"{qc:.1f} %" if qc is not None else "n/d", d3)
+            dmax = pc["data_max"]
+            render_kpi("Ora pi\u00f9 cara", f"{dmax[0]} {dmax[1]}" if dmax else "n/d", d4)
+
+            df_pct = pc["df_top"]
+            if not df_pct.empty:
+                col_f = {"F1": "#F59E0B", "F2": "#60A5FA", "F3": "#10B981"}
+                fig_pc = go.Figure()
+                for fsc in ("F1", "F2", "F3"):
+                    msk = df_pct["Fascia"] == fsc
+                    if msk.any():
+                        dff = df_pct[msk]
+                        fig_pc.add_trace(go.Bar(
+                            x=(dff["Data"] + " " + dff["Ora"]), y=dff["Prezzo (\u20ac/MWh)"],
+                            name=f"Fascia {fsc}", marker_color=col_f[fsc],
+                            hovertemplate="%{x}<br>Prezzo: \u20ac%{y:,.2f}/MWh<br>MW: %{customdata[0]:,.3f}<br>Costo: \u20ac%{customdata[1]:,.0f}<extra></extra>",
+                            customdata=np.column_stack([dff["MW"].to_numpy(),
+                                                        dff["Costo (\u20ac)"].to_numpy()])))
+                fig_pc.add_hline(y=pc["prezzo_medio_periodo"], line_dash="dash",
+                                 line_color="#9CA3AF",
+                                 annotation_text=f"medio periodo \u20ac{pc['prezzo_medio_periodo']:,.2f}/MWh")
+                fig_pc.update_layout(template="plotly_dark", height=380,
+                                     title=f"Le {pc['n_ore']} ore di picco di sistema (prezzo) e il tuo carico in quelle ore",
+                                     xaxis_title="", yaxis_title="\u20ac/MWh", barmode="group")
+                st.plotly_chart(fig_pc, use_container_width=True)
+
+                df_pco = pc["df_ore"]
+                if not df_pco.empty:
+                    fig_pco = go.Figure(go.Bar(
+                        x=df_pco["Ora"], y=df_pco["Ore critiche"],
+                        marker_color="#EF4444", name="Ore critiche",
+                        hovertemplate="Ora %{x}<br>Picchi: %{y}<br>Carico medio: %{customdata:,.3f} MW<extra></extra>",
+                        customdata=df_pco["Carico medio (MW)"]))
+                    fig_pco.update_layout(template="plotly_dark", height=300,
+                                          title="A che ora del giorno cadono i picchi di sistema",
+                                          xaxis_title="Ora", yaxis_title="N. ore critiche")
+                    st.plotly_chart(fig_pco, use_container_width=True)
+
+            st.markdown("**Le ore critiche** (ordinate dal prezzo pi\u00f9 alto)")
+            st.dataframe(pc["df_top"], use_container_width=True, hide_index=True)
+            st.download_button(
+                "\u2b07\ufe0f Esporta ore critiche (CSV)",
+                pc["df_top"].to_csv(index=False).encode("utf-8"),
+                file_name=f"picchi_coincidenti_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica l'elenco delle ore di picco di sistema con prezzo, fascia, tuo carico e costo.",
+                key="csv_pc_top",
+            )
+
+            df_pcm = pc["df_mesi"]
+            if not df_pcm.empty:
+                fig_pcm = go.Figure(go.Bar(
+                    x=df_pcm["Mese"], y=df_pcm["MWh critici"],
+                    marker_color="#8B5CF6", name="MWh critici",
+                    hovertemplate="Mese %{x}<br>MWh critici: %{y:,.1f}<br>Costo: \u20ac%{customdata:,.0f}<extra></extra>",
+                    customdata=df_pcm["Costo (\u20ac)"]))
+                fig_pcm.update_layout(template="plotly_dark", height=300,
+                                      title="MWh prelevati nelle ore critiche, per mese",
+                                      xaxis_title="Mese", yaxis_title="MWh")
+                st.plotly_chart(fig_pcm, use_container_width=True)
+                st.markdown("**Dettaglio mensile**")
+                st.dataframe(df_pcm, use_container_width=True, hide_index=True)
+
+            st.markdown("**What-if: quanto vale staccare il carico nelle ore critiche**")
+            st.caption("\U0001f4a1 Stima conservativa: l'energia spostata dalle ore critiche viene ricomprata al prezzo medio di periodo (ignora i vincoli reali di flessibilit\u00e0).")
+            df_pcw = pc["df_whatif"]
+            if not df_pcw.empty:
+                fig_pcw = go.Figure(go.Bar(
+                    x=df_pcw["Quota spostata %"].astype(str) + " %", y=df_pcw["Risparmio stimato (\u20ac)"],
+                    marker_color="#10B981", name="Risparmio stimato",
+                    hovertemplate="Quota %{x}<br>Risparmio: \u20ac%{y:,.0f}<br>MWh spostati: %{customdata:,.1f}<extra></extra>",
+                    customdata=df_pcw["MWh spostati"]))
+                fig_pcw.update_layout(template="plotly_dark", height=300,
+                                      title="Risparmio stimato spostando carico fuori dalle ore critiche",
+                                      xaxis_title="Quota di carico spostata", yaxis_title="\u20ac")
+                st.plotly_chart(fig_pcw, use_container_width=True)
+                q_pc = st.slider("\U0001f3af Quota personalizzata di carico da spostare (%)", 0, 100, 25,
+                                 key="slider_pc_q")
+                spread_pc = max(0.0, pc["prezzo_medio_critiche"] - pc["prezzo_medio_periodo"])
+                risp_pc = pc["mwh_critiche"] * q_pc / 100.0 * spread_pc
+                st.metric(f"Risparmio stimato spostando il {q_pc}% del carico critico",
+                          f"\u20ac{risp_pc:,.0f}")
+            st.caption("\U0001f4a1 Le ore critiche sono selezionate sul PREZZO di sistema, non sul tuo costo: se prelevi molto proprio in quelle ore, un programma di demand response o una copertura mirata valgono pi\u00f9 che altrove.")
 
 # Footer
 
