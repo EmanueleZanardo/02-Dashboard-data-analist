@@ -1056,6 +1056,141 @@ def calcola_correlazione_impianti(prezzi, impianti):
     }
 
 
+def calcola_curva_merito(prezzi, impianti):
+    """Curva di merito (merit order) del parco impianti: chi dispaccia e quando.
+
+    Domanda operativa: "a questo mercato, QUALI dei miei impianti entrano in
+    produzione?" — gli impianti sono ordinati per costo marginale crescente
+    (il merito economico); un impianto dispaccia nelle ore in cui il prezzo
+    supera il suo MC. Piu' un impianto sta a sinistra nella curva, piu' ore
+    dispaccia e piu' stabile e' il suo ricavo; chi sta a destra vive solo
+    degli spike di prezzo.
+
+    Metodo (tutto deterministico a parita' di input):
+    - ore valide = prezzi non-NaN, timestamp duplicati scartati (primo
+      tenuto), serie ordinata;
+    - per impianto: ore ITM = prezzo > mc; MWh dispatchati = cap x ore ITM;
+      margine = sum(max(0, prezzo - mc)) x cap (stesso modello "sempre a piena
+      potenza se ITM" del tab Margine per impianto);
+    - curva di merito: impianti ordinati per mc crescente, asse x = capacita'
+      cumulata (MW), altezza barra = mc (€/MWh);
+    - statistiche di prezzo del periodo (medio/mediano/P10/P90) per confronto
+      con la curva; "impianto marginale al prezzo medio" = l'impianto piu'
+      caro con mc <= prezzo medio (l'ultimo che dispaccia al prezzo medio).
+
+    Differenza dagli altri tab: Margine per impianto (tab 63) guarda il
+    margine €/h di ogni asset in isolamento; qui il parco e' uno STACK di
+    dispacciamento — posizionamento competitivo, fattore di utilizzo e MWh
+    dispatchati per mese.
+
+    NaN-safe: impianti con cap<=0 o mc non valido vengono scartati; zero ore
+    valide o zero impianti validi -> dict con flag 'ok' False e strutture
+    vuote con le colonne giuste.
+
+    impianti: lista di tuple (nome, mc, cap).
+
+    Ritorna dict con 'ok' (bool), 'righe' (DataFrame: Impianto, Posizione,
+    MC (€/MWh), Capacità (MW), MW cumulati inizio, MW cumulati fine, Ore ITM,
+    Ore totali, Fattore dispatch (%), MWh dispatchati, Margine (€),
+    Margine medio ITM (€/h)), 'cap_tot' (float MW), 'mc_ponderato' (float
+    €/MWh), 'dispatch_medio_pct' (float), 'margine_totale' (float €),
+    'prezzo_medio'/'prezzo_mediano'/'prezzo_p10'/'prezzo_p90' (float),
+    'marginale_medio' (nome impianto o None), 'df_mesi' (Mese + una colonna
+    "MWh <nome>" per impianto, in ordine di merito)."""
+    cols_r = ["Impianto", "Posizione", "MC (€/MWh)", "Capacità (MW)",
+              "MW cumulati inizio", "MW cumulati fine", "Ore ITM",
+              "Ore totali", "Fattore dispatch (%)", "MWh dispatchati",
+              "Margine (€)", "Margine medio ITM (€/h)"]
+    vuoto = {
+        "ok": False, "righe": pd.DataFrame({c: [] for c in cols_r}),
+        "cap_tot": 0.0, "mc_ponderato": None, "dispatch_medio_pct": None,
+        "margine_totale": 0.0, "prezzo_medio": None, "prezzo_mediano": None,
+        "prezzo_p10": None, "prezzo_p90": None, "marginale_medio": None,
+        "df_mesi": pd.DataFrame({"Mese": []}),
+    }
+    try:
+        p = prezzi.astype(float)
+        p = p[~p.index.duplicated(keep="first")].sort_index().dropna()
+    except Exception:
+        return dict(vuoto)
+    n = len(p)
+    if n == 0:
+        return dict(vuoto)
+    pv = p.to_numpy(dtype=float)
+    stats = []
+    for item in impianti:
+        try:
+            nome, mc, cap = item
+            mc = float(mc)
+            cap = float(cap)
+        except (TypeError, ValueError):
+            continue
+        if cap <= 0 or not np.isfinite(mc):
+            continue
+        itm = pv > mc
+        ore_itm = int(itm.sum())
+        mwh = float(cap * ore_itm)
+        marg = float(np.maximum(0.0, pv - mc).sum() * cap)
+        stats.append({
+            "nome": str(nome), "mc": mc, "cap": cap, "ore_itm": ore_itm,
+            "fattore": ore_itm / n * 100.0, "mwh": mwh, "margine": marg,
+            "marg_medio_itm": (marg / ore_itm if ore_itm > 0 else None),
+        })
+    if not stats:
+        return dict(vuoto)
+    stats.sort(key=lambda s: (s["mc"], s["nome"]))
+    righe = []
+    cum = 0.0
+    for i, s in enumerate(stats, start=1):
+        righe.append({
+            "Impianto": s["nome"], "Posizione": i,
+            "MC (€/MWh)": round(s["mc"], 2),
+            "Capacità (MW)": round(s["cap"], 1),
+            "MW cumulati inizio": round(cum, 1),
+            "MW cumulati fine": round(cum + s["cap"], 1),
+            "Ore ITM": s["ore_itm"], "Ore totali": n,
+            "Fattore dispatch (%)": round(s["fattore"], 1),
+            "MWh dispatchati": round(s["mwh"], 1),
+            "Margine (€)": round(s["margine"], 0),
+            "Margine medio ITM (€/h)": (None if s["marg_medio_itm"] is None
+                                        else round(s["marg_medio_itm"], 2)),
+        })
+        cum += s["cap"]
+    cap_tot = cum
+    mc_pond = sum(s["mc"] * s["cap"] for s in stats) / cap_tot
+    mwh_tot = sum(s["mwh"] for s in stats)
+    dispatch_medio = mwh_tot / (cap_tot * n) * 100.0
+    marg_tot = sum(s["margine"] for s in stats)
+    p_medio = float(np.mean(pv))
+    p_med = float(np.median(pv))
+    p10 = float(np.percentile(pv, 10))
+    p90 = float(np.percentile(pv, 90))
+    candidati = [s for s in stats if s["mc"] <= p_medio]
+    marginale = max(candidati, key=lambda s: s["mc"])["nome"] if candidati else None
+    # MWh dispatchati per mese, colonne in ordine di merito
+    idxn = p.index.tz_localize(None) if p.index.tz is not None else p.index
+    mesi = idxn.strftime("%Y-%m")
+    righe_m = []
+    for m in sorted(set(mesi)):
+        mask_m = (mesi == m)
+        riga = {"Mese": m}
+        for s in stats:
+            itm_m = (pv[mask_m] > s["mc"]).sum()
+            riga[f"MWh {s['nome']}"] = round(float(s["cap"] * itm_m), 1)
+        righe_m.append(riga)
+    cols_m = ["Mese"] + [f"MWh {s['nome']}" for s in stats]
+    return {
+        "ok": True, "righe": pd.DataFrame(righe, columns=cols_r),
+        "cap_tot": round(cap_tot, 1), "mc_ponderato": round(mc_pond, 2),
+        "dispatch_medio_pct": round(dispatch_medio, 1),
+        "margine_totale": round(marg_tot, 0),
+        "prezzo_medio": round(p_medio, 2), "prezzo_mediano": round(p_med, 2),
+        "prezzo_p10": round(p10, 2), "prezzo_p90": round(p90, 2),
+        "marginale_medio": marginale,
+        "df_mesi": pd.DataFrame(righe_m, columns=cols_m),
+    }
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def generate_mock_hourly(start_date, end_date):
     """Serie oraria sintetica ma realistica del prezzo Swissix (€/MWh):
@@ -6807,7 +6942,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -11116,6 +11251,124 @@ elif workspace == _('ws8'):
                     key="csv_ci_mesi",
                 )
             st.caption("💡 Correlazione alta + concentrazione alta = il portafoglio è un 'picco puro': considera di aggiungere un asset con profilo diverso (es. baseload contro punta) per stabilizzare i ricavi. Correlazione bassa = la diversificazione sta già funzionando.")
+
+    with tab66:
+        titolo_cm = edu("Curva di merito", "La CURVA DI MERITO (merit order) ordina i tuoi impianti dal costo marginale PIU' BASSO al PIU' ALTO: chi sta a SINISTRA dispaccia piu' ore e ha ricavi piu' stabili, chi sta a DESTRA vive solo degli spike di prezzo. Le linee di prezzo medio/mediano/P90 mostrano a colpo d'occhio quali asset sono 'dentro il mercato' e quali fuori. Diverso dal tab \U0001f4b9 Margine per impianto (ogni asset in isolamento): qui il parco e' uno STACK di dispacciamento — posizionamento competitivo, fattore di utilizzo, MWh dispatchati per mese.")
+        st.markdown(titolo_cm, unsafe_allow_html=True)
+        if not assets_sel:
+            st.info("Seleziona almeno un impianto dai filtri in alto per vedere la curva di merito.")
+        else:
+            cm = calcola_curva_merito(
+                prezzi, [(nome, ASSETS[nome][0], ASSETS[nome][1]) for nome in assets_sel])
+            if not cm["ok"]:
+                st.warning("Dati insufficienti per la curva di merito (servono prezzi orari e almeno un impianto valido).")
+            else:
+                d1, d2, d3, d4 = st.columns(4)
+                render_kpi(edu("Capacità del parco", "Somma delle capacità degli impianti selezionati: la larghezza totale della curva di merito."),
+                           f"{cm['cap_tot']:,.0f} MW", d1)
+                render_kpi(edu("MC medio ponderato", "Costo marginale medio del parco, pesato per capacità: il prezzo sotto cui la maggior parte del parco smette di dispacciare."),
+                           f"{cm['mc_ponderato']:,.1f} €/MWh", d2)
+                mm_txt = cm["marginale_medio"] if cm["marginale_medio"] else "nessuno"
+                render_kpi(edu("Impianto marginale al prezzo medio", "L'impianto piu' caro che dispaccia comunque al prezzo medio di periodo: l'ultimo gradino della curva 'dentro il mercato'. Se e' 'nessuno', nemmeno l'impianto piu' economico batte il prezzo medio."),
+                           mm_txt, d3)
+                render_kpi(edu("Fattore dispatch medio", "Quota media delle ore in cui il parco dispaccia, pesata per capacità: quanto del ferro e' davvero in produzione."),
+                           f"{cm['dispatch_medio_pct']:.1f} %", d4)
+
+                st.markdown("**Curva di merito: costo marginale su capacità cumulata**")
+                fig_cm = go.Figure()
+                for _, riga in cm["righe"].iterrows():
+                    nome = riga["Impianto"]
+                    col = ASSETS[nome][2] if nome in ASSETS else "#3b82f6"
+                    centro = (riga["MW cumulati inizio"] + riga["MW cumulati fine"]) / 2.0
+                    largh = max(riga["MW cumulati fine"] - riga["MW cumulati inizio"], 0.01)
+                    fig_cm.add_trace(go.Bar(
+                        x=[centro], y=[riga["MC (€/MWh)"]], width=[largh], name=nome,
+                        marker_color=col,
+                        hovertemplate=(f"{nome}<br>MC: %{{y:,.1f}} €/MWh<br>"
+                                       f"Capacità: {riga['Capacità (MW)']:,.0f} MW<br>"
+                                       f"Dispatch: {riga['Fattore dispatch (%)']:.1f} %<extra></extra>")))
+                fig_cm.add_hline(y=cm["prezzo_medio"], line_dash="dash", line_color="#eab308",
+                                 annotation_text=f"Medio {cm['prezzo_medio']:,.0f} €/MWh",
+                                 annotation_position="top left")
+                fig_cm.add_hline(y=cm["prezzo_mediano"], line_dash="dot", line_color="#9ca3af",
+                                 annotation_text=f"Mediano {cm['prezzo_mediano']:,.0f} €/MWh",
+                                 annotation_position="top left")
+                fig_cm.add_hline(y=cm["prezzo_p90"], line_dash="dash", line_color="#ef4444",
+                                 annotation_text=f"P90 {cm['prezzo_p90']:,.0f} €/MWh",
+                                 annotation_position="top left")
+                fig_cm.update_layout(template="plotly_dark", height=380, barmode="overlay",
+                                     title="Merit order del parco (barre = impianti, larghezza = MW)",
+                                     xaxis_title="Capacità cumulata (MW)", yaxis_title="Costo marginale (€/MWh)",
+                                     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+                st.plotly_chart(fig_cm, use_container_width=True)
+
+                st.markdown("**Fattore di dispatch per impianto**")
+                fig_cmf = go.Figure(go.Bar(
+                    x=cm["righe"]["Impianto"], y=cm["righe"]["Fattore dispatch (%)"],
+                    marker_color=[(ASSETS[n][2] if n in ASSETS else "#3b82f6")
+                                  for n in cm["righe"]["Impianto"]],
+                    hovertemplate="%{x}<br>Dispatch: %{y:.1f} %<br>Ore ITM: %{customdata}<extra></extra>",
+                    customdata=cm["righe"]["Ore ITM"]))
+                fig_cmf.update_layout(template="plotly_dark", height=300,
+                                      title="Quota di ore con prezzo sopra il costo marginale",
+                                      xaxis_title="Impianto", yaxis_title="% ore dispatchate")
+                st.plotly_chart(fig_cmf, use_container_width=True)
+
+                st.markdown("**Dettaglio impianti (ordine di merito)**")
+                st.dataframe(cm["righe"], use_container_width=True, hide_index=True)
+                st.download_button(
+                    "\u2b07\ufe0f Esporta dettaglio merito (CSV)",
+                    cm["righe"].to_csv(index=False).encode("utf-8"),
+                    file_name=f"curva_merito_{d0}_{d1}.csv",
+                    mime="text/csv",
+                    help="Scarica il dettaglio per impianto: posizione di merito, ore ITM, fattore dispatch, MWh e margine.",
+                    key="csv_cm_det",
+                )
+
+                df_cmm = cm["df_mesi"]
+                if not df_cmm.empty:
+                    st.markdown("**MWh dispatchati per mese**")
+                    fig_cmm = go.Figure()
+                    for nome in cm["righe"]["Impianto"]:
+                        col = ASSETS[nome][2] if nome in ASSETS else "#3b82f6"
+                        fig_cmm.add_trace(go.Bar(
+                            x=df_cmm["Mese"], y=df_cmm[f"MWh {nome}"], name=nome,
+                            marker_color=col,
+                            hovertemplate="Mese %{x}<br>" + f"{nome}" + ": %{y:,.0f} MWh<extra></extra>"))
+                    fig_cmm.update_layout(template="plotly_dark", height=320, barmode="stack",
+                                          title="Energia dispatchata dal parco, per mese",
+                                          xaxis_title="Mese", yaxis_title="MWh")
+                    st.plotly_chart(fig_cmm, use_container_width=True)
+                    st.download_button(
+                        "\u2b07\ufe0f Esporta MWh mensili (CSV)",
+                        df_cmm.to_csv(index=False).encode("utf-8"),
+                        file_name=f"curva_merito_mesi_{d0}_{d1}.csv",
+                        mime="text/csv",
+                        help="Scarica i MWh dispatchati per impianto e mese.",
+                        key="csv_cm_mesi",
+                    )
+
+                st.markdown("**What-if: a che prezzo costante dispaccerebbe il parco?**")
+                st.caption("\U0001f4a1 Ipotesi semplificata: prezzo spot costante per tutto l'anno (8.760 h); margine annuo stimato = max(0, prezzo − MC) × capacità × 8.760. Ignora rampe, manutenzioni e vincoli reali.")
+                pmax_cm = max(cm["prezzo_p90"] * 1.5, cm["prezzo_medio"] * 1.5, 50.0)
+                px_cm = st.slider("Prezzo spot costante (€/MWh)", 0.0, float(round(pmax_cm, 0)),
+                                  float(round(cm["prezzo_medio"], 0)), step=1.0, key="slider_cm_prezzo")
+                righe_w = []
+                marg_annuo_tot = 0.0
+                for _, riga in cm["righe"].iterrows():
+                    mc_i = float(riga["MC (€/MWh)"])
+                    cap_i = float(riga["Capacità (MW)"])
+                    dentro = px_cm > mc_i
+                    marg_a = max(0.0, px_cm - mc_i) * cap_i * 8760.0
+                    marg_annuo_tot += marg_a
+                    righe_w.append({
+                        "Impianto": riga["Impianto"],
+                        "Dispaccia": "✅ SÌ" if dentro else "❌ no",
+                        "Margine annuo stimato (€)": round(marg_a, 0),
+                    })
+                st.dataframe(pd.DataFrame(righe_w), use_container_width=True, hide_index=True)
+                st.metric("Margine annuo stimato del parco", f"€{marg_annuo_tot:,.0f}")
+            st.caption("\U0001f4a1 Un impianto a destra della linea del prezzo medio dispaccia solo negli spike: e' il candidato naturale per coperture mirate (cap/floor) o per valutare se tenerlo in riserva. Un parco tutto a sinistra del P10 e' baseload quasi garantito.")
 
 # Footer
 
