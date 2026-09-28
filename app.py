@@ -4881,6 +4881,120 @@ def calcola_sbilanciamento(prezzi, mw_f1, mw_f2, mw_f3, err_pct=10.0,
     return out
 
 
+def calcola_potenza_picco(prezzi, mw_f1, mw_f2, mw_f3, cap_mw,
+                          costo_potenza_eur_kw_anno):
+    """Ottimizzazione della potenza impegnata (demand charge / quota potenza).
+
+    Il profilo di carico dell'app e' piatto per fascia (MW costanti in
+    F1/F2/F3): il picco di prelievo e' quindi il massimo dei tre MW. La
+    potenza impegnata (contrattuale) va dimensionata sul picco: ogni kW
+    impegnato costa una quota fissa annua (in Italia la "quota potenza" di
+    trasporto/oneri, tipicamente 25-60 EUR/kW/anno per la BT; in Svizzera il
+    Leistungspreis segue la stessa logica). Ridurre la potenza impegnata da
+    'picco' a 'cap' fa risparmiare (picco - cap) x 1000 x costo_potenza EUR
+    all'anno, MA nelle ore in cui il carico supera il cap bisogna gestire
+    l'eccedenza (taglio, spostamento o accumulo): qui si quantifica quanta
+    energia e' "sopra il cap".
+
+    A differenza del tab "Valore della flessibilita'" (curtailment nelle ore
+    piu' care per risparmiare sull'ENERGIA), qui il risparmio e' sulla
+    POTENZA impegnata: non dipende dai prezzi ma solo dal profilo di carico
+    e dal costo EUR/kW/anno. I due risparmi si sommano.
+
+    Metodo (tutto deterministico a parita' di input):
+    - carico orario = MW della fascia di ciascuna ora (via fascia_oraria);
+    - picco = max del carico orario; fascia_picco = fascia con MW massimo
+      (a pari merito vince F1, poi F2, poi F3);
+    - ore_sopra = ore con carico > cap; mwh_sopra = somma(carico - cap)
+      sulle ore sopra il cap = energia da gestire (tagliare/spostare);
+    - risparmio_annuo = max(0, picco - cap) x 1000 x costo_potenza;
+    - soglia_convenienza = risparmio_annuo / mwh_sopra: quanto "vale" ogni
+      MWh gestito (tagliato o spostato) per giustificare la riduzione di
+      potenza. Se spostare/tagliare costa MENO della soglia, la riduzione
+      conviene; se costa di piu', no.
+
+    prezzi: Series oraria (indice datetime; i valori di prezzo NON sono
+    usati, serve solo la dimensione/posizione temporale delle ore).
+    cap_mw: potenza impegnata obiettivo in MW (>= 0; se >= picco, nessun
+    effetto). costo_potenza_eur_kw_anno: quota potenza in EUR/kW/anno.
+
+    NaN-safe: serie vuota, MW tutti a zero, cap/costo non validi ->
+    statistiche neutrali con DataFrame dalle colonne giuste. Picco = 0 ->
+    df_sens vuoto (nessun cap ha senso).
+
+    Ritorna dict con 'ore', 'picco_mw', 'cap_mw', 'fascia_picco',
+    'ore_sopra', 'pct_ore_sopra' (% ore sopra il cap, None se ore = 0),
+    'mwh_sopra', 'risparmio_annuo' (EUR/anno), 'soglia_convenienza'
+    (EUR/MWh gestito, None se mwh_sopra = 0), 'df_mesi' ('Mese',
+    'Picco (MW)', 'Ore sopra cap', 'MWh sopra cap'), 'df_sens' ('Cap (MW)',
+    'Risparmio (€/anno)', 'MWh da gestire').
+    """
+    cols_m = ["Mese", "Picco (MW)", "Ore sopra cap", "MWh sopra cap"]
+    cols_s = ["Cap (MW)", "Risparmio (€/anno)", "MWh da gestire"]
+    vuoto = {"ore": 0, "picco_mw": 0.0, "cap_mw": 0.0, "fascia_picco": None,
+             "ore_sopra": 0, "pct_ore_sopra": None, "mwh_sopra": 0.0,
+             "risparmio_annuo": 0.0, "soglia_convenienza": None,
+             "df_mesi": pd.DataFrame(columns=cols_m),
+             "df_sens": pd.DataFrame(columns=cols_s)}
+    try:
+        p = prezzi.astype(float).dropna()
+        p = p[~p.index.duplicated(keep="first")].sort_index()
+    except Exception:
+        return dict(vuoto)
+    if len(p) == 0:
+        return dict(vuoto)
+    try:
+        cap = max(0.0, float(cap_mw))
+    except (TypeError, ValueError):
+        cap = 0.0
+    try:
+        costo = max(0.0, float(costo_potenza_eur_kw_anno))
+    except (TypeError, ValueError):
+        costo = 0.0
+    out = dict(vuoto)
+    out["ore"] = len(p)
+    out["cap_mw"] = round(cap, 3)
+    try:
+        fasce = p.index.map(fascia_oraria)
+    except Exception:
+        return out
+    mw_map = {"F1": max(0.0, float(mw_f1)), "F2": max(0.0, float(mw_f2)),
+              "F3": max(0.0, float(mw_f3))}
+    carico = fasce.map(mw_map).to_numpy(dtype=float)
+    picco = float(carico.max())
+    out["picco_mw"] = round(picco, 3)
+    for f in ("F1", "F2", "F3"):
+        if mw_map[f] >= picco and picco > 0:
+            out["fascia_picco"] = f
+            break
+    sopra = np.clip(carico - cap, 0.0, None)
+    out["ore_sopra"] = int((sopra > 0).sum())
+    out["pct_ore_sopra"] = round(100.0 * out["ore_sopra"] / len(p), 2)
+    out["mwh_sopra"] = round(float(sopra.sum()), 2)
+    riduzione = max(0.0, picco - cap)
+    out["risparmio_annuo"] = round(riduzione * 1000.0 * costo, 2)
+    if out["mwh_sopra"] > 0:
+        out["soglia_convenienza"] = round(
+            out["risparmio_annuo"] / out["mwh_sopra"], 2)
+    mesi = p.index.to_period("M").astype(str)
+    righe = []
+    for m in sorted(set(mesi)):
+        idx = mesi == m
+        righe.append({"Mese": m, "Picco (MW)": round(float(carico[idx].max()), 3),
+                      "Ore sopra cap": int((sopra[idx] > 0).sum()),
+                      "MWh sopra cap": round(float(sopra[idx].sum()), 2)})
+    out["df_mesi"] = pd.DataFrame(righe, columns=cols_m)
+    if picco > 0:
+        righe_s = []
+        for c in np.linspace(0.0, picco, 21):
+            rid = max(0.0, picco - float(c))
+            righe_s.append({"Cap (MW)": round(float(c), 3),
+                            "Risparmio (€/anno)": round(rid * 1000.0 * costo, 2),
+                            "MWh da gestire": round(float(np.clip(carico - c, 0.0, None).sum()), 2)})
+        out["df_sens"] = pd.DataFrame(righe_s, columns=cols_s)
+    return out
+
+
 def calcola_expected_shortfall(prezzi, mw_f1, mw_f2, mw_f3, n_scenari=1000,
                                livelli=(0.95, 0.99), seed=42):
     """Expected Shortfall (CVaR) del COSTO di fornitura via Monte Carlo.
@@ -5652,7 +5766,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -9315,6 +9429,81 @@ elif workspace == _('ws8'):
                 help="Scarica gli scenari sopra il VaR 95% ordinati dal peggiore: la coda su cui si calcola l'ES.",
             )
             st.caption("💡 Se ES95/VaR95 supera ~1,3 la coda è spessa: il VaR da solo sottostima il rischio — dimensiona le coperture sull'ES, non sul VaR. Confronta con lo stress test (tab 🧪) e il Cap & Floor (tab 🛡️) per coprire proprio quella coda.")
+
+    with tab57:
+        titolo_pp = edu("Potenza di picco", "La POTENZA IMPEGNATA (contrattuale) è la potenza massima che puoi prelevare: va dimensionata sul picco del tuo carico. Ogni kW impegnato costa una quota fissa ANNUA — in Italia la 'quota potenza' di trasporto/oneri (25-60 €/kW/anno in BT), in Svizzera il Leistungspreis segue la stessa logica — che paghi anche se non usi mai quel kW. Se il tuo picco è 2 MW ma impegni 1,5 MW, risparmi 500 kW × quota ogni anno: il prezzo da pagare è gestire le ore in cui il carico supera 1,5 MW (taglio, spostamento o accumulo). Questo tab quantifica il risparmio e l'energia 'sopra il cap' da gestire. A differenza del tab 💡 Valore flessibilità (che taglia nelle ore più care per risparmiare sull'ENERGIA), qui il risparmio è sulla POTENZA e non dipende dai prezzi: i due risparmi si sommano.")
+        st.markdown(f"**{titolo_pp}**: quanta potenza impegnata ti serve davvero?", unsafe_allow_html=True)
+        st.caption("Profilo di carico = MW per fascia (tab 💰 Costo fornitura). La quota potenza si paga per ogni kW impegnato, usata o no.")
+
+        r_pp0 = calcola_potenza_picco(prezzi, mw_f1, mw_f2, mw_f3, cap_mw=0.0,
+                                      costo_potenza_eur_kw_anno=0.0)
+        picco = r_pp0["picco_mw"]
+        if r_pp0["ore"] == 0 or picco <= 0:
+            st.warning("Seleziona un periodo con dati e una potenza maggiore di zero in almeno una fascia (tab 💰 Costo fornitura).")
+        else:
+            c_pp1, c_pp2 = st.columns(2)
+            cap_in = c_pp1.slider("Potenza impegnata obiettivo (MW)", min_value=0.0,
+                                  max_value=float(picco), value=round(float(picco) * 0.8, 2),
+                                  step=0.05, key="pp_cap",
+                                  help="Potenza contrattuale: sotto questo livello il carico va gestito (taglio/spostamento).")
+            costo_kw_in = c_pp2.slider("Quota potenza (€/kW/anno)", min_value=0.0,
+                                       max_value=150.0, value=45.0, step=5.0, key="pp_costokw",
+                                       help="Costo annuo per ogni kW di potenza impegnata (quota potenza / Leistungspreis).")
+
+            r_pp = calcola_potenza_picco(prezzi, mw_f1, mw_f2, mw_f3, cap_mw=cap_in,
+                                         costo_potenza_eur_kw_anno=costo_kw_in)
+            k1, k2, k3, k4 = st.columns(4)
+            render_kpi(edu("Picco attuale", "Massimo del carico orario del periodo (MW per fascia): la potenza impegnata minima se non vuoi gestire nessuna ora."),
+                       f"{r_pp['picco_mw']:,.2f} MW", k1)
+            render_kpi(edu("Potenza impegnata obiettivo", "Il cap che hai scelto con lo slider: da qui in giù si paga la quota, sopra bisogna gestire il carico."),
+                       f"{r_pp['cap_mw']:,.2f} MW", k2)
+            render_kpi(edu("Risparmio quota potenza", "Risparmio ANNUO sulla quota potenza: (picco − cap) × 1000 × €/kW/anno. È un risparmio strutturale, indipendente dai prezzi dell'energia."),
+                       f"{r_pp['risparmio_annuo']:,.0f} €/anno", k3)
+            fascia_txt = r_pp["fascia_picco"] if r_pp["fascia_picco"] else "n/d"
+            render_kpi(edu("Fascia del picco", "La fascia oraria che determina il picco: è lì che devi intervenire (taglio/spostamento) per tenere il carico sotto il cap."),
+                       fascia_txt, k4)
+            j1, j2, j3, j4 = st.columns(4)
+            render_kpi(edu("Ore sopra il cap", "Ore del periodo in cui il carico supera la potenza obiettivo: le ore da gestire con taglio, spostamento o accumulo."),
+                       f"{r_pp['ore_sopra']:,}", j1)
+            render_kpi(edu("% ore sopra il cap", "Quota del periodo sopra il cap. Sotto il 5-10% il cap è gestibile con interventi mirati; sopra il 30% stai tagliando troppo carico."),
+                       f"{r_pp['pct_ore_sopra']:,.1f} %", j2)
+            render_kpi(edu("Energia da gestire", "MWh totali sopra il cap nel periodo: l'energia da tagliare, spostare in altre ore o coprire con accumulo/batteria."),
+                       f"{r_pp['mwh_sopra']:,.0f} MWh", j3)
+            soglia_txt = f"{r_pp['soglia_convenienza']:,.2f} €/MWh" if r_pp["soglia_convenienza"] is not None else "n/d"
+            render_kpi(edu("Soglia di convenienza", "Risparmio annuo diviso per i MWh da gestire: quanto 'vale' ogni MWh spostato/tagliato. Se gestire 1 MWh ti costa MENO della soglia, ridurre la potenza conviene; se costa di più, no."),
+                       soglia_txt, j4)
+
+            st.markdown("**Sensitività: risparmio vs energia da gestire al variare del cap**")
+            df_pps = r_pp["df_sens"]
+            fig_pp = go.Figure()
+            fig_pp.add_trace(go.Bar(x=df_pps["Cap (MW)"], y=df_pps["Risparmio (€/anno)"],
+                                    name="Risparmio €/anno", marker_color="#10b981",
+                                    hovertemplate="Cap %{x:.2f} MW<br>Risparmio: €%{y:,.0f}/anno<extra></extra>"))
+            fig_pp.add_trace(go.Scatter(x=df_pps["Cap (MW)"], y=df_pps["MWh da gestire"],
+                                        name="MWh da gestire", mode="lines+markers",
+                                        marker_color="#f59e0b", yaxis="y2",
+                                        hovertemplate="Cap %{x:.2f} MW<br>Da gestire: %{y:,.0f} MWh<extra></extra>"))
+            fig_pp.update_layout(template="plotly_dark", height=360,
+                                 title="Più abbassi il cap, più risparmi — ma più energia devi gestire",
+                                 xaxis_title="Cap di potenza impegnata (MW)",
+                                 yaxis_title="Risparmio (€/anno)",
+                                 yaxis2=dict(title="MWh da gestire", overlaying="y", side="right"))
+            sel = df_pps.iloc[(df_pps["Cap (MW)"] - cap_in).abs().argmin()]
+            fig_pp.add_vline(x=float(sel["Cap (MW)"]), line_dash="dash", line_color="#e5e7eb",
+                             annotation_text=f"cap scelto {float(sel['Cap (MW)']):.2f} MW",
+                             annotation_position="top right")
+            st.plotly_chart(fig_pp, use_container_width=True)
+
+            st.markdown("**Dettaglio mensile**")
+            st.dataframe(r_pp["df_mesi"], use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta potenza di picco (CSV)",
+                r_pp["df_mesi"].to_csv(index=False).encode("utf-8"),
+                file_name=f"potenza_picco_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica il dettaglio mensile: picco MW, ore sopra il cap e MWh da gestire.",
+            )
+            st.caption("💡 La quota potenza si paga anche sui kW mai usati: se il picco sta in F1, sposta i carichi flessibili in F2/F3 (tab 🔄 Shifting carico) e abbassa il cap senza tagliare energia. Confronta la soglia di convenienza con il costo del kWh da batteria (tab 🔋 Arbitraggio Batteria) per decidere se coprire i picchi con accumulo.")
 
 # Footer
 
