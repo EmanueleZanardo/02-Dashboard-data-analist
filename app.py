@@ -247,6 +247,292 @@ def calcola_concentrazione_fasce(prezzi, mw_f1, mw_f2, mw_f3, n_punti=20):
     return vuoto
 
 
+def calcola_ora_punta_giornaliera(prezzi, mw_f1, mw_f2, mw_f3):
+    """Ora piu' costosa di ciascun giorno di calendario (daily peak-cost hour).
+
+    Per ogni giorno individua l'ora con il costo orario massimo (prezzo spot
+    x MW della fascia dell'ora) e aggrega: a che ora cade di solito la punta,
+    in quale fascia, quanto pesa sul costo totale del periodo.
+
+    Differenza dagli altri tab: Top ore di costo classifica le ore su TUTTO
+    il periodo (le prime 10 possono cadere tutte nello stesso giorno di
+    crisi); Concentrazione costo guarda la curva di Lorenz del periodo;
+    qui la domanda operativa e' "ogni giorno, a che ora arriva il colpo piu'
+    duro?" — la risposta guida demand response ricorrente (es. ridurre il
+    carico ogni giorno alle 18) piu' che coperture una tantum.
+
+    Il profilo di carico dell'app e' piatto per fascia (MW costanti in
+    F1/F2/F3): il carico orario e' il MW della fascia di ciascuna ora (via
+    fascia_oraria).
+
+    Metodo (tutto deterministico a parita' di input):
+    - ore con prezzo NaN scartate; timestamp duplicati: primo tenuto;
+    - giorni senza ore valide, o con costo orario identicamente zero
+      (nessun prelievo), scartati: non c'e' una "punta" significativa;
+    - in caso di pari merito vince l'ora piu' piccola (argmax deterministico);
+    - con prezzi negativi la punta e' l'ora meno negativa (la piu' costosa),
+      che resta l'informazione operativa giusta.
+
+    NaN-safe: serie vuota, MW tutti a zero/non validi, nessun giorno valido
+    -> statistiche neutrali con DataFrame dalle colonne giuste. Se il costo
+    totale del periodo e' <= 0 le quote percentuali sono None.
+
+    Ritorna dict con 'giorni' (giorni con punta valida), 'costo_totale'
+    (costo EUR del periodo), 'costo_punta_tot' (somma EUR delle ore di
+    punta), 'quota_punta_pct' (% del costo nelle ore di punta, None se
+    totale <= 0), 'costo_punta_medio' (EUR medio dell'ora di punta),
+    'ora_moda' (ora 0-23 piu' frequente come punta, None se nessun giorno;
+    pari merito -> ora minore), 'fascia_moda' (fascia piu' frequente,
+    pari merito -> ordine alfabetico), 'prezzo_medio_punta' (EUR/MWh medio
+    nelle ore di punta), 'df_ore' ('Ora', 'Giorni punta', 'Quota giorni %',
+    'Costo totale (\u20ac)', 'Costo medio (\u20ac)') e 'df_mesi' ('Mese', 'Giorni',
+    'Costo punta (\u20ac)', 'Quota costo mese %').
+    """
+    cols_o = ["Ora", "Giorni punta", "Quota giorni %", "Costo totale (\u20ac)",
+              "Costo medio (\u20ac)"]
+    cols_m = ["Mese", "Giorni", "Costo punta (\u20ac)", "Quota costo mese %"]
+
+    def _riga_ore(h):
+        return {"Ora": h, "Giorni punta": 0, "Quota giorni %": 0.0,
+                "Costo totale (\u20ac)": 0.0, "Costo medio (\u20ac)": None}
+
+    vuoto = {"giorni": 0, "costo_totale": 0.0, "costo_punta_tot": 0.0,
+             "quota_punta_pct": None, "costo_punta_medio": None,
+             "ora_moda": None, "fascia_moda": None,
+             "prezzo_medio_punta": None,
+             "df_ore": pd.DataFrame([_riga_ore(h) for h in range(24)],
+                                    columns=cols_o),
+             "df_mesi": pd.DataFrame(columns=cols_m)}
+    try:
+        p = prezzi.astype(float).dropna()
+        p = p[~p.index.duplicated(keep="first")].sort_index()
+    except Exception:
+        return dict(vuoto)
+    if len(p) == 0:
+        return dict(vuoto)
+    try:
+        mws = [max(0.0, float(x)) for x in (mw_f1, mw_f2, mw_f3)]
+    except (TypeError, ValueError):
+        mws = [0.0, 0.0, 0.0]
+    if sum(mws) <= 0:
+        return dict(vuoto)
+    mw_of = {"F1": mws[0], "F2": mws[1], "F3": mws[2]}
+    fasce = p.index.map(fascia_oraria)
+    prezzi_v = p.to_numpy(dtype=float)
+    carico = np.array([mw_of[fx] for fx in fasce], dtype=float)
+    costo_h = prezzi_v * carico
+    costo_tot = float(np.nansum(costo_h))
+    out = dict(vuoto)
+    out["costo_totale"] = costo_tot
+    giorni_idx = p.index.normalize().to_numpy()
+    punte = []  # (giorno, ora, fascia, prezzo, costo)
+    for g in np.unique(giorni_idx):
+        mask = giorni_idx == g
+        ch = costo_h[mask]
+        if ch.size == 0 or not np.any(ch != 0.0):
+            continue
+        i = int(np.argmax(ch))  # pari merito -> prima ora, deterministico
+        ts = p.index[mask][i]
+        punte.append((g, int(ts.hour), str(fasce[mask][i]),
+                      float(prezzi_v[mask][i]), float(ch[i])))
+    if not punte:
+        return out
+    giorni = len(punte)
+    costo_punta = float(sum(x[4] for x in punte))
+    out["giorni"] = giorni
+    out["costo_punta_tot"] = costo_punta
+    out["costo_punta_medio"] = costo_punta / giorni
+    out["quota_punta_pct"] = (costo_punta / costo_tot * 100.0
+                              if costo_tot > 0 else None)
+    out["prezzo_medio_punta"] = float(np.mean([x[3] for x in punte]))
+    cnt_ora = {}
+    for x in punte:
+        cnt_ora[x[1]] = cnt_ora.get(x[1], 0) + 1
+    out["ora_moda"] = min(cnt_ora, key=lambda h: (-cnt_ora[h], h))
+    cnt_fx = {}
+    for x in punte:
+        cnt_fx[x[2]] = cnt_fx.get(x[2], 0) + 1
+    out["fascia_moda"] = min(cnt_fx, key=lambda fx: (-cnt_fx[fx], fx))
+    righe = []
+    for h in range(24):
+        sel = [x for x in punte if x[1] == h]
+        n = len(sel)
+        c = float(sum(x[4] for x in sel))
+        righe.append({"Ora": h, "Giorni punta": n,
+                      "Quota giorni %": round(n / giorni * 100.0, 1),
+                      "Costo totale (\u20ac)": round(c, 0),
+                      "Costo medio (\u20ac)": round(c / n, 2) if n else None})
+    out["df_ore"] = pd.DataFrame(righe, columns=cols_o)
+    righe_m = []
+    for m in sorted({pd.Timestamp(x[0]).strftime("%Y-%m") for x in punte}):
+        sel = [x for x in punte if pd.Timestamp(x[0]).strftime("%Y-%m") == m]
+        c_punta = float(sum(x[4] for x in sel))
+        mask_m = (p.index.year == int(m[:4])) & (p.index.month == int(m[5:7]))
+        c_mese = float(np.nansum(costo_h[mask_m]))
+        righe_m.append({"Mese": m, "Giorni": len(sel),
+                        "Costo punta (\u20ac)": round(c_punta, 0),
+                        "Quota costo mese %": (round(c_punta / c_mese * 100.0, 1)
+                                               if c_mese > 0 else None)})
+    out["df_mesi"] = pd.DataFrame(righe_m, columns=cols_m)
+    return out
+
+
+def calcola_efficienza_profilo(prezzi, mw_f1, mw_f2, mw_f3):
+    """Efficienza (smartness) del profilo di carico rispetto ai prezzi spot.
+
+    Domanda operativa: "il mio profilo di consumo e' intelligente?" — cioe'
+    quanto il costo reale si avvicina al minimo teorico ottenibile
+    riallocando, giorno per giorno, gli STESSI MWh sulle ore piu' economiche
+    (senza cambiare il consumo totale e senza superare il picco di potenza
+    osservato quel giorno).
+
+    Metodo (tutto deterministico a parita' di input):
+    - ore con prezzo NaN scartate; timestamp duplicati: primo tenuto;
+    - carico orario = MW della fascia di ciascuna ora (via fascia_oraria,
+      stesso profilo piatto per fascia degli altri tab);
+    - per ogni giorno di calendario con energia > 0: cap = carico orario
+      massimo osservato quel giorno; il minimo teorico si ottiene con
+      water-filling greedy sulle ore ordinate per prezzo crescente
+      (ottimo per vincoli box uniformi, anche con prezzi negativi);
+      il massimo teorico con ordine decrescente;
+    - efficienza = (Cmax - C) / (Cmax - Cmin) in %: 100% = profilo
+      perfettamente "smart" (consuma solo nelle ore piu' economiche),
+      0% = profilo peggiore possibile, 50% = neutro;
+    - correlazione di Pearson tra prezzo orario e carico orario su tutto
+      il periodo: negativa = il carico tende a stare nelle ore economiche.
+
+    Differenza dagli altri tab: Shifting carico simula UNO spostamento
+    fissato (pct%) e ne misura il risparmio; Valore flessibilita' taglia
+    carico nelle ore piu' care; qui non si simula nessuna azione — si
+    misura quanto il profilo ESISTENTE e' efficiente e qual e' il limite
+    superiore teorico di QUALSIASI demand response (nessuno shifting puo'
+    risparmiare piu' di C - Cmin).
+
+    NaN-safe: serie vuota, MW tutti a zero/non validi, nessun giorno con
+    energia > 0 -> statistiche neutrali. Se Cmax == Cmin l'efficienza e'
+    None (prezzi piatti o profilo degenere: nessun margine di manovra).
+
+    Ritorna dict con 'giorni' (giorni validi), 'costo_totale' (EUR),
+    'costo_min' (EUR, minimo teorico), 'costo_max' (EUR, massimo teorico),
+    'efficienza' (% 0-100, None se non definita), 'risparmio_max' (EUR =
+    costo_totale - costo_min), 'risparmio_max_pct' (% sul totale, None se
+    totale <= 0), 'correlazione' (Pearson prezzo-carico, None se non
+    definita), 'df_mesi' ('Mese', 'Giorni', 'Efficienza %', 'Costo (\\u20ac)',
+    'Minimo teorico (\\u20ac)', 'Risparmio max (\\u20ac)').
+    """
+    cols_m = ["Mese", "Giorni", "Efficienza %", "Costo (\u20ac)",
+              "Minimo teorico (\u20ac)", "Risparmio max (\u20ac)"]
+
+    def _riga_m(m):
+        return {"Mese": m, "Giorni": 0, "Efficienza %": None,
+                "Costo (\u20ac)": 0.0, "Minimo teorico (\u20ac)": 0.0,
+                "Risparmio max (\u20ac)": 0.0}
+
+    vuoto = {"giorni": 0, "costo_totale": 0.0, "costo_min": 0.0,
+             "costo_max": 0.0, "efficienza": None, "risparmio_max": 0.0,
+             "risparmio_max_pct": None, "correlazione": None,
+             "df_mesi": pd.DataFrame(columns=cols_m)}
+    try:
+        p = prezzi.astype(float).dropna()
+        p = p[~p.index.duplicated(keep="first")].sort_index()
+    except Exception:
+        return dict(vuoto)
+    if len(p) == 0:
+        return dict(vuoto)
+    try:
+        mws = [max(0.0, float(x)) for x in (mw_f1, mw_f2, mw_f3)]
+    except (TypeError, ValueError):
+        mws = [0.0, 0.0, 0.0]
+    if sum(mws) <= 0:
+        return dict(vuoto)
+    mw_of = {"F1": mws[0], "F2": mws[1], "F3": mws[2]}
+    fasce = p.index.map(fascia_oraria)
+    prezzi_v = p.to_numpy(dtype=float)
+    carico = np.array([mw_of[fx] for fx in fasce], dtype=float)
+    costo_h = prezzi_v * carico
+
+    # Water-filling greedy: alloca l'energia del giorno sulle ore ordinate
+    # per prezzo (crescente -> minimo, decrescente -> massimo), con cap
+    # pari al picco orario osservato quel giorno.
+    def _rialloca(prz, crg):
+        e_tot = float(np.sum(crg))
+        if e_tot <= 0:
+            return 0.0, 0.0
+        cap = float(np.max(crg))
+        ordine_min = np.argsort(prz, kind="stable")
+        ordine_max = np.argsort(-prz, kind="stable")
+        cmin = cmax = 0.0
+        rest = e_tot
+        for i in ordine_min:
+            q = min(cap, rest)
+            cmin += q * prz[i]
+            rest -= q
+            if rest <= 1e-9:
+                break
+        rest = e_tot
+        for i in ordine_max:
+            q = min(cap, rest)
+            cmax += q * prz[i]
+            rest -= q
+            if rest <= 1e-9:
+                break
+        return cmin, cmax
+
+    giorni_validi = 0
+    c_tot = c_min = c_max = 0.0
+    per_mese = {}
+    giorni_idx = pd.DatetimeIndex(p.index).normalize()
+    for giorno in sorted(set(giorni_idx)):
+        mask = giorni_idx == giorno
+        prz = prezzi_v[mask]
+        crg = carico[mask]
+        if float(np.sum(crg)) <= 0:
+            continue
+        c_g = float(np.nansum(prz * crg))
+        cmin_g, cmax_g = _rialloca(prz, crg)
+        giorni_validi += 1
+        c_tot += c_g
+        c_min += cmin_g
+        c_max += cmax_g
+        m = giorno.strftime("%Y-%m")
+        agg = per_mese.setdefault(m, [0, 0.0, 0.0, 0.0])
+        agg[0] += 1
+        agg[1] += c_g
+        agg[2] += cmin_g
+        agg[3] += cmax_g
+
+    out = dict(vuoto)
+    if giorni_validi == 0:
+        return out
+    out["giorni"] = giorni_validi
+    out["costo_totale"] = c_tot
+    out["costo_min"] = c_min
+    out["costo_max"] = c_max
+    if c_max > c_min:
+        out["efficienza"] = (c_max - c_tot) / (c_max - c_min) * 100.0
+    out["risparmio_max"] = c_tot - c_min
+    if c_tot > 0:
+        out["risparmio_max_pct"] = (c_tot - c_min) / c_tot * 100.0
+    try:
+        if np.std(prezzi_v) > 0 and np.std(carico) > 0:
+            out["correlazione"] = float(np.corrcoef(prezzi_v, carico)[0, 1])
+    except Exception:
+        pass
+    righe_m = []
+    for m in sorted(per_mese):
+        n_g, c_m, cmin_m, cmax_m = per_mese[m]
+        eff_m = ((cmax_m - c_m) / (cmax_m - cmin_m) * 100.0
+                 if cmax_m > cmin_m else None)
+        righe_m.append({"Mese": m, "Giorni": n_g,
+                        "Efficienza %": (round(eff_m, 1)
+                                         if eff_m is not None else None),
+                        "Costo (\u20ac)": round(c_m, 0),
+                        "Minimo teorico (\u20ac)": round(cmin_m, 0),
+                        "Risparmio max (\u20ac)": round(c_m - cmin_m, 0)})
+    out["df_mesi"] = pd.DataFrame(righe_m, columns=cols_m)
+    return out
+
+
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -6000,7 +6286,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -9885,6 +10171,127 @@ elif workspace == _('ws8'):
                 help="Scarica le curve di concentrazione per fascia: quota ore vs quota costo cumulata.",
             )
             st.caption("💡 F1 molto concentrata → valuta cap sulle ore di picco (tab 🛡️) o shifting verso F3 (tab 🔄). Fascia piatta → la quota fissa costa poco di più del rischio che copre.")
+
+    with tab60:
+        titolo_op = edu("Ora di punta giornaliera", "Per OGNI giorno di calendario, l'ora singola più costosa (prezzo spot × MW della fascia di quell'ora). Non è la classifica delle ore su tutto il periodo (tab 🕐 Top ore di costo, dove le prime 10 possono cadere tutte nello stesso giorno di crisi): qui la domanda è 'a che ora arriva il colpo più duro, giorno dopo giorno?' — la risposta guida la demand response ricorrente (ridurre il carico ogni giorno alle 18) più che le coperture una tantum. In caso di pari merito vince l'ora più piccola; con prezzi negativi la punta è l'ora meno negativa.")
+        st.markdown(f"**{titolo_op}**: a che ora cade, ogni giorno, l'ora più costosa?", unsafe_allow_html=True)
+        st.caption("Profilo MW per fascia: stesso della tab 💰 Costo fornitura.")
+
+        op = calcola_ora_punta_giornaliera(prezzi, mw_f1, mw_f2, mw_f3)
+        if op["giorni"] == 0:
+            st.info("Imposta una potenza maggiore di zero in almeno una fascia (tab 💰 Costo fornitura) e seleziona un periodo con dati.")
+        else:
+            c1, c2, c3, c4 = st.columns(4)
+            moda_txt = (f"{op['ora_moda']:02d}:00<br><small>{op['df_ore'].loc[op['df_ore']['Ora'] == op['ora_moda'], 'Quota giorni %'].iloc[0]:.1f}% dei giorni</small>"
+                        if op["ora_moda"] is not None else "n/d")
+            render_kpi(edu("Ora di punta più frequente", "L'ora del giorno che più spesso risulta la più costosa del giorno. Se è stabile (es. sempre le 18), la demand response ricorrente su quell'ora rende al massimo."),
+                       moda_txt, c1)
+            render_kpi(edu("Costo medio ora di punta", "Costo medio in euro della singola ora più costosa di ciascun giorno: il 'colpo giornaliero' tipico sulla bolletta."),
+                       f"{op['costo_punta_medio']:,.0f} €<br><small>prezzo medio {op['prezzo_medio_punta']:,.1f} €/MWh</small>", c2)
+            quota_txt = f"{op['quota_punta_pct']:.1f} %<br><small>di {op['costo_totale']:,.0f} € totali</small>" if op["quota_punta_pct"] is not None else "n/d"
+            render_kpi(edu("Quota del costo nelle ore di punta", "Quanta parte del costo totale del periodo è generata dalle sole ore di punta giornaliere (una per giorno). Alta = poche ore al giorno fanno gran parte della bolletta."),
+                       quota_txt, c3)
+            render_kpi(edu("Fascia più colpita", "La fascia oraria (F1/F2/F3) in cui cade più spesso l'ora di punta giornaliera: dice dove concentrare shifting, cap o flessibilità."),
+                       f"{op['fascia_moda']}<br><small>fascia della punta</small>" if op["fascia_moda"] else "n/d", c4)
+
+            st.markdown("**Quando cade l'ora di punta** (n. di giorni in cui ciascuna ora è stata la più costosa)")
+            df_opo = op["df_ore"]
+            colori_op = ["#f59e0b" if h == op["ora_moda"] else "#3b82f6" for h in df_opo["Ora"]]
+            fig_op = go.Figure()
+            fig_op.add_trace(go.Bar(
+                x=[f"{h:02d}:00" for h in df_opo["Ora"]], y=df_opo["Giorni punta"],
+                marker_color=colori_op,
+                hovertemplate="Ora %{x}<br>Giorni punta: %{y}<br>Costo totale: €%{customdata:,.0f}<extra></extra>",
+                customdata=df_opo["Costo totale (€)"]))
+            fig_op.update_layout(template="plotly_dark", height=360,
+                                 title="Distribuzione dell'ora di punta giornaliera",
+                                 xaxis_title="Ora del giorno", yaxis_title="Giorni")
+            st.plotly_chart(fig_op, use_container_width=True)
+
+            st.markdown("**Costo delle ore di punta per mese**")
+            df_opm = op["df_mesi"]
+            fig_opm = go.Figure()
+            fig_opm.add_trace(go.Bar(
+                x=df_opm["Mese"], y=df_opm["Costo punta (€)"],
+                marker_color="#ef4444",
+                hovertemplate="Mese %{x}<br>Costo punta: €%{y:,.0f}<br>Quota mese: %{customdata}%<extra></extra>",
+                customdata=df_opm["Quota costo mese %"].fillna("n/d")))
+            fig_opm.update_layout(template="plotly_dark", height=320,
+                                  title="Costo delle ore di punta per mese (€)",
+                                  xaxis_title="Mese", yaxis_title="€")
+            st.plotly_chart(fig_opm, use_container_width=True)
+
+            st.markdown("**Dettaglio per ora del giorno**")
+            st.dataframe(df_opo, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta ora di punta giornaliera (CSV)",
+                df_opm.to_csv(index=False).encode("utf-8"),
+                file_name=f"ora_punta_giornaliera_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica il dettaglio mensile: giorni analizzati, costo delle ore di punta e quota sul costo del mese.",
+            )
+            st.caption("💡 Punta stabile sempre alla stessa ora → demand response ricorrente su quell'ora (tab 🔄 Shifting carico) o cap sulle ore di picco (tab 🛡️). Punta che salta di ora in ora → serve flessibilità dinamica, non un'ora fissa da tagliare.")
+
+
+    with tab61:
+        titolo_ep = edu("Efficienza del profilo", "Quanto il tuo profilo di consumo \u00e8 'intelligente' rispetto ai prezzi: 100% = a parit\u00e0 di energia giornaliera consumi solo nelle ore pi\u00f9 economiche, 0% = solo nelle ore pi\u00f9 care, 50% = neutro. Il minimo teorico si ottiene riallocando l'energia di OGNI giorno sulle ore pi\u00f9 economiche (stessi MWh, senza superare il picco osservato): \u00e8 il limite superiore di QUALSIASI demand response \u2014 nessuno shifting pu\u00f2 risparmiare pi\u00f9 di cos\u00ec. Non simula nessuna azione: misura quanto il profilo ESISTENTE \u00e8 efficiente.")
+        st.markdown(f"**{titolo_ep}**: il tuo profilo \u00e8 smart o spreca sulle ore care?", unsafe_allow_html=True)
+        st.caption("Profilo MW per fascia: stesso della tab \U0001f4b0 Costo fornitura.")
+
+        ep = calcola_efficienza_profilo(prezzi, mw_f1, mw_f2, mw_f3)
+        if ep["giorni"] == 0:
+            st.info("Imposta una potenza maggiore di zero in almeno una fascia (tab \U0001f4b0 Costo fornitura) e seleziona un periodo con dati.")
+        else:
+            c1, c2, c3, c4 = st.columns(4)
+            eff = ep["efficienza"]
+            eff_txt = f"{eff:.1f} %<br><small>scala 0-100</small>" if eff is not None else "n/d<br><small>prezzi piatti</small>"
+            eff_col = "#10b981" if (eff is not None and eff >= 66.7) else ("#f59e0b" if (eff is not None and eff >= 33.3) else "#ef4444")
+            c1.markdown(f"<div style='background:#1F2937; padding:10px; border-radius:8px; border-left:4px solid {eff_col};'><b>{edu('Efficienza del profilo', 'Posizione del costo reale tra minimo e massimo teorico: (Cmax - C)/(Cmax - Cmin). Sopra 67% = profilo smart, sotto 33% = profilo che spreca sulle ore care.')}</b><br><span style='font-size:22px; font-weight:bold; color:{eff_col};'>{eff_txt}</span></div>", unsafe_allow_html=True)
+            risp_txt = f"{ep['risparmio_max']:,.0f} \u20ac<br><small>{ep['risparmio_max_pct']:.1f}% del costo</small>" if ep["risparmio_max_pct"] is not None else f"{ep['risparmio_max']:,.0f} \u20ac"
+            render_kpi(edu("Risparmio massimo teorico", "Euro che separano il costo reale dal minimo teorico: il tetto di QUALSIASI demand response. Se \u00e8 piccolo, non c'\u00e8 quasi nulla da ottimizzare con lo shifting (tab \U0001f504 Shifting carico)."),
+                       risp_txt, c2)
+            corr = ep["correlazione"]
+            corr_txt = f"{corr:+.2f}<br><small>prezzo vs carico</small>" if corr is not None else "n/d"
+            render_kpi(edu("Correlazione prezzo-carico", "Pearson tra prezzo orario e MW prelevati: negativa = il carico tende a stare nelle ore economiche (bene), positiva = consumi quando costa di pi\u00f9 (male)."),
+                       corr_txt, c3)
+            render_kpi(edu("Costo reale vs minimo", "Costo di fornitura del periodo contro il minimo ottenibile riallocando l'energia giorno per giorno."),
+                       f"{ep['costo_totale']:,.0f} \u20ac<br><small>minimo {ep['costo_min']:,.0f} \u20ac</small>", c4)
+
+            st.markdown("**Efficienza per mese** (%: 100 = profilo perfettamente smart)")
+            df_epm = ep["df_mesi"]
+            colori_ep = ["#10b981" if (v is not None and v >= 66.7) else ("#f59e0b" if (v is not None and v >= 33.3) else "#ef4444") for v in df_epm["Efficienza %"]]
+            fig_ep = go.Figure()
+            fig_ep.add_trace(go.Bar(
+                x=df_epm["Mese"], y=df_epm["Efficienza %"],
+                marker_color=colori_ep,
+                hovertemplate="Mese %{x}<br>Efficienza: %{y:.1f}%<br>Risparmio max: \u20ac%{customdata:,.0f}<extra></extra>",
+                customdata=df_epm["Risparmio max (\u20ac)"]))
+            fig_ep.add_hline(y=50, line_dash="dash", line_color="#6b7280",
+                             annotation_text="neutro (50%)", annotation_position="top right")
+            fig_ep.update_layout(template="plotly_dark", height=340,
+                                 title="Efficienza del profilo per mese (%)",
+                                 xaxis_title="Mese", yaxis_title="%", yaxis_range=[0, 100])
+            st.plotly_chart(fig_ep, use_container_width=True)
+
+            st.markdown("**Costo reale vs minimo teorico per mese** (\u20ac)")
+            fig_ep2 = go.Figure()
+            fig_ep2.add_trace(go.Bar(x=df_epm["Mese"], y=df_epm["Costo (\u20ac)"], name="Costo reale", marker_color="#3b82f6"))
+            fig_ep2.add_trace(go.Bar(x=df_epm["Mese"], y=df_epm["Minimo teorico (\u20ac)"], name="Minimo teorico", marker_color="#10b981"))
+            fig_ep2.update_layout(template="plotly_dark", height=340, barmode="group",
+                                  title="Costo reale vs minimo teorico (\u20ac/mese)",
+                                  xaxis_title="Mese", yaxis_title="\u20ac")
+            st.plotly_chart(fig_ep2, use_container_width=True)
+
+            st.markdown("**Dettaglio mensile**")
+            st.dataframe(df_epm, use_container_width=True, hide_index=True)
+            st.download_button(
+                "\u2b07\ufe0f Esporta efficienza profilo (CSV)",
+                df_epm.to_csv(index=False).encode("utf-8"),
+                file_name=f"efficienza_profilo_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica il dettaglio mensile: efficienza del profilo, costo reale, minimo teorico e risparmio massimo.",
+            )
+            st.caption("\U0001f4a1 Efficienza alta ma risparmio max piccolo \u2192 il profilo \u00e8 gi\u00e0 ottimizzato, non c'\u00e8 quasi nulla da guadagnare con lo shifting. Efficienza bassa + risparmio max grande \u2192 vai alla tab \U0001f504 Shifting carico per quantificare la demand response. Correlazione positiva \u2192 il carico segue i prezzi al contrario: primo candidato alla revisione del profilo.")
 
 # Footer
 
