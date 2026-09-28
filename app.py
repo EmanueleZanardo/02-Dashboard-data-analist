@@ -3243,6 +3243,117 @@ def calcola_strip_forward(prezzi, freq="ME", ora_peak_inizio=8, ora_peak_fine=20
     return out
 
 
+def calcola_climatologia_prezzo(prezzi, soglia=100.0):
+    """Climatologia del prezzo: probabilita' di superare una soglia per giorno della settimana e ora.
+
+    Per chi compra/vende energia a termine (o programma flessibilita') conta
+    sapere NON solo la media di prezzo, ma con che probabilita' il prezzo
+    supera un livello critico (es. costo variabile, strike di un'opzione,
+    prezzo dell'offerta da battere) in una data ora del giorno e in un dato
+    giorno della settimana. Questa "climatologia" risponde alla domanda
+    "a che ora e in che giorno e' piu' probabile che il prezzo superi X €/MWh?".
+
+    Differenza rispetto agli altri tab: 'Persistenza sopra soglia' studia i
+    BLOCCHI consecutivi sopra soglia (durata degli eventi); 'Picchi' elenca
+    le singole ore estreme; qui si misura la FREQUENZA condizionata al
+    calendario (matrice 7x24): una misura di rischio/probabilita', non di
+    intensita'. Differisce anche da 'Settimana tipo' che mostra i prezzi
+    MEDI: qui le probabilita' di superamento soglia.
+
+    prezzi: Series oraria in €/MWh con indice datetime (tz-aware ok).
+    soglia: livello critico in €/MWh (default 100.0); ore con prezzo >= soglia
+      contano come "sopra soglia".
+    NaN-safe: ore NaN escluse sia dal numeratore che dal denominatore.
+    Serie vuota o indice non datetime -> matrice NaN e KPI a None.
+    Mesi DST con 23/25 ore: probabilita' calcolate sulle ore osservate.
+
+    Ritorna dict con 'soglia', 'n_ore' (ore osservate), 'quota' (frazione
+    globale ore sopra soglia, None se non valutabile), 'matrice' (DataFrame
+    7 righe Lun-Dom x 24 colonne ore, probabilita' in % 0-100, NaN dove non ci
+    sono osservazioni), 'ore_osservate' (stessa forma, conteggi),
+    'media_ora' (DataFrame Ora, Prob %), 'media_giorno' (DataFrame Giorno,
+    Prob %), 'ora_picco' (ora, prob %), 'giorno_picco' (nome, prob %),
+    'p_max', 'ore_p50' (celle con P>=50%), 'eccedenza_media' (€/MWh medi di
+    max(prezzo-soglia,0) sulle ore osservate), 'eccedenza_max'."""
+
+    GIORNI = ["Lunedi'", "Martedi'", "Mercoledi'", "Giovedi'",
+              "Venerdi'", "Sabato", "Domenica"]
+    cols_g = ["Giorno", "Probabilita' (%)"]
+    cols_o = ["Ora", "Probabilita' (%)"]
+    cols_t = ["Giorno", "Ora", "Probabilita' (%)", "Ore osservate"]
+    mat_vuota = pd.DataFrame(index=GIORNI, columns=list(range(24)), dtype=float)
+    cnt_vuota = pd.DataFrame(index=GIORNI, columns=list(range(24)), dtype=float)
+    vuoto = {"soglia": None, "n_ore": 0, "quota": None,
+             "matrice": mat_vuota, "ore_osservate": cnt_vuota,
+             "media_ora": pd.DataFrame(columns=cols_o),
+             "media_giorno": pd.DataFrame(columns=cols_g),
+             "ora_picco": None, "giorno_picco": None, "p_max": None,
+             "ore_p50": 0, "eccedenza_media": None, "eccedenza_max": None,
+             "top_celle": pd.DataFrame(columns=cols_t)}
+    try:
+        soglia = float(soglia)
+    except Exception:
+        return dict(vuoto)
+    try:
+        p = prezzi.astype(float)
+        p = p[~p.index.duplicated(keep="first")].sort_index()
+    except Exception:
+        return dict(vuoto)
+    try:
+        if not isinstance(p.index, pd.DatetimeIndex):
+            return dict(vuoto)
+    except Exception:
+        return dict(vuoto)
+    p = p.dropna()
+    if len(p) == 0:
+        return dict(vuoto)
+
+    idxn = p.index.tz_localize(None) if p.index.tz is not None else p.index
+    sopra = (p.values >= soglia).astype(float)
+    df = pd.DataFrame({"wd": idxn.weekday, "ora": idxn.hour,
+                       "sopra": sopra, "ecc": np.maximum(p.values - soglia, 0.0)})
+
+    mat = ((df.groupby(["wd", "ora"])["sopra"].mean() * 100.0)
+             .unstack("ora").reindex(index=range(7), columns=range(24)))
+    cnt = (df.groupby(["wd", "ora"])["sopra"].size()
+             .unstack("ora").reindex(index=range(7), columns=range(24)))
+    mat.index = GIORNI
+    cnt.index = GIORNI
+
+    out = dict(vuoto)
+    out["soglia"] = soglia
+    out["n_ore"] = int(len(df))
+    out["quota"] = round(float(sopra.mean()), 4)
+    out["matrice"] = mat
+    out["ore_osservate"] = cnt
+    out["media_ora"] = (pd.DataFrame({"Ora": [f"{h:02d}:00" for h in range(24)],
+                                      "Probabilita' (%)": [round(float(v), 1) if pd.notna(v) else float("nan")
+                                                            for v in mat.mean(axis=0).to_numpy()]})
+                        if mat.notna().any().any() else pd.DataFrame(columns=cols_o))
+    mg = mat.mean(axis=1)
+    out["media_giorno"] = (pd.DataFrame({"Giorno": GIORNI,
+                                         "Probabilita' (%)": [round(float(v), 1) if pd.notna(v) else float("nan")
+                                                               for v in mg.to_numpy()]})
+                           if mg.notna().any() else pd.DataFrame(columns=cols_g))
+    s = mat.stack().dropna()
+    if not s.empty:
+        imax = s.idxmax()
+        out["p_max"] = round(float(s.max()), 1)
+        out["ora_picco"] = (int(imax[1]), round(float(s.max()), 1))
+        out["giorno_picco"] = (imax[0], round(float(s.max()), 1))
+        out["ore_p50"] = int((s >= 50.0).sum())
+        top = (pd.DataFrame({"Giorno": [i[0] for i in s.index],
+                             "Ora": [f"{int(i[1]):02d}:00" for i in s.index],
+                             "Probabilita' (%)": [round(float(v), 1) for v in s.to_numpy()],
+                             "Ore osservate": [int(cnt.loc[i[0], i[1]]) for i in s.index]})
+               .sort_values("Probabilita' (%)", ascending=False)
+               .head(20).reset_index(drop=True))
+        out["top_celle"] = top
+    out["eccedenza_media"] = round(float(df["ecc"].mean()), 2)
+    out["eccedenza_max"] = round(float(df["ecc"].max()), 2)
+    return out
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def generate_singularity_data():
     np.random.seed(42)
@@ -3935,7 +4046,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -6513,6 +6624,79 @@ elif workspace == _('ws8'):
                 help="Scarica base, peak, offpeak, spread e premio per ogni strip: il benchmark per confrontare le quotazioni dei broker.",
             )
 
+    with tab44:
+        titolo_cl = edu("Climatologia del prezzo", "La CLIMATOLOGIA del prezzo e' la probabilita' (calcolata sullo storico) che il prezzo orario superi un livello critico X in una data ora del giorno e in un dato giorno della settimana. E' la misura di RISCHIO/PROBABILITA', non di intensita': risponde a 'a che ora e in che giorno e' piu' probabile che il prezzo superi il mio costo variabile / lo strike / il prezzo dell'offerta da battere?'. A differenza del tab Persistenza (che studia i BLOCCHI consecutivi sopra soglia) e di Settimana tipo (che mostra i prezzi MEDI), qui ogni cella della matrice 7x24 e' una frequenza condizionata al calendario: utile per programmare flessibilita', dispacciamento e acquisti quando il mercato e' statisticamente favorevole.")
+        st.markdown(f"**{titolo_cl}**: probabilita' che il prezzo superi la soglia, per giorno della settimana e ora.", unsafe_allow_html=True)
+
+        soglia_cl = st.slider("Soglia critica (€/MWh)", min_value=0, max_value=500, value=100, step=5,
+                              help="Livello di prezzo critico: costo variabile, strike di un'opzione, prezzo dell'offerta da battere. Un'ora conta come 'sopra soglia' se prezzo >= soglia.")
+        cl = calcola_climatologia_prezzo(prezzi, soglia=float(soglia_cl))
+        if cl["n_ore"] == 0:
+            st.warning("Dati insufficienti per calcolare la climatologia (serie vuota).")
+        else:
+            c1, c2, c3, c4 = st.columns(4)
+            ora_txt = f"{cl['ora_picco'][0]:02d}:00 — {cl['ora_picco'][1]:.0f}%" if cl["ora_picco"] else "n.d."
+            gio_txt = f"{cl['giorno_picco'][0]} — {cl['giorno_picco'][1]:.0f}%" if cl["giorno_picco"] else "n.d."
+            q_txt = f"{cl['quota']*100:.1f} %" if cl["quota"] is not None else "n.d."
+            render_kpi(edu("Ora piu' probabile sopra soglia", "L'ora del giorno con la piu' alta probabilita' storica di superare la soglia: l'ora in cui il mercato e' statisticamente piu' caro."), ora_txt, c1)
+            render_kpi(edu("Giorno piu' probabile sopra soglia", "Il giorno della settimana con la piu' alta probabilita' media di superare la soglia."), gio_txt, c2)
+            render_kpi(edu("Quota ore sopra soglia", "Frazione di tutte le ore osservate con prezzo sopra la soglia: la frequenza incondizionata dell'evento."), q_txt, c3)
+            render_kpi(edu("Eccedenza attesa media", "Media su tutte le ore osservate di max(prezzo - soglia, 0): quanto, in media per ora, il prezzo eccede la soglia quando la supera. Moltiplicato per i MW, e' il margine atteso per ora."), f"{cl['eccedenza_media']:,.2f} €/MWh", c4)
+
+            try:
+                mat = cl["matrice"]
+                fig_cl1 = go.Figure(data=go.Heatmap(
+                    z=mat.to_numpy(), x=[f"{h:02d}" for h in range(24)], y=mat.index.tolist(),
+                    colorscale="Reds", zmin=0, zmax=100,
+                    colorbar=dict(title="Prob. %"),
+                    hovertemplate="Giorno: %{y}<br>Ora: %{x}:00<br>Probabilita': %{z:.1f}%<extra></extra>"))
+                fig_cl1.update_layout(template="plotly_dark", height=380,
+                                      title=f"Climatologia: probabilita' di prezzo >= {soglia_cl} €/MWh per giorno e ora",
+                                      xaxis_title="Ora del giorno", yaxis_title="Giorno della settimana")
+                st.plotly_chart(fig_cl1, use_container_width=True)
+                st.caption("Celle rosse scure = combinazioni giorno/ora in cui il prezzo supera la soglia quasi sempre: finestre tipicamente care (o, per chi vende, finestre di margine).")
+            except Exception:
+                st.info("Heatmap climatologia non disponibile per questi dati.")
+
+            try:
+                mo = cl["media_ora"].dropna()
+                mg = cl["media_giorno"].dropna()
+                fig_cl2 = go.Figure()
+                if len(mo):
+                    fig_cl2.add_trace(go.Bar(x=mo["Ora"], y=mo["Probabilita' (%)"], name="Per ora",
+                                             marker_color="#f59e0b",
+                                             hovertemplate="Ora: %{x}<br>Probabilita': %{y:.1f}%<extra></extra>"))
+                fig_cl2.update_layout(template="plotly_dark", height=300,
+                                      title="Profilo orario: probabilita' sopra soglia per ora del giorno",
+                                      xaxis_title="Ora", yaxis_title="Probabilita' (%)")
+                st.plotly_chart(fig_cl2, use_container_width=True)
+                if len(mg):
+                    fig_cl3 = go.Figure()
+                    fig_cl3.add_trace(go.Bar(x=mg["Giorno"], y=mg["Probabilita' (%)"], name="Per giorno",
+                                             marker_color="#3b82f6",
+                                             hovertemplate="Giorno: %{x}<br>Probabilita': %{y:.1f}%<extra></extra>"))
+                    fig_cl3.update_layout(template="plotly_dark", height=300,
+                                          title="Profilo settimanale: probabilita' sopra soglia per giorno",
+                                          xaxis_title="Giorno", yaxis_title="Probabilita' (%)")
+                    st.plotly_chart(fig_cl3, use_container_width=True)
+            except Exception:
+                st.info("Profili climatologia non disponibili per questi dati.")
+
+            if cl["ore_p50"] is not None:
+                st.markdown(f"**{cl['ore_p50']}** combinazioni giorno/ora hanno probabilita' >= 50% di superare la soglia.")
+            df_cl_top = cl["top_celle"]
+            if len(df_cl_top):
+                st.markdown("**Top 20 combinazioni giorno/ora piu' probabili sopra soglia**")
+                st.dataframe(df_cl_top, use_container_width=True, hide_index=True)
+                st.download_button(
+                    "⬇️ Esporta climatologia (CSV)",
+                    df_cl_top.to_csv(index=False).encode("utf-8"),
+                    file_name=f"climatologia_prezzo_{soglia_cl}_{d0}_{d1}.csv",
+                    mime="text/csv",
+                    help="Scarica le 20 combinazioni giorno/ora con la piu' alta probabilita' di superare la soglia.",
+                )
+
 # Footer
+
 st.markdown("---")
 st.markdown(f"<div style='text-align: center; color: #4B5563; font-size: 10px;'>Singularity OS V16 | Edu Mode: {st.session_state.edu_mode}</div>", unsafe_allow_html=True)
