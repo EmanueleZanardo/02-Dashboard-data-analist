@@ -5131,6 +5131,141 @@ with st.sidebar:
         st.session_state.messages.append({"role": "assistant", "content": f"Elaborazione: '{prompt}'. Il modello indica delta-hedging."})
         st.rerun()
 
+def calcola_costo_turni(prezzi, mw_f1, mw_f2, mw_f3):
+    """Costo di fornitura scomposto per turno di produzione industriale.
+
+    Molti clienti industriali lavorano su 3 turni da 8 ore: Notte 22-06,
+    Mattina 06-14, Pomeriggio 14-22. Il prezzo spot (e quindi il costo di
+    fornitura a prezzo variabile) cambia molto tra notte e giorno: questo
+    tab dice all'energy manager quanto costa far girare ciascun turno e
+    quale turno e' il piu' caro in EUR/MWh — informazione operativa per
+    spostare produzione, manutenzione o fermi sui turni piu' economici.
+
+    Il profilo di carico dell'app e' piatto per fascia (MW costanti in
+    F1/F2/F3): il carico orario e' il MW della fascia di ciascuna ora (via
+    fascia_oraria). Il costo orario e' prezzo x carico; ogni ora cade in
+    esattamente un turno.
+
+    Metodo (tutto deterministico a parita' di input):
+    - turno(h): 22,23,0-5 -> "Notte (22-06)"; 6-13 -> "Mattina (06-14)";
+      14-21 -> "Pomeriggio (14-22)";
+    - per turno: ore, MWh = somma carico, costo = somma(prezzo x carico),
+      prezzo medio = costo / MWh (None se MWh = 0), % costo = costo /
+      costo totale x 100 (0.0 se costo totale = 0);
+    - KPI: turno piu' costoso (max costo), turno piu' caro in EUR/MWh
+      (max prezzo medio tra i turni con MWh > 0), quota % del turno di
+      punta sul totale;
+    - df_mesi: per mese di calendario, costo EUR per turno (somme
+      esatte: la somma su turni e mesi = costo totale).
+
+    NaN-safe: serie vuota, MW tutti a zero o non validi -> statistiche
+    neutrali con DataFrame dalle colonne giuste.
+
+    Ritorna dict con 'ore', 'mwh_totale', 'costo_totale', 'turno_piu_costoso',
+    'turno_piu_caro_mwh', 'pct_turno_punta' (None se costo_totale = 0),
+    'df_turni' ('Turno', 'Ore', 'MWh', 'Costo (€)', 'Prezzo medio (€/MWh)',
+    '% costo'), 'df_mesi' ('Mese', 'Notte (€)', 'Mattina (€)',
+    'Pomeriggio (€)').
+    """
+    turni = ["Notte (22-06)", "Mattina (06-14)", "Pomeriggio (14-22)"]
+    cols_t = ["Turno", "Ore", "MWh", "Costo (€)", "Prezzo medio (€/MWh)", "% costo"]
+    cols_m = ["Mese", "Notte (€)", "Mattina (€)", "Pomeriggio (€)"]
+
+    def turno_di(h):
+        if h >= 22 or h < 6:
+            return "Notte (22-06)"
+        if h < 14:
+            return "Mattina (06-14)"
+        return "Pomeriggio (14-22)"
+
+    vuoto = {"ore": 0, "mwh_totale": 0.0, "costo_totale": 0.0,
+             "turno_piu_costoso": None, "turno_piu_caro_mwh": None,
+             "pct_turno_punta": None,
+             "df_turni": pd.DataFrame([{"Turno": t, "Ore": 0, "MWh": 0.0,
+                                        "Costo (€)": 0.0,
+                                        "Prezzo medio (€/MWh)": None,
+                                        "% costo": 0.0} for t in turni]),
+             "df_mesi": pd.DataFrame(columns=cols_m)}
+    try:
+        p = prezzi.astype(float).dropna()
+        p = p[~p.index.duplicated(keep="first")].sort_index()
+    except Exception:
+        return dict(vuoto)
+    if len(p) == 0:
+        return dict(vuoto)
+    try:
+        mws = [max(0.0, float(x)) for x in (mw_f1, mw_f2, mw_f3)]
+    except (TypeError, ValueError):
+        mws = [0.0, 0.0, 0.0]
+    out = dict(vuoto)
+    out["ore"] = len(p)
+    try:
+        ore_turno = pd.Series([turno_di(ts.hour) for ts in p.index],
+                              index=p.index, dtype="string")
+        carico = p.index.map(fascia_oraria).map(
+            {"F1": mws[0], "F2": mws[1], "F3": mws[2]}).astype(float)
+    except Exception:
+        return out
+    costo_orario = (p.values * carico.values)
+    df_h = pd.DataFrame({"turno": ore_turno.values, "mwh": carico.values,
+                         "costo": costo_orario})
+    g = df_h.groupby("turno", observed=True)
+    righe = []
+    costi = {}
+    for t in turni:
+        if t in g.groups:
+            gg = g.get_group(t)
+            ore_t = int(len(gg))
+            mwh_t = float(gg["mwh"].sum())
+            costo_t = float(gg["costo"].sum())
+        else:
+            ore_t, mwh_t, costo_t = 0, 0.0, 0.0
+        pm = (costo_t / mwh_t) if mwh_t > 0 else None
+        costi[t] = costo_t
+        righe.append({"Turno": t, "Ore": ore_t, "MWh": round(mwh_t, 3),
+                      "Costo (€)": round(costo_t, 2),
+                      "Prezzo medio (€/MWh)": (round(pm, 2) if pm is not None else None),
+                      "% costo": 0.0})
+    costo_tot = float(df_h["costo"].sum())
+    mwh_tot = float(df_h["mwh"].sum())
+    for rg in righe:
+        rg["% costo"] = round(rg["Costo (€)"] / costo_tot * 100.0, 1) if costo_tot > 0 else 0.0
+    # Chiudi l'arrotondamento a 1 decimale: la somma deve fare 100.0
+    if costo_tot > 0:
+        residuo = round(100.0 - sum(rg["% costo"] for rg in righe), 1)
+        if abs(residuo) > 0.0:
+            tmax_r = max(turni, key=lambda t: costi[t])
+            for rg in righe:
+                if rg["Turno"] == tmax_r:
+                    rg["% costo"] = round(rg["% costo"] + residuo, 1)
+                    break
+    out["df_turni"] = pd.DataFrame(righe, columns=cols_t)
+    out["mwh_totale"] = round(mwh_tot, 3)
+    out["costo_totale"] = round(costo_tot, 2)
+    if costo_tot > 0:
+        tmax = max(turni, key=lambda t: costi[t])
+        out["turno_piu_costoso"] = tmax
+        out["pct_turno_punta"] = round(costi[tmax] / costo_tot * 100.0, 1)
+        pm_vals = {r["Turno"]: r["Prezzo medio (€/MWh)"] for r in righe
+                   if r["Prezzo medio (€/MWh)"] is not None}
+        out["turno_piu_caro_mwh"] = max(pm_vals, key=pm_vals.get) if pm_vals else None
+    # Dettaglio mensile: costo per turno, mese di calendario
+    try:
+        df_h["mese"] = pd.PeriodIndex(p.index, freq="M").astype(str)
+        dm = (df_h.groupby(["mese", "turno"], observed=True)["costo"]
+              .sum().unstack(fill_value=0.0))
+        for t in turni:
+            if t not in dm.columns:
+                dm[t] = 0.0
+        dm = dm[turni].reset_index()
+        dm.columns = ["Mese", "Notte (€)", "Mattina (€)", "Pomeriggio (€)"]
+        for c in ["Notte (€)", "Mattina (€)", "Pomeriggio (€)"]:
+            dm[c] = dm[c].round(2)
+        out["df_mesi"] = dm.sort_values("Mese").reset_index(drop=True)
+    except Exception:
+        pass
+    return out
+
 def render_kpi(title, value, col):
     col.markdown(f"<div class='metric-container'><div class='metric-label'>{title}</div><div class='metric-val'>{value}</div></div>", unsafe_allow_html=True)
 
@@ -5766,7 +5901,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -9504,6 +9639,65 @@ elif workspace == _('ws8'):
                 help="Scarica il dettaglio mensile: picco MW, ore sopra il cap e MWh da gestire.",
             )
             st.caption("💡 La quota potenza si paga anche sui kW mai usati: se il picco sta in F1, sposta i carichi flessibili in F2/F3 (tab 🔄 Shifting carico) e abbassa il cap senza tagliare energia. Confronta la soglia di convenienza con il costo del kWh da batteria (tab 🔋 Arbitraggio Batteria) per decidere se coprire i picchi con accumulo.")
+
+    with tab58:
+        titolo_ct = edu("Costo per turno", "Molti clienti industriali lavorano su 3 turni da 8 ore: NOTTE 22-06, MATTINA 06-14, POMERIGGIO 14-22. Il prezzo spot cambia molto tra notte e giorno, quindi far girare la produzione in un turno invece che in un altro costa cifre diverse: questo tab dice quanto costa l'energia di CIASCUN turno (MWh, euro, euro/MWh, quota % sul totale). Il turno più caro in €/MWh è dove vale la pena spostare produzione, manutenzione o fermi programmati. Il carico è quello del tab 💰 Costo fornitura (MW per fascia); i prezzi sono quelli del periodo selezionato.")
+        st.markdown(f"**{titolo_ct}**: quanto costa far girare ciascun turno?", unsafe_allow_html=True)
+        st.caption("Turni standard da 8 ore: Notte 22-06 · Mattina 06-14 · Pomeriggio 14-22.")
+
+        r_ct = calcola_costo_turni(prezzi, mw_f1, mw_f2, mw_f3)
+        if r_ct["ore"] == 0 or r_ct["mwh_totale"] <= 0:
+            st.warning("Seleziona un periodo con dati e una potenza maggiore di zero in almeno una fascia (tab 💰 Costo fornitura).")
+        else:
+            k1, k2, k3, k4 = st.columns(4)
+            render_kpi(edu("Turno più costoso", "Il turno che assorbe più euro in totale: lì c'è la spesa maggiore da ottimizzare."),
+                       r_ct["turno_piu_costoso"] or "n/d", k1)
+            render_kpi(edu("Turno più caro (€/MWh)", "Il turno con il prezzo medio più alto: il più penalizzante in cui consumare. Spostare produzione qui è dove il risparmio per MWh è massimo."),
+                       r_ct["turno_piu_caro_mwh"] or "n/d", k2)
+            pct_txt = f"{r_ct['pct_turno_punta']:,.1f} %" if r_ct["pct_turno_punta"] is not None else "n/d"
+            render_kpi(edu("Quota del turno di punta", "Percentuale del costo totale assorbita dal turno più costoso: più è alta, più concentrare l'attenzione su quel turno paga."),
+                       pct_txt, k3)
+            render_kpi(edu("Costo totale periodo", "Somma dei costi dei tre turni = costo di fornitura totale del periodo."),
+                       f"{r_ct['costo_totale']:,.0f} €", k4)
+
+            df_ct = r_ct["df_turni"]
+            fig_ct = go.Figure()
+            fig_ct.add_trace(go.Bar(x=df_ct["Turno"], y=df_ct["Costo (€)"],
+                                    name="Costo €", marker_color="#3b82f6",
+                                    hovertemplate="%{x}<br>Costo: €%{y:,.0f}<extra></extra>"))
+            fig_ct.add_trace(go.Scatter(x=df_ct["Turno"], y=df_ct["Prezzo medio (€/MWh)"],
+                                        name="Prezzo medio €/MWh", mode="lines+markers",
+                                        marker_color="#f59e0b", yaxis="y2",
+                                        hovertemplate="%{x}<br>Prezzo medio: €%{y:,.2f}/MWh<extra></extra>"))
+            fig_ct.update_layout(template="plotly_dark", height=360,
+                                 title="Costo per turno e prezzo medio del turno",
+                                 xaxis_title="Turno", yaxis_title="Costo (€)",
+                                 yaxis2=dict(title="Prezzo medio (€/MWh)", overlaying="y", side="right"))
+            st.plotly_chart(fig_ct, use_container_width=True)
+
+            st.markdown("**Dettaglio per turno**")
+            st.dataframe(df_ct, use_container_width=True, hide_index=True)
+
+            st.markdown("**Dettaglio mensile (€)**")
+            df_ctm = r_ct["df_mesi"]
+            fig_ctm = go.Figure()
+            for c, col_c in [("Notte (€)", "#1d4ed8"), ("Mattina (€)", "#f59e0b"), ("Pomeriggio (€)", "#10b981")]:
+                fig_ctm.add_trace(go.Bar(x=df_ctm["Mese"], y=df_ctm[c], name=c.replace(" (€)", ""),
+                                         marker_color=col_c,
+                                         hovertemplate="%{x}<br>%{fullData.name}: €%{y:,.0f}<extra></extra>"))
+            fig_ctm.update_layout(template="plotly_dark", height=360, barmode="stack",
+                                  title="Costo mensile per turno (impilato)",
+                                  xaxis_title="Mese", yaxis_title="Costo (€)")
+            st.plotly_chart(fig_ctm, use_container_width=True)
+            st.dataframe(df_ctm, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta costo per turno (CSV)",
+                df_ctm.to_csv(index=False).encode("utf-8"),
+                file_name=f"costo_turni_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica il dettaglio mensile: costo in euro per ciascun turno.",
+            )
+            st.caption("💡 Se il turno di notte è il più caro in €/MWh, valuta di spostare fermi/manutenzione nelle ore notturne (tab 🔄 Shifting carico) o di ridurre il carico notturno con la batteria (tab 🔋 Arbitraggio Batteria).")
 
 # Footer
 
