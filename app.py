@@ -5143,6 +5143,150 @@ def calcola_distribuzione_prezzi(prezzi, soglia_alta=150.0, soglia_bassa=0.0, n_
             "df_percentili": df_p, "mesi": mesi}
 
 
+def calcola_timing_costo(prezzi, mw_f1, mw_f2, mw_f3):
+    """Timing del costo di fornitura NEL TEMPO: quando si concentra la spesa del periodo.
+
+    Domanda operativa dell'energy analyst: "il costo arriva tutto all'inizio,
+    tutto alla fine, o e' distribuito uniforme? a che punto del periodo ho gia'
+    speso meta' del budget?" — serve per la gestione di cassa, per il burn rate
+    del budget e per decidere quando fissare i prezzi ai clienti finali. Dato un
+    profilo di carico (MW prelevati in ciascuna fascia F1/F2/F3), calcola il
+    costo orario = prezzo spot x MW della fascia, lo aggrega per giorno di
+    calendario e studia la cumulata temporale: giorno di pareggio (primo giorno
+    in cui la quota cumulata di costo raggiunge il 50%), anticipo/ritardo del
+    pareggio rispetto alla meta' del periodo, quota di costo nella prima meta'
+    dei giorni, indice di Gini sui costi giornalieri (concentrazione temporale)
+    e statistiche giorno piu' caro / piu' economico / medio.
+    Diverso dal tab Concentrazione costo (curva di Lorenz sulle ore ordinate
+    per PREZZO, senza dimensione temporale) e dal tab Top giorni di costo
+    (classifica dei giorni): qui conta SOLO l'ordine di calendario.
+
+    Parametri:
+    - prezzi: Series oraria in euro/MWh;
+    - mw_f1/mw_f2/mw_f3: potenza prelevata (MW) nelle ore di ciascuna fascia
+      (valori negativi portati a 0).
+
+    Regole di sanitizzazione:
+    - ore con prezzo NaN scartate, timestamp duplicati -> primo tenuto, serie
+      ordinata; l'aggregazione e' per data di calendario (i giorni con != 24 ore,
+      es. cambi ora legale, restano un unico gruppo data);
+    - MW tutti a zero, serie vuota, meno di 2 giorni di calendario, oppure
+      costo totale <= 0 (es. prezzi tutti nulli/negativi) -> 'ok' False;
+    - con costi giornalieri negativi le quote % possono superare il 100%
+      (documentato) e l'indice di Gini non e' definito (None), perche' la
+      formula standard richiede valori non negativi.
+
+    Ritorna dict con 'ok' (bool), 'n_giorni', 'mwh', 'totale' (costo euro),
+    'giorno_pareggio' (Timestamp del primo giorno con cumulata >= 50%, None se
+    non definito), 'giorni_anticipo_ritardo' (pareggio - meta' periodo, in
+    giorni, negativo = in anticipo), 'quota_prima_meta' (% del costo nella
+    prima meta' dei giorni di calendario), 'gini' (0..1 sui costi giornalieri,
+    None con costi negativi), 'giorno_max'/'costo_max' (giorno piu' caro),
+    'giorno_min'/'costo_min' (giorno piu' economico), 'costo_medio_giorno',
+    'std_giorno', 'df_giorni' (DataFrame 'Giorno'/'Ore'/'MWh'/'Costo (euro)'/
+    'Quota costo %'/'Quota cumulata %' in ordine di calendario) e 'df_curva'
+    (DataFrame 'Giorno'/'Cumulata %'/'Attesa %' per il grafico, dove 'Attesa %'
+    e' la retta uniforme 100*(i+1)/n_giorni).
+    """
+    COLS_G = ["Giorno", "Ore", "MWh", "Costo (euro)", "Quota costo %", "Quota cumulata %"]
+    COLS_C = ["Giorno", "Cumulata %", "Attesa %"]
+
+    def _vuoto():
+        return {"ok": False, "n_giorni": 0, "mwh": 0.0, "totale": 0.0,
+                "giorno_pareggio": None, "giorni_anticipo_ritardo": None,
+                "quota_prima_meta": None, "gini": None,
+                "giorno_max": None, "costo_max": None,
+                "giorno_min": None, "costo_min": None,
+                "costo_medio_giorno": None, "std_giorno": None,
+                "df_giorni": pd.DataFrame(columns=COLS_G),
+                "df_curva": pd.DataFrame(columns=COLS_C)}
+
+    try:
+        p = prezzi.astype(float)
+        if hasattr(p.index, "duplicated"):
+            p = p[~p.index.duplicated(keep="first")]
+        p = p.dropna().sort_index()
+    except Exception:
+        return _vuoto()
+    if len(p) == 0:
+        return _vuoto()
+    try:
+        mws = [max(0.0, float(x)) for x in (mw_f1, mw_f2, mw_f3)]
+    except (TypeError, ValueError):
+        return _vuoto()
+    if sum(mws) <= 0:
+        return _vuoto()
+    mw_of = {"F1": mws[0], "F2": mws[1], "F3": mws[2]}
+    fasce = p.index.map(fascia_oraria)
+    prezzi_v = p.to_numpy(dtype=float)
+    carico = np.array([mw_of[fx] for fx in fasce], dtype=float)
+    costo_h = prezzi_v * carico
+    mwh = float(np.nansum(carico))
+    totale = float(np.nansum(costo_h))
+    if totale <= 0:
+        return _vuoto()
+
+    giorni = p.index.normalize()
+    df_d = pd.DataFrame({"data": giorni, "costo": costo_h, "mwh": carico})
+    agg = df_d.groupby("data", sort=True).agg(
+        ore=("costo", "size"), mwh=("mwh", "sum"), costo=("costo", "sum"))
+    agg = agg.reset_index()
+    n = len(agg)
+    if n < 2:
+        return _vuoto()
+
+    costi = agg["costo"].to_numpy(dtype=float)
+    quote = 100.0 * costi / totale
+    cumulata = np.cumsum(quote)
+    i_par = int(np.argmax(cumulata >= 50.0 - 1e-12))
+    giorno_pareggio = pd.Timestamp(agg["data"].iloc[i_par])
+    prima = pd.Timestamp(agg["data"].iloc[0])
+    ultima = pd.Timestamp(agg["data"].iloc[-1])
+    meta_periodo = prima + (ultima - prima) / 2
+    anticipo_ritardo = (giorno_pareggio - meta_periodo).total_seconds() / 86400.0
+    k_meta = (n + 1) // 2  # prima meta' dei giorni (ceil)
+    quota_prima_meta = float(100.0 * costi[:k_meta].sum() / totale)
+
+    if np.all(costi >= 0):
+        xs = np.sort(costi)
+        s = xs.sum()
+        if s > 0:
+            ii = np.arange(1, n + 1)
+            gini = float((2.0 * np.sum(ii * xs)) / (n * s) - (n + 1.0) / n)
+            gini = max(0.0, min(1.0, gini))
+        else:
+            gini = 0.0
+    else:
+        gini = None
+
+    i_max = int(np.argmax(costi))
+    i_min = int(np.argmin(costi))
+    df_g = pd.DataFrame({
+        "Giorno": agg["data"].dt.strftime("%Y-%m-%d"),
+        "Ore": agg["ore"].to_numpy(dtype=int),
+        "MWh": np.round(agg["mwh"].to_numpy(dtype=float), 2),
+        "Costo (euro)": np.round(costi, 2),
+        "Quota costo %": np.round(quote, 2),
+        "Quota cumulata %": np.round(cumulata, 2),
+    })
+    df_c = pd.DataFrame({
+        "Giorno": agg["data"].dt.strftime("%Y-%m-%d"),
+        "Cumulata %": np.round(cumulata, 2),
+        "Attesa %": np.round(100.0 * np.arange(1, n + 1) / n, 2),
+    })
+    return {"ok": True, "n_giorni": n, "mwh": mwh, "totale": totale,
+            "giorno_pareggio": giorno_pareggio,
+            "giorni_anticipo_ritardo": float(anticipo_ritardo),
+            "quota_prima_meta": quota_prima_meta, "gini": gini,
+            "giorno_max": pd.Timestamp(agg["data"].iloc[i_max]),
+            "costo_max": float(costi[i_max]),
+            "giorno_min": pd.Timestamp(agg["data"].iloc[i_min]),
+            "costo_min": float(costi[i_min]),
+            "costo_medio_giorno": float(costi.mean()),
+            "std_giorno": float(costi.std(ddof=0)) if n > 1 else 0.0,
+            "df_giorni": df_g, "df_curva": df_c}
+
+
 def calcola_climatologia_prezzo(prezzi, soglia=100.0):
     """Climatologia del prezzo: probabilita' di superare una soglia per giorno della settimana e ora.
 
@@ -7790,7 +7934,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -12649,6 +12793,104 @@ elif workspace == _('ws8'):
                 st.caption(f"\u2139\ufe0f Media condizionata coda alta (oltre P95): {dp['media_coda_alta']:,.2f} \u20ac/MWh | "
                            f"coda bassa (sotto P5): {dp['media_coda_bassa']:,.2f} \u20ac/MWh")
             st.caption("\U0001f4a1 Coda destra grassa + skew positivo: i picchi sono piu' frequenti di quanto dica la normale \u2014 alza le soglie di VaR e gli strike delle coperture. Distribuzione quasi normale: deviazione standard e modelli gaussiani sono affidabili.")
+
+    with tab72:
+        titolo_tc = edu("Timing del costo", "Il TIMING DEL COSTO dice QUANDO, nel calendario del periodo, si concentra la tua spesa di fornitura: arriva tutta all'inizio, tutta alla fine, o e' distribuita uniforme? Il 'giorno di pareggio' e' il primo giorno in cui hai gia' speso il 50% del costo totale del periodo: se cade molto prima della meta' del periodo, il budget brucia in fretta (servono cassa e coperture anticipate); se cade dopo, la spesa e' posticipata. La curva cumulata contro la retta uniforme mostra a colpo d'occhio gli scostamenti; l'indice di Gini temporale li riassume in un numero (0 = perfettamente distribuito, vicino a 1 = tutto in pochi giorni). Diverso dal tab \U0001f3af Concentrazione costo (curva di Lorenz sulle ore ordinate per PREZZO, senza dimensione temporale) e dal tab \U0001f51d Top giorni di costo (classifica dei giorni piu' cari): qui conta solo l'ordine di calendario, per gestire cassa e burn rate del budget.")
+        st.markdown(titolo_tc, unsafe_allow_html=True)
+        tc1, tc2, tc3 = st.columns(3)
+        with tc1:
+            tc_mw_f1 = st.number_input("Profilo: MW in F1", min_value=0.0, value=1.0, step=0.5, key="tc_mw_f1",
+                                      help="Potenza prelevata nelle ore di fascia F1 (lun-ven 8-19).")
+        with tc2:
+            tc_mw_f2 = st.number_input("Profilo: MW in F2", min_value=0.0, value=1.0, step=0.5, key="tc_mw_f2",
+                                      help="Potenza prelevata nelle ore di fascia F2 (sera feriali + sabato diurno).")
+        with tc3:
+            tc_mw_f3 = st.number_input("Profilo: MW in F3", min_value=0.0, value=1.0, step=0.5, key="tc_mw_f3",
+                                      help="Potenza prelevata nelle ore di fascia F3 (notti, domenica, festivi).")
+        tc = calcola_timing_costo(prezzi, tc_mw_f1, tc_mw_f2, tc_mw_f3)
+        if not tc["ok"]:
+            st.warning("Dati insufficienti per il timing (servono almeno 2 giorni di calendario con costo totale positivo e profilo non nullo).")
+        else:
+            k1, k2, k3, k4 = st.columns(4)
+            ar = tc["giorni_anticipo_ritardo"]
+            if ar < -0.5:
+                ar_txt, ar_ico = f"{ar:+.1f} gg: in anticipo", "\U0001f7e2"
+            elif ar > 0.5:
+                ar_txt, ar_ico = f"{ar:+.1f} gg: in ritardo", "\U0001f534"
+            else:
+                ar_txt, ar_ico = "in linea con met\u00e0 periodo", "\U0001f7e1"
+            render_kpi(edu("Giorno di pareggio", "Primo giorno in cui la spesa cumulata raggiunge il 50% del costo totale del periodo. In anticipo = il budget brucia in fretta (servono cassa e coperture anticipate); in ritardo = la spesa e' posticipata."),
+                       f"{tc['giorno_pareggio'].strftime('%d/%m')}", k1)
+            st.caption(f"{ar_ico} Pareggio {ar_txt}")
+            render_kpi(edu("Costo nella 1\u00aa met\u00e0", "Quota del costo totale caduta nella prima met\u00e0 dei giorni di calendario: sopra il 50% = spesa front-loaded, sotto = back-loaded."),
+                       f"{tc['quota_prima_meta']:.1f} %", k2)
+            g = tc["gini"]
+            if g is None:
+                g_txt = "n/d (costi negativi)"
+            elif g < 0.2:
+                g_txt = f"{g:.2f} (distribuito)"
+            elif g < 0.4:
+                g_txt = f"{g:.2f} (moderato)"
+            else:
+                g_txt = f"{g:.2f} (concentrato)"
+            render_kpi(edu("Concentrazione temporale", "Indice di Gini sui costi giornalieri: 0 = costo perfettamente distribuito sui giorni, vicino a 1 = quasi tutto il costo in pochi giorni. Non definito con costi giornalieri negativi."),
+                       g_txt, k3)
+            render_kpi(edu("Costo totale periodo", "Costo di fornitura del profilo sul periodo selezionato (prezzo spot x MW di fascia, ora per ora)."),
+                       f"\u20ac {tc['totale']:,.0f}", k4)
+            st.caption(f"{tc['n_giorni']} giorni | Costo medio/giorno \u20ac {tc['costo_medio_giorno']:,.0f} | "
+                       f"Giorno pi\u00f9 caro: {tc['giorno_max'].strftime('%d/%m')} (\u20ac {tc['costo_max']:,.0f}) | "
+                       f"Giorno pi\u00f9 economico: {tc['giorno_min'].strftime('%d/%m')} (\u20ac {tc['costo_min']:,.0f}) | "
+                       f"Energia {tc['mwh']:,.0f} MWh")
+            st.markdown("**Curva cumulata del costo nel tempo**")
+            dfc = tc["df_curva"]
+            passo = max(1, len(dfc) // 12)
+            fig_tc = go.Figure()
+            fig_tc.add_trace(go.Scatter(
+                x=dfc["Giorno"], y=dfc["Cumulata %"], mode="lines+markers",
+                name="Quota cumulata", line=dict(color="#3b82f6", width=2.5),
+                marker=dict(size=4),
+                hovertemplate="%{x}: %{y:.1f} % del costo<extra></extra>"))
+            fig_tc.add_trace(go.Scatter(
+                x=dfc["Giorno"], y=dfc["Attesa %"], mode="lines",
+                name="Uniforme attesa", line=dict(color="#9ca3af", width=1.5, dash="dash"),
+                hovertemplate="%{x}: %{y:.1f} % atteso<extra></extra>"))
+            fig_tc.add_hline(y=50.0, line_dash="dot", line_color="#eab308",
+                             annotation_text="Pareggio 50%", annotation_position="top left")
+            fig_tc.update_layout(template="plotly_dark", height=400,
+                                 title="Quando si accumula la spesa: sopra la retta = costo anticipato, sotto = posticipato",
+                                 xaxis_title="Giorno", yaxis_title="% del costo totale",
+                                 xaxis=dict(tickangle=-45, tickmode="array",
+                                            tickvals=dfc["Giorno"][::passo].tolist()))
+            st.plotly_chart(fig_tc, use_container_width=True)
+            st.markdown("**Costo per giorno** (rosso = sopra la media giornaliera)")
+            dfg = tc["df_giorni"]
+            media_g = tc["costo_medio_giorno"]
+            colori_g = ["#ef4444" if c > media_g else "#3b82f6" for c in dfg["Costo (euro)"]]
+            fig_tcb = go.Figure()
+            fig_tcb.add_trace(go.Bar(
+                x=dfg["Giorno"], y=dfg["Costo (euro)"],
+                marker_color=colori_g, name="Costo giorno",
+                hovertemplate="%{x}: \u20ac %{y:,.0f}<extra></extra>"))
+            fig_tcb.add_hline(y=media_g, line_dash="dash", line_color="#eab308",
+                              annotation_text=f"Media \u20ac {media_g:,.0f}/g", annotation_position="top left")
+            fig_tcb.update_layout(template="plotly_dark", height=360,
+                                  title="Spesa giornaliera di fornitura del profilo",
+                                  xaxis_title="Giorno", yaxis_title="\u20ac",
+                                  xaxis=dict(tickangle=-45, tickmode="array",
+                                             tickvals=dfg["Giorno"][::passo].tolist()))
+            st.plotly_chart(fig_tcb, use_container_width=True)
+            st.markdown("**Dettaglio giornaliero**")
+            st.dataframe(dfg, use_container_width=True, hide_index=True)
+            st.download_button(
+                "\u2b07\ufe0f Esporta timing costo (CSV)",
+                dfg.to_csv(index=False).encode("utf-8"),
+                file_name=f"timing_costo_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica il costo giornaliero con quote e cumulata del periodo.",
+                key="csv_tc_giorni",
+            )
+            st.caption("\U0001f4a1 Curva sopra la retta uniforme a inizio periodo = spesa front-loaded: anticipa coperture e liquidit\u00e0. Curva sotto la retta = spesa posticipata: hai tempo per fissare i prezzi. Gini alto + pareggio in anticipo = il rischio di budget si gioca nei primi giorni: quelli vanno coperti per primi.")
+
 
 # Footer
 
