@@ -1819,6 +1819,146 @@ def calcola_power_to_heat(prezzi, gas_eur_mwh_th, eff_caldaia_pct, cop,
             "risparmio_medio_ora": valore / n if n else 0.0,
             "df_mesi": df_mesi, "df_ore": df_ore}
 
+def calcola_valore_idro(prezzi, cap_mwh, pot_mw, eff_rt_pct, afflusso_mwh_g,
+                        ore_pompa=3, ore_turbina=3):
+    """Valore di un idroelettrico con serbatoio e pompaggio (tab 'Valore idro').
+
+    Simula giorno per giorno la gestione deterministica del serbatoio: ogni
+    giorno arriva l'AFFLUSSO naturale gratuito (MWh/giorno), si pompa nelle
+    'ore_pompa' piu' economiche e si turbina nelle 'ore_turbina' piu' care,
+    con rendimento di round-trip eff_rt_pct diviso tra carica e scarica
+    (sqrt(eta) per lato). L'energia da afflusso viene turbinata per prima.
+
+    Metodo (tutto deterministico a parita' di input):
+    - stoccaggio iniziale = afflusso_mwh_g; ogni giorno: stoccaggio =
+      min(cap, stoccaggio + afflusso); Vp = min(spazio, pot x ore_pompa)
+      pompato al prezzo medio delle ore_pompa piu' basse; energia in rete
+      dopo carica = Vp x sqrt(eta)
+    - Vt = min(stoccaggio, pot x ore_turbina) turbinato al prezzo medio delle
+      ore_turbina piu' alte; ricavo = Vt x p_sell x sqrt(eta)
+    - valore giorno = ricavo - costo acquisto; giorno 'attivo' se > 0
+    - quota del ricavo imputabile all'afflusso: min(Vt, stock_afflusso) x
+      p_sell x sqrt(eta) (l'afflusso e' gratis, quindi e' tutto margine)
+
+    NaN-safe: serie vuota -> 0 giorni e DataFrame con colonne giuste; input
+    non validi (cap/pot/eff <= 0, afflusso < 0, Serie non oraria) -> dict
+    neutro senza eccezioni.
+
+    Ritorna dict con 'giorni', 'valore_tot_eur', 'eur_per_mw',
+    'eur_per_mwh_cap', 'giorni_attivi', 'share_attivi', 'mese_migliore',
+    'valore_afflusso_eur', 'valore_pompaggio_eur', 'energia_turbinata_mwh',
+    'df_mesi', 'df_giorni'.
+    """
+    cols_m = ["Mese", "Giorni", "Valore (€)", "Valore per MW (€/MW)",
+              "Giorni attivi"]
+    cols_g = ["Data", "Spot min (€/MWh)", "Spot max (€/MWh)",
+              "Spread (€/MWh)", "Pompato (MWh)", "Turbinato (MWh)",
+              "Valore (€)"]
+    vuoto = {"giorni": 0, "valore_tot_eur": 0.0, "eur_per_mw": 0.0,
+             "eur_per_mwh_cap": 0.0, "giorni_attivi": 0, "share_attivi": 0.0,
+             "mese_migliore": "—", "valore_afflusso_eur": 0.0,
+             "valore_pompaggio_eur": 0.0, "energia_turbinata_mwh": 0.0,
+             "df_mesi": pd.DataFrame(columns=cols_m),
+             "df_giorni": pd.DataFrame(columns=cols_g)}
+    try:
+        cap = float(cap_mwh)
+        pot = float(pot_mw)
+        eta = float(eff_rt_pct) / 100.0
+        affl = float(afflusso_mwh_g)
+        op = max(1, int(ore_pompa))
+        ot = max(1, int(ore_turbina))
+    except (TypeError, ValueError):
+        return dict(vuoto)
+    if any(np.isnan(x) for x in (cap, pot, eta, affl)):
+        return dict(vuoto)
+    if cap <= 0 or pot <= 0 or eta <= 0 or eta > 1 or affl < 0:
+        return dict(vuoto)
+    try:
+        p = prezzi.astype(float).dropna()
+    except (TypeError, ValueError, AttributeError):
+        return dict(vuoto)
+    try:
+        giorni_idx = p.index.normalize()
+    except (TypeError, ValueError, AttributeError):
+        return dict(vuoto)
+    if len(p) == 0:
+        return dict(vuoto)
+    sqrt_eta = float(np.sqrt(eta))
+    storage = min(cap, affl)          # stoccaggio iniziale (energia gratis)
+    stock_affl = storage              # quota di stoccaggio da afflusso
+    righe_g, righe_m = [], []
+    tot_val = 0.0
+    tot_affl = 0.0
+    tot_mwh = 0.0
+    n_attivi = 0
+    for giorno, grp in p.groupby(giorni_idx):
+        v = grp.values
+        n_h = len(v)
+        if n_h == 0:
+            continue
+        idx_ord = np.argsort(v)
+        k_p = min(op, n_h)
+        k_t = min(ot, n_h)
+        p_buy = float(v[idx_ord[:k_p]].mean())
+        p_sell = float(v[idx_ord[-k_t:]].mean())
+        # afflusso del giorno (gratis, in stoccaggio)
+        spazio = cap - storage
+        agg = min(affl, max(0.0, spazio))
+        storage += agg
+        stock_affl = min(storage, stock_affl + agg)
+        # pompa nelle ore piu' economiche
+        vp = min(max(0.0, cap - storage), pot * k_p)
+        costo = vp * p_buy
+        storage += vp * sqrt_eta
+        # turbina nelle ore piu' care (prima l'energia da afflusso)
+        vt = min(storage, pot * k_t)
+        ricavo = vt * p_sell * sqrt_eta
+        quota_affl = min(vt, stock_affl)
+        val_affl = quota_affl * p_sell * sqrt_eta
+        stock_affl = max(0.0, stock_affl - quota_affl)
+        storage = max(0.0, storage - vt)
+        val_g = ricavo - costo
+        tot_val += val_g
+        tot_affl += val_affl
+        tot_mwh += vt
+        if val_g > 0:
+            n_attivi += 1
+        righe_g.append({"Data": giorno.strftime("%d/%m/%Y"),
+                        "Spot min (€/MWh)": round(p_buy, 2),
+                        "Spot max (€/MWh)": round(p_sell, 2),
+                        "Spread (€/MWh)": round(p_sell - p_buy, 2),
+                        "Pompato (MWh)": round(vp, 2),
+                        "Turbinato (MWh)": round(vt, 2),
+                        "Valore (€)": round(val_g, 1)})
+    n_g = len(righe_g)
+    df_giorni = pd.DataFrame(righe_g, columns=cols_g)
+    try:
+        df_tmp = df_giorni.copy()
+        df_tmp["Mese"] = p.groupby(giorni_idx).size().index.strftime("%Y-%m")
+        for per, grp in df_tmp.groupby("Mese"):
+            righe_m.append({
+                "Mese": per,
+                "Giorni": int(len(grp)),
+                "Valore (€)": round(float(grp["Valore (€)"].sum()), 0),
+                "Valore per MW (€/MW)": round(float(grp["Valore (€)"].sum()) / pot, 0),
+                "Giorni attivi": int((grp["Valore (€)"] > 0).sum()),
+            })
+        df_mesi = pd.DataFrame(righe_m, columns=cols_m)
+    except (TypeError, ValueError, AttributeError):
+        df_mesi = pd.DataFrame(columns=cols_m)
+    mese_best = "—"
+    if len(df_mesi):
+        mese_best = str(df_mesi.loc[df_mesi["Valore (€)"].idxmax(), "Mese"])
+    return {"giorni": n_g, "valore_tot_eur": float(tot_val),
+            "eur_per_mw": float(tot_val / pot), "eur_per_mwh_cap": float(tot_val / cap),
+            "giorni_attivi": n_attivi,
+            "share_attivi": float(n_attivi / n_g) if n_g else 0.0,
+            "mese_migliore": mese_best,
+            "valore_afflusso_eur": float(tot_affl),
+            "valore_pompaggio_eur": float(tot_val - tot_affl),
+            "energia_turbinata_mwh": float(tot_mwh),
+            "df_mesi": df_mesi, "df_giorni": df_giorni}
+
 def calcola_shape_fattori(prezzi):
     """Fattori di shape stagionale dallo spot storico (per costruire curve forward 'shaped').
     Ritorna un dict:
@@ -9358,7 +9498,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -15427,6 +15567,79 @@ elif workspace == _('ws8'):
                 key="csv_p2h_ore",
             )
             st.caption("💡 Uso pratico: la distanza dello spot dal break-even e' il segnale operativo per commutare caldaia/pompa di calore (ibrido) o per dimensionare l'accumulo termico; un COP piu' alto o una CO2 piu' cara spostano il break-even verso l'alto e allargano le ore P2H.")
+
+    with tab82:
+        titolo_idro = edu("Valore idro (serbatoio con pompaggio)", "Il SERBATOIO idroelettrico guadagna dallo SPREAD giornaliero: pompa energia nelle ore piu' economiche e turbina nelle ore piu' care. Con RENDIMENTO di round-trip eta (perso in parte in carica e in parte in scarica) e AFFLUSSO naturale gratuito (pioggia/neve, gratis da turbinare), il valore dell'impianto e' la somma di due margini: l'arbitraggio di pompaggio (spread al netto delle perdite) e la vendita dell'energia da afflusso. In Ticino le centrali ad accumulazione come Biasca vivono di questo: capire quanto spread serve per coprire le perdite di round-trip dice se conviene pompare.")
+        st.markdown(titolo_idro, unsafe_allow_html=True)
+
+        h1, h2, h3 = st.columns(3)
+        with h1:
+            idro_cap = st.number_input("Capacita' serbatoio (MWh)", min_value=1.0, value=400.0, step=10.0, key="idro_cap",
+                                      help="Energia immagazzinabile: un bacino medio-alpino sta tra qualche centinaio di MWh e diversi GWh.")
+        with h2:
+            idro_pot = st.number_input("Potenza turbina/pompa (MW)", min_value=1.0, value=50.0, step=5.0, key="idro_pot",
+                                      help="Potenza massima in turbina e in pompa.")
+        with h3:
+            idro_eta = st.number_input("Rendimento round-trip (%)", min_value=50.0, max_value=100.0, value=75.0, step=1.0, key="idro_eta",
+                                      help="Pompa + turbina insieme: 70-80% per gli impianti con pompaggio moderni, ~85% per i migliori.")
+        i1, i2, i3 = st.columns(3)
+        with i1:
+            idro_affl = st.number_input("Afflusso naturale (MWh/giorno)", min_value=0.0, value=120.0, step=10.0, key="idro_affl",
+                                      help="Acqua gratuita che riempie il bacino ogni giorno: pioggia, scioglimento neve, deflussi minimi. Converte in energia producibile.")
+        with i2:
+            idro_op = st.number_input("Ore di pompaggio/giorno", min_value=1, max_value=12, value=3, step=1, key="idro_op",
+                                      help="Quante delle ore piu' economiche del giorno usi per pompare.")
+        with i3:
+            idro_ot = st.number_input("Ore di turbina/giorno", min_value=1, max_value=12, value=3, step=1, key="idro_ot",
+                                      help="Quante delle ore piu' care del giorno usi per turbinare.")
+
+        res_idro = calcola_valore_idro(prezzi, idro_cap, idro_pot, idro_eta, idro_affl, idro_op, idro_ot)
+        if res_idro["giorni"] == 0:
+            st.warning("Seleziona un periodo con dati per valorizzare l'impianto idro.")
+        else:
+            k1, k2, k3, k4 = st.columns(4)
+            render_kpi("Valore periodo (€)", f"{res_idro['valore_tot_eur']:,.0f}", k1)
+            render_kpi("Valore per MW installato (€/MW)", f"{res_idro['eur_per_mw']:,.0f}", k2)
+            render_kpi("Valore per MWh di serbatoio (€/MWh cap)", f"{res_idro['eur_per_mwh_cap']:,.1f}", k3)
+            render_kpi("Giorni con margine positivo", f"{res_idro['giorni_attivi']:,} ({res_idro['share_attivi']*100:,.0f}%)", k4)
+            k5, k6 = st.columns(2)
+            render_kpi("Margine da afflusso (€, gratis)", f"{res_idro['valore_afflusso_eur']:,.0f}", k5)
+            render_kpi("Margine da pompaggio (€, spread-perse)", f"{res_idro['valore_pompaggio_eur']:,.0f}", k6)
+            st.caption(f"💡 Lettura: {res_idro['energia_turbinata_mwh']:,.0f} MWh turbinati nel periodo; il mese migliore e' **{res_idro['mese_migliore']}**. Con round-trip {idro_eta:,.0f}% il pompaggio guadagna solo se il prezzo nelle ore di punta supera di almeno **{100/idro_eta:,.2f}x** il prezzo nelle ore di pompaggio (a coprire le perdite): se il margine da pompaggio e' negativo, il serbatoio lavora solo sull'afflusso.")
+
+            df_idrom = res_idro["df_mesi"]
+            if len(df_idrom):
+                fig_idro1 = go.Figure()
+                fig_idro1.add_trace(go.Bar(x=df_idrom["Mese"], y=df_idrom["Valore (€)"], name="Valore idro",
+                                           marker_color="#3b82f6",
+                                           hovertemplate="%{x}<br>Valore: €%{y:,.0f}<extra></extra>"))
+                fig_idro1.update_layout(template="plotly_dark", height=340,
+                                        title="Valore idro mensile (€)",
+                                        xaxis_title="Mese", yaxis_title="€")
+                st.plotly_chart(fig_idro1, use_container_width=True)
+                st.markdown("**Dettaglio mensile**")
+                st.dataframe(df_idrom, use_container_width=True, hide_index=True)
+                st.download_button(
+                    "⬇️ Esporta valore idro mensile (CSV)",
+                    df_idrom.to_csv(index=False).encode("utf-8"),
+                    file_name=f"valore_idro_mensile_{d0}_{d1}.csv",
+                    mime="text/csv",
+                    help="Scarica il dettaglio mensile: valore, valore per MW, giorni attivi.",
+                    key="csv_idro_mesi",
+                )
+            df_idrog = res_idro["df_giorni"]
+            st.markdown("**Top 10 giorni per valore idro**")
+            st.dataframe(df_idrog.sort_values("Valore (€)", ascending=False).head(10),
+                         use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta valore idro giornaliero (CSV)",
+                df_idrog.to_csv(index=False).encode("utf-8"),
+                file_name=f"valore_idro_giornaliero_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica la serie giornaliera: spread, energia pompata/turbinata, valore.",
+                key="csv_idro_giorni",
+            )
+            st.caption("💡 Uso pratico: il valore per MW e' la base per confrontare l'impianto con il costo annuo di gestione (OPEX) o con un contratto di tolling; l'afflusso garantisce un floor di ricavo anche negli spread piatti, mentre il pompaggio rende solo nei giorni di alta volatilita'.")
 
 
 # Footer
