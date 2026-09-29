@@ -7230,8 +7230,11 @@ def calcola_potenza_picco(prezzi, mw_f1, mw_f2, mw_f3, cap_mw,
         fasce = p.index.map(fascia_oraria)
     except Exception:
         return out
-    mw_map = {"F1": max(0.0, float(mw_f1)), "F2": max(0.0, float(mw_f2)),
-              "F3": max(0.0, float(mw_f3))}
+    try:
+        mw_map = {"F1": max(0.0, float(mw_f1)), "F2": max(0.0, float(mw_f2)),
+                  "F3": max(0.0, float(mw_f3))}
+    except (TypeError, ValueError):
+        mw_map = {"F1": 0.0, "F2": 0.0, "F3": 0.0}
     carico = fasce.map(mw_map).to_numpy(dtype=float)
     picco = float(carico.max())
     out["picco_mw"] = round(picco, 3)
@@ -8157,6 +8160,190 @@ def calcola_alert_personalizzati(prezzi, regole, livello_critico=150.0, livello_
             "regole_valide": valide}
 
 
+def calcola_autoconsumo_fv(prezzi, mw_f1, mw_f2, mw_f3, potenza_mwp,
+                           perdite_pct=14.0, feedin_eur_mwh=60.0,
+                           capex_eur_kwp=1100.0):
+    """Autoconsumo fotovoltaico behind-the-meter (tab 'Autoconsumo FV').
+
+    Simula un impianto FV sul sito del cliente: la generazione oraria
+    (profilo_solare deterministico x potenza x (1 - perdite)) copre per prima
+    cosa il carico orario del profilo (MW per fascia, come nel resto dell'app);
+    l'eccedenza viene immessa in rete e valorizzata al prezzo di ritiro
+    dedicato (feed-in).
+
+    A differenza del tab Price capture (tutta la generazione venduta a spot),
+    qui la domanda e': quanto risparmio in bolletta con il FV sul tetto.
+
+    Metodo (tutto deterministico a parita' di input):
+    - carico orario = MW della fascia di ciascuna ora (via fascia_oraria);
+    - gen oraria = profilo_solare(prezzi, potenza_mwp) x (1 - perdite_pct/100);
+    - autoconsumo_h = min(gen_h, carico_h); eccedenza_h = gen_h - autoconsumo_h;
+    - costo evitato = somma(autoconsumo_h x prezzo_h): bolletta che non paghi;
+    - ricavo eccedenze = somma(eccedenza_h) x feedin;
+    - risparmio periodo = costo evitato + ricavo eccedenze;
+    - quota autoconsumo = autoconsumo / generazione (None se gen = 0);
+    - quota autosufficienza = autoconsumo / carico (None se carico = 0);
+    - annualizzazione x 8760/ore: produzione annua, risparmio annuo;
+    - payback = CAPEX / risparmio annuo (None se risparmio annuo <= 0);
+    - produzione specifica = kWh/kWp/anno;
+    - df_mesi: per mese Generazione/Autoconsumo/Eccedenza (MWh), Costo evitato
+      (EUR), Ricavo eccedenze (EUR), quote %;
+    - sweep dimensionamento: 21 potenze da 0 a pmax = max(2 x picco carico,
+      potenza x 1.5, 0.05 MWp); per ciascuna risparmio annuo, payback e quote
+      (vettorizzato sul profilo normalizzato a 1 MWp).
+
+    prezzi: Series oraria in EUR/MWh (indice datetime).
+    potenza_mwp: taglia impianto in MWp (>= 0). perdite_pct: perdite di sistema
+    % (0-90). feedin_eur_mwh: prezzo di ritiro delle eccedenze. capex_eur_kwp:
+    costo chiavi in mano per kWp (solo per il payback).
+
+    NaN-safe: serie vuota, MW tutti a zero, parametri non validi ->
+    statistiche neutrali con DataFrame dalle colonne giuste.
+
+    Ritorna dict con 'ore', 'picco_carico_mw', 'potenza_mwp', 'capex_eur',
+    'gen_mwh', 'autoconsumo_mwh', 'eccedenza_mwh', 'carico_mwh',
+    'quota_autoconsumo', 'quota_autosufficienza', 'costo_base_eur',
+    'costo_evitato_eur', 'ricavo_eccedenze_eur', 'risparmio_periodo_eur',
+    'risparmio_annuo_eur', 'payback_anni', 'produzione_specifica_kwh_kwp',
+    'df_mesi', 'df_sweep' ('Potenza (MWp)', 'Risparmio annuo (EUR)',
+    'Payback (anni)', 'Quota autoconsumo (%)', 'Quota autosufficienza (%)').
+    """
+    cols_m = ["Mese", "Generazione (MWh)", "Autoconsumo (MWh)", "Eccedenza (MWh)",
+              "Costo evitato (EUR)", "Ricavo eccedenze (EUR)",
+              "Quota autoconsumo (%)", "Quota autosufficienza (%)"]
+    cols_s = ["Potenza (MWp)", "Risparmio annuo (EUR)", "Payback (anni)",
+              "Quota autoconsumo (%)", "Quota autosufficienza (%)"]
+    vuoto = {"ore": 0, "picco_carico_mw": 0.0, "potenza_mwp": 0.0, "capex_eur": 0.0,
+             "gen_mwh": 0.0, "autoconsumo_mwh": 0.0, "eccedenza_mwh": 0.0,
+             "carico_mwh": 0.0, "quota_autoconsumo": None,
+             "quota_autosufficienza": None, "costo_base_eur": 0.0,
+             "costo_evitato_eur": 0.0, "ricavo_eccedenze_eur": 0.0,
+             "risparmio_periodo_eur": 0.0, "risparmio_annuo_eur": 0.0,
+             "payback_anni": None, "produzione_specifica_kwh_kwp": None,
+             "df_mesi": pd.DataFrame(columns=cols_m),
+             "df_sweep": pd.DataFrame(columns=cols_s)}
+    try:
+        p = prezzi.astype(float).dropna()
+        p = p[~p.index.duplicated(keep="first")].sort_index()
+    except Exception:
+        return dict(vuoto)
+    if len(p) == 0:
+        return dict(vuoto)
+    try:
+        pot = max(0.0, float(potenza_mwp))
+    except (TypeError, ValueError):
+        pot = 0.0
+    try:
+        perd = float(perdite_pct)
+    except (TypeError, ValueError):
+        perd = 14.0
+    perd = min(90.0, max(0.0, perd))
+    try:
+        feedin = max(0.0, float(feedin_eur_mwh))
+    except (TypeError, ValueError):
+        feedin = 0.0
+    try:
+        capex_kwp = max(0.0, float(capex_eur_kwp))
+    except (TypeError, ValueError):
+        capex_kwp = 0.0
+    out = dict(vuoto)
+    out["ore"] = len(p)
+    out["potenza_mwp"] = round(pot, 4)
+    try:
+        fasce = p.index.map(fascia_oraria)
+    except Exception:
+        return out
+    try:
+        mw_map = {"F1": max(0.0, float(mw_f1)), "F2": max(0.0, float(mw_f2)),
+                  "F3": max(0.0, float(mw_f3))}
+    except (TypeError, ValueError):
+        mw_map = {"F1": 0.0, "F2": 0.0, "F3": 0.0}
+    carico = fasce.map(mw_map).to_numpy(dtype=float)
+    picco = float(carico.max()) if len(carico) else 0.0
+    out["picco_carico_mw"] = round(picco, 3)
+    try:
+        gen1 = profilo_solare(p, 1.0).to_numpy(dtype=float) * (1.0 - perd / 100.0)
+    except Exception:
+        return out
+    pr = p.to_numpy(dtype=float)
+    fattore_annuo = 8760.0 / len(p)
+    capex = pot * 1000.0 * capex_kwp
+    out["capex_eur"] = round(capex, 2)
+    carico_mwh = float(carico.sum())
+    out["carico_mwh"] = round(carico_mwh, 2)
+    out["costo_base_eur"] = round(float((carico * pr).sum()), 2)
+    # --- sweep dimensionamento (vettorizzato su profilo normalizzato) ---
+    pmax = max(2.0 * picco, pot * 1.5, 0.05)
+    ps = np.linspace(0.0, pmax, 21)
+    G = gen1[:, None] * ps[None, :]
+    AUTO = np.minimum(G, carico[:, None])
+    ECC = G - AUTO
+    evitato_v = (AUTO * pr[:, None]).sum(axis=0)
+    ricavo_v = ECC.sum(axis=0) * feedin
+    risp_annuo_v = (evitato_v + ricavo_v) * fattore_annuo
+    gen_v = G.sum(axis=0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        q_auto_v = np.where(gen_v > 0, AUTO.sum(axis=0) / gen_v * 100.0, np.nan)
+        q_self_v = np.where(carico_mwh > 0, AUTO.sum(axis=0) / carico_mwh * 100.0, np.nan)
+        capex_v = ps * 1000.0 * capex_kwp
+        pb_v = np.where(risp_annuo_v > 0, capex_v / risp_annuo_v, np.nan)
+    righe_s = []
+    for i, pv in enumerate(ps):
+        righe_s.append({"Potenza (MWp)": round(float(pv), 4),
+                        "Risparmio annuo (EUR)": round(float(risp_annuo_v[i]), 2),
+                        "Payback (anni)": (round(float(pb_v[i]), 2)
+                                            if np.isfinite(pb_v[i]) else None),
+                        "Quota autoconsumo (%)": (round(float(q_auto_v[i]), 1)
+                                                  if np.isfinite(q_auto_v[i]) else None),
+                        "Quota autosufficienza (%)": (round(float(q_self_v[i]), 1)
+                                                      if np.isfinite(q_self_v[i]) else None)})
+    out["df_sweep"] = pd.DataFrame(righe_s, columns=cols_s)
+    # --- punto di lavoro (potenza scelta) ---
+    g = gen1 * pot
+    auto = np.minimum(g, carico)
+    ecc = g - auto
+    gen_mwh = float(g.sum())
+    auto_mwh = float(auto.sum())
+    ecc_mwh = float(ecc.sum())
+    out["gen_mwh"] = round(gen_mwh, 2)
+    out["autoconsumo_mwh"] = round(auto_mwh, 2)
+    out["eccedenza_mwh"] = round(ecc_mwh, 2)
+    out["quota_autoconsumo"] = round(100.0 * auto_mwh / gen_mwh, 1) if gen_mwh > 0 else None
+    out["quota_autosufficienza"] = (round(100.0 * auto_mwh / carico_mwh, 1)
+                                    if carico_mwh > 0 else None)
+    evitato = float((auto * pr).sum())
+    ricavo = float(ecc_mwh * feedin)
+    out["costo_evitato_eur"] = round(evitato, 2)
+    out["ricavo_eccedenze_eur"] = round(ricavo, 2)
+    risp = evitato + ricavo
+    out["risparmio_periodo_eur"] = round(risp, 2)
+    risp_annuo = risp * fattore_annuo
+    out["risparmio_annuo_eur"] = round(risp_annuo, 2)
+    out["payback_anni"] = round(capex / risp_annuo, 2) if risp_annuo > 0 else None
+    out["produzione_specifica_kwh_kwp"] = (
+        round(gen_mwh * fattore_annuo * 1000.0 / (pot * 1000.0), 0)
+        if pot > 0 else None)
+    # --- dettaglio mensile ---
+    mesi = p.index.to_period("M").astype(str)
+    righe = []
+    for m in sorted(set(mesi)):
+        idx = mesi == m
+        gm = float(g[idx].sum())
+        am = float(auto[idx].sum())
+        em = float(ecc[idx].sum())
+        cm = float(carico[idx].sum())
+        righe.append({"Mese": m,
+                      "Generazione (MWh)": round(gm, 2),
+                      "Autoconsumo (MWh)": round(am, 2),
+                      "Eccedenza (MWh)": round(em, 2),
+                      "Costo evitato (EUR)": round(float((auto[idx] * pr[idx]).sum()), 2),
+                      "Ricavo eccedenze (EUR)": round(em * feedin, 2),
+                      "Quota autoconsumo (%)": round(100.0 * am / gm, 1) if gm > 0 else None,
+                      "Quota autosufficienza (%)": round(100.0 * am / cm, 1) if cm > 0 else None})
+    out["df_mesi"] = pd.DataFrame(righe, columns=cols_m)
+    return out
+
+
 def render_kpi(title, value, col):
     col.markdown(f"<div class='metric-container'><div class='metric-label'>{title}</div><div class='metric-val'>{value}</div></div>", unsafe_allow_html=True)
 
@@ -8792,7 +8979,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -14408,6 +14595,123 @@ elif workspace == _('ws8'):
             st.caption("💡 Uso pratico: parti dalle 6 regole preimpostate e stringi/allarga le soglie finché i giorni critici "
                        "corrispondono a quelli in cui saresti davvero intervenuto (fixing, shifting dei carichi, copertura). "
                        "Se una regola non scatta mai nel periodo, la soglia e' troppo severa; se scatta sempre, e' rumore.")
+
+
+    with tab78:
+        titolo_fv = edu("Autoconsumo fotovoltaico (behind-the-meter)", "Quanto risparmi in bolletta con un impianto FV sul tuo sito? La generazione oraria (profilo solare deterministico, picco a mezzogiorno, giorno piu' lungo in estate) copre per prima cosa il TUO carico orario (MW per fascia come nel tab Costo fornitura); l'eccedenza viene immessa in rete al prezzo di ritiro dedicato. A differenza del tab Price capture (tutto venduto a spot), qui la domanda e' il risparmio in bolletta: costo evitato = energia autoconsumata x prezzo spot di quell'ora. Lo sweep di dimensionamento mostra come cambiano risparmio annuo, payback e quote al crescere della taglia.")
+        st.markdown(titolo_fv, unsafe_allow_html=True)
+
+        fv1, fv2, fv3, fv4 = st.columns(4)
+        with fv1:
+            fv_kwp = st.number_input("Potenza FV (kWp)", min_value=0.0, value=100.0, step=10.0, key="fv_kwp",
+                                     help="Taglia dell'impianto in kWp (1000 kWp = 1 MWp).")
+        with fv2:
+            fv_perd = st.number_input("Perdite di sistema (%)", min_value=0.0, max_value=90.0, value=14.0, step=1.0, key="fv_perd",
+                                      help="Perdite inverter, cavi, sporco, mismatch: tipicamente 10-15%.")
+        with fv3:
+            fv_feedin = st.number_input("Ritiro eccedenze (€/MWh)", min_value=0.0, value=60.0, step=5.0, key="fv_feedin",
+                                        help="Prezzo a cui vengono valorizzate le eccedenze immesse in rete.")
+        with fv4:
+            fv_capex = st.number_input("CAPEX (€/kWp)", min_value=0.0, value=1100.0, step=50.0, key="fv_capex",
+                                       help="Costo chiavi in mano per kWp, usato solo per il payback.")
+
+        res_fv = calcola_autoconsumo_fv(prezzi, mw_f1, mw_f2, mw_f3, fv_kwp / 1000.0,
+                                       perdite_pct=fv_perd, feedin_eur_mwh=fv_feedin,
+                                       capex_eur_kwp=fv_capex)
+        if res_fv["ore"] == 0 or res_fv["potenza_mwp"] <= 0:
+            st.warning("Seleziona un periodo con dati e una potenza FV maggiore di zero.")
+        else:
+            q_auto_txt = f"{res_fv['quota_autoconsumo']:.1f} %" if res_fv["quota_autoconsumo"] is not None else "n/d"
+            q_self_txt = f"{res_fv['quota_autosufficienza']:.1f} %" if res_fv["quota_autosufficienza"] is not None else "n/d"
+            k1, k2, k3, k4 = st.columns(4)
+            render_kpi(edu("Quota di autoconsumo", "Percentuale della generazione FV consumata in loco: alta = impianto ben dimensionato sul carico diurno; bassa = tanta eccedenza venduta al prezzo di ritiro."),
+                       q_auto_txt, k1)
+            render_kpi(edu("Quota di autosufficienza", "Percentuale del tuo consumo coperta dal FV: piu' e' alta, meno compri dalla rete."),
+                       q_self_txt, k2)
+            render_kpi(edu("Costo evitato (periodo)", "Bolletta che NON paghi: ogni kWh autoconsumato vale il prezzo spot di quell'ora."),
+                       f"{res_fv['costo_evitato_eur']:,.0f} €", k3)
+            render_kpi(edu("Ricavo eccedenze (periodo)", "Eccedenza immessa in rete valorizzata al prezzo di ritiro dedicato."),
+                       f"{res_fv['ricavo_eccedenze_eur']:,.0f} €", k4)
+            pb_txt = f"{res_fv['payback_anni']:.1f} anni" if res_fv["payback_anni"] is not None else "n/d"
+            ps_txt = f"{res_fv['produzione_specifica_kwh_kwp']:,.0f}" if res_fv["produzione_specifica_kwh_kwp"] is not None else "n/d"
+            k5, k6, k7, k8 = st.columns(4)
+            render_kpi(edu("Risparmio totale (periodo)", "Costo evitato + ricavo eccedenze nel periodo selezionato."),
+                       f"{res_fv['risparmio_periodo_eur']:,.0f} €", k5)
+            render_kpi(edu("Risparmio annuo stimato", "Risparmio del periodo annualizzato (x 8760/ore del periodo)."),
+                       f"{res_fv['risparmio_annuo_eur']:,.0f} €", k6)
+            render_kpi(edu("Payback", "CAPEX / risparmio annuo: anni per ripagare l'impianto."),
+                       pb_txt, k7)
+            render_kpi(edu("Produzione specifica", "kWh prodotti per kWp all'anno: resa dell'impianto nella tua zona."),
+                       f"{ps_txt} kWh/kWp", k8)
+
+            df_fvm = res_fv["df_mesi"]
+            fig_fv1 = go.Figure()
+            fig_fv1.add_trace(go.Bar(x=df_fvm["Mese"], y=df_fvm["Autoconsumo (MWh)"], name="Autoconsumo",
+                                     marker_color="#eab308",
+                                     hovertemplate="%{x}<br>Autoconsumo: %{y:,.1f} MWh<extra></extra>"))
+            fig_fv1.add_trace(go.Bar(x=df_fvm["Mese"], y=df_fvm["Eccedenza (MWh)"], name="Eccedenza",
+                                     marker_color="#38bdf8",
+                                     hovertemplate="%{x}<br>Eccedenza: %{y:,.1f} MWh<extra></extra>"))
+            fig_fv1.update_layout(template="plotly_dark", height=360, barmode="stack",
+                                  title="Generazione mensile: autoconsumo vs eccedenza",
+                                  xaxis_title="Mese", yaxis_title="MWh")
+            st.plotly_chart(fig_fv1, use_container_width=True)
+
+            fig_fv2 = go.Figure()
+            fig_fv2.add_trace(go.Scatter(x=df_fvm["Mese"], y=df_fvm["Quota autoconsumo (%)"],
+                                         name="Quota autoconsumo %", mode="lines+markers",
+                                         marker_color="#eab308",
+                                         hovertemplate="%{x}<br>Autoconsumo: %{y:.1f} %<extra></extra>"))
+            fig_fv2.add_trace(go.Scatter(x=df_fvm["Mese"], y=df_fvm["Quota autosufficienza (%)"],
+                                         name="Quota autosufficienza %", mode="lines+markers",
+                                         marker_color="#10b981",
+                                         hovertemplate="%{x}<br>Autosufficienza: %{y:.1f} %<extra></extra>"))
+            fig_fv2.update_layout(template="plotly_dark", height=320,
+                                  title="Quote mensili: autoconsumo e autosufficienza",
+                                  xaxis_title="Mese", yaxis_title="%")
+            st.plotly_chart(fig_fv2, use_container_width=True)
+
+            df_fvs = res_fv["df_sweep"]
+            fig_fv3 = go.Figure()
+            fig_fv3.add_trace(go.Scatter(x=df_fvs["Potenza (MWp)"], y=df_fvs["Risparmio annuo (EUR)"],
+                                         name="Risparmio annuo €", mode="lines+markers",
+                                         marker_color="#10b981",
+                                         hovertemplate="Potenza: %{x:.2f} MWp<br>Risparmio: €%{y:,.0f}<extra></extra>"))
+            fig_fv3.add_trace(go.Scatter(x=df_fvs["Potenza (MWp)"], y=df_fvs["Payback (anni)"],
+                                         name="Payback (anni)", mode="lines+markers",
+                                         marker_color="#f59e0b", yaxis="y2",
+                                         hovertemplate="Potenza: %{x:.2f} MWp<br>Payback: %{y:.1f} anni<extra></extra>"))
+            i_opt = int(df_fvs["Risparmio annuo (EUR)"].idxmax())
+            p_opt = float(df_fvs.loc[i_opt, "Potenza (MWp)"])
+            fig_fv3.add_vline(x=p_opt, line_dash="dash", line_color="#ef4444",
+                              annotation_text=f"max risparmio: {p_opt:.2f} MWp")
+            fig_fv3.update_layout(template="plotly_dark", height=380,
+                                  title="Sweep dimensionamento: risparmio annuo e payback vs taglia",
+                                  xaxis_title="Potenza (MWp)", yaxis_title="Risparmio annuo (€)",
+                                  yaxis2=dict(title="Payback (anni)", overlaying="y", side="right"))
+            st.plotly_chart(fig_fv3, use_container_width=True)
+
+            st.markdown("**Dettaglio mensile**")
+            st.dataframe(df_fvm, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta autoconsumo mensile (CSV)",
+                df_fvm.to_csv(index=False).encode("utf-8"),
+                file_name=f"autoconsumo_fv_mensile_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica il dettaglio mensile: generazione, autoconsumo, eccedenza, costo evitato, ricavo eccedenze e quote.",
+                key="csv_fv_mesi",
+            )
+            st.markdown("**Sweep dimensionamento**")
+            st.dataframe(df_fvs, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta sweep dimensionamento (CSV)",
+                df_fvs.to_csv(index=False).encode("utf-8"),
+                file_name=f"autoconsumo_fv_sweep_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica lo sweep: per ogni taglia, risparmio annuo, payback e quote.",
+                key="csv_fv_sweep",
+            )
+            st.caption("💡 Uso pratico: la taglia con il payback minimo (non quella con il risparmio massimo) e' spesso la scelta migliore se il capitale e' limitato; oltre il picco di carico diurno la quota di autoconsumo crolla e l'eccedenza vale solo il prezzo di ritiro. Confronta con il tab Price capture per la vendita a spot e con Arbitraggio Batteria per spostare l'eccedenza nelle ore care.")
 
 
 # Footer
