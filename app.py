@@ -7538,6 +7538,152 @@ def calcola_costo_turni(prezzi, mw_f1, mw_f2, mw_f3):
         pass
     return out
 
+def calcola_backtest_ordini_limite(prezzi, mw_f1, mw_f2, mw_f3, soglie):
+    """Backtest deterministico di ordini limite di acquisto sul mercato spot.
+
+    Domanda operativa dell'energy analyst: "se automatizzassi l'acquisto con
+    un ordine limite a X euro/MWh (algo 'buy-the-dip' per carichi flessibili,
+    ricariche, pompaggi, batch), quante ore si riempirebbero, a che prezzo
+    medio comprerei davvero e quanto risparmierei rispetto a comprare tutto
+    al prezzo medio di periodo?" — l'ordine si riempie in OGNI ora con
+    prezzo <= soglia (fill deterministico sullo storico; nessuno slippage
+    modellato, i volumi orari del profilo sono piccoli rispetto al mercato).
+
+    Diverso dal tab Finestre di acquisto (tab23: cerca la finestra CONTIGUA
+    di N ore piu' economica di ogni giorno — timing, non prezzo) e dal tab
+    Top ore di costo (tab39: le ore piu' care GIA' accadute, non una
+    strategia eseguibile in avanti).
+
+    Per ogni soglia S:
+    - ore riempite = ore con prezzo <= S; quota ore = riempite / ore totali;
+    - MWh acquistabili = somma dei MW di fascia nelle ore riempite;
+    - prezzo medio di riempimento = media dei prezzi nelle ore riempite
+      (il prezzo a cui compreresti davvero con quel limite: sempre < S);
+    - risparmio vs media = (prezzo medio periodo - prezzo medio
+      riempimento) x MWh riempiti (positivo = risparmi, negativo = paghi
+      di piu' — puo' succedere solo se il profilo pesa sulle ore care).
+
+    Sanitizzazione: ore con prezzo NaN scartate, timestamp duplicati ->
+    primo tenuto, serie ordinata per tempo; ore in Europe/Zurich per la
+    fascia corretta; soglie non numeriche/non finite scartate, duplicate
+    rimosse, ordinate in modo crescente. Serie con meno di 24 ore, profilo
+    nullo o nessuna soglia valida -> 'ok' False.
+
+    Ritorna dict con 'ok', 'prezzo_medio_periodo', 'mwh_totale',
+    'tot_ore', 'df_soglie' ('Soglia (euro/MWh)' / 'Ore riempite' /
+    'Quota ore %' / 'MWh acquistabili' / 'Quota MWh %' / 'Prezzo medio
+    riempimento (euro/MWh)' / 'Risparmio vs media (euro)'), 'df_mesi'
+    ('Mese' + una colonna 'MWh @ <soglia>' per soglia testata), 'df_ore'
+    ('Data' / 'Ora' / 'Prezzo (euro/MWh)' / 'Fascia' / 'MW' / 'MWh') con
+    tutte le ore del periodo: la UI filtra per la soglia selezionata."""
+    COLS_S = ["Soglia (euro/MWh)", "Ore riempite", "Quota ore %",
+              "MWh acquistabili", "Quota MWh %",
+              "Prezzo medio riempimento (euro/MWh)",
+              "Risparmio vs media (euro)"]
+    COLS_O = ["Data", "Ora", "Prezzo (euro/MWh)", "Fascia", "MW", "MWh"]
+
+    def _vuoto():
+        return {"ok": False, "prezzo_medio_periodo": None, "mwh_totale": 0.0,
+                "tot_ore": 0,
+                "df_soglie": pd.DataFrame(columns=COLS_S),
+                "df_mesi": pd.DataFrame(columns=["Mese"]),
+                "df_ore": pd.DataFrame(columns=COLS_O)}
+
+    try:
+        p = prezzi.astype(float)
+        if hasattr(p.index, "duplicated"):
+            p = p[~p.index.duplicated(keep="first")]
+        p = p.dropna().sort_index()
+    except Exception:
+        return _vuoto()
+    if len(p) < 24:
+        return _vuoto()
+    try:
+        mws = [max(0.0, float(x)) for x in (mw_f1, mw_f2, mw_f3)]
+    except (TypeError, ValueError):
+        return _vuoto()
+    if sum(mws) <= 0:
+        return _vuoto()
+    soglie_pulite = []
+    try:
+        soglie_iter = list(soglie)
+    except TypeError:
+        return _vuoto()
+    for s in soglie_iter:
+        try:
+            v = float(s)
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(v) and v not in soglie_pulite:
+            soglie_pulite.append(v)
+    soglie_pulite = sorted(soglie_pulite)
+    if not soglie_pulite:
+        return _vuoto()
+
+    idx = p.index.tz_convert("Europe/Zurich") if p.index.tz is not None else p.index
+    valori = p.to_numpy(dtype=float)
+    fasce = np.array([fascia_oraria(ts) for ts in idx])
+    mw_map = {"F1": mws[0], "F2": mws[1], "F3": mws[2]}
+    mw_ore = np.array([mw_map.get(fx, 0.0) for fx in fasce], dtype=float)
+    medio = float(np.mean(valori))
+    mwh_tot = float(mw_ore.sum())
+
+    righe = []
+    maschere = []
+    for s in soglie_pulite:
+        mask = valori <= s
+        maschere.append(mask)
+        n_fill = int(mask.sum())
+        mwh_fill = float(mw_ore[mask].sum())
+        if n_fill > 0:
+            medio_fill = float(np.mean(valori[mask]))
+            risp = (medio - medio_fill) * mwh_fill
+        else:
+            medio_fill, risp = None, 0.0
+        righe.append({
+            "Soglia (euro/MWh)": s,
+            "Ore riempite": n_fill,
+            "Quota ore %": round(n_fill / len(valori) * 100.0, 2),
+            "MWh acquistabili": round(mwh_fill, 1),
+            "Quota MWh %": round(mwh_fill / mwh_tot * 100.0, 2) if mwh_tot > 0 else 0.0,
+            "Prezzo medio riempimento (euro/MWh)": (round(medio_fill, 2)
+                                                   if medio_fill is not None else None),
+            "Risparmio vs media (euro)": round(risp, 2),
+        })
+    df_soglie = pd.DataFrame(righe, columns=COLS_S)
+
+    # MWh riempiti per mese di calendario e per soglia.
+    try:
+        mesi = pd.PeriodIndex(idx, freq="M").astype(str).to_numpy()
+        dfm = pd.DataFrame({"mese": mesi})
+        for s, mask in zip(soglie_pulite, maschere):
+            dfm[f"@ {s:g}"] = np.where(mask, mw_ore, 0.0)
+        g = dfm.groupby("mese", observed=True).sum(numeric_only=True)
+        df_mesi = g.reset_index().rename(columns={"mese": "Mese"})
+        df_mesi = df_mesi.sort_values("Mese").reset_index(drop=True)
+        for c in df_mesi.columns[1:]:
+            df_mesi[c] = df_mesi[c].round(1)
+    except Exception:
+        df_mesi = pd.DataFrame(columns=["Mese"])
+
+    # Dettaglio orario completo: la UI filtra per la soglia selezionata.
+    try:
+        df_ore = pd.DataFrame({
+            "Data": idx.strftime("%d/%m/%Y"),
+            "Ora": idx.hour,
+            "Prezzo (euro/MWh)": np.round(valori, 2),
+            "Fascia": fasce,
+            "MW": np.round(mw_ore, 3),
+            "MWh": np.round(mw_ore, 3),
+        })
+    except Exception:
+        df_ore = pd.DataFrame(columns=COLS_O)
+
+    return {"ok": True, "prezzo_medio_periodo": round(medio, 2),
+            "mwh_totale": round(mwh_tot, 1), "tot_ore": int(len(p)),
+            "df_soglie": df_soglie, "df_mesi": df_mesi, "df_ore": df_ore}
+
+
 def render_kpi(title, value, col):
     col.markdown(f"<div class='metric-container'><div class='metric-label'>{title}</div><div class='metric-val'>{value}</div></div>", unsafe_allow_html=True)
 
@@ -8173,7 +8319,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -13228,6 +13374,131 @@ elif workspace == _('ws8'):
                 st.markdown("**Eventi consecutivi** (streak di anomalie)")
                 st.dataframe(ap["df_streak"], use_container_width=True, hide_index=True)
             st.caption("\U0001f4a1 Uno spike ricorrente alla stessa ora = pattern strutturale (es. rampa serale): si copre con flessibilita' o hedging mirato su quell'ora. Uno spike isolato con z altissimo = evento di mercato: serve solo per il post-mortem e per tarare le soglie di alert. I drop ricorrenti in F3 sono le ore in cui conviene concentrare i carichi spostabili.")
+
+    with tab74:
+        titolo_bl = edu("Backtest ordini limite", "Il BACKTEST DEGLI ORDINI LIMITE simula una strategia di acquisto 'buy-the-dip' eseguibile in avanti: piazzi un ordine limite a X \u20ac/MWh e compri in OGNI ora con prezzo <= X. Per ogni soglia il tab misura quante ore si riempiono, quanti MWh del tuo profilo (F1/F2/F3) vengono davvero acquistati, a che PREZZO MEDIO DI RIEMPIMENTO compreresti (sempre sotto la soglia) e il RISPARMIO rispetto a comprare tutto al prezzo medio di periodo. Serve a tarare gli algoritmi di acquisto per carichi flessibili (ricariche, pompaggi, batch): una soglia troppo bassa non riempie mai, una troppo alta non risparmia niente \u2014 la curva prezzo-medio-vs-soglia mostra il punto di equilibrio. Diverso dal tab Finestre di acquisto (cerca la finestra CONTIGUA piu' economica di ogni giorno: timing, non prezzo) e dal tab Top ore di costo (le ore care GIA' accadute, non una strategia).")
+        st.markdown(titolo_bl, unsafe_allow_html=True)
+        bi1, bi2, bi3, bi4 = st.columns(4)
+        with bi1:
+            bl_soglie_txt = st.text_input("Soglie da testare (\u20ac/MWh, separate da virgola)", value="40,60,80,100,120,150", key="bl_soglie",
+                                          help="Ordini limite da simulare sullo storico: per ogni soglia si contano le ore con prezzo <= soglia e si misurano MWh riempiti, prezzo medio di riempimento e risparmio.")
+        with bi2:
+            bl_mw_f1 = st.number_input("Profilo: MW in F1", min_value=0.0, value=1.0, step=0.5, key="bl_mw_f1",
+                                       help="Potenza prelevata nelle ore di fascia F1 (lun-ven 8-19).")
+        with bi3:
+            bl_mw_f2 = st.number_input("Profilo: MW in F2", min_value=0.0, value=1.0, step=0.5, key="bl_mw_f2",
+                                       help="Potenza prelevata nelle ore di fascia F2 (sera feriali + sabato diurno).")
+        with bi4:
+            bl_mw_f3 = st.number_input("Profilo: MW in F3", min_value=0.0, value=1.0, step=0.5, key="bl_mw_f3",
+                                       help="Potenza prelevata nelle ore di fascia F3 (notti, domenica, festivi).")
+        soglie_in = []
+        for pezzo in bl_soglie_txt.replace(";", ",").split(","):
+            try:
+                v = float(pezzo.strip())
+                if np.isfinite(v):
+                    soglie_in.append(v)
+            except ValueError:
+                pass
+        bl = calcola_backtest_ordini_limite(prezzi, bl_mw_f1, bl_mw_f2, bl_mw_f3, soglie_in)
+        if not bl["ok"]:
+            st.warning("Dati insufficienti per il backtest (servono almeno 24 ore di prezzi, un profilo non nullo e almeno una soglia valida).")
+        else:
+            dfb = bl["df_soglie"]
+            opzioni = dfb["Soglia (euro/MWh)"].tolist()
+            medio_p = bl["prezzo_medio_periodo"]
+            idx_def = min(range(len(opzioni)), key=lambda i: abs(opzioni[i] - 0.8 * medio_p))
+            bl_soglia = st.selectbox("Soglia di dettaglio (\u20ac/MWh)", opzioni, index=idx_def, key="bl_sel",
+                                     help="Soglia su cui mostrare KPI, distribuzione oraria e mensile dei riempimenti e dettaglio delle ore.")
+            riga = dfb[dfb["Soglia (euro/MWh)"] == bl_soglia].iloc[0]
+            k1, k2, k3, k4 = st.columns(4)
+            render_kpi(edu("Ore riempite", "Ore del periodo con prezzo <= soglia: l'ordine limite si sarebbe riempito in queste ore."),
+                       f"{int(riga['Ore riempite'])} ({riga['Quota ore %']:.1f} %)", k1)
+            render_kpi(edu("MWh acquistabili", "Energia del tuo profilo (MW di fascia x ore riempite) che l'ordine limite avrebbe comprato."),
+                       f"{riga['MWh acquistabili']:,.1f} ({riga['Quota MWh %']:.1f} %)", k2)
+            pmr = riga["Prezzo medio riempimento (euro/MWh)"]
+            pmr_txt = "n/d" if pmr is None or (isinstance(pmr, float) and np.isnan(pmr)) else f"\u20ac {pmr:,.2f}"
+            render_kpi(edu("Prezzo medio di riempimento", "Prezzo medio a cui avresti comprato davvero con questo limite: media dei prezzi solo nelle ore riempite, sempre sotto la soglia."),
+                       pmr_txt, k3)
+            risp = riga["Risparmio vs media (euro)"]
+            render_kpi(edu("Risparmio vs media periodo", "(Prezzo medio periodo - prezzo medio riempimento) x MWh riempiti: positivo = risparmi, negativo = paghi di piu'."),
+                       f"\u20ac {risp:+,.0f}", k4)
+            st.caption(f"Prezzo medio periodo \u20ac {medio_p:,.2f}/MWh | Energia profilo {bl['mwh_totale']:,.1f} MWh | {bl['tot_ore']} ore analizzate")
+            st.markdown("**Prezzo medio di riempimento vs soglia** (tratteggio = media periodo)")
+            dfc = dfb.dropna(subset=["Prezzo medio riempimento (euro/MWh)"])
+            fig_bl1 = go.Figure()
+            fig_bl1.add_trace(go.Scatter(x=dfc["Soglia (euro/MWh)"], y=dfc["Prezzo medio riempimento (euro/MWh)"],
+                                         mode="lines+markers", name="Prezzo medio riempimento", line=dict(color="#22c55e"),
+                                         hovertemplate="Soglia %{x:.0f} \u20ac/MWh: riempimento medio %{y:.2f} \u20ac/MWh<extra></extra>"))
+            fig_bl1.add_hline(y=medio_p, line_dash="dash", line_color="#eab308",
+                              annotation_text=f"Media periodo \u20ac {medio_p:,.2f}/MWh", annotation_position="top left")
+            fig_bl1.update_layout(template="plotly_dark", height=340,
+                                  title="A che prezzo compri davvero al variare del limite",
+                                  xaxis_title="Soglia ordine limite (\u20ac/MWh)", yaxis_title="\u20ac/MWh")
+            st.plotly_chart(fig_bl1, use_container_width=True)
+            st.markdown("**MWh acquistabili e risparmio per soglia**")
+            fig_bl2 = go.Figure()
+            fig_bl2.add_trace(go.Bar(x=dfb["Soglia (euro/MWh)"], y=dfb["MWh acquistabili"], name="MWh acquistabili",
+                                     marker_color="#3b82f6",
+                                     hovertemplate="Soglia %{x:.0f}: %{y:,.1f} MWh<extra></extra>"))
+            fig_bl2.add_trace(go.Scatter(x=dfb["Soglia (euro/MWh)"], y=dfb["Risparmio vs media (euro)"], name="Risparmio (\u20ac)",
+                                         mode="lines+markers", yaxis="y2", line=dict(color="#22c55e"),
+                                         hovertemplate="Soglia %{x:.0f}: \u20ac %{y:+,.0f}<extra></extra>"))
+            fig_bl2.update_layout(template="plotly_dark", height=340,
+                                  title="Volumi riempiti e risparmio al crescere della soglia",
+                                  xaxis_title="Soglia (\u20ac/MWh)", yaxis_title="MWh",
+                                  yaxis2=dict(title="Risparmio (\u20ac)", overlaying="y", side="right"))
+            st.plotly_chart(fig_bl2, use_container_width=True)
+            det = bl["df_ore"][bl["df_ore"]["Prezzo (euro/MWh)"] <= bl_soglia]
+            st.markdown(f"**Quando si riempie l'ordine a \u20ac {bl_soglia:g}/MWh** (ore riempite per ora del giorno)")
+            if det.empty:
+                st.info("Nessuna ora riempita a questa soglia: alza il limite.")
+            else:
+                cnt_ore = det.groupby("Ora").size().reindex(range(24), fill_value=0)
+                fig_bl3 = go.Figure()
+                fig_bl3.add_trace(go.Bar(x=cnt_ore.index, y=cnt_ore.values, marker_color="#8b5cf6", name="Ore riempite",
+                                         hovertemplate="Ore %{x}:00: %{y} riempite<extra></extra>"))
+                fig_bl3.update_layout(template="plotly_dark", height=320,
+                                      title="In quali ore del giorno l'ordine si riempie: solo di notte o anche di giorno?",
+                                      xaxis_title="Ora", yaxis_title="Ore riempite",
+                                      xaxis=dict(tickmode="array", tickvals=list(range(24))))
+                st.plotly_chart(fig_bl3, use_container_width=True)
+            st.markdown(f"**MWh riempiti per mese** (soglia \u20ac {bl_soglia:g}/MWh)")
+            dfm = bl["df_mesi"]
+            col_m = f"@ {bl_soglia:g}"
+            if col_m in dfm.columns and not dfm.empty:
+                passo_m = max(1, len(dfm) // 12)
+                fig_bl4 = go.Figure()
+                fig_bl4.add_trace(go.Bar(x=dfm["Mese"], y=dfm[col_m], marker_color="#0ea5e9", name="MWh riempiti",
+                                         hovertemplate="%{x}: %{y:,.1f} MWh<extra></extra>"))
+                fig_bl4.update_layout(template="plotly_dark", height=320,
+                                      title="Stagionalita' dei riempimenti: in quali mesi il limite lavora di piu'",
+                                      xaxis_title="Mese", yaxis_title="MWh",
+                                      xaxis=dict(tickangle=-45, tickmode="array",
+                                                 tickvals=dfm["Mese"][::passo_m].tolist()))
+                st.plotly_chart(fig_bl4, use_container_width=True)
+            st.markdown("**Confronto soglie**")
+            st.dataframe(dfb, use_container_width=True, hide_index=True)
+            st.download_button(
+                "\u2b07\ufe0f Esporta backtest soglie (CSV)",
+                dfb.to_csv(index=False).encode("utf-8"),
+                file_name=f"backtest_ordini_limite_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica il confronto per soglia: ore riempite, MWh, prezzo medio di riempimento e risparmio.",
+                key="csv_bl_soglie",
+            )
+            if not det.empty:
+                st.markdown(f"**Dettaglio ore riempite** (soglia \u20ac {bl_soglia:g}/MWh, ordinate per prezzo)")
+                det_ord = det.sort_values("Prezzo (euro/MWh)").reset_index(drop=True)
+                st.dataframe(det_ord, use_container_width=True, hide_index=True)
+                st.download_button(
+                    "\u2b07\ufe0f Esporta ore riempite (CSV)",
+                    det_ord.to_csv(index=False).encode("utf-8"),
+                    file_name=f"backtest_ordini_limite_{bl_soglia:g}eur_{d0}_{d1}.csv",
+                    mime="text/csv",
+                    help="Scarica tutte le ore in cui l'ordine limite si sarebbe riempito.",
+                    key="csv_bl_det",
+                )
+            st.caption("\U0001f4a1 La curva del prezzo medio di riempimento cresce sempre con la soglia: il punto dolce e' dove il risparmio marginale per ogni euro di soglia in piu' crolla. Se gli ordini si riempiono solo di notte (grafico per ora), il limite e' troppo basso per coprire il profilo diurno: alza la soglia o abbina una quota a prezzo fisso per le ore F1.")
 
 
 
