@@ -4679,6 +4679,163 @@ def calcola_struttura_termine(prezzi, soglia_pct=1.5):
     return out
 
 
+def calcola_giorni_critici(prezzi, w_prezzo=1.0, w_vola=1.0, w_neg=1.0,
+                           w_rampa=1.0, w_picco=1.0, soglia=70.0):
+    """Giorni critici: classifica i giorni di calendario per 'stress' del profilo di prezzo.
+
+    Domanda operativa: "quali giorni del periodo hanno messo sotto stress
+    il portafoglio?" — un energy analyst usa questa classifica per il
+    post-mortem operativo (perche' il giorno X e' costato tanto), per
+    calibrare soglie di alert e per prioritizzare i giorni da analizzare nel
+    dettaglio.
+
+    Metodo (deterministico a parita' di input):
+    - ore valide = prezzi non-NaN, timestamp duplicati scartati (primo
+      tenuto), serie ordinata; i giorni con != 24 ore (es. cambi ora legale)
+      vengono scartati e conteggiati in 'giorni_scarto';
+    - per ogni giorno completo 5 metriche grezze: prezzo medio (euro/MWh),
+      volatilita' intraday (std delle 24 ore), quota di ore a prezzo
+      negativo (%), rampa massima (max |delta| tra ore consecutive),
+      picco massimo;
+    - ogni metrica e' normalizzata in z-score sul periodo, clip a [0, 3] e
+      portata in [0, 1] (z <= 0 -> 0): solo lo stress SOPRA la media conta;
+      metriche a std nulla (es. nessuna ora negativa nel periodo) danno
+      sempre 0;
+    - score = 100 * media ponderata dei 5 indicatori normalizzati; pesi
+      negativi clampati a 0, se tutti i pesi sono 0 si usano pesi unitari;
+    - un giorno e' 'critico' se score >= soglia.
+
+    Servono >= 2 giorni completi, altrimenti 'ok' False.
+
+    Ritorna dict con 'ok' (bool), 'n_giorni', 'giorni_scarto', 'df'
+    (Giorno, Giorno settimana, Score, Prezzo medio (euro/MWh),
+    Volatilita' (euro/MWh), Ore negative, Rampa max (euro/MWh),
+    Picco (euro/MWh), Critico — ordinato per Score decrescente),
+    'giorno_top' (str YYYY-MM-DD|None), 'score_top' (float|None),
+    'score_medio_top10' (float|None), 'quota_critici' (% float|None),
+    'df_settimana' (Giorno settimana, Score medio, Giorni) e
+    'df_mese' (Mese, Score medio, Giorni)."""
+    COLS_DET = ["Giorno", "Giorno settimana", "Score",
+                "Prezzo medio (euro/MWh)", "Volatilita' (euro/MWh)",
+                "Ore negative", "Rampa max (euro/MWh)", "Picco (euro/MWh)",
+                "Critico"]
+    WD_IT = ["Lun", "Mar", "Mer", "Gio", "Ven", "Sab", "Dom"]
+
+    def _vuoto():
+        return {
+            "ok": False, "n_giorni": 0, "giorni_scarto": 0,
+            "df": pd.DataFrame(columns=COLS_DET),
+            "giorno_top": None, "score_top": None,
+            "score_medio_top10": None, "quota_critici": None,
+            "df_settimana": pd.DataFrame(
+                columns=["Giorno settimana", "Score medio", "Giorni"]),
+            "df_mese": pd.DataFrame(columns=["Mese", "Score medio", "Giorni"]),
+        }
+
+    try:
+        p = prezzi.astype(float)
+        p = p[~p.index.duplicated(keep="first")].sort_index().dropna()
+    except Exception:
+        return _vuoto()
+    if len(p) == 0:
+        return _vuoto()
+    try:
+        idxn = p.index.tz_localize(None) if p.index.tz is not None else p.index
+        giorni = idxn.floor("D")
+        ore_h = idxn.hour
+    except Exception:
+        return _vuoto()
+    mat = pd.DataFrame({"g": giorni, "h": ore_h, "v": p.to_numpy(dtype=float)})
+    piv = mat.pivot_table(index="g", columns="h", values="v", aggfunc="first")
+    piv = piv.reindex(columns=range(24))
+    comp = piv.dropna(axis=0, how="any")
+    scarto = int(len(piv) - len(comp))
+    n_giorni = len(comp)
+    if n_giorni < 2:
+        v = _vuoto()
+        v["giorni_scarto"] = scarto
+        return v
+
+    X = comp.to_numpy(dtype=float)
+    media = X.mean(axis=1)
+    std = X.std(axis=1, ddof=1)
+    quota_neg = (X < 0).mean(axis=1) * 100.0
+    rampa = np.abs(np.diff(X, axis=1)).max(axis=1)
+    picco = X.max(axis=1)
+
+    def _zc(v):
+        v = np.asarray(v, dtype=float)
+        mu = float(np.mean(v))
+        sd = float(np.std(v, ddof=1)) if len(v) > 1 else 0.0
+        if not np.isfinite(sd) or sd <= 1e-12:
+            return np.zeros_like(v)
+        return np.clip((v - mu) / sd, 0.0, 3.0) / 3.0
+
+    zc = np.stack([_zc(media), _zc(std), _zc(quota_neg), _zc(rampa),
+                   _zc(picco)], axis=1)
+    pesi = np.array([w_prezzo, w_vola, w_neg, w_rampa, w_picco], dtype=float)
+    pesi = np.where(np.isfinite(pesi), np.maximum(pesi, 0.0), 0.0)
+    if pesi.sum() <= 0:
+        pesi = np.ones(5)
+    score = 100.0 * (zc * pesi).sum(axis=1) / pesi.sum()
+
+    try:
+        soglia = float(soglia)
+    except Exception:
+        soglia = 70.0
+    soglia = min(100.0, max(0.0, soglia))
+
+    gidx = comp.index
+    ord_idx = np.argsort(-score, kind="stable")
+    righe = []
+    for i in ord_idx:
+        g = gidx[i]
+        righe.append({
+            "Giorno": g.strftime("%Y-%m-%d"),
+            "Giorno settimana": WD_IT[int(g.weekday())],
+            "Score": round(float(score[i]), 1),
+            "Prezzo medio (euro/MWh)": round(float(media[i]), 2),
+            "Volatilita' (euro/MWh)": round(float(std[i]), 2),
+            "Ore negative": int((X[i] < 0).sum()),
+            "Rampa max (euro/MWh)": round(float(rampa[i]), 2),
+            "Picco (euro/MWh)": round(float(picco[i]), 2),
+            "Critico": "SI" if score[i] >= soglia else "no",
+        })
+    df = pd.DataFrame(righe, columns=COLS_DET)
+
+    wd_lab = [WD_IT[int(g.weekday())] for g in gidx]
+    set_righe = []
+    for w in WD_IT:
+        m = np.array([w2 == w for w2 in wd_lab])
+        if m.any():
+            set_righe.append({"Giorno settimana": w,
+                              "Score medio": round(float(score[m].mean()), 1),
+                              "Giorni": int(m.sum())})
+    df_set = pd.DataFrame(set_righe,
+                          columns=["Giorno settimana", "Score medio", "Giorni"])
+    mesi_lab = [g.strftime("%Y-%m") for g in gidx]
+    mese_righe = []
+    for m in sorted(set(mesi_lab)):
+        mm = np.array([x == m for x in mesi_lab])
+        mese_righe.append({"Mese": m,
+                           "Score medio": round(float(score[mm].mean()), 1),
+                           "Giorni": int(mm.sum())})
+    df_mese = pd.DataFrame(mese_righe,
+                           columns=["Mese", "Score medio", "Giorni"])
+
+    top = float(score[ord_idx[0]])
+    out = _vuoto()
+    out.update({
+        "ok": True, "n_giorni": n_giorni, "giorni_scarto": scarto, "df": df,
+        "giorno_top": gidx[ord_idx[0]].strftime("%Y-%m-%d"),
+        "score_top": round(top, 1),
+        "score_medio_top10": round(float(score[ord_idx[:10]].mean()), 1),
+        "quota_critici": round(float((score >= soglia).mean() * 100.0), 1),
+        "df_settimana": df_set, "df_mese": df_mese,
+    })
+    return out
+
+
 def calcola_climatologia_prezzo(prezzi, soglia=100.0):
     """Climatologia del prezzo: probabilita' di superare una soglia per giorno della settimana e ora.
 
@@ -7326,7 +7483,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -11920,6 +12077,94 @@ elif workspace == _('ws8'):
             if stm["coppie_scarto"]:
                 st.caption(f"\u2139\ufe0f {stm['coppie_scarto']} coppie di mesi non consecutive scartate (buchi nei dati).")
             st.caption("\U0001f4a1 Curva in contango persistente + premio strip positivo: conviene comprare spot e coprire a breve; backwardation strutturale: conviene fissare a termine prima che la curva si appiattisca.")
+
+    with tab69:
+        titolo_gc = edu("Giorni critici", "I GIORNI CRITICI sono i giorni di calendario con il profilo di prezzo piu' 'stressato': prezzo medio alto, alta volatilita' intraday, ore a prezzo negativo, rampe brusche tra ore consecutive, picchi estremi. Ogni giorno riceve uno SCORE 0-100 da un indicatore composito: le 5 metriche sono normalizzate sul periodo (solo lo stress SOPRA la media conta) e mediate con pesi regolabili. E' lo strumento di post-mortem operativo: dice quali giorni hanno messo sotto stress il portafoglio e perche', calibra le soglie degli alert e priorizza i giorni da analizzare nel dettaglio. Diverso dal tab \\U0001f51d Top giorni di costo (ordina per costo assoluto) e dal tab \\U0001f5d3\\ufe0f Giorni tipo (raggruppa per forma del profilo): qui conta la SEVERITA' combinata degli eventi di stress.")
+        st.markdown(titolo_gc, unsafe_allow_html=True)
+        c1, c2, c3, c4, c5 = st.columns(5)
+        with c1:
+            w_p = st.slider("Peso prezzo medio", 0.0, 3.0, 1.0, step=0.5, key="slider_gc_wp",
+                            help="Quanto pesa il prezzo medio giornaliero nello score.")
+        with c2:
+            w_v = st.slider("Peso volatilita'", 0.0, 3.0, 1.0, step=0.5, key="slider_gc_wv",
+                            help="Quanto pesa la volatilita' intraday (std delle 24 ore).")
+        with c3:
+            w_n = st.slider("Peso prezzi negativi", 0.0, 3.0, 1.0, step=0.5, key="slider_gc_wn",
+                            help="Quanto pesa la quota di ore a prezzo negativo.")
+        with c4:
+            w_r = st.slider("Peso rampe", 0.0, 3.0, 1.0, step=0.5, key="slider_gc_wr",
+                            help="Quanto pesa la rampa massima tra ore consecutive.")
+        with c5:
+            w_k = st.slider("Peso picco", 0.0, 3.0, 1.0, step=0.5, key="slider_gc_wk",
+                            help="Quanto pesa il picco massimo di prezzo.")
+        soglia_gc = st.slider("Soglia 'giorno critico' (score)", 50, 95, 70, step=5, key="slider_gc_soglia",
+                              help="Score minimo per classificare un giorno come critico.")
+        gc = calcola_giorni_critici(prezzi, w_p, w_v, w_n, w_r, w_k, soglia_gc)
+        if not gc["ok"]:
+            st.warning("Dati insufficienti per i giorni critici (servono almeno 2 giorni completi di 24 ore).")
+        else:
+            g1, g2, g3 = st.columns(3)
+            render_kpi(edu("Giorno piu' critico", "Il giorno con lo score di stress piu' alto del periodo: il candidato numero uno per il post-mortem operativo."),
+                       f"{gc['giorno_top']} ({gc['score_top']:.1f})", g1)
+            render_kpi(edu("Score medio top-10", "Score medio dei 10 giorni piu' stressati: misura la severita' degli eventi estremi del periodo."),
+                       f"{gc['score_medio_top10']:.1f}", g2)
+            render_kpi(edu("Quota giorni critici", f"Percentuale di giorni con score >= {soglia_gc}: la frequenza con cui il portafoglio subisce stress."),
+                       f"{gc['quota_critici']:.1f} %", g3)
+
+            st.markdown("**Top 15 giorni per score di stress**")
+            top15 = gc["df"].head(15).iloc[::-1]
+            fig_gc = go.Figure()
+            fig_gc.add_trace(go.Bar(
+                x=top15["Score"], y=top15["Giorno"], orientation="h",
+                marker_color=["#ef4444" if c == "SI" else "#f59e0b" for c in top15["Critico"]],
+                hovertemplate="%{y}: score %{x:.1f} — medio %{customdata[0]:,.2f}, picco %{customdata[1]:,.2f} €/MWh<extra></extra>",
+                customdata=np.stack([top15["Prezzo medio (euro/MWh)"].to_numpy(),
+                                     top15["Picco (euro/MWh)"].to_numpy()], axis=1)))
+            fig_gc.update_layout(template="plotly_dark", height=480,
+                                 title="Score di stress per giorno (rosso = critico, arancio = sotto soglia)",
+                                 xaxis_title="Score (0-100)", yaxis_title="Giorno")
+            st.plotly_chart(fig_gc, use_container_width=True)
+
+            st.markdown("**Score medio per giorno della settimana**")
+            ds = gc["df_settimana"]
+            fig_gcs = go.Figure()
+            fig_gcs.add_trace(go.Bar(
+                x=ds["Giorno settimana"], y=ds["Score medio"],
+                marker_color="#f59e0b",
+                hovertemplate="%{x}: score medio %{y:.1f} (%{customdata} giorni)<extra></extra>",
+                customdata=ds["Giorni"]))
+            fig_gcs.update_layout(template="plotly_dark", height=300,
+                                  title="In quali giorni della settimana si concentra lo stress",
+                                  xaxis_title="Giorno", yaxis_title="Score medio")
+            st.plotly_chart(fig_gcs, use_container_width=True)
+
+            if len(gc["df_mese"]) > 1:
+                st.markdown("**Score medio per mese**")
+                dm = gc["df_mese"]
+                fig_gcm = go.Figure()
+                fig_gcm.add_trace(go.Bar(
+                    x=dm["Mese"], y=dm["Score medio"],
+                    marker_color="#f59e0b",
+                    hovertemplate="%{x}: score medio %{y:.1f} (%{customdata} giorni)<extra></extra>",
+                    customdata=dm["Giorni"]))
+                fig_gcm.update_layout(template="plotly_dark", height=300,
+                                      title="Stagionalita' dello stress: i mesi piu' critici",
+                                      xaxis_title="Mese", yaxis_title="Score medio")
+                st.plotly_chart(fig_gcm, use_container_width=True)
+
+            st.markdown("**Dettaglio giorni**")
+            st.dataframe(gc["df"], use_container_width=True, hide_index=True)
+            st.download_button(
+                "\u2b07\ufe0f Esporta giorni critici (CSV)",
+                gc["df"].to_csv(index=False).encode("utf-8"),
+                file_name=f"giorni_critici_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica la classifica dei giorni: score, metriche di stress e flag critico.",
+                key="csv_gc_det",
+            )
+            if gc["giorni_scarto"]:
+                st.caption(f"\u2139\ufe0f {gc['giorni_scarto']} giorni incompleti scartati (es. cambi ora legale).")
+            st.caption("\U0001f4a1 Peso alto sul picco e sulle rampe: score da usare per calibrare gli alert intraday. Peso alto sul prezzo medio: score da usare per il post-mortem del costo.")
 
 # Footer
 
