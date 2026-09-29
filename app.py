@@ -4519,6 +4519,166 @@ def calcola_strip_forward(prezzi, freq="ME", ora_peak_inizio=8, ora_peak_fine=20
     return out
 
 
+def calcola_struttura_termine(prezzi, soglia_pct=1.5):
+    """Struttura a termine implicita: contango/backwardation degli strip mensili.
+
+    Dal day-ahead storico ricostruisce gli strip mensili base impliciti (riuso
+    di calcola_strip_forward) e analizza la PENDENZA della curva a termine:
+    quando il mercato prezza i mesi lontani piu' cari dei vicini la curva e'
+    in CONTANGO (il rolling di una copertura a termine costa: ogni roll
+    compra piu' caro), quando e' al contrario e' in BACKWARDATION (conviene
+    comprare a termine, il roll paga). Domanda operativa: "conviene comprare
+    ora spot o coprire a termine?" e "quanto mi costa il rolling delle
+    coperture?".
+
+    Metodo (deterministico a parita' di input):
+    - strip mensili base dalla serie ore; servono >= 2 strip, altrimenti 'ok'
+      False;
+    - per ogni coppia di mesi di calendario CONSECUTIVI (le coppie con buchi
+      di dati vengono scartate e conteggiate in 'coppie_scarto'): delta =
+      strip[t+1]-strip[t] in €/MWh e in % sul mese precedente;
+    - regime della coppia: "Contango" se delta% > soglia, "Backwardation"
+      se delta% < -soglia, altrimenti "Flat"; base del mese precedente = 0
+      -> delta% NaN e regime "Flat";
+    - slope annualizzata = variazione % totale dal primo all'ultimo strip /
+      anni coperti (12 mesi = 1 anno);
+    - stagionalita': delta% medio per mese di calendario dello strip di
+      arrivo (quale mese 'tira su' la curva);
+    - premio spot vs primo strip: media delle ultime 168 ore valide della
+      serie (prezzo 'corrente') contro il primo strip.
+
+    Ritorna dict con 'ok' (bool), 'n_strip', 'coppie', 'coppie_scarto',
+    'df_strip' (Strip, Base (€/MWh)), 'df_step' (Strip, Base (€/MWh),
+    'Delta vs prec. (€/MWh)', 'Delta %', 'Regime'), 'df_stag' (Mese,
+    'Delta % medio', 'N coppie'), 'regime_dominante' (str),
+    'quota_contango' (% float), 'quota_backwardation' (% float),
+    'slope_annua_pct' (float|None), 'contango_max_pct', 'backwardation_max_pct',
+    'spot_ultime168' (float|None), 'premio_spot_vs_strip1_pct' (float|None)."""
+    COLS_STEP = ["Strip", "Base (€/MWh)", "Delta vs prec. (€/MWh)",
+                 "Delta %", "Regime"]
+    vuoto = {"ok": False, "n_strip": 0, "coppie": 0, "coppie_scarto": 0,
+             "df_strip": pd.DataFrame(columns=["Strip", "Base (€/MWh)"]),
+             "df_step": pd.DataFrame(columns=COLS_STEP),
+             "df_stag": pd.DataFrame(columns=["Mese", "Delta % medio",
+                                              "N coppie"]),
+             "regime_dominante": None, "quota_contango": None,
+             "quota_backwardation": None, "slope_annua_pct": None,
+             "contango_max_pct": None, "backwardation_max_pct": None,
+             "spot_ultime168": None, "premio_spot_vs_strip1_pct": None}
+
+    def _vuoto():
+        return dict(vuoto)
+
+    if soglia_pct < 0:
+        soglia_pct = 0.0
+    try:
+        sf = calcola_strip_forward(prezzi, "ME")
+    except Exception:
+        return _vuoto()
+    df = sf.get("df")
+    if df is None or len(df) < 2:
+        return _vuoto()
+    strip = df["Strip"].astype(str).tolist()
+    base = df["Base (€/MWh)"].astype(float).to_numpy()
+    try:
+        mesi = [pd.Timestamp(s + "-01") for s in strip]
+    except Exception:
+        return _vuoto()
+
+    righe, delta_pct_validi, stag = [], [], {}
+    coppie, scarto = 0, 0
+    for i in range(1, len(mesi)):
+        gap = (mesi[i].year - mesi[i - 1].year) * 12 + (mesi[i].month - mesi[i - 1].month)
+        if gap != 1:
+            scarto += 1
+            continue
+        b0, b1 = base[i - 1], base[i]
+        d = b1 - b0
+        if np.isfinite(b0) and b0 != 0 and np.isfinite(d):
+            dpct = d / abs(b0) * 100.0
+        else:
+            dpct = np.nan
+        if np.isfinite(dpct):
+            if dpct > soglia_pct:
+                regime = "Contango"
+            elif dpct < -soglia_pct:
+                regime = "Backwardation"
+            else:
+                regime = "Flat"
+            delta_pct_validi.append(dpct)
+            m_lab = mesi[i].strftime("%m")
+            stag.setdefault(m_lab, []).append(dpct)
+        else:
+            regime = "Flat"
+        coppie += 1
+        righe.append({
+            "Strip": strip[i],
+            "Base (€/MWh)": round(float(b1), 2),
+            "Delta vs prec. (€/MWh)": round(float(d), 2),
+            "Delta %": round(float(dpct), 2) if np.isfinite(dpct) else np.nan,
+            "Regime": regime,
+        })
+    if coppie == 0:
+        return _vuoto()
+
+    df_step = pd.DataFrame(righe, columns=COLS_STEP)
+    df_strip = df[["Strip", "Base (€/MWh)"]].copy().reset_index(drop=True)
+
+    n_c = int((df_step["Regime"] == "Contango").sum())
+    n_b = int((df_step["Regime"] == "Backwardation").sum())
+    quota_c = round(n_c / coppie * 100.0, 1)
+    quota_b = round(n_b / coppie * 100.0, 1)
+    if n_c > n_b:
+        dom = "Contango"
+    elif n_b > n_c:
+        dom = "Backwardation"
+    else:
+        dom = "Mista"
+
+    mesi_totali = (mesi[-1].year - mesi[0].year) * 12 + (mesi[-1].month - mesi[0].month)
+    slope = None
+    if mesi_totali > 0 and np.isfinite(base[0]) and base[0] != 0:
+        slope = round(float((base[-1] - base[0]) / abs(base[0]) * 100.0
+                            / (mesi_totali / 12.0)), 2)
+
+    v = np.array([x for x in delta_pct_validi], dtype=float)
+    c_max = round(float(v[v > soglia_pct].max()), 2) if (v > soglia_pct).any() else None
+    b_max = round(float(v[v < -soglia_pct].min()), 2) if (v < -soglia_pct).any() else None
+
+    stag_righe = []
+    for m in sorted(stag.keys()):
+        vals = stag[m]
+        stag_righe.append({
+            "Mese": m,
+            "Delta % medio": round(float(np.mean(vals)), 2),
+            "N coppie": len(vals),
+        })
+    df_stag = pd.DataFrame(stag_righe, columns=["Mese", "Delta % medio", "N coppie"])
+
+    spot, premio = None, None
+    try:
+        p = prezzi.astype(float)
+        p = p[~p.index.duplicated(keep="first")].sort_index().dropna()
+        if len(p) >= 24:
+            spot = round(float(p.tail(168).mean()), 2)
+            if np.isfinite(base[0]) and base[0] != 0 and spot is not None:
+                premio = round(float((base[0] - spot) / abs(spot) * 100.0), 2)
+    except Exception:
+        spot, premio = None, None
+
+    out = _vuoto()
+    out.update({
+        "ok": True, "n_strip": len(df_strip), "coppie": coppie,
+        "coppie_scarto": scarto, "df_strip": df_strip, "df_step": df_step,
+        "df_stag": df_stag, "regime_dominante": dom,
+        "quota_contango": quota_c, "quota_backwardation": quota_b,
+        "slope_annua_pct": slope, "contango_max_pct": c_max,
+        "backwardation_max_pct": b_max, "spot_ultime168": spot,
+        "premio_spot_vs_strip1_pct": premio,
+    })
+    return out
+
+
 def calcola_climatologia_prezzo(prezzi, soglia=100.0):
     """Climatologia del prezzo: probabilita' di superare una soglia per giorno della settimana e ora.
 
@@ -7166,7 +7326,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -11685,6 +11845,81 @@ elif workspace == _('ws8'):
             if gt["giorni_scarto"]:
                 st.caption(f"\u2139\ufe0f {gt['giorni_scarto']} giorni con ore mancanti scartati (es. cambi ora legale).")
             st.caption("\U0001f4a1 I tipi con spread alto e concentrati in pochi mesi sono i candidati per coperture stagionali mirate; un tipo 'piatto' dominante indica un mercato prevedibile dove il prezzo fisso conviene.")
+
+    with tab68:
+        titolo_st = edu("Struttura a termine", "La STRUTTURA A TERMINE e' la pendenza della curva dei prezzi a termine: dagli strip mensili base impliciti dello storico si calcola quanto il mercato prezza di piu' (o di meno) i mesi lontani rispetto a quelli vicini. Se i mesi lontani costano di piu' la curva e' in CONTANGO: il rolling di una copertura a termine costa soldi (ogni roll compra piu' caro). Se costano di meno e' in BACKWARDATION: conviene comprare a termine, il rolling paga. E' lo strumento operativo per decidere spot vs forward e per quantificare il costo di rollover delle coperture nel tempo. Diverso dal tab \U0001f4e6 Strip forward (i singoli contratti mese per mese): qui si guarda la PENDENZA tra uno strip e il successivo, non i livelli.")
+        st.markdown(titolo_st, unsafe_allow_html=True)
+        soglia_st = st.slider("Soglia contango/backwardation (%)", 0.5, 5.0, 1.5, step=0.5, key="slider_st_soglia",
+                             help="Variazione % mese-su-mese oltre la quale uno step di curva conta come contango o backwardation; sotto resta 'flat'.")
+        stm = calcola_struttura_termine(prezzi, soglia_st)
+        if not stm["ok"]:
+            st.warning("Dati insufficienti per la struttura a termine (servono almeno 2 mesi completi di strip).")
+        else:
+            PAL_ST = {"Contango": "#22c55e", "Backwardation": "#ef4444", "Flat": "#64748b"}
+            dom = stm["regime_dominante"]
+            t1, t2, t3, t4 = st.columns(4)
+            render_kpi(edu("Regime dominante", "Il regime piu' frequente negli step mese-su-mese della curva: Contango = i mesi lontani costano piu' dei vicini (il rolling delle coperture costa), Backwardation = il contrario (conviene il termine), Mista = nessun regime prevale."),
+                       dom, t1)
+            render_kpi(edu("Quota contango", "Percentuale di step mese-su-mese in contango sopra la soglia: misura quanto la curva premia l'acquisto immediato invece del termine."),
+                       f"{stm['quota_contango']:.1f} %", t2)
+            slope_txt = f"{stm['slope_annua_pct']:+.2f} %/anno" if stm["slope_annua_pct"] is not None else "n/d"
+            render_kpi(edu("Slope annualizzata", "Variazione % dal primo all'ultimo strip divisa per gli anni coperti: la pendenza media della curva a termine. Positiva = contango strutturale, negativa = backwardation strutturale."),
+                       slope_txt, t3)
+            pr_txt = f"{stm['premio_spot_vs_strip1_pct']:+.2f} %" if stm["premio_spot_vs_strip1_pct"] is not None else "n/d"
+            render_kpi(edu("Premio strip vs spot", "Quanto il primo strip costa in piu' (o in meno) rispetto alla media delle ultime 168 ore: il 'premio di copertura' implicito pagabile oggi per il mese in corso."),
+                       pr_txt, t4)
+
+            st.markdown("**Curva a termine implicita (strip mensili base)**")
+            fig_st = go.Figure()
+            fig_st.add_trace(go.Scatter(
+                x=stm["df_strip"]["Strip"], y=stm["df_strip"]["Base (€/MWh)"],
+                mode="lines+markers", name="Strip base",
+                line=dict(color="#38bdf8", width=2.5),
+                hovertemplate="%{x}: %{y:,.2f} €/MWh<extra></extra>"))
+            fig_st.update_layout(template="plotly_dark", height=360,
+                                 title="Strip mensili base impliciti (€/MWh): curva in salita = contango, in discesa = backwardation",
+                                 xaxis_title="Mese di consegna", yaxis_title="€/MWh")
+            st.plotly_chart(fig_st, use_container_width=True)
+
+            st.markdown("**Variazione mese-su-mese della curva**")
+            step = stm["df_step"]
+            fig_std = go.Figure()
+            fig_std.add_trace(go.Bar(
+                x=step["Strip"], y=step["Delta %"],
+                marker_color=[PAL_ST[r] for r in step["Regime"]],
+                hovertemplate="%{x}: %{y:+.2f} % — %{customdata}<extra></extra>",
+                customdata=step["Regime"]))
+            fig_std.update_layout(template="plotly_dark", height=320,
+                                  title=f"Delta % strip[t+1] vs strip[t] (soglia ±{soglia_st:.1f} %)",
+                                  xaxis_title="Mese di arrivo", yaxis_title="Δ %")
+            st.plotly_chart(fig_std, use_container_width=True)
+
+            st.markdown("**Dettaglio step di curva**")
+            st.dataframe(step, use_container_width=True, hide_index=True)
+            st.download_button(
+                "\u2b07\ufe0f Esporta step di curva (CSV)",
+                step.to_csv(index=False).encode("utf-8"),
+                file_name=f"struttura_termine_step_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica gli step mese-su-mese: strip di arrivo, base, delta in €/MWh e in %, regime (contango/backwardation/flat).",
+                key="csv_st_step",
+            )
+            if not stm["df_stag"].empty:
+                st.markdown("**Stagionalita' della pendenza**")
+                fig_stg = go.Figure()
+                fig_stg.add_trace(go.Bar(
+                    x=stm["df_stag"]["Mese"], y=stm["df_stag"]["Delta % medio"],
+                    marker_color=["#22c55e" if v > 0 else "#ef4444" for v in stm["df_stag"]["Delta % medio"]],
+                    hovertemplate="Mese %{x}: %{y:+.2f} % medio (%{customdata} coppie)<extra></extra>",
+                    customdata=stm["df_stag"]["N coppie"]))
+                fig_stg.update_layout(template="plotly_dark", height=300,
+                                      title="Delta % medio per mese di calendario dello strip di arrivo: quali mesi 'tirano su' la curva",
+                                      xaxis_title="Mese", yaxis_title="Δ % medio")
+                st.plotly_chart(fig_stg, use_container_width=True)
+                st.dataframe(stm["df_stag"], use_container_width=True, hide_index=True)
+            if stm["coppie_scarto"]:
+                st.caption(f"\u2139\ufe0f {stm['coppie_scarto']} coppie di mesi non consecutive scartate (buchi nei dati).")
+            st.caption("\U0001f4a1 Curva in contango persistente + premio strip positivo: conviene comprare spot e coprire a breve; backwardation strutturale: conviene fissare a termine prima che la curva si appiattisca.")
 
 # Footer
 
