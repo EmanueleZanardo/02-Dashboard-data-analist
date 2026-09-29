@@ -8344,6 +8344,169 @@ def calcola_autoconsumo_fv(prezzi, mw_f1, mw_f2, mw_f3, potenza_mwp,
     return out
 
 
+def calcola_nuovo_carico(prezzi, profilo_24, potenza_mw, mw_f1, mw_f2, mw_f3,
+                         tariffa_picco_eur_kw_anno=0.0, mod_mensile=None):
+    """Costo marginale di un nuovo carico (tab 'Nuovo carico').
+
+    Valuta quanto costa aggiungere un nuovo consumo (es. flotta EV, pompe di
+    calore, datacenter) con un profilo giornaliero dato, valorizzato ai prezzi
+    spot orari del periodo selezionato.
+
+    Metodo (tutto deterministico a parita' di input):
+    - profilo_24: 24 fattori 0..1 (frazione della potenza nominale per ora);
+      valori fuori range vengono clampati; lunghezza diversa da 24 -> neutrali.
+    - mod_mensile: 12 moltiplicatori mensili (default 1.0) per carichi
+      stagionali (es. pompe di calore); valori negativi -> 0; lunghezza
+      diversa da 12 -> neutrali.
+    - carico_nuovo_h = potenza_mw x profilo_24[ora] x mod_mensile[mese];
+    - costo_h = carico_nuovo_h x prezzo_h;
+    - prezzo medio = somma(costo) / somma(energia) (None se energia = 0);
+    - confronto con carico esistente: stesso calcolo sul profilo per fascia
+      (come nel resto dell'app) -> delta €/MWh e % (shape del nuovo carico
+      migliore o peggiore della media del carico esistente);
+    - picco: picco esistente dal carico per fascia; picco totale coincidente
+      = max(carico_esistente_h + carico_nuovo_h); incremento = totale -
+      esistente (>= 0); un carico notturno puo' alzare il picco meno della sua
+      potenza nominale se il picco esistente e' diurno;
+    - costo potenza = incremento_picco_MW x 1000 x tariffa €/kW/anno;
+    - annualizzazione x 8760/ore: energia e costi annui stimati;
+    - df_mesi: per mese Energia (MWh), Costo (EUR), Prezzo medio (€/MWh),
+      Picco nuovo (MW);
+    - df_ore: 24 righe con Ora, Frazione profilo, Energia (MWh), Prezzo medio
+      ora (€/MWh) ponderato sull'energia del nuovo carico in quell'ora.
+
+    NaN-safe: serie vuota, potenza 0, profilo tutto a zero, parametri non
+    validi -> statistiche neutrali con DataFrame dalle colonne giuste.
+
+    Ritorna dict con 'ore', 'potenza_mw', 'energia_mwh', 'energia_annua_mwh',
+    'costo_periodo_eur', 'costo_annuo_eur', 'prezzo_medio_eur_mwh',
+    'prezzo_medio_base_eur_mwh', 'delta_eur_mwh', 'delta_pct',
+    'picco_nuovo_mw', 'picco_esistente_mw', 'picco_totale_mw',
+    'incremento_picco_mw', 'costo_potenza_annuo_eur',
+    'costo_totale_annuo_eur', 'quota_costo_f1_pct', 'df_mesi', 'df_ore'.
+    """
+    cols_m = ["Mese", "Energia (MWh)", "Costo (EUR)", "Prezzo medio (€/MWh)",
+              "Picco nuovo (MW)"]
+    cols_h = ["Ora", "Frazione profilo", "Energia (MWh)",
+              "Prezzo medio ora (€/MWh)"]
+    vuoto = {"ore": 0, "potenza_mw": 0.0, "energia_mwh": 0.0,
+             "energia_annua_mwh": 0.0, "costo_periodo_eur": 0.0,
+             "costo_annuo_eur": 0.0, "prezzo_medio_eur_mwh": None,
+             "prezzo_medio_base_eur_mwh": None, "delta_eur_mwh": None,
+             "delta_pct": None, "picco_nuovo_mw": 0.0,
+             "picco_esistente_mw": 0.0, "picco_totale_mw": 0.0,
+             "incremento_picco_mw": 0.0, "costo_potenza_annuo_eur": 0.0,
+             "costo_totale_annuo_eur": 0.0, "quota_costo_f1_pct": None,
+             "df_mesi": pd.DataFrame(columns=cols_m),
+             "df_ore": pd.DataFrame(columns=cols_h)}
+    try:
+        prof = np.asarray(profilo_24, dtype=float).ravel()
+    except (TypeError, ValueError):
+        return dict(vuoto)
+    if prof.shape[0] != 24 or np.isnan(prof).any():
+        return dict(vuoto)
+    prof = np.clip(prof, 0.0, 1.0)
+    if mod_mensile is None:
+        mod = np.ones(12)
+    else:
+        try:
+            mod = np.asarray(mod_mensile, dtype=float).ravel()
+        except (TypeError, ValueError):
+            return dict(vuoto)
+        if mod.shape[0] != 12 or np.isnan(mod).any():
+            return dict(vuoto)
+        mod = np.clip(mod, 0.0, None)
+    try:
+        p = prezzi.astype(float).dropna()
+        p = p[~p.index.duplicated(keep="first")].sort_index()
+    except Exception:
+        return dict(vuoto)
+    if len(p) == 0:
+        return dict(vuoto)
+    try:
+        pot = max(0.0, float(potenza_mw))
+    except (TypeError, ValueError):
+        pot = 0.0
+    try:
+        tar = max(0.0, float(tariffa_picco_eur_kw_anno))
+    except (TypeError, ValueError):
+        tar = 0.0
+    out = dict(vuoto)
+    out["ore"] = len(p)
+    out["potenza_mw"] = round(pot, 4)
+    try:
+        fasce = p.index.map(fascia_oraria)
+    except Exception:
+        return out
+    try:
+        mw_map = {"F1": max(0.0, float(mw_f1)), "F2": max(0.0, float(mw_f2)),
+                  "F3": max(0.0, float(mw_f3))}
+    except (TypeError, ValueError):
+        mw_map = {"F1": 0.0, "F2": 0.0, "F3": 0.0}
+    carico_e = fasce.map(mw_map).to_numpy(dtype=float)
+    pr = p.to_numpy(dtype=float)
+    ore_idx = p.index.hour.to_numpy()
+    mesi_idx = p.index.month.to_numpy()
+    nuovo = pot * prof[ore_idx] * mod[mesi_idx - 1]
+    costo = nuovo * pr
+    fattore_annuo = 8760.0 / len(p)
+    energia = float(nuovo.sum())
+    costo_tot = float(costo.sum())
+    out["energia_mwh"] = round(energia, 2)
+    out["energia_annua_mwh"] = round(energia * fattore_annuo, 2)
+    out["costo_periodo_eur"] = round(costo_tot, 2)
+    costo_annuo = costo_tot * fattore_annuo
+    out["costo_annuo_eur"] = round(costo_annuo, 2)
+    out["prezzo_medio_eur_mwh"] = (round(costo_tot / energia, 2)
+                                   if energia > 0 else None)
+    energia_e = float(carico_e.sum())
+    costo_e = float((carico_e * pr).sum())
+    pm_base = costo_e / energia_e if energia_e > 0 else None
+    out["prezzo_medio_base_eur_mwh"] = round(pm_base, 2) if pm_base is not None else None
+    if out["prezzo_medio_eur_mwh"] is not None and pm_base is not None and pm_base != 0:
+        out["delta_eur_mwh"] = round(out["prezzo_medio_eur_mwh"] - pm_base, 2)
+        out["delta_pct"] = round(100.0 * (out["prezzo_medio_eur_mwh"] - pm_base) / pm_base, 1)
+    picco_e = float(carico_e.max()) if len(carico_e) else 0.0
+    picco_n = float(nuovo.max()) if len(nuovo) else 0.0
+    picco_t = float((carico_e + nuovo).max()) if len(nuovo) else 0.0
+    incr = max(0.0, picco_t - picco_e)
+    out["picco_esistente_mw"] = round(picco_e, 3)
+    out["picco_nuovo_mw"] = round(picco_n, 3)
+    out["picco_totale_mw"] = round(picco_t, 3)
+    out["incremento_picco_mw"] = round(incr, 3)
+    costo_pot = incr * 1000.0 * tar
+    out["costo_potenza_annuo_eur"] = round(costo_pot, 2)
+    out["costo_totale_annuo_eur"] = round(costo_annuo + costo_pot, 2)
+    costo_f1 = float(costo[fasce == "F1"].sum())
+    out["quota_costo_f1_pct"] = (round(100.0 * costo_f1 / costo_tot, 1)
+                                 if costo_tot > 0 else None)
+    # --- dettaglio mensile ---
+    mesi = p.index.to_period("M").astype(str)
+    righe = []
+    for m in sorted(set(mesi)):
+        idx = mesi == m
+        em = float(nuovo[idx].sum())
+        cm = float(costo[idx].sum())
+        righe.append({"Mese": m,
+                      "Energia (MWh)": round(em, 2),
+                      "Costo (EUR)": round(cm, 2),
+                      "Prezzo medio (€/MWh)": round(cm / em, 2) if em > 0 else None,
+                      "Picco nuovo (MW)": round(float(nuovo[idx].max()), 3)})
+    out["df_mesi"] = pd.DataFrame(righe, columns=cols_m)
+    # --- dettaglio orario (profilo 24h) ---
+    righe_h = []
+    for h in range(24):
+        idx = ore_idx == h
+        eh = float(nuovo[idx].sum())
+        ch = float(costo[idx].sum())
+        righe_h.append({"Ora": h,
+                        "Frazione profilo": round(float(prof[h]), 3),
+                        "Energia (MWh)": round(eh, 2),
+                        "Prezzo medio ora (€/MWh)": round(ch / eh, 2) if eh > 0 else None})
+    out["df_ore"] = pd.DataFrame(righe_h, columns=cols_h)
+    return out
+
+
 def render_kpi(title, value, col):
     col.markdown(f"<div class='metric-container'><div class='metric-label'>{title}</div><div class='metric-val'>{value}</div></div>", unsafe_allow_html=True)
 
@@ -8979,7 +9142,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -14711,7 +14874,152 @@ elif workspace == _('ws8'):
                 help="Scarica lo sweep: per ogni taglia, risparmio annuo, payback e quote.",
                 key="csv_fv_sweep",
             )
-            st.caption("💡 Uso pratico: la taglia con il payback minimo (non quella con il risparmio massimo) e' spesso la scelta migliore se il capitale e' limitato; oltre il picco di carico diurno la quota di autoconsumo crolla e l'eccedenza vale solo il prezzo di ritiro. Confronta con il tab Price capture per la vendita a spot e con Arbitraggio Batteria per spostare l'eccedenza nelle ore care.")
+    with tab79:
+        titolo_nc = edu("Costo marginale di un nuovo carico", "Quanto ti costa aggiungere un nuovo consumo (flotta EV, pompe di calore, datacenter, nuova linea produttiva)? Il profilo giornaliero scelto (frazione della potenza nominale per ora) viene valorizzato ai prezzi spot orari del periodo: il prezzo medio €/MWh che ne esce e' il vero costo marginale del nuovo carico, da confrontare con il prezzo medio del tuo carico esistente. Il picco coincidente dice se il nuovo carico alza il picco totale del sito (e quindi l'eventuale corrispettivo di potenza): un carico notturno puo' costare meno della sua potenza nominale se il tuo picco e' diurno.")
+        st.markdown(titolo_nc, unsafe_allow_html=True)
+
+        PROFILI_NC = {
+            "Piatto 24/7 (base costante)": ([1.0] * 24, None),
+            "Datacenter (90% costante)": ([0.9] * 24, None),
+            "Ore lavorative (8-18)": ([1.0 if 8 <= h < 18 else 0.15 for h in range(24)], None),
+            "Ricarica EV notturna (22-6)": ([1.0 if (h >= 22 or h < 6) else 0.0 for h in range(24)], None),
+            "Pompa di calore (picco sera, invernale)": (
+                [1.0 if h in (6, 7, 8, 17, 18, 19, 20, 21) else 0.5 for h in range(24)],
+                [1.4, 1.3, 1.15, 0.9, 0.6, 0.4, 0.35, 0.35, 0.5, 0.8, 1.15, 1.35]),
+            "Personalizzato (editor 24 ore)": (None, None),
+        }
+        nc1, nc2, nc3 = st.columns(3)
+        with nc1:
+            nc_prof_nome = st.selectbox("Profilo del nuovo carico", list(PROFILI_NC.keys()), key="nc_profilo",
+                                        help="Forma giornaliera del nuovo consumo, come frazione della potenza nominale.")
+        with nc2:
+            nc_pot = st.number_input("Potenza nuovo carico (MW)", min_value=0.0, value=0.5, step=0.1, key="nc_pot",
+                                     help="Potenza nominale del nuovo carico.")
+        with nc3:
+            nc_tar = st.number_input("Corrispettivo di potenza (€/kW/anno)", min_value=0.0, value=0.0, step=5.0, key="nc_tar",
+                                     help="Se paghi un corrispettivo per il picco di potenza, il tab calcola il costo aggiuntivo sul picco coincidente. 0 = disattivato.")
+
+        nc_prof, nc_mod = PROFILI_NC[nc_prof_nome]
+        if nc_prof is None:
+            df_nc_edit = pd.DataFrame({"Ora": list(range(24)),
+                                       "Frazione (0-1)": [1.0] * 24})
+            df_nc_edit = st.data_editor(df_nc_edit, use_container_width=True, hide_index=True,
+                                        num_rows="fixed", key="nc_editor",
+                                        help="Frazione della potenza nominale assorbita in ciascuna ora (0 = spento, 1 = piena potenza).")
+            try:
+                nc_prof = [max(0.0, min(1.0, float(v))) for v in df_nc_edit["Frazione (0-1)"].tolist()]
+            except Exception:
+                nc_prof = [0.0] * 24
+            nc_prof = (nc_prof + [0.0] * 24)[:24]
+        if nc_prof_nome == "Pompa di calore (picco sera, invernale)":
+            st.caption("❄️ Profilo pompa di calore con modulazione stagionale automatica (gennaio x1.4, luglio/agosto x0.35): il costo segue i prezzi spot di ciascun mese.")
+
+        res_nc = calcola_nuovo_carico(prezzi, nc_prof, nc_pot, mw_f1, mw_f2, mw_f3,
+                                      tariffa_picco_eur_kw_anno=nc_tar,
+                                      mod_mensile=nc_mod)
+        if res_nc["ore"] == 0 or res_nc["potenza_mw"] <= 0:
+            st.warning("Seleziona un periodo con dati e una potenza maggiore di zero.")
+        else:
+            pm_txt = f"{res_nc['prezzo_medio_eur_mwh']:.2f} €/MWh" if res_nc["prezzo_medio_eur_mwh"] is not None else "n/d"
+            if res_nc["delta_eur_mwh"] is not None:
+                segno = "+" if res_nc["delta_eur_mwh"] > 0 else ""
+                delta_txt = f"{segno}{res_nc['delta_eur_mwh']:.2f} €/MWh ({segno}{res_nc['delta_pct']:.1f} %)"
+            else:
+                delta_txt = "n/d"
+            f1_txt = f"{res_nc['quota_costo_f1_pct']:.1f} %" if res_nc["quota_costo_f1_pct"] is not None else "n/d"
+            k1, k2, k3, k4 = st.columns(4)
+            render_kpi(edu("Energia annua aggiuntiva", "MWh in piu' all'anno con questo profilo e potenza (annualizzato dal periodo)."),
+                       f"{res_nc['energia_annua_mwh']:,.0f} MWh", k1)
+            render_kpi(edu("Costo spot annuo", "Costo incrementale annuo valorizzato ai prezzi spot orari: la bolletta in piu'."),
+                       f"{res_nc['costo_annuo_eur']:,.0f} €", k2)
+            render_kpi(edu("Prezzo medio nuovo carico", "Costo / energia del nuovo carico: il suo vero €/MWh, shape inclusa."),
+                       pm_txt, k3)
+            render_kpi(edu("Delta vs carico esistente", "Differenza tra il €/MWh del nuovo carico e quello del tuo carico attuale: negativo = il nuovo carico ha una forma migliore (piu' economico per MWh)."),
+                       delta_txt, k4)
+            k5, k6, k7, k8 = st.columns(4)
+            render_kpi(edu("Picco coincidente aggiuntivo", "Di quanto sale il picco totale del sito (esistente + nuovo): puo' essere meno della potenza nominale se i picchi non coincidono."),
+                       f"{res_nc['incremento_picco_mw']:.3f} MW", k5)
+            render_kpi(edu("Costo potenza annuo", "Incremento di picco x corrispettivo €/kW/anno: il costo di capacita' aggiuntivo."),
+                       f"{res_nc['costo_potenza_annuo_eur']:,.0f} €", k6)
+            render_kpi(edu("Costo totale all-in annuo", "Spot annuo + costo potenza: il costo pieno del nuovo carico."),
+                       f"{res_nc['costo_totale_annuo_eur']:,.0f} €", k7)
+            render_kpi(edu("Quota costo in F1", "Percentuale del costo del nuovo carico che cade nelle ore di punta F1."),
+                       f1_txt, k8)
+
+            df_nch = res_nc["df_ore"]
+            fig_nc1 = go.Figure()
+            fig_nc1.add_trace(go.Bar(x=df_nch["Ora"], y=df_nch["Frazione profilo"], name="Frazione profilo",
+                                     marker_color="#38bdf8",
+                                     hovertemplate="Ora %{x}: %{y:.2f}<extra></extra>"))
+            fig_nc1.add_trace(go.Scatter(x=df_nch["Ora"], y=df_nch["Prezzo medio ora (€/MWh)"],
+                                         name="Prezzo medio ora €/MWh", mode="lines+markers",
+                                         marker_color="#f59e0b", yaxis="y2",
+                                         hovertemplate="Ora %{x}: €%{y:.2f}/MWh<extra></extra>"))
+            fig_nc1.update_layout(template="plotly_dark", height=360,
+                                  title="Profilo orario del nuovo carico vs prezzo medio per ora",
+                                  xaxis_title="Ora del giorno", yaxis_title="Frazione della potenza",
+                                  yaxis2=dict(title="€/MWh", overlaying="y", side="right"))
+            st.plotly_chart(fig_nc1, use_container_width=True)
+
+            df_ncm = res_nc["df_mesi"]
+            fig_nc2 = go.Figure()
+            fig_nc2.add_trace(go.Bar(x=df_ncm["Mese"], y=df_ncm["Costo (EUR)"], name="Costo mensile",
+                                     marker_color="#10b981",
+                                     hovertemplate="%{x}<br>Costo: €%{y:,.0f}<extra></extra>"))
+            fig_nc2.add_trace(go.Scatter(x=df_ncm["Mese"], y=df_ncm["Prezzo medio (€/MWh)"],
+                                         name="Prezzo medio €/MWh", mode="lines+markers",
+                                         marker_color="#f59e0b", yaxis="y2",
+                                         hovertemplate="%{x}<br>€%{y:.2f}/MWh<extra></extra>"))
+            fig_nc2.update_layout(template="plotly_dark", height=360,
+                                  title="Costo incrementale mensile e prezzo medio",
+                                  xaxis_title="Mese", yaxis_title="Costo (€)",
+                                  yaxis2=dict(title="€/MWh", overlaying="y", side="right"))
+            st.plotly_chart(fig_nc2, use_container_width=True)
+
+            righe_conf = []
+            for nome_p, (prof_p, mod_p) in PROFILI_NC.items():
+                if prof_p is None:
+                    continue
+                rp = calcola_nuovo_carico(prezzi, prof_p, nc_pot, mw_f1, mw_f2, mw_f3,
+                                          tariffa_picco_eur_kw_anno=nc_tar,
+                                          mod_mensile=mod_p)
+                righe_conf.append({"Profilo": nome_p,
+                                   "Energia annua (MWh)": rp["energia_annua_mwh"],
+                                   "Costo spot annuo (EUR)": rp["costo_annuo_eur"],
+                                   "Prezzo medio (€/MWh)": rp["prezzo_medio_eur_mwh"],
+                                   "Picco coincidente (MW)": rp["incremento_picco_mw"],
+                                   "Costo totale annuo (EUR)": rp["costo_totale_annuo_eur"]})
+            df_nc_conf = pd.DataFrame(righe_conf)
+            fig_nc3 = go.Figure()
+            fig_nc3.add_trace(go.Bar(x=df_nc_conf["Prezzo medio (€/MWh)"], y=df_nc_conf["Profilo"],
+                                     orientation="h", marker_color="#a78bfa",
+                                     hovertemplate="%{y}<br>€%{x:.2f}/MWh<extra></extra>"))
+            fig_nc3.update_layout(template="plotly_dark", height=320,
+                                  title=f"Confronto profili a parita' di potenza ({nc_pot:.2f} MW): prezzo medio €/MWh",
+                                  xaxis_title="€/MWh", yaxis_title="")
+            st.plotly_chart(fig_nc3, use_container_width=True)
+
+            st.markdown("**Dettaglio mensile**")
+            st.dataframe(df_ncm, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta nuovo carico mensile (CSV)",
+                df_ncm.to_csv(index=False).encode("utf-8"),
+                file_name=f"nuovo_carico_mensile_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica il dettaglio mensile: energia, costo, prezzo medio e picco del nuovo carico.",
+                key="csv_nc_mesi",
+            )
+            st.markdown("**Confronto profili**")
+            st.dataframe(df_nc_conf, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta confronto profili (CSV)",
+                df_nc_conf.to_csv(index=False).encode("utf-8"),
+                file_name=f"nuovo_carico_confronto_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica il confronto tra i profili preimpostati a parita' di potenza.",
+                key="csv_nc_confronto",
+            )
+            st.caption("💡 Uso pratico: la ricarica notturna e' quasi sempre il profilo piu' economico per MWh; confronta il delta vs carico esistente per capire se il nuovo carico migliora o peggiora la tua forma media. Se il picco coincidente e' minore della potenza nominale, stai sfruttando ore in cui il sito ha margine: vale oro quando paghi il corrispettivo di potenza.")
 
 
 # Footer
