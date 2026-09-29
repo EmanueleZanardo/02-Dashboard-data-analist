@@ -5143,6 +5143,245 @@ def calcola_distribuzione_prezzi(prezzi, soglia_alta=150.0, soglia_bassa=0.0, n_
             "df_percentili": df_p, "mesi": mesi}
 
 
+
+def calcola_anomalie_prezzo(prezzi, mw_f1, mw_f2, mw_f3, metodo="mad", soglia=3.5,
+                            min_giorni_baseline=3):
+    """Anomalie statistiche del prezzo orario rispetto alla stagionalita' attesa.
+
+    Domanda operativa dell'energy analyst: "quali ore del periodo sono state
+    VERAMENTE anomale, non solo care?" — un prezzo di 300 euro/MWh alle 18:00
+    di gennaio e' normale, lo stesso prezzo alle 3:00 di domenica e'
+    sospetto. Diverso dal tab Picchi di prezzo (tab18, soglia fissa in
+    euro/MWh: guarda solo gli eventi di scarsita' assoluta) e dal tab Giorni
+    critici (tab69, score composito GIORNALIERO su 5 metriche): qui la
+    selezione e' ORARIA e STATISTICA, sullo scostamento dal prezzo atteso per
+    quell'ora della settimana, con metodi robusti ai dati rumorosi.
+
+    Metodo (deterministico a parita' di input):
+    - baseline stagionale: mediana del prezzo per coppia (giorno della
+      settimana, ora) calcolata sull'intero periodo (prezzo "atteso" per
+      quell'ora tipica della settimana);
+    - residuo = prezzo - baseline (scostamento in euro/MWh);
+    - metodo "mad" (default): z-score robusto modificato,
+      z = 0.6745 * residuo / MAD (Median Absolute Deviation dei residui);
+      anomalia se |z| > soglia (default 3.5, letteratura Iglewicz-Hoaglin);
+    - metodo "iqr": limiti Q1 - k*IQR / Q3 + k*IQR sui residui (k = soglia,
+      default 1.5 e' il classico Tukey);
+    - spike = residuo positivo (prezzo sopra atteso), drop = residuo
+      negativo (prezzo sotto atteso: per un buyer sono opportunita');
+    - streak: anomalie consecutive (>= 2 ore) raggruppate in eventi con
+      durata, picco di scostamento e ora di inizio.
+
+    Sanitizzazione: ore con prezzo NaN scartate, timestamp duplicati ->
+    primo tenuto, serie ordinata per tempo; giorni della settimana in inglese
+    via day_name (locale-independent). Serie con meno di 24 ore valide o con
+    tutti i residui uguali (MAD = 0 / IQR = 0) -> 'ok' False.
+
+    Impatto economico: per ogni anomalia, MWh e costo extra = (prezzo -
+    atteso) x MW della fascia dell'ora: positivo = spesa in piu' rispetto
+    all'atteso, negativo = risparmio inaspettato.
+
+    Ritorna dict con 'ok', 'metodo', 'soglia', 'tot_ore', 'n_anomalie',
+    'n_spike', 'n_drop', 'quota_pct', 'max_spike' (z, residuo, prezzo, atteso,
+    data/ora), 'max_drop' (idem negativo), 'streak_max' (durata max in ore),
+    'n_streak', 'costo_extra_tot' (euro: somma degli scostamenti x MW),
+    'df_anomalie' (Data/Ora/Prezzo/Atteso/Scostamento euro/Scostamento %/
+    Z-score/Tipo/Fascia/MW/Costo extra), 'df_ore' (Ora/Spike/Drop),
+    'df_mesi' (Mese/Spike/Drop/'Costo extra (euro)'),
+    'df_streak' (Inizio/Durata ore/Picco scostamento euro/Tipo prevalente),
+    'bin_centers'/'counts' per l'istogramma dei residui, 'lim_alto'/'lim_basso'
+    (soglie in residuo euro/MWh)."""
+    COLS_A = ["Data", "Ora", "Prezzo (euro/MWh)", "Atteso (euro/MWh)",
+              "Scostamento (euro/MWh)", "Scostamento %", "Z-score", "Tipo",
+              "Fascia", "MW", "Costo extra (euro)"]
+    COLS_O = ["Ora", "Spike", "Drop"]
+    COLS_M = ["Mese", "Spike", "Drop", "Costo extra (euro)"]
+    COLS_S = ["Inizio", "Durata ore", "Picco scostamento (euro/MWh)",
+              "Tipo prevalente"]
+
+    def _naive(ts):
+        tz = getattr(ts, "tz", None)
+        return ts.tz_convert(None) if tz is not None else ts
+
+    def _vuoto():
+        return {"ok": False, "metodo": metodo, "soglia": soglia,
+                "tot_ore": 0, "n_anomalie": 0, "n_spike": 0, "n_drop": 0,
+                "quota_pct": 0.0, "max_spike": None, "max_drop": None,
+                "streak_max": 0, "n_streak": 0, "costo_extra_tot": 0.0,
+                "df_anomalie": pd.DataFrame(columns=COLS_A),
+                "df_ore": pd.DataFrame(columns=COLS_O),
+                "df_mesi": pd.DataFrame(columns=COLS_M),
+                "df_streak": pd.DataFrame(columns=COLS_S),
+                "bin_centers": np.array([]), "counts": np.array([]),
+                "lim_alto": None, "lim_basso": None}
+
+    try:
+        p = prezzi.astype(float)
+        if hasattr(p.index, "duplicated"):
+            p = p[~p.index.duplicated(keep="first")]
+        p = p.dropna().sort_index()
+    except Exception:
+        return _vuoto()
+    if len(p) < 24:
+        return _vuoto()
+    try:
+        soglia = float(soglia)
+        if soglia <= 0:
+            return _vuoto()
+    except (TypeError, ValueError):
+        return _vuoto()
+    try:
+        mws = [max(0.0, float(x)) for x in (mw_f1, mw_f2, mw_f3)]
+    except (TypeError, ValueError):
+        return _vuoto()
+    if sum(mws) <= 0:
+        return _vuoto()
+    metodo = str(metodo).lower()
+    if metodo not in ("mad", "iqr"):
+        metodo = "mad"
+
+    idx = p.index.tz_convert("Europe/Zurich") if p.index.tz is not None else p.index
+    valori = p.to_numpy(dtype=float)
+    dow = idx.dayofweek.to_numpy()          # 0 = lunedi'
+    ora = idx.hour.to_numpy()
+    # Baseline stagionale: mediana per (giorno_settimana, ora) sul periodo.
+    chiavi = dow * 24 + ora
+    base = np.empty(len(valori))
+    gruppi = {}
+    for k in np.unique(chiavi):
+        m = chiavi == k
+        med = float(np.median(valori[m]))
+        base[m] = med
+        gruppi[int(k)] = med
+    residui = valori - base
+    mad = float(np.median(np.abs(residui - np.median(residui))))
+    q1, q3 = float(np.percentile(residui, 25)), float(np.percentile(residui, 75))
+    iqr = q3 - q1
+    if metodo == "mad":
+        if mad <= 0:
+            return _vuoto()
+        z = 0.6745 * residui / mad
+        is_anom = np.abs(z) > soglia
+        lim_alto = float(np.median(residui) + soglia * mad / 0.6745)
+        lim_basso = float(np.median(residui) - soglia * mad / 0.6745)
+    else:
+        if iqr <= 0:
+            return _vuoto()
+        lim_alto = q3 + soglia * iqr
+        lim_basso = q1 - soglia * iqr
+        is_anom = (residui > lim_alto) | (residui < lim_basso)
+        z = residui / iqr  # z "equivalente" in unita' IQR per il report
+    n_anom = int(is_anom.sum())
+    if n_anom == 0:
+        # Nessuna anomalia: ritorna ok con conteggi a zero e df vuoti validi.
+        out = _vuoto()
+        out.update({"ok": True, "tot_ore": int(len(p)), "quota_pct": 0.0,
+                    "bin_centers": np.array([]), "counts": np.array([]),
+                    "lim_alto": lim_alto, "lim_basso": lim_basso})
+        rr = residui
+        if len(rr) > 0:
+            h, b = np.histogram(rr, bins=min(50, max(10, int(len(rr) / 20))))
+            out["bin_centers"] = (b[:-1] + b[1:]) / 2.0
+            out["counts"] = h
+        return out
+
+    an_idx = np.where(is_anom)[0]
+    residui_a = residui[an_idx]
+    z_a = z[an_idx]
+    prezzi_a = valori[an_idx]
+    base_a = base[an_idx]
+    idx_a = idx[an_idx]
+    tipo = np.where(residui_a > 0, "spike", "drop")
+    pct = np.where(base_a != 0, 100.0 * residui_a / np.abs(base_a), np.nan)
+    fasce_a = [fascia_oraria(ts) for ts in idx_a]
+    mw_map = {"F1": mws[0], "F2": mws[1], "F3": mws[2]}
+    mw_a = np.array([mw_map.get(fx, 0.0) for fx in fasce_a], dtype=float)
+    costo_extra = residui_a * mw_a
+    # max spike / max drop per residuo (non per z: stesso ranking, ma in euro)
+    i_sp = int(np.argmax(np.where(tipo == "spike", residui_a, -np.inf)))
+    i_dr = int(np.argmin(np.where(tipo == "drop", residui_a, np.inf)))
+    def _ev(i):
+        ts = _naive(idx_a[i])
+        return {"z": float(z_a[i]), "residuo": float(residui_a[i]),
+                "prezzo": float(prezzi_a[i]), "atteso": float(base_a[i]),
+                "data": ts.strftime("%Y-%m-%d"), "ora": ts.strftime("%H:00")}
+    max_spike = _ev(i_sp) if (tipo == "spike").any() else None
+    max_drop = _ev(i_dr) if (tipo == "drop").any() else None
+    # Streak: anomalie in ore consecutive (>= 2 ore)
+    diffs = np.diff(an_idx)
+    spezzoni, start = [], 0
+    for j, d in enumerate(diffs):
+        if d != 1:
+            spezzoni.append((start, j)); start = j + 1
+    spezzoni.append((start, len(an_idx) - 1))
+    righe_s = []
+    for a, b in spezzoni:
+        if b - a + 1 >= 2:
+            seg = residui_a[a:b + 1]
+            i_pic = a + int(np.argmax(np.abs(seg)))
+            ts0n = _naive(idx_a[a])
+            spk = int((tipo[a:b + 1] == "spike").sum())
+            drp = (b - a + 1) - spk
+            righe_s.append({"Inizio": ts0n.strftime("%Y-%m-%d %H:00"),
+                            "Durata ore": int(b - a + 1),
+                            "Picco scostamento (euro/MWh)": round(float(residui_a[i_pic]), 2),
+                            "Tipo prevalente": "spike" if spk >= drp else "drop"})
+    df_streak = pd.DataFrame(righe_s, columns=COLS_S)
+    df_streak = df_streak.sort_values("Durata ore", ascending=False).reset_index(drop=True)
+
+    righe_a = []
+    for i in range(len(an_idx)):
+        ts = _naive(idx_a[i])
+        righe_a.append({"Data": ts.strftime("%Y-%m-%d"),
+                        "Ora": ts.strftime("%H:00"),
+                        "Prezzo (euro/MWh)": round(float(prezzi_a[i]), 2),
+                        "Atteso (euro/MWh)": round(float(base_a[i]), 2),
+                        "Scostamento (euro/MWh)": round(float(residui_a[i]), 2),
+                        "Scostamento %": (round(float(pct[i]), 1)
+                                          if np.isfinite(pct[i]) else None),
+                        "Z-score": round(float(z_a[i]), 2),
+                        "Tipo": tipo[i], "Fascia": fasce_a[i],
+                        "MW": round(float(mw_a[i]), 2),
+                        "Costo extra (euro)": round(float(costo_extra[i]), 2)})
+    df_a = pd.DataFrame(righe_a, columns=COLS_A)
+    df_a = df_a.sort_values("Scostamento (euro/MWh)", key=lambda s: s.abs(),
+                            ascending=False).reset_index(drop=True)
+    # Profilo orario
+    ore_an = ora[an_idx]
+    righe_o = [{"Ora": f"{h:02d}:00",
+                "Spike": int(((ore_an == h) & (tipo == "spike")).sum()),
+                "Drop": int(((ore_an == h) & (tipo == "drop")).sum())}
+               for h in range(24)]
+    df_o = pd.DataFrame(righe_o, columns=COLS_O)
+    # Mensile
+    mesi_nomi = ["Gen", "Feb", "Mar", "Apr", "Mag", "Giu",
+                 "Lug", "Ago", "Set", "Ott", "Nov", "Dic"]
+    mesi_a = idx_a.month.to_numpy() if hasattr(idx_a, "month") else np.array([t.month for t in idx_a])
+    righe_m = []
+    for m in range(1, 13):
+        mk = mesi_a == m
+        righe_m.append({"Mese": mesi_nomi[m - 1],
+                        "Spike": int(((tipo == "spike") & mk).sum()),
+                        "Drop": int(((tipo == "drop") & mk).sum()),
+                        "Costo extra (euro)": round(float(costo_extra[mk].sum()), 2)})
+    df_m = pd.DataFrame(righe_m, columns=COLS_M)
+    # Istogramma residui
+    h, b = np.histogram(residui, bins=min(60, max(10, int(len(residui) / 15))))
+    return {"ok": True, "metodo": metodo, "soglia": soglia,
+            "tot_ore": int(len(p)), "n_anomalie": n_anom,
+            "n_spike": int((tipo == "spike").sum()),
+            "n_drop": int((tipo == "drop").sum()),
+            "quota_pct": round(100.0 * n_anom / len(p), 2),
+            "max_spike": max_spike, "max_drop": max_drop,
+            "streak_max": int(df_streak["Durata ore"].max()) if len(df_streak) else 0,
+            "n_streak": int(len(df_streak)),
+            "costo_extra_tot": round(float(costo_extra.sum()), 2),
+            "df_anomalie": df_a, "df_ore": df_o, "df_mesi": df_m,
+            "df_streak": df_streak,
+            "bin_centers": (b[:-1] + b[1:]) / 2.0, "counts": h,
+            "lim_alto": lim_alto, "lim_basso": lim_basso}
+
+
 def calcola_timing_costo(prezzi, mw_f1, mw_f2, mw_f3):
     """Timing del costo di fornitura NEL TEMPO: quando si concentra la spesa del periodo.
 
@@ -7934,7 +8173,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -12890,6 +13129,107 @@ elif workspace == _('ws8'):
                 key="csv_tc_giorni",
             )
             st.caption("\U0001f4a1 Curva sopra la retta uniforme a inizio periodo = spesa front-loaded: anticipa coperture e liquidit\u00e0. Curva sotto la retta = spesa posticipata: hai tempo per fissare i prezzi. Gini alto + pareggio in anticipo = il rischio di budget si gioca nei primi giorni: quelli vanno coperti per primi.")
+
+
+    with tab73:
+        titolo_ap = edu("Anomalie di prezzo", "Le ANOMALIE DI PREZZO sono le ore in cui il mercato si e' comportato in modo STATISTICAMENTE strano rispetto a cio' che ci si aspettava per quell'ora della settimana: non basta che il prezzo sia alto in assoluto (quello lo guarda il tab Picchi di prezzo con una soglia fissa), conta lo scostamento dal prezzo TIPICO di quell'ora tipica. Il metodo calcola per ogni ora il prezzo 'atteso' (mediana di tutte le ore uguali del periodo, es. tutti i martedi' alle 18:00) e misura il residuo = prezzo - atteso: un residuo positivo (spike) e' spesa inattesa, uno negativo (drop) e' un'opportunita' mancata o colta. La rilevazione usa metodi robusti ai dati rumorosi: MAD (z-score modificato con Median Absolute Deviation, soglia default 3.5) oppure IQR (regola di Tukey, soglia default 1.5). Diverso dal tab Giorni critici (score composito GIORNALIERO): qui la grana e' ORARIA e serve a capire in quali ore il mercato 'sbaglia' rispetto al suo schema stagionale.")
+        st.markdown(titolo_ap, unsafe_allow_html=True)
+        ac1, ac2 = st.columns(2)
+        with ac1:
+            ap_metodo = st.selectbox("Metodo di rilevazione", ["mad", "iqr"], index=0, key="ap_metodo",
+                                     help="mad: z-score robusto modificato (0.6745 x residuo / MAD), soglia default 3.5. iqr: regola di Tukey sui residui (Q1 - k x IQR / Q3 + k x IQR), soglia default 1.5.")
+        with ac2:
+            ap_soglia = st.number_input("Soglia", min_value=0.5, max_value=10.0, value=3.5, step=0.5, key="ap_soglia",
+                                        help="Per mad: z-score oltre il quale un'ora e' anomala (3.5 = standard Iglewicz-Hoaglin). Per iqr: moltiplicatore dell'intervallo interquartile (1.5 = classico Tukey).")
+        am1, am2, am3 = st.columns(3)
+        with am1:
+            ap_mw_f1 = st.number_input("Profilo: MW in F1", min_value=0.0, value=1.0, step=0.5, key="ap_mw_f1",
+                                       help="Potenza prelevata nelle ore di fascia F1 (lun-ven 8-19).")
+        with am2:
+            ap_mw_f2 = st.number_input("Profilo: MW in F2", min_value=0.0, value=1.0, step=0.5, key="ap_mw_f2",
+                                       help="Potenza prelevata nelle ore di fascia F2 (sera feriali + sabato diurno).")
+        with am3:
+            ap_mw_f3 = st.number_input("Profilo: MW in F3", min_value=0.0, value=1.0, step=0.5, key="ap_mw_f3",
+                                       help="Potenza prelevata nelle ore di fascia F3 (notti, domenica, festivi).")
+        ap = calcola_anomalie_prezzo(prezzi, ap_mw_f1, ap_mw_f2, ap_mw_f3, metodo=ap_metodo, soglia=ap_soglia)
+        if not ap["ok"]:
+            st.warning("Dati insufficienti per le anomalie (servono almeno 24 ore con prezzi non tutti uguali e profilo non nullo).")
+        else:
+            k1, k2, k3, k4 = st.columns(4)
+            render_kpi(edu("Ore anomale", "Ore con scostamento statistico dal prezzo atteso per quell'ora della settimana, con il metodo e la soglia scelti."),
+                       f"{ap['n_anomalie']} ({ap['quota_pct']:.2f} %)", k1)
+            render_kpi(edu("Spike / Drop", "Spike = ore con prezzo sopra l'atteso (spesa inattesa). Drop = ore con prezzo sotto l'atteso (opportunita': se il carico era acceso, hai risparmiato)."),
+                       f"{ap['n_spike']} / {ap['n_drop']}", k2)
+            ce = ap["costo_extra_tot"]
+            ce_txt = f"\u20ac {ce:+,.0f}" if ce != 0 else "\u20ac 0"
+            render_kpi(edu("Costo extra anomalo", "Somma su tutte le anomalie di (prezzo - atteso) x MW della fascia dell'ora: positivo = spesa in piu' rispetto a quanto ci si aspettava, negativo = risparmio inatteso."),
+                       ce_txt, k3)
+            ns = ap["n_streak"]
+            render_kpi(edu("Eventi consecutivi", "Streak = anomalie in ore consecutive (>= 2 ore): eventi di stress prolungati, piu' difficili da schivare con la flessibilita' di breve."),
+                       f"{ns} (max {ap['streak_max']} h)", k4)
+            det = []
+            if ap["max_spike"] is not None:
+                ms = ap["max_spike"]
+                det.append(f"Spike max: \u20ac {ms['prezzo']:,.0f}/MWh vs atteso \u20ac {ms['atteso']:,.0f} (z {ms['z']:+.1f}) il {ms['data']} ore {ms['ora']}")
+            if ap["max_drop"] is not None:
+                md = ap["max_drop"]
+                det.append(f"Drop max: \u20ac {md['prezzo']:,.0f}/MWh vs atteso \u20ac {md['atteso']:,.0f} (z {md['z']:+.1f}) il {md['data']} ore {md['ora']}")
+            if det:
+                st.caption(" | ".join(det) + f" | Soglie residuo: [{ap['lim_basso']:+.1f} / {ap['lim_alto']:+.1f}] \u20ac/MWh | {ap['tot_ore']} ore analizzate")
+            st.markdown("**Distribuzione degli scostamenti** (rosso = sopra soglia anomalia, verde = sotto)")
+            bc, ct = ap["bin_centers"], ap["counts"]
+            colori_h = ["#ef4444" if x > ap["lim_alto"] else ("#22c55e" if x < ap["lim_basso"] else "#3b82f6") for x in bc]
+            fig_aph = go.Figure()
+            fig_aph.add_trace(go.Bar(x=bc, y=ct, marker_color=colori_h, name="Ore",
+                                     hovertemplate="Scostamento %{x:.1f} \u20ac/MWh: %{y} ore<extra></extra>"))
+            fig_aph.add_vline(x=ap["lim_alto"], line_dash="dash", line_color="#ef4444",
+                              annotation_text="Soglia spike", annotation_position="top right")
+            fig_aph.add_vline(x=ap["lim_basso"], line_dash="dash", line_color="#22c55e",
+                              annotation_text="Soglia drop", annotation_position="top left")
+            fig_aph.update_layout(template="plotly_dark", height=340,
+                                  title="Residui prezzo - atteso: le code oltre le soglie sono le anomalie",
+                                  xaxis_title="Scostamento dal prezzo atteso (\u20ac/MWh)", yaxis_title="Ore")
+            st.plotly_chart(fig_aph, use_container_width=True)
+            st.markdown("**Quando capitano le anomalie** (per ora del giorno)")
+            dfo = ap["df_ore"]
+            fig_apo = go.Figure()
+            fig_apo.add_trace(go.Bar(x=dfo["Ora"], y=dfo["Spike"], name="Spike", marker_color="#ef4444",
+                                     hovertemplate="%{x}: %{y} spike<extra></extra>"))
+            fig_apo.add_trace(go.Bar(x=dfo["Ora"], y=dfo["Drop"], name="Drop", marker_color="#22c55e",
+                                     hovertemplate="%{x}: %{y} drop<extra></extra>"))
+            fig_apo.update_layout(template="plotly_dark", height=340, barmode="group",
+                                  title="Anomalie per ora del giorno: c'e' un'ora 'sospetta' ricorrente?",
+                                  xaxis_title="Ora", yaxis_title="N. anomalie",
+                                  xaxis=dict(tickangle=-45))
+            st.plotly_chart(fig_apo, use_container_width=True)
+            st.markdown("**Anomalie per mese** (spike/drop + costo extra)")
+            dfm = ap["df_mesi"]
+            dfm_nz = dfm[(dfm["Spike"] > 0) | (dfm["Drop"] > 0)]
+            fig_apm = go.Figure()
+            fig_apm.add_trace(go.Bar(x=dfm_nz["Mese"], y=dfm_nz["Spike"], name="Spike", marker_color="#ef4444",
+                                     hovertemplate="%{x}: %{y} spike<extra></extra>"))
+            fig_apm.add_trace(go.Bar(x=dfm_nz["Mese"], y=dfm_nz["Drop"], name="Drop", marker_color="#22c55e",
+                                     hovertemplate="%{x}: %{y} drop<extra></extra>"))
+            fig_apm.update_layout(template="plotly_dark", height=320, barmode="group",
+                                  title="Stagionalita' delle anomalie: in quali mesi il mercato 'sbaglia' di piu'",
+                                  xaxis_title="Mese", yaxis_title="N. anomalie")
+            st.plotly_chart(fig_apm, use_container_width=True)
+            st.markdown("**Dettaglio anomalie** (ordinate per scostamento assoluto)")
+            st.dataframe(ap["df_anomalie"], use_container_width=True, hide_index=True)
+            st.download_button(
+                "\u2b07\ufe0f Esporta anomalie (CSV)",
+                ap["df_anomalie"].to_csv(index=False).encode("utf-8"),
+                file_name=f"anomalie_prezzo_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica tutte le ore anomale con prezzo, atteso, scostamento, z-score e costo extra.",
+                key="csv_ap_anomalie",
+            )
+            if ap["n_streak"] > 0:
+                st.markdown("**Eventi consecutivi** (streak di anomalie)")
+                st.dataframe(ap["df_streak"], use_container_width=True, hide_index=True)
+            st.caption("\U0001f4a1 Uno spike ricorrente alla stessa ora = pattern strutturale (es. rampa serale): si copre con flessibilita' o hedging mirato su quell'ora. Uno spike isolato con z altissimo = evento di mercato: serve solo per il post-mortem e per tarare le soglie di alert. I drop ricorrenti in F3 sono le ore in cui conviene concentrare i carichi spostabili.")
+
+
 
 
 # Footer
