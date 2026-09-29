@@ -5001,6 +5001,148 @@ def calcola_tranche_acquisto(prezzi, mw_f1, mw_f2, mw_f3, tranche):
     return out
 
 
+def calcola_distribuzione_prezzi(prezzi, soglia_alta=150.0, soglia_bassa=0.0, n_bin=50):
+    """Distribuzione statistica dei prezzi orari: forma, code e probabilita' di soglia.
+
+    Domanda operativa dell'energy analyst: "i prezzi sono simmetrici o hanno
+    code grasse? quanto spesso supero le soglie di budget/rischio?" La funzione
+    calcola istogramma, percentili chiave (P1/P5/P25/mediana/P75/P95/P99),
+    momenti (media, deviazione standard, asimmetria/skew, curtosi in eccesso),
+    misure di dispersione (IQR, range interdecile P90-P10) e analisi delle code:
+    quota di ore sopra la soglia alta / sotto la soglia bassa, ore a prezzo
+    negativo, media condizionata delle code (sopra P95, sotto P5) e curva
+    normale teorica sovrapposta all'istogramma per il confronto visivo.
+    Diverso dal tab VaR (simula il COSTO di un profilo) e dal tab Crolli &
+    recuperi (eventi sequenziali): qui si studia la FORMA della distribuzione
+    dei prezzi, base per calibrare VaR, stop e modelli di prezzo.
+
+    Parametri:
+    - prezzi: Series oraria in euro/MWh;
+    - soglia_alta/soglia_bassa: soglie operative in euro/MWh per l'analisi code;
+    - n_bin: numero di classi dell'istogramma (clamp 10-200).
+
+    Regole di sanitizzazione:
+    - ore con prezzo NaN scartate, timestamp duplicati -> primo tenuto;
+    - meno di 24 ore valide -> 'ok' False;
+    - serie costante (std 0): skew/curtosi 0 per convenzione, overlay normale
+      nullo, coefficiente di variazione None;
+    - media ~0 -> coefficiente di variazione None (divisione per zero).
+
+    Ritorna dict con 'ok' (bool), 'n_ore', 'min', 'max', 'media', 'mediana',
+    'std', 'p1', 'p5', 'p25', 'p75', 'p95', 'p99', 'iqr', 'range_p90_p10',
+    'skew', 'kurt', 'cv' (None se non definito), 'n_sopra_alta',
+    'quota_sopra_alta', 'n_sotto_bassa', 'quota_sotto_bassa', 'n_negativi',
+    'quota_negativi', 'media_coda_alta' (media oltre P95), 'media_coda_bassa'
+    (media sotto P5), 'bin_centers', 'counts', 'norm_overlay' (np arrays),
+    'df_percentili' (DataFrame Percentile/Valore euro/MWh), 'mesi' (lista di
+    dict {'label', 'valori'} per il box plot mensile).
+    """
+    COLS_P = ["Percentile", "Valore (euro/MWh)"]
+
+    def _vuoto():
+        return {"ok": False, "n_ore": 0, "min": None, "max": None,
+                "media": None, "mediana": None, "std": None,
+                "p1": None, "p5": None, "p25": None, "p75": None,
+                "p95": None, "p99": None, "iqr": None, "range_p90_p10": None,
+                "skew": None, "kurt": None, "cv": None,
+                "n_sopra_alta": 0, "quota_sopra_alta": 0.0,
+                "n_sotto_bassa": 0, "quota_sotto_bassa": 0.0,
+                "n_negativi": 0, "quota_negativi": 0.0,
+                "media_coda_alta": None, "media_coda_bassa": None,
+                "bin_centers": np.array([]), "counts": np.array([]),
+                "norm_overlay": np.array([]),
+                "df_percentili": pd.DataFrame(columns=COLS_P), "mesi": []}
+
+    try:
+        s = prezzi.astype(float)
+        if hasattr(s.index, "duplicated"):
+            s = s[~s.index.duplicated(keep="first")]
+        s = s.dropna()
+    except Exception:
+        return _vuoto()
+    n = len(s)
+    if n < 24:
+        return _vuoto()
+    vals = s.to_numpy(dtype=float)
+    try:
+        n_bin = int(min(200, max(10, n_bin)))
+    except Exception:
+        n_bin = 50
+
+    vmin = float(vals.min())
+    vmax = float(vals.max())
+    media = float(vals.mean())
+    mediana = float(np.median(vals))
+    std = float(vals.std(ddof=1)) if n > 1 else 0.0
+    p1, p5, p25, p75, p95, p99 = (float(np.percentile(vals, q))
+                                 for q in (1, 5, 25, 75, 95, 99))
+    p10 = float(np.percentile(vals, 10))
+    p90 = float(np.percentile(vals, 90))
+    iqr = p75 - p25
+    range_p90_p10 = p90 - p10
+    if std < 1e-12:
+        skew, kurt = 0.0, 0.0  # serie costante: momenti di ordine >2 non definiti
+    else:
+        skew = float(np.nan_to_num(pd.Series(vals).skew(), nan=0.0))
+        kurt = float(np.nan_to_num(pd.Series(vals).kurt(), nan=0.0))
+    cv = float(std / abs(media)) if abs(media) > 1e-9 and std >= 1e-12 else None
+
+    try:
+        sa = float(soglia_alta)
+    except Exception:
+        sa = 150.0
+    try:
+        sb = float(soglia_bassa)
+    except Exception:
+        sb = 0.0
+    n_sopra = int((vals > sa).sum())
+    n_sotto = int((vals < sb).sum())
+    n_neg = int((vals < 0).sum())
+    coda_alta = vals[vals > p95]
+    coda_bassa = vals[vals < p5]
+    media_coda_alta = float(coda_alta.mean()) if len(coda_alta) else None
+    media_coda_bassa = float(coda_bassa.mean()) if len(coda_bassa) else None
+
+    counts, edges = np.histogram(vals, bins=n_bin)
+    bin_centers = (edges[:-1] + edges[1:]) / 2.0
+    bin_w = edges[1] - edges[0] if len(edges) > 1 else 1.0
+    if std < 1e-12 or bin_w <= 0:
+        norm_overlay = np.zeros_like(bin_centers)
+    else:
+        z = (bin_centers - media) / std
+        norm_overlay = n * bin_w * np.exp(-0.5 * z ** 2) / (std * np.sqrt(2 * np.pi))
+
+    mesi = []
+    try:
+        if isinstance(s.index, pd.DatetimeIndex):
+            idxn = s.index.tz_localize(None) if s.index.tz is not None else s.index
+            for per, grp in s.groupby(idxn.to_period("M")):
+                if len(grp) >= 24:
+                    mesi.append({"label": str(per),
+                                 "valori": grp.to_numpy(dtype=float)})
+    except Exception:
+        mesi = []
+
+    df_p = pd.DataFrame([
+        ("Min", vmin), ("P1", p1), ("P5", p5), ("P25", p25),
+        ("Mediana (P50)", mediana), ("Media", media), ("P75", p75),
+        ("P95", p95), ("P99", p99), ("Max", vmax),
+    ], columns=COLS_P)
+
+    return {"ok": True, "n_ore": n, "min": vmin, "max": vmax, "media": media,
+            "mediana": mediana, "std": std, "p1": p1, "p5": p5, "p25": p25,
+            "p75": p75, "p95": p95, "p99": p99, "iqr": iqr,
+            "range_p90_p10": range_p90_p10, "skew": skew, "kurt": kurt,
+            "cv": cv, "n_sopra_alta": n_sopra,
+            "quota_sopra_alta": 100.0 * n_sopra / n, "n_sotto_bassa": n_sotto,
+            "quota_sotto_bassa": 100.0 * n_sotto / n, "n_negativi": n_neg,
+            "quota_negativi": 100.0 * n_neg / n,
+            "media_coda_alta": media_coda_alta,
+            "media_coda_bassa": media_coda_bassa, "bin_centers": bin_centers,
+            "counts": counts, "norm_overlay": norm_overlay,
+            "df_percentili": df_p, "mesi": mesi}
+
+
 def calcola_climatologia_prezzo(prezzi, soglia=100.0):
     """Climatologia del prezzo: probabilita' di superare una soglia per giorno della settimana e ora.
 
@@ -7648,7 +7790,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -12423,6 +12565,90 @@ elif workspace == _('ws8'):
                 key="csv_ta_det",
             )
             st.caption("\U0001f4a1 Usa questo tab a ogni nuovo fixing: aggiungi la riga e confronta subito il prezzo pattuito con il mercato realizzato.")
+
+    with tab71:
+        titolo_dp = edu("Distribuzione prezzi", "La DISTRIBUZIONE DEI PREZZI descrive la FORMA statistica dei prezzi orari del periodo: non solo media e picchi, ma quanto spesso i prezzi stanno nelle code, se la distribuzione e' simmetrica o sbilanciata verso l'alto (tipico dello spot elettrico: tante ore basse, pochi picchi estremi) e con che probabilita' superi le tue soglie operative. L'istogramma con la curva normale sovrapposta mostra a colpo d'occhio se i prezzi si comportano 'bene' (campana) o hanno code grasse; asimmetria (skew) e curtosi la quantificano; i percentili P5/P95 danno la fascia dove cade il 90% delle ore. E' la base per calibrare VaR, stop e modelli di prezzo: se la coda destra e' grassa, il rischio di picco e' piu' alto di quanto dica la deviazione standard. Diverso dal tab \U0001f3b2 VaR costo (simula il COSTO di un profilo di prelievo) e dal tab \U0001f4c9 Crolli & recuperi (eventi sequenziali nel tempo): qui conta solo la forma della distribuzione, senza dimensione temporale.")
+        st.markdown(titolo_dp, unsafe_allow_html=True)
+        dp1, dp2, dp3 = st.columns(3)
+        with dp1:
+            soglia_alta_dp = st.slider("Soglia alta (\u20ac/MWh)", 0.0, 500.0, 150.0, step=5.0, key="slider_dp_alta",
+                                       help="Soglia di prezzo 'critica' verso l'alto: es. livello di budget o strike di un'opzione.")
+        with dp2:
+            soglia_bassa_dp = st.slider("Soglia bassa (\u20ac/MWh)", -100.0, 100.0, 0.0, step=5.0, key="slider_dp_bassa",
+                                        help="Soglia di prezzo verso il basso: es. 0 per contare le ore a prezzo negativo.")
+        with dp3:
+            nbin_dp = st.slider("Classi istogramma", 10, 200, 50, step=5, key="slider_dp_bin",
+                                help="Numero di barre dell'istogramma: piu' classi = piu' dettaglio, meno stabilita'.")
+        dp = calcola_distribuzione_prezzi(prezzi, soglia_alta_dp, soglia_bassa_dp, nbin_dp)
+        if not dp["ok"]:
+            st.warning("Dati insufficienti per la distribuzione (servono almeno 24 ore valide).")
+        else:
+            k1, k2, k3, k4 = st.columns(4)
+            render_kpi(edu("Mediana", "Il prezzo 'tipico': meta' delle ore sta sotto, meta' sopra. Piu' robusta della media contro i picchi estremi."),
+                       f"{dp['mediana']:,.2f} \u20ac/MWh", k1)
+            sk = dp["skew"]
+            if sk > 0.5:
+                sk_lab, sk_ico = "coda destra", "\U0001f534"
+            elif sk < -0.5:
+                sk_lab, sk_ico = "coda sinistra", "\U0001f7e0"
+            else:
+                sk_lab, sk_ico = "quasi simmetrica", "\U0001f7e2"
+            render_kpi(edu("Asimmetria (skew)", "Sbilanciatura della distribuzione: positiva = coda verso i picchi alti (rischio prezzo), negativa = coda verso il basso, ~0 = simmetrica."),
+                       f"{sk_ico} {sk:+.2f} ({sk_lab})", k2)
+            render_kpi(edu("Dispersione P95\u2212P5", "Ampiezza della fascia dove cade il 90% delle ore: quanto e' 'largo' il mercato nel periodo."),
+                       f"{dp['p95'] - dp['p5']:,.2f} \u20ac/MWh", k3)
+            n_oltre = dp["n_sopra_alta"] + dp["n_sotto_bassa"]
+            q_oltre = 100.0 * n_oltre / dp["n_ore"] if dp["n_ore"] else 0.0
+            render_kpi(edu("Ore oltre soglie", "Ore con prezzo sopra la soglia alta o sotto la soglia bassa: la frequenza degli eventi fuori norma."),
+                       f"{n_oltre:,} ({q_oltre:.1f} %)", k4)
+            cv_txt = f" | CV {dp['cv']:.2f}" if dp["cv"] is not None else ""
+            st.caption(f"Media {dp['media']:,.2f} \u20ac/MWh | Dev.std {dp['std']:,.2f} | Curtosi (eccesso) {dp['kurt']:+.2f} | "
+                       f"IQR {dp['iqr']:,.2f} \u20ac/MWh{cv_txt} | Negativi: {dp['n_negativi']:,} ore ({dp['quota_negativi']:.1f} %)")
+            st.markdown("**Istogramma prezzi vs curva normale**")
+            fig_dp = go.Figure()
+            fig_dp.add_trace(go.Bar(
+                x=dp["bin_centers"], y=dp["counts"],
+                marker_color="#3b82f6", name="Ore osservate",
+                hovertemplate="Prezzo ~%{x:,.1f} \u20ac/MWh: %{y:,} ore<extra></extra>"))
+            if dp["std"] >= 1e-12:
+                fig_dp.add_trace(go.Scatter(
+                    x=dp["bin_centers"], y=dp["norm_overlay"],
+                    mode="lines", name="Normale teorica",
+                    line=dict(color="#f59e0b", width=2, dash="dash"),
+                    hovertemplate="Normale: %{y:,.1f} ore attese<extra></extra>"))
+            for xv, col, nm in [(dp["p5"], "#fb923c", "P5"), (dp["mediana"], "#e5e7eb", "Mediana"),
+                                (dp["p95"], "#fb923c", "P95")]:
+                fig_dp.add_vline(x=xv, line_dash="dot", line_color=col,
+                                 annotation_text=f"{nm} {xv:,.0f}", annotation_position="top")
+            fig_dp.update_layout(template="plotly_dark", height=420,
+                                 title="Distribuzione dei prezzi orari (blu) contro la campana gaussiana (arancio)",
+                                 xaxis_title="\u20ac/MWh", yaxis_title="Ore", barmode="overlay")
+            st.plotly_chart(fig_dp, use_container_width=True)
+            if len(dp["mesi"]) > 1:
+                st.markdown("**Distribuzione per mese** (box plot)")
+                fig_dpm = go.Figure()
+                for m in dp["mesi"]:
+                    fig_dpm.add_trace(go.Box(y=m["valori"], name=m["label"],
+                                             boxpoints="outliers", marker_color="#3b82f6",
+                                             hovertemplate="%{y:,.2f} \u20ac/MWh<extra>" + m["label"] + "</extra>"))
+                fig_dpm.update_layout(template="plotly_dark", height=380,
+                                      title="Come cambia la distribuzione mese per mese",
+                                      xaxis_title="Mese", yaxis_title="\u20ac/MWh", showlegend=False)
+                st.plotly_chart(fig_dpm, use_container_width=True)
+            st.markdown("**Percentili**")
+            st.dataframe(dp["df_percentili"], use_container_width=True, hide_index=True)
+            st.download_button(
+                "\u2b07\ufe0f Esporta distribuzione (CSV)",
+                dp["df_percentili"].to_csv(index=False).encode("utf-8"),
+                file_name=f"distribuzione_prezzi_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica i percentili della distribuzione dei prezzi del periodo.",
+                key="csv_dp_det",
+            )
+            if dp["media_coda_alta"] is not None:
+                st.caption(f"\u2139\ufe0f Media condizionata coda alta (oltre P95): {dp['media_coda_alta']:,.2f} \u20ac/MWh | "
+                           f"coda bassa (sotto P5): {dp['media_coda_bassa']:,.2f} \u20ac/MWh")
+            st.caption("\U0001f4a1 Coda destra grassa + skew positivo: i picchi sono piu' frequenti di quanto dica la normale \u2014 alza le soglie di VaR e gli strike delle coperture. Distribuzione quasi normale: deviazione standard e modelli gaussiani sono affidabili.")
 
 # Footer
 
