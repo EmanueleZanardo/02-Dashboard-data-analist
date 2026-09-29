@@ -1959,6 +1959,153 @@ def calcola_valore_idro(prezzi, cap_mwh, pot_mw, eff_rt_pct, afflusso_mwh_g,
             "energia_turbinata_mwh": float(tot_mwh),
             "df_mesi": df_mesi, "df_giorni": df_giorni}
 
+
+def profilo_eolico(prezzi, potenza_mw):
+    """Profilo orario sintetico di generazione eolica (MW), deterministico.
+
+    Capacity factor medio ~30%: piu' vento in inverno e di notte, rumore
+    smooth con seed fisso (stesso profilo a parita' di input). A differenza
+    del solare, l'eolico produce anche nelle ore serali/notturne piu' care:
+    il capture price e' di norma piu' alto.
+    potenza_mw: potenza installata (MW, <=0 -> profilo nullo).
+    Ritorna una Series (MW) indicizzata come `prezzi`."""
+    idx = prezzi.index
+    try:
+        ore = idx.hour.to_numpy() + idx.minute.to_numpy() / 60.0
+        mese = idx.month.to_numpy()
+    except (TypeError, ValueError, AttributeError):
+        return pd.Series(dtype=float)
+    stag = 1.0 + 0.45 * np.cos(2 * np.pi * (mese - 1.0) / 12.0)   # max gennaio
+    diur = 1.0 + 0.25 * np.cos(2 * np.pi * (ore - 3.0) / 24.0)    # max ~03:00
+    rng = np.random.default_rng(42)
+    rum = rng.normal(0.0, 1.0, len(idx))
+    for _ in range(3):  # smoothing: il vento e' persistente
+        rum = 0.75 * rum + 0.25 * np.concatenate(([rum[0]], rum[:-1]))
+    dev = float(np.std(rum))
+    cf = 0.30 * stag * diur * np.exp(0.35 * rum / (dev if dev > 0 else 1.0))
+    cf = np.clip(cf, 0.0, 1.0)
+    return pd.Series(max(0.0, float(potenza_mw)) * cf, index=idx,
+                     name="Generazione eolica (MW)")
+
+
+def calcola_ppa_merchant(prezzi, gen_mw, prezzo_ppa, quota_pct, perdite_pct=0.0,
+                         n_strike=25):
+    """Confronto PPA pay-as-produced vs vendita merchant (tab 'PPA vs merchant').
+
+    Ogni ora h la generazione gen_h (al netto delle perdite) si divide in:
+    quota contrattuale q venduta a prezzo fisso P_ppa, resto a spot_h.
+      ricavo_ppa   = q*MWh*P_ppa + (1-q)*MWh*capture
+      ricavo_merch = MWh*capture            (capture = prezzo catturato)
+      delta        = q*MWh*(P_ppa - capture): il PPA conviene se lo strike
+                     supera il capture price dell'impianto.
+
+    Sweep deterministici (formule chiuse, nessun loop orario):
+    - sweep strike: delta per strike in [0.5*capture .. 1.5*capture]
+    - sweep quota:  delta per quota 0..100% a strike fissato
+
+    KPI: produzione MWh, ricavi merchant/PPA, delta EUR e %, prezzo medio
+    effettivo con PPA, capture price, break-even strike (= capture),
+    quota di MWh prodotta nelle ore in cui il PPA batte lo spot.
+
+    NaN-safe: ore con prezzo o generazione NaN ignorate; energia nulla o
+    serie vuota -> dict neutro con DataFrame dalle colonne giuste.
+
+    Ritorna dict con 'mwh', 'ricavo_merchant', 'ricavo_ppa', 'delta_eur',
+    'delta_pct', 'prezzo_medio_ppa', 'capture', 'break_even', 'share_itm_mwh',
+    'df_mesi', 'df_giorni', 'df_strike', 'df_quota'.
+    """
+    cols_m = ["Mese", "MWh", "Ricavo merchant (€)", "Ricavo PPA (€)",
+              "Delta (€)"]
+    cols_g = ["Data", "MWh", "Spot medio (€/MWh)", "Ricavo merchant (€)",
+              "Ricavo PPA (€)", "Delta (€)"]
+    cols_s = ["Strike PPA (€/MWh)", "Delta vs merchant (€)"]
+    cols_q = ["Quota PPA (%)", "Delta vs merchant (€)"]
+    vuoto = {"mwh": 0.0, "ricavo_merchant": 0.0, "ricavo_ppa": 0.0,
+             "delta_eur": 0.0, "delta_pct": 0.0, "prezzo_medio_ppa": 0.0,
+             "capture": 0.0, "break_even": 0.0, "share_itm_mwh": 0.0,
+             "df_mesi": pd.DataFrame(columns=cols_m),
+             "df_giorni": pd.DataFrame(columns=cols_g),
+             "df_strike": pd.DataFrame(columns=cols_s),
+             "df_quota": pd.DataFrame(columns=cols_q)}
+    try:
+        strike = float(prezzo_ppa)
+        q = min(100.0, max(0.0, float(quota_pct))) / 100.0
+        perd = min(99.0, max(0.0, float(perdite_pct))) / 100.0
+    except (TypeError, ValueError):
+        return dict(vuoto)
+    if np.isnan(strike) or np.isnan(q) or np.isnan(perd):
+        return dict(vuoto)
+    try:
+        df = pd.DataFrame({"prezzo": prezzi.astype(float),
+                           "gen": gen_mw.astype(float)}).dropna()
+    except (TypeError, ValueError, AttributeError):
+        return dict(vuoto)
+    if len(df) == 0:
+        return dict(vuoto)
+    df["gen"] = df["gen"] * (1.0 - perd)
+    df = df[df["gen"] > 0]
+    if len(df) == 0:
+        return dict(vuoto)
+    mwh = float(df["gen"].sum())
+    ric_m = float((df["prezzo"] * df["gen"]).sum())
+    capture = ric_m / mwh
+    ric_p = mwh * q * strike + mwh * (1.0 - q) * capture
+    delta = ric_p - ric_m
+    delta_pct = (delta / abs(ric_m) * 100.0) if ric_m != 0 else 0.0
+    prezzo_medio = ric_p / mwh
+    share_itm = float(df.loc[df["prezzo"] < strike, "gen"].sum() / mwh)
+    righe_m, righe_g = [], []
+    try:
+        giorni_idx = df.index.normalize()
+    except (TypeError, ValueError, AttributeError):
+        giorni_idx = None
+    if giorni_idx is not None:
+        for giorno, grp in df.groupby(giorni_idx):
+            m = float(grp["gen"].sum())
+            rm = float((grp["prezzo"] * grp["gen"]).sum())
+            rp = m * q * strike + (m * (1.0 - q)) * (rm / m if m else 0.0)
+            righe_g.append({"Data": giorno.date().isoformat(), "MWh": round(m, 1),
+                            "Spot medio (€/MWh)": round(float(grp["prezzo"].mean()), 2),
+                            "Ricavo merchant (€)": round(rm, 0),
+                            "Ricavo PPA (€)": round(rp, 0),
+                            "Delta (€)": round(rp - rm, 0)})
+        df_giorni = pd.DataFrame(righe_g, columns=cols_g)
+    else:
+        df_giorni = pd.DataFrame(columns=cols_g)
+    if len(df_giorni):
+        df_giorni["Mese"] = pd.to_datetime(df_giorni["Data"]).dt.strftime("%Y-%m")
+        for per, grp in df_giorni.groupby("Mese"):
+            righe_m.append({"Mese": per, "MWh": round(float(grp["MWh"].sum()), 0),
+                            "Ricavo merchant (€)": round(float(grp["Ricavo merchant (€)"].sum()), 0),
+                            "Ricavo PPA (€)": round(float(grp["Ricavo PPA (€)"].sum()), 0),
+                            "Delta (€)": round(float(grp["Delta (€)"].sum()), 0)})
+        df_mesi = pd.DataFrame(righe_m, columns=cols_m)
+    else:
+        df_mesi = pd.DataFrame(columns=cols_m)
+    try:
+        ns = max(5, int(n_strike))
+        lo, hi = 0.5 * capture, 1.5 * capture
+        if hi <= lo:
+            lo, hi = capture - 10.0, capture + 10.0
+        strikes = np.linspace(lo, hi, ns)
+        df_strike = pd.DataFrame({"Strike PPA (€/MWh)": np.round(strikes, 2),
+                                  "Delta vs merchant (€)": np.round(mwh * q * (strikes - capture), 0)},
+                                 columns=cols_s)
+        quote = np.arange(0, 101, 10)
+        df_quota = pd.DataFrame({"Quota PPA (%)": quote,
+                                 "Delta vs merchant (€)": np.round(mwh * (quote / 100.0) * (strike - capture), 0)},
+                                columns=cols_q)
+    except (TypeError, ValueError):
+        df_strike = pd.DataFrame(columns=cols_s)
+        df_quota = pd.DataFrame(columns=cols_q)
+    return {"mwh": mwh, "ricavo_merchant": ric_m, "ricavo_ppa": ric_p,
+            "delta_eur": delta, "delta_pct": float(delta_pct),
+            "prezzo_medio_ppa": prezzo_medio, "capture": capture,
+            "break_even": capture, "share_itm_mwh": float(share_itm),
+            "df_mesi": df_mesi, "df_giorni": df_giorni,
+            "df_strike": df_strike, "df_quota": df_quota}
+
+
 def calcola_shape_fattori(prezzi):
     """Fattori di shape stagionale dallo spot storico (per costruire curve forward 'shaped').
     Ritorna un dict:
@@ -9498,7 +9645,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -15640,6 +15787,122 @@ elif workspace == _('ws8'):
                 key="csv_idro_giorni",
             )
             st.caption("💡 Uso pratico: il valore per MW e' la base per confrontare l'impianto con il costo annuo di gestione (OPEX) o con un contratto di tolling; l'afflusso garantisce un floor di ricavo anche negli spread piatti, mentre il pompaggio rende solo nei giorni di alta volatilita'.")
+
+
+    with tab83:
+        titolo_ppa = edu("PPA vs merchant (pay-as-produced)", "Un PPA (Power Purchase Agreement) vende una QUOTA della produzione a PREZZO FISSO (strike): il resto va a spot. Con il profilo di generazione dell'impianto calcoli il CAPTURE PRICE (il prezzo medio che l'impianto cattura davvero a mercato) e il delta del PPA: delta = quota x MWh x (strike - capture). Se lo strike supera il capture price, il PPA crea valore; altrimenti e' un costo. Il break-even e' esattamente il capture price: la curva qui sotto mostra a che strike il contratto pareggia il mercato.")
+        st.markdown(titolo_ppa, unsafe_allow_html=True)
+
+        p1, p2, p3 = st.columns(3)
+        with p1:
+            ppa_pot = st.number_input("Potenza installata (MW)", min_value=0.0, value=20.0, step=1.0, key="ppa_pot",
+                                      help="Taglia dell'impianto rinnovabile: 10-50 MW per un parco FV/eolico medio.")
+        with p2:
+            ppa_tipo = st.selectbox("Tecnologia / profilo", ["Fotovoltaico", "Eolico", "Baseload (piatto)"],
+                                    key="ppa_tipo",
+                                    help="FV: produce di giorno (capture piu' basso per cannibalizzazione); Eolico: produce anche di notte (capture piu' alto); Baseload: profilo piatto, capture = prezzo base.")
+        with p3:
+            ppa_perd = st.number_input("Perdite di sistema (%)", min_value=0.0, max_value=30.0, value=3.0, step=0.5, key="ppa_perd",
+                                        help="Perdite inverter/cavi/indisponibilita' che riducono la produzione vendibile.")
+        p4, p5 = st.columns(2)
+        with p4:
+            ppa_strike = st.number_input("Strike PPA (€/MWh)", min_value=0.0, value=70.0, step=1.0, key="ppa_strike",
+                                         help="Prezzo fisso del contratto sulla quota contrattualizzata.")
+        with p5:
+            ppa_quota = st.slider("Quota contrattualizzata PPA (%)", min_value=0, max_value=100, value=70, step=5, key="ppa_quota",
+                                  help="Percentuale della produzione venduta a prezzo fisso (pay-as-produced); il resto va a spot.")
+
+        if ppa_tipo == "Fotovoltaico":
+            gen_ppa = profilo_solare(prezzi, ppa_pot)
+        elif ppa_tipo == "Eolico":
+            gen_ppa = profilo_eolico(prezzi, ppa_pot)
+        else:
+            gen_ppa = pd.Series(float(ppa_pot), index=prezzi.index, name="Generazione baseload (MW)")
+
+        res_ppa = calcola_ppa_merchant(prezzi, gen_ppa, ppa_strike, ppa_quota, ppa_perd)
+        if res_ppa["mwh"] == 0:
+            st.warning("Seleziona un periodo con dati e una potenza > 0 per simulare il PPA.")
+        else:
+            k1, k2, k3, k4 = st.columns(4)
+            render_kpi("Produzione periodo (MWh)", f"{res_ppa['mwh']:,.0f}", k1)
+            render_kpi("Ricavo merchant (€)", f"{res_ppa['ricavo_merchant']:,.0f}", k2)
+            render_kpi("Ricavo con PPA (€)", f"{res_ppa['ricavo_ppa']:,.0f}", k3)
+            segno = "+" if res_ppa["delta_eur"] >= 0 else ""
+            render_kpi("Delta PPA vs merchant (€)", f"{segno}{res_ppa['delta_eur']:,.0f} ({segno}{res_ppa['delta_pct']:,.1f}%)", k4)
+            k5, k6, k7, k8 = st.columns(4)
+            render_kpi("Prezzo medio con PPA (€/MWh)", f"{res_ppa['prezzo_medio_ppa']:,.2f}", k5)
+            render_kpi("Capture price (€/MWh)", f"{res_ppa['capture']:,.2f}", k6)
+            render_kpi("Break-even strike (€/MWh)", f"{res_ppa['break_even']:,.2f}", k7)
+            render_kpi("MWh con PPA > spot (%)", f"{res_ppa['share_itm_mwh']*100:,.0f}", k8)
+            st.caption(f"💡 Lettura: lo strike di **{ppa_strike:,.0f} €/MWh** {'supera' if ppa_strike >= res_ppa['break_even'] else 'e\' sotto'} il break-even di **{res_ppa['break_even']:,.2f} €/MWh**, quindi il PPA {'crea valore' if res_ppa['delta_eur'] >= 0 else 'distrugge valore'} rispetto al merchant su questo periodo. Il {res_ppa['share_itm_mwh']*100:,.0f}% dell'energia e' prodotta in ore in cui il prezzo fisso batte lo spot.")
+
+            df_ppam = res_ppa["df_mesi"]
+            if len(df_ppam):
+                fig_ppa1 = go.Figure()
+                fig_ppa1.add_trace(go.Bar(x=df_ppam["Mese"], y=df_ppam["Ricavo merchant (€)"], name="Merchant",
+                                           marker_color="#64748b",
+                                           hovertemplate="%{x}<br>Merchant: €%{y:,.0f}<extra></extra>"))
+                fig_ppa1.add_trace(go.Bar(x=df_ppam["Mese"], y=df_ppam["Ricavo PPA (€)"], name="Con PPA",
+                                           marker_color="#22c55e",
+                                           hovertemplate="%{x}<br>PPA: €%{y:,.0f}<extra></extra>"))
+                fig_ppa1.update_layout(template="plotly_dark", height=340, barmode="group",
+                                        title="Ricavi mensili: merchant vs con PPA (€)",
+                                        xaxis_title="Mese", yaxis_title="€")
+                st.plotly_chart(fig_ppa1, use_container_width=True)
+                st.markdown("**Dettaglio mensile**")
+                st.dataframe(df_ppam, use_container_width=True, hide_index=True)
+                st.download_button(
+                    "⬇️ Esporta ricavi PPA mensili (CSV)",
+                    df_ppam.to_csv(index=False).encode("utf-8"),
+                    file_name=f"ppa_merchant_mensile_{d0}_{d1}.csv",
+                    mime="text/csv",
+                    help="Scarica il dettaglio mensile: MWh, ricavi merchant e PPA, delta.",
+                    key="csv_ppa_mesi",
+                )
+            df_ppag = res_ppa["df_giorni"]
+            st.markdown("**Top 10 giorni per delta PPA**")
+            st.dataframe(df_ppag.sort_values("Delta (€)", ascending=False).head(10),
+                         use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta ricavi PPA giornalieri (CSV)",
+                df_ppag.to_csv(index=False).encode("utf-8"),
+                file_name=f"ppa_merchant_giornaliero_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica la serie giornaliera: MWh, spot medio, ricavi, delta.",
+                key="csv_ppa_giorni",
+            )
+            c1, c2 = st.columns(2)
+            with c1:
+                df_ppas = res_ppa["df_strike"]
+                if len(df_ppas):
+                    fig_ppa2 = go.Figure()
+                    fig_ppa2.add_trace(go.Scatter(x=df_ppas["Strike PPA (€/MWh)"], y=df_ppas["Delta vs merchant (€)"],
+                                                   mode="lines", name="Delta",
+                                                   line=dict(color="#22c55e", width=2),
+                                                   hovertemplate="Strike: €%{x:,.1f}<br>Delta: €%{y:,.0f}<extra></extra>"))
+                    fig_ppa2.add_vline(x=res_ppa["break_even"], line_dash="dash", line_color="#f59e0b",
+                                        annotation_text=f"Break-even {res_ppa['break_even']:,.1f}")
+                    fig_ppa2.add_hline(y=0, line_color="#64748b", line_width=1)
+                    fig_ppa2.update_layout(template="plotly_dark", height=320,
+                                            title="Delta vs strike PPA (€)",
+                                            xaxis_title="Strike (€/MWh)", yaxis_title="Delta (€)")
+                    st.plotly_chart(fig_ppa2, use_container_width=True)
+            with c2:
+                df_ppaq = res_ppa["df_quota"]
+                if len(df_ppaq):
+                    fig_ppa3 = go.Figure()
+                    fig_ppa3.add_trace(go.Scatter(x=df_ppaq["Quota PPA (%)"], y=df_ppaq["Delta vs merchant (€)"],
+                                                   mode="lines+markers", name="Delta",
+                                                   line=dict(color="#3b82f6", width=2),
+                                                   hovertemplate="Quota: %{x}%<br>Delta: €%{y:,.0f}<extra></extra>"))
+                    fig_ppa3.add_vline(x=ppa_quota, line_dash="dash", line_color="#f59e0b",
+                                        annotation_text=f"Quota {ppa_quota}%")
+                    fig_ppa3.add_hline(y=0, line_color="#64748b", line_width=1)
+                    fig_ppa3.update_layout(template="plotly_dark", height=320,
+                                            title="Delta vs quota contrattualizzata (€)",
+                                            xaxis_title="Quota PPA (%)", yaxis_title="Delta (€)")
+                    st.plotly_chart(fig_ppa3, use_container_width=True)
+            st.caption("💡 Uso pratico: il break-even strike e' il prezzo minimo da chiedere in negoziazione per non perdere rispetto al merchant; la curva strike mostra quanto margine hai a ogni prezzo offerto, quella quota mostra come scala il rischio/rendimento con la quota contrattualizzata (a strike sopra break-even, piu' quota = piu' valore).")
 
 
 # Footer
