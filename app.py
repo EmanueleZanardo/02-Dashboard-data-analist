@@ -1191,6 +1191,230 @@ def calcola_curva_merito(prezzi, impianti):
     }
 
 
+def calcola_giorni_tipo(prezzi, n_cluster=4):
+    """Classificazione dei giorni di calendario in 'giorni tipo' di prezzo spot.
+
+    Domanda operativa: "che TIPI di giornata esistono nel periodo?" — per un
+    energy analyst la classificazione dei giorni (es. 'piatta', 'doppia
+    gobba', 'picco serale') e' la base per strategie di acquisto/vendita
+    differenziate per tipo di giornata, backtest su giorni tipo e stima del
+    fabbisogno di flessibilita' (i tipi con spread picco-valle alto sono i
+    candidati per shifting/batteria).
+
+    Metodo (tutto deterministico a parita' di input):
+    - ore valide = prezzi non-NaN, timestamp duplicati scartati (primo
+      tenuto), serie ordinata; i giorni con != 24 ore (es. cambi ora legale)
+      vengono scartati e conteggiati in 'giorni_scarto';
+    - ogni giorno diventa un vettore 24h normalizzato per la sua media
+      giornaliera: il clustering lavora sulla FORMA del profilo, non sul
+      livello di prezzo;
+    - k-means con init k-means++ a seed fisso 42, max 300 iterazioni Lloyd;
+      un cluster che resta vuoto viene re-inizializzato sul punto piu'
+      lontano dal suo centroide (deterministico);
+    - i cluster sono riordinati per prezzo medio crescente: "Tipo 1" = il
+      giorno tipo piu' economico; i centroidi vengono ri-denormalizzati in
+      €/MWh moltiplicando la forma per il livello medio del cluster;
+    - giorno rappresentativo (medoide) = il giorno di calendario reale piu'
+      vicino al centroide del suo cluster.
+
+    k richiesto = clamp(2..6); se i giorni completi sono meno di k,
+    k_effettivo = n_giorni. Meno di 2 giorni completi -> dict con flag 'ok'
+    False e strutture vuote con le colonne giuste.
+
+    Ritorna dict con 'ok' (bool), 'k' (richiesto), 'k_effettivo',
+    'n_giorni', 'giorni_scarto', 'df_centroidi' (indice Ora 0..23, una colonna
+    "Tipo i (€/MWh)" per cluster, valori in €/MWh), 'df_stat' (Tipo, Giorni,
+    Quota %, Prezzo medio (€/MWh), Picco (€/MWh), Ora picco, Valle (€/MWh),
+    Ora valle, Spread (€/MWh), Giorno rappresentativo), 'df_dettaglio'
+    (Giorno, Tipo, Giorno settimana, Prezzo medio (€/MWh), Picco (€/MWh),
+    Ora picco, Valle (€/MWh), Ora valle), 'df_settimana' (conteggi Lun..Dom
+    x Tipo), 'df_mesi' (conteggi YYYY-MM x Tipo), 'inertia' (float,
+    somma dei quadrati intra-cluster sui profili normalizzati)."""
+    COLS_STAT = ["Tipo", "Giorni", "Quota %", "Prezzo medio (€/MWh)",
+                 "Picco (€/MWh)", "Ora picco", "Valle (€/MWh)", "Ora valle",
+                 "Spread (€/MWh)", "Giorno rappresentativo"]
+    COLS_DET = ["Giorno", "Tipo", "Giorno settimana", "Prezzo medio (€/MWh)",
+                "Picco (€/MWh)", "Ora picco", "Valle (€/MWh)", "Ora valle"]
+    WD_IT = ["Lun", "Mar", "Mer", "Gio", "Ven", "Sab", "Dom"]
+
+    def _vuoto(k_rich):
+        tipi0 = [f"Tipo {i + 1}" for i in range(max(int(k_rich), 0))]
+        return {
+            "ok": False, "k": int(k_rich), "k_effettivo": 0, "n_giorni": 0,
+            "giorni_scarto": 0,
+            "df_centroidi": pd.DataFrame(
+                {f"{t} (€/MWh)": [] for t in tipi0},
+                index=pd.Index([], name="Ora")),
+            "df_stat": pd.DataFrame({c: [] for c in COLS_STAT}),
+            "df_dettaglio": pd.DataFrame({c: [] for c in COLS_DET}),
+            "df_settimana": pd.DataFrame(
+                index=pd.Index(WD_IT, name="Giorno settimana"), columns=tipi0),
+            "df_mesi": pd.DataFrame({c: [] for c in ["Mese"] + tipi0}),
+            "inertia": None,
+        }
+
+    try:
+        k_rich = int(n_cluster)
+    except Exception:
+        k_rich = 4
+    try:
+        p = prezzi.astype(float)
+        p = p[~p.index.duplicated(keep="first")].sort_index().dropna()
+    except Exception:
+        return _vuoto(k_rich)
+    if len(p) == 0:
+        return _vuoto(k_rich)
+    try:
+        idxn = p.index.tz_localize(None) if p.index.tz is not None else p.index
+        giorni = idxn.floor("D")
+        ore_h = idxn.hour
+    except Exception:
+        return _vuoto(k_rich)
+    mat = pd.DataFrame({"g": giorni, "h": ore_h, "v": p.to_numpy(dtype=float)})
+    piv = mat.pivot_table(index="g", columns="h", values="v", aggfunc="first")
+    piv = piv.reindex(columns=range(24))
+    comp = piv.dropna(axis=0, how="any")
+    scarto = int(len(piv) - len(comp))
+    n_giorni = len(comp)
+    if n_giorni < 2:
+        v = _vuoto(k_rich)
+        v["giorni_scarto"] = scarto
+        return v
+    k = max(2, min(6, k_rich))
+    k = min(k, n_giorni)
+    X = comp.to_numpy(dtype=float)
+    medie = X.mean(axis=1)
+    Xn = X / np.where(np.abs(medie) > 1e-9, medie, 1.0)[:, None]
+
+    # k-means deterministico (seed fisso 42)
+    rng = np.random.default_rng(42)
+    n = n_giorni
+    cent = [Xn[rng.integers(n)]]
+    for _ in range(1, k):
+        C = np.stack(cent)
+        d2 = ((Xn[:, None, :] - C[None, :, :]) ** 2).sum(-1).min(axis=1)
+        tot = d2.sum()
+        prob = d2 / tot if tot > 0 else np.full(n, 1.0 / n)
+        cent.append(Xn[rng.choice(n, p=prob)])
+    cent = np.stack(cent)
+    labels = np.zeros(n, dtype=int)
+    for _ in range(300):
+        d2 = ((Xn[:, None, :] - cent[None, :, :]) ** 2).sum(-1)
+        nuovo = d2.argmin(axis=1)
+        for j in range(k):
+            membri = Xn[nuovo == j]
+            if len(membri):
+                cent[j] = membri.mean(axis=0)
+            else:
+                cent[j] = Xn[int(np.argmax(d2[:, j]))]
+        if np.array_equal(nuovo, labels):
+            labels = nuovo
+            break
+        labels = nuovo
+    # Ripara eventuali cluster rimasti vuoti (puo' accadere quando k == n):
+    # assegna al cluster vuoto il punto piu' lontano, rubato al cluster piu'
+    # popoloso (che ha di certo >= 2 membri se esiste un vuoto e n >= k).
+    for _ in range(k + 1):
+        d2f = ((Xn[:, None, :] - cent[None, :, :]) ** 2).sum(-1)
+        labf = d2f.argmin(axis=1)
+        vuoti = [j for j in range(k) if not (labf == j).any()]
+        if not vuoti:
+            labels = labf
+            break
+        for j in vuoti:
+            conteggi = np.bincount(labf, minlength=k)
+            src = int(np.argmax(conteggi))
+            idx_src = np.where(labf == src)[0]
+            dd = ((Xn[idx_src] - cent[j]) ** 2).sum(axis=1)
+            labf[idx_src[int(np.argmax(dd))]] = j
+        labels = labf
+        for jj in range(k):
+            if (labels == jj).any():
+                cent[jj] = Xn[labels == jj].mean(axis=0)
+    inertia = float(((Xn - cent[labels]) ** 2).sum())
+
+    # riordina i cluster per livello di prezzo crescente
+    livelli = np.array([
+        medie[labels == j].mean() if (labels == j).any() else np.nan
+        for j in range(k)])
+    ordine = np.argsort(np.where(np.isnan(livelli), np.inf, livelli),
+                        kind="stable")
+    mappa = {old: new for new, old in enumerate(ordine)}
+    lab = np.array([mappa[j] for j in labels])
+    cent_ord = cent[ordine]
+    livelli_ord = livelli[ordine]
+    tipi = [f"Tipo {i + 1}" for i in range(k)]
+
+    date_list = list(comp.index)
+    medoidi = []
+    for i in range(k):
+        idx_i = np.where(lab == i)[0]
+        dd = ((Xn[idx_i] - cent_ord[i]) ** 2).sum(axis=1)
+        medoidi.append(idx_i[int(np.argmin(dd))])
+
+    profili_eur = {
+        f"{t} (€/MWh)": np.round(cent_ord[i] * livelli_ord[i], 2)
+        for i, t in enumerate(tipi)}
+    df_centroidi = pd.DataFrame(profili_eur, index=pd.Index(range(24), name="Ora"))
+
+    righe_s = []
+    for i, t in enumerate(tipi):
+        n_i = int((lab == i).sum())
+        prof = cent_ord[i] * livelli_ord[i]
+        righe_s.append({
+            "Tipo": t, "Giorni": n_i,
+            "Quota %": round(100.0 * n_i / n, 1),
+            "Prezzo medio (€/MWh)": round(float(livelli_ord[i]), 2),
+            "Picco (€/MWh)": round(float(prof.max()), 2),
+            "Ora picco": int(prof.argmax()),
+            "Valle (€/MWh)": round(float(prof.min()), 2),
+            "Ora valle": int(prof.argmin()),
+            "Spread (€/MWh)": round(float(prof.max() - prof.min()), 2),
+            "Giorno rappresentativo": date_list[medoidi[i]].strftime("%Y-%m-%d"),
+        })
+    df_stat = pd.DataFrame(righe_s, columns=COLS_STAT)
+
+    righe_d = []
+    for d_idx, d in enumerate(date_list):
+        r = X[d_idx]
+        righe_d.append({
+            "Giorno": d.strftime("%Y-%m-%d"),
+            "Tipo": tipi[lab[d_idx]],
+            "Giorno settimana": WD_IT[d.weekday()],
+            "Prezzo medio (€/MWh)": round(float(medie[d_idx]), 2),
+            "Picco (€/MWh)": round(float(r.max()), 2),
+            "Ora picco": int(r.argmax()),
+            "Valle (€/MWh)": round(float(r.min()), 2),
+            "Ora valle": int(r.argmin()),
+        })
+    df_dettaglio = pd.DataFrame(righe_d, columns=COLS_DET)
+
+    wd = [WD_IT[d.weekday()] for d in date_list]
+    righe_w = []
+    for w in WD_IT:
+        riga = {"Giorno settimana": w}
+        for i, t in enumerate(tipi):
+            riga[t] = int(((np.array(wd) == w) & (lab == i)).sum())
+        righe_w.append(riga)
+    df_settimana = pd.DataFrame(righe_w).set_index("Giorno settimana")
+
+    mesi = [d.strftime("%Y-%m") for d in date_list]
+    righe_m = []
+    for m in sorted(set(mesi)):
+        riga = {"Mese": m}
+        for i, t in enumerate(tipi):
+            riga[t] = int(((np.array(mesi) == m) & (lab == i)).sum())
+        righe_m.append(riga)
+    df_mesi = pd.DataFrame(righe_m, columns=["Mese"] + tipi)
+
+    return {
+        "ok": True, "k": k_rich, "k_effettivo": k, "n_giorni": n_giorni,
+        "giorni_scarto": scarto, "df_centroidi": df_centroidi,
+        "df_stat": df_stat, "df_dettaglio": df_dettaglio,
+        "df_settimana": df_settimana, "df_mesi": df_mesi, "inertia": inertia,
+    }
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def generate_mock_hourly(start_date, end_date):
     """Serie oraria sintetica ma realistica del prezzo Swissix (€/MWh):
@@ -6799,7 +7023,7 @@ elif workspace == _('ws7'):
 # ==========================================
 elif workspace == _('ws8'):
     st.markdown(f"<h1>{_('ws8')}</h1>", unsafe_allow_html=True)
-    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread, shaping curva, spread weekend, price capture, volatilità realizzata, confronto anno-su-anno, analisi prezzi negativi, spread intra-day, picchi di prezzo, profilo settimanale tipo, curva di durata, concentrazione del costo di fornitura, simulazione demand shifting, finestre di acquisto ottimali, stagionalità mensile, monitoraggio del budget energetico annuale, analisi di sensitività del costo al profilo di prelievo, Value-at-Risk Monte Carlo del costo di fornitura, classifica dei giorni di calendario più costosi per il profilo di prelievo, fasce tariffarie orarie ottimali derivate dal profilo di prezzo osservato, autocorrelazione del prezzo spot (persistenza e stagionalità), stress test deterministico del costo di fornitura sotto shock di prezzo, previsione naive-stagionale del prezzo del giorno successivo con backtest di accuratezza, decomposizione stagionale del prezzo (trend + pattern giornaliero/settimanale + residuo) con export CSV, margine di contribuzione per impianto con scomposizione mensile e analisi di concentrazione del margine.")
+    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread, shaping curva, spread weekend, price capture, volatilità realizzata, confronto anno-su-anno, analisi prezzi negativi, spread intra-day, picchi di prezzo, profilo settimanale tipo, curva di durata, concentrazione del costo di fornitura, simulazione demand shifting, finestre di acquisto ottimali, stagionalità mensile, monitoraggio del budget energetico annuale, analisi di sensitività del costo al profilo di prelievo, Value-at-Risk Monte Carlo del costo di fornitura, classifica dei giorni di calendario più costosi per il profilo di prelievo, fasce tariffarie orarie ottimali derivate dal profilo di prezzo osservato, autocorrelazione del prezzo spot (persistenza e stagionalità), stress test deterministico del costo di fornitura sotto shock di prezzo, previsione naive-stagionale del prezzo del giorno successivo con backtest di accuratezza, decomposizione stagionale del prezzo (trend + pattern giornaliero/settimanale + residuo) con export CSV, margine di contribuzione per impianto con scomposizione mensile e analisi di concentrazione del margine, classificazione dei giorni in giorni tipo di prezzo (clustering deterministico dei profili giornalieri).")
 
     # ---------- Controlli: sorgente, periodo, impianti ----------
     st.subheader("⚙️ Sorgente dati & Timeframe")
@@ -6942,7 +7166,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -11369,6 +11593,98 @@ elif workspace == _('ws8'):
                 st.dataframe(pd.DataFrame(righe_w), use_container_width=True, hide_index=True)
                 st.metric("Margine annuo stimato del parco", f"€{marg_annuo_tot:,.0f}")
             st.caption("\U0001f4a1 Un impianto a destra della linea del prezzo medio dispaccia solo negli spike: e' il candidato naturale per coperture mirate (cap/floor) o per valutare se tenerlo in riserva. Un parco tutto a sinistra del P10 e' baseload quasi garantito.")
+
+    with tab67:
+        titolo_gt = edu("Giorni tipo", "I GIORNI TIPO raggruppano i giorni di calendario per FORMA del profilo di prezzo orario: giorni 'piatti', 'a doppia gobba', 'con picco serale' ecc. Il clustering (k-means deterministico a seed fisso: a parita' di dati il risultato non cambia mai) lavora sui profili normalizzati per la media giornaliera — la forma — e poi riporta i centroidi in €/MWh. Serve per strategie di acquisto/vendita differenziate per tipo di giornata, backtest su giorni tipo e stima del fabbisogno di flessibilita': i tipi con spread picco-valle alto sono i candidati naturali per shifting dei carichi o arbitraggio con batteria. Diverso dal tab 📆 Settimana tipo (media per giorno della settimana, fissata dal calendario): qui i tipi emergono dai dati.")
+        st.markdown(titolo_gt, unsafe_allow_html=True)
+        k_gt = st.slider("Numero di giorni tipo (k)", 2, 6, 4, key="slider_gt_k",
+                         help="Quanti gruppi di giorni cercare. Pochi tipi = lettura semplice, piu' tipi = dettaglio fine ma gruppi piccoli.")
+        gt = calcola_giorni_tipo(prezzi, k_gt)
+        if not gt["ok"]:
+            st.warning("Dati insufficienti per i giorni tipo (servono almeno 2 giorni completi di 24 ore).")
+        else:
+            stat = gt["df_stat"]
+            dom = stat.iloc[stat["Quota %"].idxmax()]
+            caro = stat.iloc[stat["Prezzo medio (€/MWh)"].idxmax()]
+            PAL_GT = ["#38bdf8", "#f59e0b", "#10b981", "#f472b6", "#a78bfa", "#ef4444"]
+            g1, g2, g3, g4 = st.columns(4)
+            render_kpi(edu("Giorni classificati", "Giorni di calendario con 24 ore valide inclusi nel clustering. I giorni con ore mancanti (es. cambi ora legale) vengono scartati."),
+                       f"{gt['n_giorni']}", g1)
+            render_kpi(edu("Tipo dominante", "Il giorno tipo piu' frequente nel periodo: la 'giornata normale' del mercato in queste settimane."),
+                       f"{dom['Tipo']} — {dom['Quota %']:.1f} %", g2)
+            render_kpi(edu("Tipo piu' caro", "Il giorno tipo con il prezzo medio giornaliero piu' alto: le giornate da coprire o da cui stare lontani con i prelievi."),
+                       f"{caro['Tipo']} — {caro['Prezzo medio (€/MWh)']:,.2f} €/MWh", g3)
+            render_kpi(edu("Spread max picco-valle", "Il piu' alto scarto tra ora piu' cara e ora piu' economica tra i tipi: misura il potenziale di shifting/arbitraggio del tipo piu' 'appuntito'."),
+                       f"{stat['Spread (€/MWh)'].max():,.2f} €/MWh", g4)
+
+            st.markdown("**Profili dei giorni tipo (€/MWh)**")
+            fig_gt = go.Figure()
+            for i, col in enumerate(gt["df_centroidi"].columns):
+                tipo = col.replace(" (€/MWh)", "")
+                fig_gt.add_trace(go.Scatter(
+                    x=gt["df_centroidi"].index, y=gt["df_centroidi"][col],
+                    mode="lines+markers", name=tipo,
+                    line=dict(color=PAL_GT[i % len(PAL_GT)], width=2.5),
+                    hovertemplate="Ora %{x}: %{y:,.2f} €/MWh<extra>" + tipo + "</extra>"))
+            fig_gt.update_layout(template="plotly_dark", height=380,
+                                 title="Centroide di ogni tipo: la 'giornata tipo' in €/MWh",
+                                 xaxis_title="Ora", yaxis_title="€/MWh",
+                                 legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                                             xanchor="right", x=1))
+            st.plotly_chart(fig_gt, use_container_width=True)
+
+            st.markdown("**Statistiche per tipo**")
+            st.dataframe(stat, use_container_width=True, hide_index=True)
+            st.download_button(
+                "\u2b07\ufe0f Esporta statistiche tipi (CSV)",
+                stat.to_csv(index=False).encode("utf-8"),
+                file_name=f"giorni_tipo_stat_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica le statistiche per tipo: giorni, quota, prezzo medio, picco/valle e ore, spread, giorno rappresentativo.",
+                key="csv_gt_stat",
+            )
+
+            st.markdown("**Distribuzione per giorno della settimana**")
+            fig_gtw = go.Figure()
+            for i, t in enumerate(stat["Tipo"]):
+                fig_gtw.add_trace(go.Bar(
+                    x=gt["df_settimana"].index, y=gt["df_settimana"][t], name=t,
+                    marker_color=PAL_GT[i % len(PAL_GT)],
+                    hovertemplate="%{x} — " + t + ": %{y} giorni<extra></extra>"))
+            fig_gtw.update_layout(template="plotly_dark", height=320, barmode="group",
+                                  title="Quanti giorni di ogni tipo cadono in ciascun giorno settimanale",
+                                  xaxis_title="Giorno settimana", yaxis_title="N. giorni")
+            st.plotly_chart(fig_gtw, use_container_width=True)
+
+            if not gt["df_mesi"].empty:
+                st.markdown("**Distribuzione per mese**")
+                fig_gtm = go.Figure()
+                for i, t in enumerate(stat["Tipo"]):
+                    fig_gtm.add_trace(go.Bar(
+                        x=gt["df_mesi"]["Mese"], y=gt["df_mesi"][t], name=t,
+                        marker_color=PAL_GT[i % len(PAL_GT)],
+                        hovertemplate="Mese %{x} — " + t + ": %{y} giorni<extra></extra>"))
+                fig_gtm.update_layout(template="plotly_dark", height=320, barmode="stack",
+                                      title="Composizione dei tipi mese per mese (stagionalita' dei giorni tipo)",
+                                      xaxis_title="Mese", yaxis_title="N. giorni")
+                st.plotly_chart(fig_gtm, use_container_width=True)
+
+            st.markdown("**Dettaglio giorni**")
+            st.dataframe(gt["df_dettaglio"], use_container_width=True, hide_index=True)
+            st.download_button(
+                "\u2b07\ufe0f Esporta dettaglio giorni (CSV)",
+                gt["df_dettaglio"].to_csv(index=False).encode("utf-8"),
+                file_name=f"giorni_tipo_dettaglio_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica la classificazione giorno per giorno: tipo, giorno della settimana, prezzo medio, picco/valle e ore.",
+                key="csv_gt_det",
+            )
+            med_txt = ", ".join(f"{r['Tipo']}: {r['Giorno rappresentativo']}"
+                                for _, r in stat.iterrows())
+            st.caption(f"\U0001f4cc Giorni rappresentativi (il giorno reale piu' vicino al centroide): {med_txt}.")
+            if gt["giorni_scarto"]:
+                st.caption(f"\u2139\ufe0f {gt['giorni_scarto']} giorni con ore mancanti scartati (es. cambi ora legale).")
+            st.caption("\U0001f4a1 I tipi con spread alto e concentrati in pochi mesi sono i candidati per coperture stagionali mirate; un tipo 'piatto' dominante indica un mercato prevedibile dove il prezzo fisso conviene.")
 
 # Footer
 
