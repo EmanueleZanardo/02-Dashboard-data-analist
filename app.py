@@ -7684,6 +7684,209 @@ def calcola_backtest_ordini_limite(prezzi, mw_f1, mw_f2, mw_f3, soglie):
             "df_soglie": df_soglie, "df_mesi": df_mesi, "df_ore": df_ore}
 
 
+def calcola_take_or_pay(prezzi, mw_f1, mw_f2, mw_f3, prezzo_fisso,
+                        volume_mode="profilo", tolleranza_pct=10.0,
+                        pen_sopra_pct=0.0, pen_sotto_pct=0.0,
+                        sweep_prezzi=None):
+    """Take-or-pay: contratto di fornitura a prezzo fisso con banda di
+    tolleranza sui volumi orari.
+
+    Domanda operativa dell'energy analyst: "se firmo un fisso a P euro/MWh
+    con volume orario contrattato V e tolleranza +/-X%, quanto pago DAVVERO
+    col mio profilo?" — il contratto copre al prezzo P solo il volume
+    dentro la banda [V*(1-X), V*(1+X)]: il consumo OLTRE il cap si regola
+    a spot maggiorato di una penale, il volume SOTTO il floor resta comunque
+    pagato a P (take-or-pay) con eventuale rivendita a spot scontato.
+
+    Diverso dal tab Fisso vs indicizzato (tab46: fisso PURO senza banda
+    volumi, tutto il consumo a P) e dal tab Sbilanciamento (tab55: errore
+    di PREVISIONE del carico regolato dal TSO, non un contratto
+    commerciale). Qui il driver di costo e' la RIGIDITA' del volume
+    contrattato rispetto al profilo reale.
+
+    volume_mode: "profilo" = il volume contrattato segue il profilo
+    dichiarato F1/F2/F3 (V_h = consumo di fascia); "piatto" = baseload
+    (V_h = consumo medio orario). Con "profilo" e tolleranza 0 il contratto
+    copre esattamente il profilo dichiarato a P.
+
+    Per ogni ora h, con C = consumo, V = volume contrattato,
+    floor = V*(1-tol), cap = V*(1+tol), S = spot:
+    - quota in banda: min(max(C, floor), cap) pagata a P;
+    - eccedenza sopra cap: (C - cap) a S * (1 + pen_sopra);
+    - take-or-pay sotto floor: floor pagato a P, meno credito di rivendita
+      (floor - C) * S * (1 - pen_sotto).
+
+    Sanitizzazione: ore con prezzo NaN scartate, timestamp duplicati ->
+    primo tenuto, serie ordinata per tempo; ore in Europe/Zurich per la
+    fascia corretta; tolleranza clamp 0-100, penali clamp 0-100, prezzo
+    fisso >= 0 e finito. Serie con meno di 24 ore, profilo nullo o prezzo
+    fisso non valido -> 'ok' False.
+
+    Ritorna dict con 'ok', 'prezzo_fisso', 'tot_ore', 'mwh_consumati',
+    'mwh_contrattati', 'costo_totale', 'prezzo_medio_effettivo',
+    'costo_spot', 'delta_vs_spot' (positivo = il contratto costa DI PIU'
+    dello spot), 'pct_ore_in_banda' / 'pct_ore_sotto_floor' /
+    'pct_ore_sopra_cap', 'mwh_take_or_pay' (pagati a P ma non consumati),
+    'mwh_eccedenza', 'df_ore' ('Data' / 'Ora' / 'Fascia' /
+    'Prezzo (euro/MWh)' / 'MW consumati' / 'MW contrattati' / 'Floor (MW)' /
+    'Cap (MW)' / 'Stato' / 'Costo orario (euro)'), 'df_mesi' ('Mese' /
+    'Costo contratto (euro)' / 'Costo spot (euro)' / 'MWh' /
+    'Prezzo medio effettivo (euro/MWh)'), 'df_sweep' ('Prezzo fisso
+    (euro/MWh)' / 'Prezzo medio effettivo (euro/MWh)' / 'Delta vs spot
+    (euro)') per i prezzi in sweep_prezzi (sanitizzati, finiti, >= 0,
+    deduplicati, ordinati)."""
+    COLS_O = ["Data", "Ora", "Fascia", "Prezzo (euro/MWh)", "MW consumati",
+              "MW contrattati", "Floor (MW)", "Cap (MW)", "Stato",
+              "Costo orario (euro)"]
+    COLS_S = ["Prezzo fisso (euro/MWh)", "Prezzo medio effettivo (euro/MWh)",
+              "Delta vs spot (euro)"]
+
+    def _vuoto():
+        return {"ok": False, "prezzo_fisso": None, "tot_ore": 0,
+                "mwh_consumati": 0.0, "mwh_contrattati": 0.0,
+                "costo_totale": 0.0, "prezzo_medio_effettivo": None,
+                "costo_spot": 0.0, "delta_vs_spot": 0.0,
+                "pct_ore_in_banda": 0.0, "pct_ore_sotto_floor": 0.0,
+                "pct_ore_sopra_cap": 0.0, "mwh_take_or_pay": 0.0,
+                "mwh_eccedenza": 0.0,
+                "df_ore": pd.DataFrame(columns=COLS_O),
+                "df_mesi": pd.DataFrame(columns=["Mese"]),
+                "df_sweep": pd.DataFrame(columns=COLS_S)}
+
+    try:
+        p = prezzi.astype(float)
+        if hasattr(p.index, "duplicated"):
+            p = p[~p.index.duplicated(keep="first")]
+        p = p.dropna().sort_index()
+    except Exception:
+        return _vuoto()
+    if len(p) < 24:
+        return _vuoto()
+    try:
+        mws = [max(0.0, float(x)) for x in (mw_f1, mw_f2, mw_f3)]
+    except (TypeError, ValueError):
+        return _vuoto()
+    if sum(mws) <= 0:
+        return _vuoto()
+    try:
+        P = float(prezzo_fisso)
+    except (TypeError, ValueError):
+        return _vuoto()
+    if not np.isfinite(P) or P < 0:
+        return _vuoto()
+    try:
+        tol = max(0.0, min(100.0, float(tolleranza_pct))) / 100.0
+        pen_up = 1.0 + max(0.0, min(100.0, float(pen_sopra_pct))) / 100.0
+        pen_down = 1.0 - max(0.0, min(100.0, float(pen_sotto_pct))) / 100.0
+    except (TypeError, ValueError):
+        return _vuoto()
+
+    idx = p.index.tz_convert("Europe/Zurich") if p.index.tz is not None else p.index
+    valori = p.to_numpy(dtype=float)
+    fasce = np.array([fascia_oraria(ts) for ts in idx])
+    mw_map = {"F1": mws[0], "F2": mws[1], "F3": mws[2]}
+    consumo = np.array([mw_map.get(fx, 0.0) for fx in fasce], dtype=float)
+    if volume_mode == "piatto":
+        vol = np.full_like(consumo, consumo.mean())
+    else:
+        vol = consumo.copy()
+    floor = vol * (1.0 - tol)
+    cap = vol * (1.0 + tol)
+
+    in_banda = np.minimum(np.maximum(consumo, floor), cap)
+    eccesso = np.maximum(0.0, consumo - cap)
+    mancante = np.maximum(0.0, floor - consumo)
+    costo_eccesso = eccesso * valori * pen_up
+    credito = mancante * valori * pen_down
+
+    def _costo_totale(pf):
+        return float(np.sum(in_banda * pf + costo_eccesso - credito))
+
+    costo_tot = _costo_totale(P)
+    mwh = float(consumo.sum())
+    pme = costo_tot / mwh if mwh > 0 else None
+    costo_spot = float(np.sum(consumo * valori))
+    delta = costo_tot - costo_spot
+
+    n = len(valori)
+    sopra = consumo > cap
+    sotto = consumo < floor
+    pct_sopra = round(float(sopra.sum()) / n * 100.0, 2)
+    pct_sotto = round(float(sotto.sum()) / n * 100.0, 2)
+    pct_banda = round(100.0 - pct_sopra - pct_sotto, 2)
+
+    try:
+        sweep = []
+        if sweep_prezzi is not None:
+            for s in list(sweep_prezzi):
+                try:
+                    v = float(s)
+                except (TypeError, ValueError):
+                    continue
+                if np.isfinite(v) and v >= 0 and v not in sweep:
+                    sweep.append(v)
+        sweep = sorted(sweep)
+    except TypeError:
+        sweep = []
+    righe_s = [{"Prezzo fisso (euro/MWh)": s,
+                "Prezzo medio effettivo (euro/MWh)": round(_costo_totale(s) / mwh, 2) if mwh > 0 else None,
+                "Delta vs spot (euro)": round(_costo_totale(s) - costo_spot, 2)}
+               for s in sweep]
+    df_sweep = pd.DataFrame(righe_s, columns=COLS_S)
+
+    stati = np.where(sopra, "sopra cap", np.where(sotto, "sotto floor (take-or-pay)", "in banda"))
+    costo_ora = in_banda * P + costo_eccesso - credito
+    try:
+        df_ore = pd.DataFrame({
+            "Data": idx.strftime("%d/%m/%Y"),
+            "Ora": idx.hour,
+            "Fascia": fasce,
+            "Prezzo (euro/MWh)": np.round(valori, 2),
+            "MW consumati": np.round(consumo, 3),
+            "MW contrattati": np.round(vol, 3),
+            "Floor (MW)": np.round(floor, 3),
+            "Cap (MW)": np.round(cap, 3),
+            "Stato": stati,
+            "Costo orario (euro)": np.round(costo_ora, 2),
+        })
+    except Exception:
+        df_ore = pd.DataFrame(columns=COLS_O)
+
+    try:
+        dfm = pd.DataFrame({
+            "mese": pd.PeriodIndex(idx, freq="M").astype(str),
+            "costo_c": costo_ora,
+            "costo_s": consumo * valori,
+            "mwh": consumo,
+        })
+        g = dfm.groupby("mese", observed=True).sum(numeric_only=True)
+        df_mesi = g.reset_index().rename(columns={
+            "mese": "Mese", "costo_c": "Costo contratto (euro)",
+            "costo_s": "Costo spot (euro)", "mwh": "MWh"})
+        df_mesi = df_mesi.sort_values("Mese").reset_index(drop=True)
+        df_mesi["Costo contratto (euro)"] = df_mesi["Costo contratto (euro)"].round(0)
+        df_mesi["Costo spot (euro)"] = df_mesi["Costo spot (euro)"].round(0)
+        df_mesi["MWh"] = df_mesi["MWh"].round(1)
+        df_mesi["Prezzo medio effettivo (euro/MWh)"] = (
+            df_mesi["Costo contratto (euro)"] / df_mesi["MWh"].replace(0, np.nan)).round(2)
+    except Exception:
+        df_mesi = pd.DataFrame(columns=["Mese"])
+
+    return {"ok": True, "prezzo_fisso": P, "tot_ore": n,
+            "mwh_consumati": round(mwh, 1),
+            "mwh_contrattati": round(float(vol.sum()), 1),
+            "costo_totale": round(costo_tot, 2),
+            "prezzo_medio_effettivo": round(pme, 2) if pme is not None else None,
+            "costo_spot": round(costo_spot, 2),
+            "delta_vs_spot": round(delta, 2),
+            "pct_ore_in_banda": pct_banda,
+            "pct_ore_sotto_floor": pct_sotto,
+            "pct_ore_sopra_cap": pct_sopra,
+            "mwh_take_or_pay": round(float(mancante.sum()), 1),
+            "mwh_eccedenza": round(float(eccesso.sum()), 1),
+            "df_ore": df_ore, "df_mesi": df_mesi, "df_sweep": df_sweep}
+
+
 def render_kpi(title, value, col):
     col.markdown(f"<div class='metric-container'><div class='metric-label'>{title}</div><div class='metric-val'>{value}</div></div>", unsafe_allow_html=True)
 
@@ -8319,7 +8522,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -13501,6 +13704,142 @@ elif workspace == _('ws8'):
             st.caption("\U0001f4a1 La curva del prezzo medio di riempimento cresce sempre con la soglia: il punto dolce e' dove il risparmio marginale per ogni euro di soglia in piu' crolla. Se gli ordini si riempiono solo di notte (grafico per ora), il limite e' troppo basso per coprire il profilo diurno: alza la soglia o abbina una quota a prezzo fisso per le ore F1.")
 
 
+    with tab75:
+        titolo_tp = edu("Take-or-pay", "Il TAKE-OR-PAY e' la clausola dei contratti di fornitura a prezzo fisso che ti obbliga a pagare comunque un volume minimo (il 'floor'), anche se consumi di meno: il volume dentro la BANDA DI TOLLERANZA si paga al prezzo fisso P, il consumo OLTRE il cap si regola a spot maggiorato di penale, il volume SOTTO il floor lo paghi a P senza consumarlo (meno un eventuale credito di rivendita a spot scontato). Questo tab simula quanto pagheresti DAVVERO col tuo profilo F1/F2/F3: se il tuo carico e' rigido il contratto conviene, se e' volatile paghi il 'costo della rigidita''. Diverso dal tab Fisso vs indicizzato (fisso puro senza banda volumi) e dal tab Sbilanciamento (errore di previsione regolato dal TSO, non un contratto commerciale).")
+        st.markdown(titolo_tp, unsafe_allow_html=True)
+        tp1, tp2, tp3, tp4 = st.columns(4)
+        with tp1:
+            tp_p = st.number_input("Prezzo fisso contrattuale P (€/MWh)", min_value=0.0, value=100.0, step=5.0, key="tp_p",
+                                   help="Prezzo fisso del contratto per il volume dentro la banda di tolleranza.")
+        with tp2:
+            tp_mode = st.selectbox("Volume contrattato", ["Profilo dichiarato (segue F1/F2/F3)", "Piatto (baseload)"], key="tp_mode",
+                                   help="'Profilo dichiarato': il volume contrattato orario segue il tuo profilo di fascia — con tolleranza 0 copri esattamente il profilo. 'Piatto': contratto baseload pari al consumo medio orario.")
+        with tp3:
+            tp_tol = st.slider("Tolleranza volumi (± %)", min_value=0.0, max_value=50.0, value=10.0, step=1.0, key="tp_tol",
+                               help="Banda di tolleranza sul volume orario contrattato: dentro [V×(1−tol), V×(1+tol)] paghi P, fuori scattano regolamento a spot e take-or-pay.")
+        with tp4:
+            tp_pen_up = st.slider("Penale eccedenza sopra cap (% su spot)", min_value=0.0, max_value=100.0, value=0.0, step=5.0, key="tp_pen_up",
+                                  help="Maggiorazione sullo spot per il consumo oltre il cap: 0 = regoli a spot puro.")
+        tp5, tp6, tp7, tp8 = st.columns(4)
+        with tp5:
+            tp_pen_down = st.slider("Sconto rivendita sotto floor (% su spot)", min_value=0.0, max_value=100.0, value=20.0, step=5.0, key="tp_pen_down",
+                                    help="Sconto sullo spot a cui rivendi il volume take-or-pay non consumato: 100 = nessun credito, lo paghi tutto a P.")
+        with tp6:
+            tp_mw_f1 = st.number_input("Profilo: MW in F1", min_value=0.0, value=1.0, step=0.5, key="tp_mw_f1",
+                                       help="Potenza prelevata nelle ore di fascia F1 (lun-ven 8-19).")
+        with tp7:
+            tp_mw_f2 = st.number_input("Profilo: MW in F2", min_value=0.0, value=1.0, step=0.5, key="tp_mw_f2",
+                                       help="Potenza prelevata nelle ore di fascia F2 (sera feriali + sabato diurno).")
+        with tp8:
+            tp_mw_f3 = st.number_input("Profilo: MW in F3", min_value=0.0, value=1.0, step=0.5, key="tp_mw_f3",
+                                       help="Potenza prelevata nelle ore di fascia F3 (notti, domenica, festivi).")
+        tp_p_low = max(0.0, tp_p - 50.0)
+        tp_p_high = tp_p + 50.0
+        tp_sweep = list(np.linspace(tp_p_low, tp_p_high, 21).round(1))
+        tp_mode_code = "piatto" if tp_mode.startswith("Piatto") else "profilo"
+        tp = calcola_take_or_pay(prezzi, tp_mw_f1, tp_mw_f2, tp_mw_f3, tp_p,
+                                 volume_mode=tp_mode_code, tolleranza_pct=tp_tol,
+                                 pen_sopra_pct=tp_pen_up, pen_sotto_pct=tp_pen_down,
+                                 sweep_prezzi=tp_sweep)
+        if not tp["ok"]:
+            st.warning("Dati insufficienti per la simulazione (servono almeno 24 ore di prezzi, un profilo non nullo e un prezzo fisso >= 0).")
+        else:
+            k1, k2, k3, k4 = st.columns(4)
+            render_kpi(edu("Costo totale contratto", "Quanto paghi davvero col contratto: volume in banda a P + eccedenze a spot maggiorato − credito di rivendita del take-or-pay."),
+                       f"€ {tp['costo_totale']:,.0f}", k1)
+            render_kpi(edu("Prezzo medio effettivo", "Costo totale diviso MWh consumati: il prezzo 'vero' che paghi col contratto, da confrontare col P nominale."),
+                       f"€ {tp['prezzo_medio_effettivo']:,.2f}/MWh", k2)
+            delta = tp["delta_vs_spot"]
+            render_kpi(edu("Delta vs tutto-a-spot", "Contratto meno mercato spot puro: positivo = il contratto ti costa DI PIU' dello spot, negativo = risparmi."),
+                       f"€ {delta:+,.0f}", k3)
+            render_kpi(edu("Ore dentro la banda", "Quota di ore in cui il consumo resta dentro [floor, cap]: piu' e' alta, piu' il contratto si comporta come un fisso puro."),
+                       f"{tp['pct_ore_in_banda']:.1f} %", k4)
+            st.caption(f"Profilo {tp['mwh_consumati']:,.1f} MWh consumati | {tp['mwh_contrattati']:,.1f} MWh contrattati | {tp['tot_ore']} ore | "
+                       f"{tp['pct_ore_sotto_floor']:.1f} % ore sotto floor (take-or-pay) | {tp['pct_ore_sopra_cap']:.1f} % ore sopra cap | "
+                       f"{tp['mwh_take_or_pay']:,.1f} MWh pagati a P e non consumati | {tp['mwh_eccedenza']:,.1f} MWh di eccedenza")
+            st.markdown("**Prezzo medio effettivo al variare del P contrattuale** (tratteggio = media spot periodo)")
+            dfs = tp["df_sweep"]
+            medio_spot_tp = tp["costo_spot"] / tp["mwh_consumati"] if tp["mwh_consumati"] > 0 else 0.0
+            fig_tp1 = go.Figure()
+            fig_tp1.add_trace(go.Scatter(x=dfs["Prezzo fisso (euro/MWh)"], y=dfs["Prezzo medio effettivo (euro/MWh)"],
+                                         mode="lines+markers", name="Prezzo medio effettivo",
+                                         line=dict(color="#22c55e"),
+                                         hovertemplate="P %{x:.1f} €/MWh: effettivo %{y:.2f} €/MWh<extra></extra>"))
+            fig_tp1.add_hline(y=medio_spot_tp, line_dash="dash", line_color="#eab308",
+                              annotation_text=f"Media spot € {medio_spot_tp:,.2f}/MWh", annotation_position="top left")
+            fig_tp1.add_trace(go.Scatter(x=dfs["Prezzo fisso (euro/MWh)"], y=dfs["Prezzo fisso (euro/MWh)"],
+                                         mode="lines", name="P = effettivo (fisso puro)",
+                                         line=dict(color="#64748b", dash="dot"),
+                                         hovertemplate="P %{x:.1f}<extra></extra>"))
+            fig_tp1.update_layout(template="plotly_dark", height=340,
+                                  title="Quanto paghi davvero al variare del prezzo fisso offerto",
+                                  xaxis_title="Prezzo fisso contrattuale P (€/MWh)",
+                                  yaxis_title="Prezzo medio effettivo (€/MWh)")
+            st.plotly_chart(fig_tp1, use_container_width=True)
+            st.markdown("**Costo mensile: contratto vs spot**")
+            dfm_tp = tp["df_mesi"]
+            fig_tp2 = go.Figure()
+            fig_tp2.add_trace(go.Bar(x=dfm_tp["Mese"], y=dfm_tp["Costo contratto (euro)"], name="Contratto",
+                                     marker_color="#3b82f6",
+                                     hovertemplate="%{x}: € %{y:,.0f}<extra></extra>"))
+            fig_tp2.add_trace(go.Bar(x=dfm_tp["Mese"], y=dfm_tp["Costo spot (euro)"], name="Spot",
+                                     marker_color="#f59e0b",
+                                     hovertemplate="%{x}: € %{y:,.0f}<extra></extra>"))
+            passo_tp = max(1, len(dfm_tp) // 12)
+            fig_tp2.update_layout(template="plotly_dark", height=340, barmode="group",
+                                  title="In quali mesi il contratto batte lo spot (e viceversa)",
+                                  xaxis_title="Mese", yaxis_title="€",
+                                  xaxis=dict(tickangle=-45, tickmode="array",
+                                             tickvals=dfm_tp["Mese"][::passo_tp].tolist()))
+            st.plotly_chart(fig_tp2, use_container_width=True)
+            st.markdown("**Quando esci dalla banda** (ore sotto floor / in banda / sopra cap per ora del giorno)")
+            dfo = tp["df_ore"]
+            if not dfo.empty:
+                piv = pd.crosstab(dfo["Ora"], dfo["Stato"]).reindex(range(24), fill_value=0)
+                for col in ["in banda", "sotto floor (take-or-pay)", "sopra cap"]:
+                    if col not in piv.columns:
+                        piv[col] = 0
+                fig_tp3 = go.Figure()
+                colori_tp = {"in banda": "#22c55e", "sotto floor (take-or-pay)": "#ef4444", "sopra cap": "#f59e0b"}
+                for col in ["in banda", "sotto floor (take-or-pay)", "sopra cap"]:
+                    fig_tp3.add_trace(go.Bar(x=piv.index, y=piv[col], name=col, marker_color=colori_tp[col],
+                                             hovertemplate="Ore %{x}:00 — " + col + ": %{y}<extra></extra>"))
+                fig_tp3.update_layout(template="plotly_dark", height=340, barmode="stack",
+                                      title="Le ore rosse sono take-or-pay pagato e non consumato: dove si concentra la rigidita'",
+                                      xaxis_title="Ora", yaxis_title="Ore",
+                                      xaxis=dict(tickmode="array", tickvals=list(range(24))))
+                st.plotly_chart(fig_tp3, use_container_width=True)
+            st.markdown("**Sintesi sweep prezzo fisso**")
+            st.dataframe(dfs, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta sweep prezzo fisso (CSV)",
+                dfs.to_csv(index=False).encode("utf-8"),
+                file_name=f"take_or_pay_sweep_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica il prezzo medio effettivo e il delta vs spot per ogni P simulato.",
+                key="csv_tp_sweep",
+            )
+            st.markdown("**Dettaglio mensile**")
+            st.dataframe(dfm_tp, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta dettaglio mensile (CSV)",
+                dfm_tp.to_csv(index=False).encode("utf-8"),
+                file_name=f"take_or_pay_mesi_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica costo contratto vs spot per mese con prezzo medio effettivo.",
+                key="csv_tp_mesi",
+            )
+            with st.expander("Dettaglio orario (stato banda e costo ora per ora)"):
+                st.dataframe(dfo, use_container_width=True, hide_index=True)
+                st.download_button(
+                    "⬇️ Esporta dettaglio orario (CSV)",
+                    dfo.to_csv(index=False).encode("utf-8"),
+                    file_name=f"take_or_pay_ore_{d0}_{d1}.csv",
+                    mime="text/csv",
+                    help="Scarica tutte le ore con stato della banda e costo orario.",
+                    key="csv_tp_ore",
+                )
+            st.caption("💡 Il divario tra la curva verde e la diagonale tratteggiata e' il 'costo della rigidita'': con tolleranza 0 e volume 'profilo' il contratto e' un fisso puro (curva = diagonale). Se le ore rosse si concentrano di notte o nel weekend, il volume contrattato e' troppo alto per il tuo profilo reale: contratta una banda piu' larga o un volume piatto piu' basso.")
 
 
 # Footer
