@@ -2106,6 +2106,183 @@ def calcola_ppa_merchant(prezzi, gen_mw, prezzo_ppa, quota_pct, perdite_pct=0.0,
             "df_strike": df_strike, "df_quota": df_quota}
 
 
+def calcola_carico_interrompibile(prezzi, carico_mw, ore_max_mese, strike_eur,
+                                  premio_mw_mese, margine_perso_eur_mwh,
+                                  n_strike=25, n_ore=26):
+    """Valore di un contratto di carico interrompibile / demand response
+    (tab 'Carico interrompibile').
+
+    Il cliente mette a disposizione `carico_mw` MW di carico riducibile: ogni
+    mese il gestore puo' interrompere il carico nelle ore piu' care, fino a
+    `ore_max_mese` ore al mese e solo nelle ore in cui lo spot supera
+    `strike_eur` (la soglia di attivazione del programma). Il cliente incassa:
+      - premio di disponibilita': carico_mw * premio_mw_mese (€/MW/mese)
+        per ogni mese coperto;
+      - pagamento per le riduzioni: MWh_ridotti * strike_eur.
+    e perde il margine di produzione sulle ore interrotte:
+      costo_opportunita = MWh_ridotti * margine_perso_eur_mwh.
+
+    valore = premio_totale + MWh_ridotti * (strike - margine_perso)
+
+    Il carico e' assunto piatto: ogni ora attivata riduce `carico_mw` MWh.
+    Break-even sulle attivazioni: strike = margine_perso (ogni ora attivata
+    e' a valore >= 0 solo sopra questa soglia).
+
+    NaN-safe: ore con prezzo NaN ignorate; serie vuota, carico<=0 o
+    ore_max_mese<=0 -> dict neutro con DataFrame dalle colonne giuste.
+
+    Ritorna dict con 'valore', 'premio_totale', 'ricavo_attivazioni',
+    'costo_opportunita', 'ore_attivate', 'mwh_ridotti',
+    'valore_per_mwh_ridotto', 'giorni_attivi', 'mesi_attivi', 'share_ore',
+    'break_even_strike', 'df_mesi', 'df_giorni', 'df_ore', 'df_strike',
+    'df_oremax'.
+    """
+    cols_m = ["Mese", "Ore attivate", "MWh ridotti", "Premio (€)",
+              "Ricavo attivazioni (€)", "Valore (€)"]
+    cols_g = ["Data", "Ore attivate", "MWh ridotti",
+              "Spot medio attivazioni (€/MWh)", "Valore (€)"]
+    cols_h = ["Ora del giorno", "Ore attivate", "MWh ridotti"]
+    cols_s = ["Strike (€/MWh)", "Ore attivate", "Valore (€)"]
+    cols_o = ["Ore max/mese", "Ore attivate", "Valore (€)"]
+    vuoto = {"valore": 0.0, "premio_totale": 0.0, "ricavo_attivazioni": 0.0,
+             "costo_opportunita": 0.0, "ore_attivate": 0, "mwh_ridotti": 0.0,
+             "valore_per_mwh_ridotto": 0.0, "giorni_attivi": 0, "mesi_attivi": 0,
+             "share_ore": 0.0, "break_even_strike": 0.0,
+             "df_mesi": pd.DataFrame(columns=cols_m),
+             "df_giorni": pd.DataFrame(columns=cols_g),
+             "df_ore": pd.DataFrame(columns=cols_h),
+             "df_strike": pd.DataFrame(columns=cols_s),
+             "df_oremax": pd.DataFrame(columns=cols_o)}
+
+    def _attiva(df_p, omax, strike):
+        """Mask booleana delle ore attivate: per ogni mese, le ore piu' care
+        con prezzo >= strike, al massimo `omax` per mese. Ritorna None se
+        l'indice non e' datetizzabile."""
+        try:
+            mesi = df_p.index.to_period("M")
+        except (TypeError, ValueError, AttributeError):
+            return None
+        mask = pd.Series(False, index=df_p.index)
+        for _per, grp in df_p.groupby(mesi):
+            cand = grp[grp["prezzo"] >= strike]
+            if len(cand) and omax > 0:
+                sel = cand.nlargest(omax, "prezzo")
+                mask.loc[sel.index] = True
+        return mask
+
+    try:
+        cap = max(0.0, float(carico_mw))
+        omax = max(0, int(round(float(ore_max_mese))))
+        strike = float(strike_eur)
+        premio = float(premio_mw_mese)
+        marg = float(margine_perso_eur_mwh)
+    except (TypeError, ValueError):
+        return dict(vuoto)
+    if any(np.isnan([cap, strike, premio, marg])) or cap <= 0 or omax <= 0:
+        return dict(vuoto)
+    try:
+        df = pd.DataFrame({"prezzo": prezzi.astype(float)}).dropna()
+    except (TypeError, ValueError, AttributeError):
+        return dict(vuoto)
+    if len(df) == 0:
+        return dict(vuoto)
+    mask = _attiva(df, omax, strike)
+    if mask is None:
+        return dict(vuoto)
+    att = df[mask]
+    ore = int(mask.sum())
+    mwh = float(ore * cap)
+    try:
+        per_m = df.index.to_period("M")
+        n_mesi = int(per_m.nunique())
+    except (TypeError, ValueError, AttributeError):
+        n_mesi = 0
+    premio_tot = cap * premio * n_mesi
+    ric_att = mwh * strike
+    costo_opp = mwh * marg
+    valore = premio_tot + ric_att - costo_opp
+    valore_per_mwh = (valore / mwh) if mwh > 0 else 0.0
+    share = (ore / (omax * n_mesi)) if omax * n_mesi > 0 else 0.0
+    break_even = float(marg)
+
+    righe_m, righe_g = [], []
+    try:
+        if n_mesi:
+            for per in per_m.unique():
+                grp_a = df[mask & (per_m == per)]
+                oa = int(len(grp_a))
+                mwa = oa * cap
+                prem_m = cap * premio
+                val_m = prem_m + mwa * (strike - marg)
+                righe_m.append({"Mese": per.strftime("%Y-%m"), "Ore attivate": oa,
+                                "MWh ridotti": round(mwa, 1),
+                                "Premio (€)": round(prem_m, 0),
+                                "Ricavo attivazioni (€)": round(mwa * strike, 0),
+                                "Valore (€)": round(val_m, 0)})
+        df_mesi = pd.DataFrame(righe_m, columns=cols_m)
+    except (TypeError, ValueError, AttributeError):
+        df_mesi = pd.DataFrame(columns=cols_m)
+    try:
+        giorni_att = att.index.normalize()
+        for giorno, grp in att.groupby(giorni_att):
+            oa = int(len(grp))
+            mwa = oa * cap
+            righe_g.append({"Data": giorno.date().isoformat(), "Ore attivate": oa,
+                            "MWh ridotti": round(mwa, 1),
+                            "Spot medio attivazioni (€/MWh)":
+                                round(float(grp["prezzo"].mean()), 2),
+                            "Valore (€)": round(mwa * (strike - marg), 0)})
+        df_giorni = pd.DataFrame(righe_g, columns=cols_g)
+    except (TypeError, ValueError, AttributeError):
+        df_giorni = pd.DataFrame(columns=cols_g)
+    try:
+        ore_h = att.index.hour.to_numpy()
+        cnt = pd.Series(ore_h).value_counts().sort_index()
+        righe_h = [{"Ora del giorno": int(h), "Ore attivate": int(c),
+                    "MWh ridotti": round(c * cap, 1)}
+                   for h, c in cnt.items()]
+        df_ore = pd.DataFrame(righe_h, columns=cols_h)
+    except (TypeError, ValueError, AttributeError):
+        df_ore = pd.DataFrame(columns=cols_h)
+    try:
+        ns = max(5, int(n_strike))
+        pmin, pmax = float(df["prezzo"].min()), float(df["prezzo"].max())
+        lo, hi = min(pmin, strike), max(pmax, strike)
+        strikes = np.linspace(lo, hi, ns) if hi > lo else np.array([strike])
+        righe_s = []
+        for s in strikes:
+            m2 = _attiva(df, omax, float(s))
+            o2 = int(m2.sum()) if m2 is not None else 0
+            mw2 = o2 * cap
+            v2 = premio_tot + mw2 * (float(s) - marg)
+            righe_s.append({"Strike (€/MWh)": round(float(s), 2),
+                            "Ore attivate": o2,
+                            "Valore (€)": round(v2, 0)})
+        df_strike = pd.DataFrame(righe_s, columns=cols_s)
+        no = max(5, int(n_ore))
+        omax_grid = np.unique(np.linspace(0, max(omax * 2, 4), no).astype(int))
+        righe_o = []
+        for o3 in omax_grid:
+            m3 = _attiva(df, int(o3), strike)
+            o3a = int(m3.sum()) if m3 is not None else 0
+            mw3 = o3a * cap
+            v3 = premio_tot + mw3 * (strike - marg)
+            righe_o.append({"Ore max/mese": int(o3), "Ore attivate": o3a,
+                            "Valore (€)": round(v3, 0)})
+        df_oremax = pd.DataFrame(righe_o, columns=cols_o)
+    except (TypeError, ValueError, AttributeError):
+        df_strike = pd.DataFrame(columns=cols_s)
+        df_oremax = pd.DataFrame(columns=cols_o)
+    return {"valore": valore, "premio_totale": premio_tot,
+            "ricavo_attivazioni": ric_att, "costo_opportunita": costo_opp,
+            "ore_attivate": ore, "mwh_ridotti": mwh,
+            "valore_per_mwh_ridotto": valore_per_mwh,
+            "giorni_attivi": len(df_giorni), "mesi_attivi": n_mesi,
+            "share_ore": share, "break_even_strike": break_even,
+            "df_mesi": df_mesi, "df_giorni": df_giorni, "df_ore": df_ore,
+            "df_strike": df_strike, "df_oremax": df_oremax}
+
+
 def calcola_shape_fattori(prezzi):
     """Fattori di shape stagionale dallo spot storico (per costruire curve forward 'shaped').
     Ritorna un dict:
@@ -9645,7 +9822,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -15903,6 +16080,126 @@ elif workspace == _('ws8'):
                                             xaxis_title="Quota PPA (%)", yaxis_title="Delta (€)")
                     st.plotly_chart(fig_ppa3, use_container_width=True)
             st.caption("💡 Uso pratico: il break-even strike e' il prezzo minimo da chiedere in negoziazione per non perdere rispetto al merchant; la curva strike mostra quanto margine hai a ogni prezzo offerto, quella quota mostra come scala il rischio/rendimento con la quota contrattualizzata (a strike sopra break-even, piu' quota = piu' valore).")
+
+
+    with tab84:
+        titolo_ci = edu("Carico interrompibile (demand response)", "Il cliente riduce il carico nelle ore piu' care quando il gestore lo chiede: incassa un PREMIO DI DISPONIBILITA' (€/MW/mese, garantito) piu' un pagamento a STRIKE (€/MWh) per ogni MWh ridotto, e perde il MARGINE di produzione sulle ore interrotte. Il modello attiva il carico nelle N ore piu' care di ogni mese con spot sopra lo strike: valore = premio + MWh_ridotti x (strike - margine_perso). Ogni ora attivata e' profittevole solo se lo strike supera il margine perso: quello e' il break-even da negoziare.")
+        st.markdown(titolo_ci, unsafe_allow_html=True)
+
+        ci1, ci2, ci3, ci4, ci5 = st.columns(5)
+        with ci1:
+            ci_cap = st.number_input("Carico riducibile (MW)", min_value=0.0, value=10.0, step=1.0, key="ci_cap",
+                                     help="Potenza di carico che puoi interrompere in ogni ora attivata (assunto piatto).")
+        with ci2:
+            ci_omax = st.slider("Ore max/mese", min_value=0, max_value=80, value=20, step=5, key="ci_omax",
+                                help="Cap contrattuale di attivazioni al mese: solo le ore piu' care vengono usate.")
+        with ci3:
+            ci_strike = st.number_input("Strike (€/MWh)", min_value=0.0, value=250.0, step=10.0, key="ci_strike",
+                                        help="Soglia di attivazione e pagamento per MWh ridotto: le ore sotto lo strike non vengono mai interrotte.")
+        with ci4:
+            ci_premio = st.number_input("Premio (€/MW/mese)", min_value=0.0, value=3000.0, step=100.0, key="ci_premio",
+                                        help="Premio di disponibilita' garantito, anche nei mesi senza attivazioni.")
+        with ci5:
+            ci_marg = st.number_input("Margine perso (€/MWh)", min_value=0.0, value=150.0, step=10.0, key="ci_marg",
+                                      help="Margine di produzione perso per ogni MWh non consumato (ore interrotte).")
+
+        res_ci = calcola_carico_interrompibile(prezzi, ci_cap, ci_omax, ci_strike, ci_premio, ci_marg)
+        if res_ci["mesi_attivi"] == 0 or ci_cap <= 0 or ci_omax <= 0:
+            st.warning("Seleziona un periodo con dati, un carico riducibile > 0 e un cap di ore/mese > 0 per valutare il contratto.")
+        else:
+            k1, k2, k3, k4 = st.columns(4)
+            render_kpi("Valore contratto periodo (€)", f"{res_ci['valore']:,.0f}", k1)
+            render_kpi("Premio disponibilita' (€)", f"{res_ci['premio_totale']:,.0f}", k2)
+            render_kpi("Ricavo attivazioni (€)", f"{res_ci['ricavo_attivazioni']:,.0f}", k3)
+            render_kpi("Costo opportunita' (€)", f"{res_ci['costo_opportunita']:,.0f}", k4)
+            k5, k6, k7, k8 = st.columns(4)
+            render_kpi("Ore attivate", f"{res_ci['ore_attivate']:,.0f}", k5)
+            render_kpi("Quota cap usata (%)", f"{res_ci['share_ore']*100:,.0f}", k6)
+            render_kpi("Valore per MWh ridotto (€/MWh)", f"{res_ci['valore_per_mwh_ridotto']:,.2f}", k7)
+            render_kpi("Break-even strike (€/MWh)", f"{res_ci['break_even_strike']:,.2f}", k8)
+            st.caption(f"💡 Lettura: **{res_ci['ore_attivate']:,.0f} ore** attivate in **{res_ci['giorni_attivi']} giorni** su {res_ci['mesi_attivi']} mesi; "
+                       f"lo strike di **{ci_strike:,.0f} €/MWh** {'supera' if ci_strike >= res_ci['break_even_strike'] else 'e\' sotto'} "
+                       f"il break-even di **{res_ci['break_even_strike']:,.0f} €/MWh**, quindi ogni ora attivata "
+                       f"{'aggiunge valore' if ci_strike >= res_ci['break_even_strike'] else 'distrugge valore'} oltre al premio garantito di €{res_ci['premio_totale']:,.0f}.")
+
+            df_cim = res_ci["df_mesi"]
+            if len(df_cim):
+                fig_ci1 = go.Figure()
+                fig_ci1.add_trace(go.Bar(x=df_cim["Mese"], y=df_cim["Premio (€)"], name="Premio",
+                                         marker_color="#64748b",
+                                         hovertemplate="%{x}<br>Premio: €%{y:,.0f}<extra></extra>"))
+                fig_ci1.add_trace(go.Bar(x=df_cim["Mese"], y=df_cim["Ricavo attivazioni (€)"] - df_cim["MWh ridotti"] * ci_marg,
+                                         name="Attivazioni nette", marker_color="#f59e0b",
+                                         hovertemplate="%{x}<br>Attivazioni nette: €%{y:,.0f}<extra></extra>"))
+                fig_ci1.update_layout(template="plotly_dark", height=340, barmode="stack",
+                                       title="Valore mensile: premio + attivazioni nette (€)",
+                                       xaxis_title="Mese", yaxis_title="€")
+                st.plotly_chart(fig_ci1, use_container_width=True)
+                st.markdown("**Dettaglio mensile**")
+                st.dataframe(df_cim, use_container_width=True, hide_index=True)
+                st.download_button(
+                    "⬇️ Esporta carico interrompibile mensile (CSV)",
+                    df_cim.to_csv(index=False).encode("utf-8"),
+                    file_name=f"carico_interrompibile_mensile_{d0}_{d1}.csv",
+                    mime="text/csv",
+                    help="Scarica il dettaglio mensile: ore attivate, MWh ridotti, premio, ricavo, valore.",
+                    key="csv_ci_mesi",
+                )
+            df_cio = res_ci["df_ore"]
+            if len(df_cio):
+                fig_ci2 = go.Figure()
+                fig_ci2.add_trace(go.Bar(x=df_cio["Ora del giorno"], y=df_cio["Ore attivate"],
+                                         name="Ore attivate", marker_color="#f59e0b",
+                                         hovertemplate="Ora %{x}: %{y} ore<extra></extra>"))
+                fig_ci2.update_layout(template="plotly_dark", height=300,
+                                       title="Quando avvengono le interruzioni: ore attivate per ora del giorno",
+                                       xaxis_title="Ora", yaxis_title="Ore attivate")
+                st.plotly_chart(fig_ci2, use_container_width=True)
+            df_cig = res_ci["df_giorni"]
+            st.markdown("**Top 10 giorni per valore delle attivazioni**")
+            st.dataframe(df_cig.sort_values("Valore (€)", ascending=False).head(10),
+                         use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta carico interrompibile giornaliero (CSV)",
+                df_cig.to_csv(index=False).encode("utf-8"),
+                file_name=f"carico_interrompibile_giornaliero_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica la serie giornaliera: ore attivate, MWh ridotti, spot medio, valore.",
+                key="csv_ci_giorni",
+            )
+            c1, c2 = st.columns(2)
+            with c1:
+                df_cis = res_ci["df_strike"]
+                if len(df_cis):
+                    fig_ci3 = go.Figure()
+                    fig_ci3.add_trace(go.Scatter(x=df_cis["Strike (€/MWh)"], y=df_cis["Valore (€)"],
+                                                 mode="lines", name="Valore",
+                                                 line=dict(color="#f59e0b", width=2),
+                                                 hovertemplate="Strike: €%{x:,.1f}<br>Valore: €%{y:,.0f}<extra></extra>"))
+                    fig_ci3.add_vline(x=ci_strike, line_dash="dash", line_color="#3b82f6",
+                                       annotation_text=f"Strike {ci_strike:,.0f}")
+                    fig_ci3.add_vline(x=res_ci["break_even_strike"], line_dash="dot", line_color="#22c55e",
+                                       annotation_text=f"Break-even {res_ci['break_even_strike']:,.0f}")
+                    fig_ci3.add_hline(y=0, line_color="#64748b", line_width=1)
+                    fig_ci3.update_layout(template="plotly_dark", height=320,
+                                           title="Valore contratto vs strike (€)",
+                                           xaxis_title="Strike (€/MWh)", yaxis_title="Valore (€)")
+                    st.plotly_chart(fig_ci3, use_container_width=True)
+            with c2:
+                df_cio2 = res_ci["df_oremax"]
+                if len(df_cio2):
+                    fig_ci4 = go.Figure()
+                    fig_ci4.add_trace(go.Scatter(x=df_cio2["Ore max/mese"], y=df_cio2["Valore (€)"],
+                                                 mode="lines+markers", name="Valore",
+                                                 line=dict(color="#3b82f6", width=2),
+                                                 hovertemplate="Cap: %{x} h<br>Valore: €%{y:,.0f}<extra></extra>"))
+                    fig_ci4.add_vline(x=ci_omax, line_dash="dash", line_color="#f59e0b",
+                                       annotation_text=f"Cap {ci_omax}h")
+                    fig_ci4.update_layout(template="plotly_dark", height=320,
+                                           title="Valore contratto vs cap ore/mese (€)",
+                                           xaxis_title="Ore max/mese", yaxis_title="Valore (€)")
+                    st.plotly_chart(fig_ci4, use_container_width=True)
+            st.caption("💡 Uso pratico: il premio rende il contratto un floor di ricavo anche in mercati piatti (a strike alto, nessuna attivazione ma il premio resta); il break-even strike = margine perso e' il minimo da chiedere in negoziazione affinche' ogni ora attivata non distrugga valore; la curva del cap mostra il rendimento marginale delle ore aggiuntive (diminuisce: le prime ore coprono i picchi piu' cari).")
 
 
 # Footer
