@@ -1,0 +1,108 @@
+"""Test delle funzioni pure di calcolo di app.py (senza avviare Streamlit).
+
+Estrae le funzioni da app.py via AST e le esegue in un namespace con
+pandas/numpy. Stile dei QA: conta i check, 0 fail attesi.
+Uso: python3 tests/test_helpers.py
+"""
+import ast
+import os
+import sys
+
+import numpy as np
+import pandas as pd
+
+APP = os.path.join(os.path.dirname(__file__), "..", "app.py")
+WANT = {"PROFILI_CARICO_TIPO", "profilo_carico_tipo", "shock_scenario",
+        "banner_demo", "generate_mock_hourly"}
+
+tree = ast.parse(open(APP, encoding="utf-8").read())
+
+
+class _DummySt:
+    """Solo per i decoratori @st.cache_data: li rende no-op nei test."""
+
+    @staticmethod
+    def cache_data(*a, **k):
+        def deco(fn):
+            return fn
+
+        # supporta sia @st.cache_data sia @st.cache_data(...)
+        if a and callable(a[0]) and len(a) == 1 and not k:
+            return a[0]
+        return deco
+
+
+ns = {"pd": pd, "np": np, "st": _DummySt()}
+found = set()
+for node in tree.body:
+    if isinstance(node, (ast.FunctionDef, ast.Assign)) is False:
+        continue
+    names = []
+    if isinstance(node, ast.FunctionDef):
+        names = [node.name]
+    else:
+        names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+    for n in names:
+        if n in WANT:
+            mod = ast.Module(body=[node], type_ignores=[])
+            exec(compile(mod, APP, "exec"), ns)  # noqa: S102 - repo proprio
+            found.add(n)
+
+checks = failed = 0
+
+
+def check(name, cond):
+    global checks, failed
+    checks += 1
+    if not cond:
+        failed += 1
+        print(f"FAIL: {name}")
+
+
+check("funzioni trovate", found == WANT)
+
+profilo_carico_tipo = ns["profilo_carico_tipo"]
+shock_scenario = ns["shock_scenario"]
+
+# --- profilo_carico_tipo ---
+p = profilo_carico_tipo("Industriale 3 turni", 10.0)
+check("profilo 24 valori", len(p) == 24)
+check("industriale piatto", abs(p.sum() - 24 * 0.85 * 10.0) < 1e-6)
+check("profilo non negativi", bool((p >= 0).all()))
+u = profilo_carico_tipo("Uffici (lun-ven 8-19)", 2.0)
+check("uffici picco=2MW", abs(u.max() - 2.0) < 1e-9)
+check("uffici notte bassa", u.iloc[3] < u.iloc[10])
+g = profilo_carico_tipo("GDO / Supermercato", 1.0)
+check("gdo 24 valori", len(g) == 24 and abs(g.max() - 1.0) < 1e-9)
+z = profilo_carico_tipo("TipoInesistente", 5.0)
+check("tipo sconosciuto -> default industriale", abs(z.sum() - 24 * 0.85 * 5.0) < 1e-6)
+z2 = profilo_carico_tipo("Uffici (lun-ven 8-19)", -3)
+check("picco negativo -> zeri", bool((z2 == 0).all()))
+z3 = profilo_carico_tipo("Uffici (lun-ven 8-19)", "nan")
+check("picco non numerico -> zeri", bool((z3 == 0).all()))
+
+# --- shock_scenario ---
+idx = pd.date_range("2026-01-01", periods=48, freq="h")
+serie = pd.Series([100.0] * 48, index=idx)
+r = shock_scenario(serie, 25, 1000.0)
+check("shock +25% prezzo medio", abs(r["prezzo_medio_shock"] - 125.0) < 1e-9)
+check("shock delta annuo", abs(r["delta"] - 25.0 * 1000.0) < 1e-6)
+check("shock costo base", abs(r["costo_base"] - 100.0 * 1000.0) < 1e-6)
+r2 = shock_scenario(serie, -50, 1000.0)
+check("shock -50%", abs(r2["prezzo_medio_shock"] - 50.0) < 1e-9 and r2["delta"] < 0)
+r3 = shock_scenario(pd.Series([], dtype=float), 25, 1000.0)
+check("serie vuota -> zeri", r3["delta"] == 0.0 and r3["costo_base"] == 0.0)
+r4 = shock_scenario(serie, "xx", 1000.0)
+check("shock non numerico -> zeri", r4["delta"] == 0.0)
+r5 = shock_scenario(pd.Series([np.nan, np.nan]), 25, 1000.0)
+check("serie solo-NaN -> zeri", r5["costo_base"] == 0.0)
+
+# --- generate_mock_hourly deterministico ---
+mock = ns["generate_mock_hourly"]
+m1 = mock(__import__("datetime").date(2026, 1, 1), __import__("datetime").date(2026, 1, 7))
+m2 = mock(__import__("datetime").date(2026, 1, 1), __import__("datetime").date(2026, 1, 7))
+check("mock deterministico (seed fisso)", m1.equals(m2))
+check("mock 7gg = 168 ore", len(m1) == 168)
+
+print(f"{checks} check / {failed} fail")
+sys.exit(1 if failed else 0)
