@@ -1,6 +1,6 @@
-streamlit
-pandas
-numpy
-entsoe-py
-plotly
-scipy
+streamlit==1.39.0
+pandas==2.2.2
+numpy==1.26.4
+entsoe-py==0.6.4
+plotly==5.22.0
+scipy==1.13.1
