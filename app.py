@@ -1773,6 +1773,140 @@ def calcola_lcoe_break_even_cf(capex_eur_kw, opex_eur_kw_anno, vita_anni,
     return float(lcoe_al_100 / p * 100.0)
 
 
+def profilo_efficienza(ore, mesi, profilo):
+    """Pesi orari (0..1) del risparmio di un intervento di efficienza energetica.
+
+    ore: ore del giorno 0-23. mesi: mesi 1-12. profilo:
+    'Uniforme' (risparmio costante, es. motori IE4 / LED sempre accesi),
+    'Diurno' (risparmio nelle ore 6-20, es. illuminazione uffici / LED),
+    'Invernale (riscaldamento)' (risparmio ott-mar, es. pompa di calore /
+    coibentazione), 'Estivo (raffrescamento)' (risparmio giu-set di giorno,
+    es. chiller / climatizzazione), 'Notturno' (risparmio 22-6, es. carichi
+    stand-by / spegnimento notturno). Profilo ignoto -> uniforme.
+    Ritorna array di pesi clip >= 0; input non validi -> array vuoto."""
+    try:
+        h = np.asarray(ore, dtype=float)
+        m = np.asarray(mesi, dtype=float)
+    except (TypeError, ValueError):
+        return np.array([])
+    if h.size == 0 or h.shape != m.shape:
+        return np.array([])
+    diurna = np.maximum(np.sin(np.pi * (h - 6.0) / 14.0), 0.0) ** 1.2
+    diurna = np.where((h >= 6) & (h <= 20), diurna, 0.0)
+    mesi_int = m.astype(int)
+    if profilo == "Diurno":
+        w = diurna
+    elif profilo == "Invernale (riscaldamento)":
+        w = np.where(np.isin(mesi_int, [10, 11, 12, 1, 2, 3]), 1.0, 0.1)
+    elif profilo == "Estivo (raffrescamento)":
+        w = np.where(np.isin(mesi_int, [6, 7, 8, 9]), np.maximum(diurna, 0.15), 0.05)
+    elif profilo == "Notturno":
+        w = np.where((h >= 22) | (h < 6), 1.0, 0.0)
+    else:
+        w = np.ones_like(h)
+    return np.clip(w, 0.0, None)
+
+
+def calcola_tir(flussi):
+    """TIR di una serie di flussi annui [f0, f1, ...] via bisezione su NPV=0.
+
+    Cerca r in [-0.99, 5.0]; se NPV(r) non cambia segno -> None (nessuna TIR
+    definita, es. progetto che non ripaga mai l'investimento). NaN-safe:
+    input non validi -> None."""
+    try:
+        cf = [float(x) for x in flussi]
+    except (TypeError, ValueError):
+        return None
+    if len(cf) < 2 or not all(np.isfinite(cf)):
+        return None
+    if cf[0] >= 0 or sum(cf[1:]) <= 0:
+        return None
+
+    def npv(r):
+        return sum(c / ((1.0 + r) ** i) for i, c in enumerate(cf))
+
+    lo, hi = -0.99, 5.0
+    n_lo, n_hi = npv(lo), npv(hi)
+    if not (np.isfinite(n_lo) and np.isfinite(n_hi)) or n_lo * n_hi > 0:
+        return None
+    for _ in range(80):
+        mid = 0.5 * (lo + hi)
+        n_mid = npv(mid)
+        if not np.isfinite(n_mid):
+            return None
+        if n_lo * n_mid <= 0:
+            hi, n_hi = mid, n_mid
+        else:
+            lo, n_lo = mid, n_mid
+    return float(0.5 * (lo + hi))
+
+
+def calcola_valore_efficienza(prezzi, risparmio_kwh_anno, profilo,
+                              investimento_eur, vita_anni, tasso_pct):
+    """Payback / NPV / TIR di un intervento di efficienza energetica.
+
+    I kWh risparmiati all'anno sono distribuiti sulle ore del periodo secondo
+    il profilo (profilo_efficienza) e valorizzati al prezzo spot orario; il
+    valore del periodo e' annualizzato (365 / giorni del periodo).
+    Ritorna dict con: valore_annuo_eur, prezzo_medio_kwh (valore del MWh
+    risparmiato, €/MWh), payback_anni (inf se il risparmio annuo <= 0),
+    npv_eur, tir_pct (None se indefinita), serie_oraria (valore in € per ora),
+    giorni_periodo, fattore_annuo. NaN-safe: input non validi -> dict neutro
+    con nan/None e serie vuota, senza eccezioni."""
+    neutro = {"valore_annuo_eur": float("nan"),
+              "prezzo_medio_kwh": float("nan"),
+              "payback_anni": float("inf"),
+              "npv_eur": float("nan"),
+              "tir_pct": None,
+              "serie_oraria": pd.Series(dtype=float),
+              "giorni_periodo": float("nan"),
+              "fattore_annuo": float("nan")}
+    try:
+        px = pd.Series(prezzi).dropna()
+        risparmio = float(risparmio_kwh_anno)
+        inv = float(investimento_eur)
+        n = float(vita_anni)
+        r = float(tasso_pct) / 100.0
+    except (TypeError, ValueError):
+        return neutro
+    if px.empty:
+        return neutro
+    if not all(np.isfinite(v) for v in (risparmio, inv, n, r)):
+        return neutro
+    if risparmio <= 0 or inv < 0 or n <= 0 or r < 0:
+        return neutro
+    try:
+        ore = px.index.hour
+        mesi = px.index.month
+    except AttributeError:
+        return neutro
+    w = profilo_efficienza(ore, mesi, profilo)
+    if w.size != len(px) or w.sum() <= 0:
+        return neutro
+    giorni = max(1.0, len(px) / 24.0)
+    fattore = 365.0 / giorni
+    kwh_ora = risparmio * w / (w.sum() * fattore)
+    v = px.values.astype(float)
+    serie = pd.Series(kwh_ora * v / 1000.0, index=px.index,
+                      name="Valore risparmio (€)")
+    valore_annuo = float(serie.sum()) * fattore
+    prezzo_medio = valore_annuo / risparmio * 1000.0
+    payback = inv / valore_annuo if valore_annuo > 0 else float("inf")
+    fattore_att = n if r == 0.0 else (1.0 - (1.0 + r) ** (-n)) / r
+    npv = -inv + valore_annuo * fattore_att
+    tir = calcola_tir([-inv] + [valore_annuo] * int(round(n)))
+    out = dict(neutro)
+    out.update({"valore_annuo_eur": float(valore_annuo),
+                "prezzo_medio_kwh": float(prezzo_medio),
+                "payback_anni": float(payback),
+                "npv_eur": float(npv),
+                "tir_pct": None if tir is None else float(tir * 100.0),
+                "serie_oraria": serie,
+                "giorni_periodo": float(giorni),
+                "fattore_annuo": float(fattore)})
+    return out
+
+
 def calcola_fuel_switching(prezzi, gas_eur_mwh, eff_gas_pct, coal_eur_mwh,
                            eff_coal_pct, co2_eur_t, ef_gas=0.4, ef_coal=0.9):
     """Fuel switching gas <-> carbone (tab 'Fuel switching').
@@ -10408,7 +10542,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -17343,6 +17477,115 @@ elif workspace == _('ws8'):
                 key="csv_lcoe",
             )
         st.caption("Uso pratico: se il margine e' negativo, prima di archiviare il progetto gioca con le leve vere — CAPEX (preventivi), WACC (struttura del finanziamento) e CF di sito (dati di producibilita', non valori di catalogo). Confronta con il tab PPA vs merchant: un PPA sopra il LCOE ma sotto lo spot atteso puo' comunque finanziare l'impianto.")
+
+
+    with tab92:
+        banner_demo("Payback di un intervento di efficienza (kWh risparmiati valorizzati allo spot orario) su prezzi reali o sintetici")
+        titolo_ef = edu("Payback efficienza", "Un kWh RISPARMIATO vale quanto costerebbe comprarlo: lo si distribuisce sulle ore secondo il profilo dell'intervento (es. LED = diurno, pompa di calore = invernale) e lo si valorizza al prezzo spot orario di ogni ora. Il valore annuo cosi' ottenuto, al netto dell'investimento, da' payback semplice, NPV e TIR: il vero 'prezzo' di un kWh di efficienza, non un valore medio di bolletta. Attenzione: il profilo conta — un risparmio concentrato di giorno, quando lo spot e' piu' alto, vale di piu' dello stesso risparmio di notte.")
+        st.markdown(f"**{titolo_ef}**: quanto rende davvero un intervento di efficienza ai prezzi di mercato del periodo?", unsafe_allow_html=True)
+
+        ef1, ef2, ef3 = st.columns(3)
+        with ef1:
+            inv_ef = st.number_input("Investimento (€)", min_value=0.0, value=50000.0, step=1000.0, key="ef_inv",
+                                     help="CAPEX tutto incluso dell'intervento (apparecchiature + installazione).")
+        with ef2:
+            kwh_ef = st.number_input("Risparmio annuo (kWh)", min_value=0.0, value=200000.0, step=5000.0, key="ef_kwh",
+                                     help="kWh risparmiati ogni anno dall'intervento (stima da audit o scheda tecnica).")
+        with ef3:
+            prof_ef = st.selectbox("Profilo del risparmio", ["Uniforme", "Diurno", "Invernale (riscaldamento)",
+                                                             "Estivo (raffrescamento)", "Notturno"], key="ef_prof",
+                                   help="Quando avviene il risparmio durante l'anno: il profilo diurno/invernale lo valorizza alle ore piu' care.")
+        ef4, ef5 = st.columns(2)
+        with ef4:
+            vita_ef = st.number_input("Vita utile (anni)", min_value=1, max_value=40, value=12, step=1, key="ef_vita")
+        with ef5:
+            tasso_ef = st.number_input("Tasso di sconto (%)", min_value=0.0, max_value=20.0, value=4.0, step=0.5, key="ef_tasso",
+                                       help="Tasso di attualizzazione per il NPV.")
+
+        ris_ef = calcola_valore_efficienza(prezzi, kwh_ef, prof_ef, inv_ef, vita_ef, tasso_ef)
+        serie_ef = ris_ef["serie_oraria"]
+        va = ris_ef["valore_annuo_eur"]
+        pm = ris_ef["prezzo_medio_kwh"]
+        pb = ris_ef["payback_anni"]
+
+        media_spot = float(prezzi.dropna().mean()) if len(prezzi.dropna()) else float("nan")
+        k1, k2, k3, k4 = st.columns(4)
+        render_kpi("Valore annuo risparmiato (€)", f"{va:,.0f}" if np.isfinite(va) else "n.d.", k1)
+        if np.isfinite(pm) and np.isfinite(media_spot):
+            delta_pm = f"{pm - media_spot:+,.1f} €/MWh vs media spot"
+        else:
+            delta_pm = "n.d."
+        render_kpi("Prezzo del kWh risparmiato (€/MWh)", f"{pm:,.1f}" if np.isfinite(pm) else "n.d.", k2)
+        if np.isfinite(pb):
+            segno_ef = "🟢" if pb <= vita_ef else "🔴"
+            render_kpi(f"{segno_ef} Payback semplice (anni)", f"{pb:.1f}" if pb != float("inf") else "> vita utile", k3)
+        else:
+            render_kpi("Payback semplice (anni)", "n.d.", k3)
+        tir_ef = ris_ef["tir_pct"]
+        render_kpi("TIR (%)", f"{tir_ef:.1f} %" if tir_ef is not None and np.isfinite(tir_ef) else "n.d.", k4)
+        if np.isfinite(va):
+            st.caption(f"Valore del MWh risparmiato: **{pm:,.1f} €/MWh** ({delta_pm}) — NPV a {vita_ef} anni @ {tasso_ef:.1f}%: **{ris_ef['npv_eur']:+,.0f} €**{'.' if ris_ef['npv_eur'] >= 0 else ' (progetto in perdita)'}")
+
+        if np.isfinite(va) and not serie_ef.dropna().empty:
+            mens_ef = pd.DataFrame({"Data": serie_ef.index, "Valore": serie_ef.values.astype(float)})
+            mens_ef["Mese"] = pd.to_datetime(mens_ef["Data"]).dt.to_period("M").astype(str)
+            # kWh mensili risparmiati con lo stesso profilo, per il prezzo del MWh risparmiato
+            kwh_m = mens_ef.assign(ora=mens_ef["Data"].dt.hour, mese=mens_ef["Data"].dt.month)
+            pesi_m = profilo_efficienza(kwh_m["ora"], kwh_m["mese"], prof_ef)
+            fattore_a = ris_ef["fattore_annuo"]
+            kwh_m["kWh"] = kwh_ef * pesi_m / (pesi_m.sum() * fattore_a) if pesi_m.sum() > 0 else 0.0
+            agg_ef = mens_ef.groupby("Mese")["Valore"].sum().reset_index()
+            agg_k = kwh_m.groupby("Mese")["kWh"].sum().reset_index()
+            agg_ef = agg_ef.merge(agg_k, on="Mese")
+            agg_ef["Prezzo_MWh"] = np.where(agg_ef["kWh"] > 0,
+                                            agg_ef["Valore"] / agg_ef["kWh"] * 1000.0, np.nan)
+
+            fig_ef = go.Figure()
+            fig_ef.add_trace(go.Bar(x=agg_ef["Mese"], y=agg_ef["Valore"], name="Valore risparmio (€)",
+                                    marker_color="#10B981",
+                                    hovertemplate="Mese: %{x}<br>Valore: %{y:,.0f} €<extra></extra>"))
+            fig_ef.add_trace(go.Scatter(x=agg_ef["Mese"], y=agg_ef["Prezzo_MWh"], name="€/MWh risparmiato",
+                                        mode="lines+markers", line=dict(color="#F59E0B"), yaxis="y2",
+                                        hovertemplate="Mese: %{x}<br>€/MWh: %{y:,.1f}<extra></extra>"))
+            if np.isfinite(media_spot):
+                fig_ef.add_hline(y=media_spot, line_dash="dot", line_color="#9ca3af",
+                                 annotation_text=f"Media spot {media_spot:,.1f} €/MWh",
+                                 annotation_position="top right", yref="y2")
+            fig_ef.update_layout(template="plotly_dark", height=380, barmode="group",
+                                 title="Valore mensile del risparmio e prezzo del MWh risparmiato",
+                                 xaxis_title="Mese", yaxis_title="Valore (€)",
+                                 yaxis2=dict(title="€/MWh risparmiato", overlaying="y", side="right"))
+            st.plotly_chart(fig_ef, use_container_width=True)
+
+            anni_cf = np.arange(0, int(vita_ef) + 1)
+            cum = -inv_ef + va * anni_cf
+            fig_cf = go.Figure()
+            fig_cf.add_trace(go.Scatter(x=anni_cf, y=cum, mode="lines+markers",
+                                        line=dict(color="#10B981" if cum[-1] >= 0 else "#EF4444"),
+                                        name="Cassa cumulata",
+                                        hovertemplate="Anno %{x}<br>Cumulata: %{y:+,.0f} €<extra></extra>"))
+            fig_cf.add_hline(y=0, line_dash="dot", line_color="#9ca3af")
+            if np.isfinite(pb) and pb <= vita_ef:
+                fig_cf.add_vline(x=pb, line_dash="dash", line_color="#F59E0B",
+                                 annotation_text=f"Payback {pb:.1f} anni", annotation_position="top right")
+            fig_cf.update_layout(template="plotly_dark", height=320,
+                                 title="Curva di cassa cumulata (investimento + risparmi annui)",
+                                 xaxis_title="Anno", yaxis_title="Cassa cumulata (€)")
+            st.plotly_chart(fig_cf, use_container_width=True)
+
+            df_ef = agg_ef[["Mese", "Valore", "kWh", "Prezzo_MWh"]].copy()
+            df_ef.columns = ["Mese", "Valore risparmio (€)", "kWh risparmiati", "Prezzo MWh risparmiato (€/MWh)"]
+            df_ef[["Valore risparmio (€)", "kWh risparmiati", "Prezzo MWh risparmiato (€/MWh)"]] = \
+                df_ef[["Valore risparmio (€)", "kWh risparmiati", "Prezzo MWh risparmiato (€/MWh)"]].round(1)
+            st.download_button(
+                "⬇️ Esporta payback efficienza (CSV)",
+                df_ef.to_csv(index=False).encode("utf-8"),
+                file_name=f"payback_efficienza_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Tabella mensile: valore del risparmio, kWh risparmiati e prezzo del MWh risparmiato con i parametri impostati.",
+                key="csv_eff",
+            )
+        st.caption("Uso pratico: confronta il 'prezzo del kWh risparmiato' con il prezzo che paghi in bolletta — se il primo e' maggiore, l'efficienza batte qualsiasi contratto. Prova a cambiare profilo: lo stesso investimento in LED (diurno) puo' ripagarsi prima della stessa spesa su un carico notturno, a parita' di kWh.")
 
 
 # Footer
