@@ -2283,6 +2283,202 @@ def calcola_carico_interrompibile(prezzi, carico_mw, ore_max_mese, strike_eur,
             "df_strike": df_strike, "df_oremax": df_oremax}
 
 
+def calcola_tolling(prezzi, capacita_mw, heat_rate, prezzo_gas_mwh_th,
+                    vom_eur_mwh=0.0, costo_co2_eur_mwh=0.0,
+                    costo_avvio_eur_mw=0.0, fee_mw_mese=0.0,
+                    n_gas=21, n_hr=21):
+    """Valore di un tolling agreement su impianto termoelettrico (tab 'Tolling').
+
+    Il tollee paga una fee di capacita' fissa e ottiene il DIRITTO (non
+    l'obbligo) di far produrre l'impianto quando conviene: ogni ora in cui lo
+    spark spread supera zero l'impianto va a piena potenza.
+
+    spark_h = prezzo_h - heat_rate x prezzo_gas - vom - co2   (€/MWh elettrici)
+    on_h = spark_h > 0          (flessibilita' totale, avviamento istantaneo)
+    valore_intrinseco = somma(max(0, spark_h)) x capacita'     (€ sul periodo)
+    avviamenti = transizioni off->on; costo_avvii = avviamenti x costo_avvio/MW x capacita'
+    fee_tot = capacita' x fee_mw_mese x mesi
+    valore = valore_intrinseco - costo_avvii - fee_tot          (€ netti)
+
+    La regola di dispatch greedy e' ottima solo con costi di avviamento nulli:
+    con start cost > 0 il vero valore ottimizzato e' leggermente superiore a
+    quello calcolato qui (l'ottimo evita gli avviamenti non remunerativi),
+    quindi questa stima e' conservativa.
+
+    break_even_fee (€/MW/mese) = (intrinseco - avviamenti)/(capacita' x mesi):
+    la fee massima pagabile a valore zero. break_even_gas (€/MWh termici) =
+    prezzo del gas che azzera il valore netto, via bisezione su funzione
+    monotona decrescente (None se il valore resta sempre > 0 nel range, o se
+    e' <= 0 gia' a gas gratis).
+
+    NaN-safe: serie vuota, capacita'<=0, heat_rate<=0, parametri non validi
+    -> dict neutro con DataFrame dalle colonne giuste.
+
+    Ritorna dict con 'valore', 'valore_per_mw', 'intrinseco', 'costo_avvii',
+    'fee_tot', 'ore_itm', 'share_itm', 'fattore_carico', 'avviamenti',
+    'margine_medio_itm', 'spark_medio', 'mesi_attivi', 'giorni_attivi',
+    'break_even_fee', 'break_even_gas', 'df_mesi', 'df_giorni', 'df_ore',
+    'df_gas', 'df_hr'.
+    """
+    cols_m = ["Mese", "Ore ITM", "Avviamenti", "Valore intrinseco (€)",
+              "Fee (€)", "Valore netto (€)"]
+    cols_g = ["Data", "Ore ITM", "Valore intrinseco (€)"]
+    cols_h = ["Ora del giorno", "Ore ITM"]
+    cols_gas = ["Prezzo gas (€/MWh th)", "Ore ITM", "Valore (€)"]
+    cols_hr = ["Heat rate", "Ore ITM", "Valore (€)"]
+    vuoto = {"valore": 0.0, "valore_per_mw": 0.0, "intrinseco": 0.0,
+             "costo_avvii": 0.0, "fee_tot": 0.0, "ore_itm": 0, "share_itm": 0.0,
+             "fattore_carico": 0.0, "avviamenti": 0, "margine_medio_itm": 0.0,
+             "spark_medio": 0.0, "mesi_attivi": 0, "giorni_attivi": 0,
+             "break_even_fee": None, "break_even_gas": None,
+             "df_mesi": pd.DataFrame(columns=cols_m),
+             "df_giorni": pd.DataFrame(columns=cols_g),
+             "df_ore": pd.DataFrame(columns=cols_h),
+             "df_gas": pd.DataFrame(columns=cols_gas),
+             "df_hr": pd.DataFrame(columns=cols_hr)}
+
+    def _dispatch(df_p, hr_p, gas_p):
+        """Ritorna (spark Series, mask on, margine_orario €, avviamenti)."""
+        spark = df_p["prezzo"] - hr_p * gas_p - vom - co2
+        on = spark > 0
+        marg = np.where(on.to_numpy(), spark.to_numpy(), 0.0) * cap
+        on_i = on.astype(int)
+        starts = int((((on_i - on_i.shift(1, fill_value=0)) > 0)).sum())
+        return spark, on, marg, starts
+
+    try:
+        cap = float(capacita_mw)
+        hr = float(heat_rate)
+        gas = float(prezzo_gas_mwh_th)
+        vom = float(vom_eur_mwh)
+        co2 = float(costo_co2_eur_mwh)
+        cavv = float(costo_avvio_eur_mw)
+        fee = float(fee_mw_mese)
+    except (TypeError, ValueError):
+        return dict(vuoto)
+    if any(np.isnan([cap, hr, gas, vom, co2, cavv, fee])) or cap <= 0 \
+            or hr <= 0 or gas < 0 or vom < 0 or co2 < 0 or cavv < 0 or fee < 0:
+        return dict(vuoto)
+    try:
+        df = pd.DataFrame({"prezzo": prezzi.astype(float)}).dropna()
+    except (TypeError, ValueError, AttributeError):
+        return dict(vuoto)
+    if len(df) == 0:
+        return dict(vuoto)
+
+    spark, on, marg, starts = _dispatch(df, hr, gas)
+    ore_itm = int(on.sum())
+    intrinseco = float(marg.sum())
+    costo_avvii = starts * cavv * cap
+    try:
+        per_m = df.index.to_period("M")
+        n_mesi = int(per_m.nunique())
+    except (TypeError, ValueError, AttributeError):
+        per_m = None
+        n_mesi = 0
+    fee_tot = cap * fee * n_mesi
+    valore = intrinseco - costo_avvii - fee_tot
+    valore_per_mw = valore / cap
+    share_itm = ore_itm / len(df)
+    margine_medio = (marg[on.to_numpy()].mean() / cap) if ore_itm else 0.0
+    spark_medio = float(spark.mean())
+    be_fee = ((intrinseco - costo_avvii) / (cap * n_mesi)) if n_mesi else None
+
+    def _valore_netto(g):
+        _s, _on, _m, _st = _dispatch(df, hr, g)
+        return float(_m.sum()) - _st * cavv * cap - fee_tot
+
+    be_gas = None
+    if _valore_netto(0.0) > 0:
+        hi = max(gas * 2.0, 1.0)
+        for _ in range(12):
+            if _valore_netto(hi) < 0:
+                break
+            hi *= 2.0
+        else:
+            hi = None
+        if hi is not None:
+            lo = 0.0
+            for _ in range(50):
+                mid = (lo + hi) / 2.0
+                if _valore_netto(mid) > 0:
+                    lo = mid
+                else:
+                    hi = mid
+            be_gas = (lo + hi) / 2.0
+
+    try:
+        fee_m = cap * fee
+        righe_m = []
+        if per_m is not None and n_mesi:
+            for per in per_m.unique():
+                sub = (per_m == per)
+                sub_np = sub.to_numpy() if hasattr(sub, "to_numpy") else np.asarray(sub)
+                on_m = on[sub_np]
+                marg_m = marg[sub_np]
+                st_m = int((((on_m.astype(int) - on_m.astype(int).shift(1, fill_value=0)) > 0)).sum())
+                intr_m = float(marg_m.sum())
+                cavv_m = st_m * cavv * cap
+                righe_m.append({"Mese": per.strftime("%Y-%m"),
+                                "Ore ITM": int(on_m.sum()),
+                                "Avviamenti": st_m,
+                                "Valore intrinseco (€)": round(intr_m, 0),
+                                "Fee (€)": round(fee_m, 0),
+                                "Valore netto (€)": round(intr_m - cavv_m - fee_m, 0)})
+        df_mesi = pd.DataFrame(righe_m, columns=cols_m)
+    except (TypeError, ValueError, AttributeError):
+        df_mesi = pd.DataFrame(columns=cols_m)
+    try:
+        righe_g = []
+        on_np, marg_np = on.to_numpy(), marg
+        giorni = df.index.normalize()
+        for giorno, grp in df.groupby(giorni):
+            idx = grp.index
+            righe_g.append({"Data": giorno.date().isoformat(),
+                            "Ore ITM": int(on.loc[idx].sum()),
+                            "Valore intrinseco (€)": round(float(marg_np[df.index.get_indexer(idx)].sum()), 0)})
+        df_giorni = pd.DataFrame(righe_g, columns=cols_g)
+    except (TypeError, ValueError, AttributeError):
+        df_giorni = pd.DataFrame(columns=cols_g)
+    try:
+        cnt = pd.Series(df.index[on].hour.to_numpy()).value_counts().sort_index()
+        righe_h = [{"Ora del giorno": int(h), "Ore ITM": int(c)}
+                   for h, c in cnt.items()]
+        df_ore = pd.DataFrame(righe_h, columns=cols_h)
+    except (TypeError, ValueError, AttributeError):
+        df_ore = pd.DataFrame(columns=cols_h)
+    try:
+        ng = max(5, int(n_gas))
+        gas_grid = np.linspace(0.5 * gas, 1.5 * gas, ng) if gas > 0 else np.array([0.0])
+        righe_gs, righe_hs = [], []
+        for g2 in gas_grid:
+            _s2, _on2, _m2, _st2 = _dispatch(df, hr, float(g2))
+            righe_gs.append({"Prezzo gas (€/MWh th)": round(float(g2), 2),
+                             "Ore ITM": int(_on2.sum()),
+                             "Valore (€)": round(float(_m2.sum()) - _st2 * cavv * cap - fee_tot, 0)})
+        df_gas = pd.DataFrame(righe_gs, columns=cols_gas)
+        nh = max(5, int(n_hr))
+        for h2 in np.linspace(0.7 * hr, 1.3 * hr, nh):
+            _s3, _on3, _m3, _st3 = _dispatch(df, float(h2), gas)
+            righe_hs.append({"Heat rate": round(float(h2), 3),
+                             "Ore ITM": int(_on3.sum()),
+                             "Valore (€)": round(float(_m3.sum()) - _st3 * cavv * cap - fee_tot, 0)})
+        df_hr = pd.DataFrame(righe_hs, columns=cols_hr)
+    except (TypeError, ValueError, AttributeError):
+        df_gas = pd.DataFrame(columns=cols_gas)
+        df_hr = pd.DataFrame(columns=cols_hr)
+
+    return {"valore": valore, "valore_per_mw": valore_per_mw,
+            "intrinseco": intrinseco, "costo_avvii": costo_avvii,
+            "fee_tot": fee_tot, "ore_itm": ore_itm, "share_itm": share_itm,
+            "fattore_carico": share_itm, "avviamenti": starts,
+            "margine_medio_itm": float(margine_medio), "spark_medio": spark_medio,
+            "mesi_attivi": n_mesi, "giorni_attivi": len(df_giorni),
+            "break_even_fee": be_fee, "break_even_gas": be_gas,
+            "df_mesi": df_mesi, "df_giorni": df_giorni, "df_ore": df_ore,
+            "df_gas": df_gas, "df_hr": df_hr}
+
+
 def calcola_shape_fattori(prezzi):
     """Fattori di shape stagionale dallo spot storico (per costruire curve forward 'shaped').
     Ritorna un dict:
@@ -9822,7 +10018,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -16200,6 +16396,150 @@ elif workspace == _('ws8'):
                                            xaxis_title="Ore max/mese", yaxis_title="Valore (€)")
                     st.plotly_chart(fig_ci4, use_container_width=True)
             st.caption("💡 Uso pratico: il premio rende il contratto un floor di ricavo anche in mercati piatti (a strike alto, nessuna attivazione ma il premio resta); il break-even strike = margine perso e' il minimo da chiedere in negoziazione affinche' ogni ora attivata non distrugga valore; la curva del cap mostra il rendimento marginale delle ore aggiuntive (diminuisce: le prime ore coprono i picchi piu' cari).")
+
+
+    with tab85:
+        titolo_to = edu("Tolling agreement (opzione su spark spread)", "Con un TOLLING paghi una FEE DI CAPACITA' fissa (€/MW/mese) e ottieni il diritto di far produrre l'impianto quando conviene: ogni ora in cui lo spark spread (prezzo elettrico - heat_rate x prezzo_gas - VOM - CO2) e' positivo, l'impianto va a piena potenza. Il valore e' quindi una striscia di call sullo spark: valore = somma(max(0, spark)) x MW - costi di avviamento - fee totale. I break-even dicono la fee massima negoziabile e il prezzo del gas che azzera il valore: sopra il break-even gas il tolling non vale piu' la fee.")
+        st.markdown(titolo_to, unsafe_allow_html=True)
+
+        to1, to2, to3, to4 = st.columns(4)
+        with to1:
+            to_cap = st.number_input("Capacita' (MW)", min_value=0.0, value=50.0, step=5.0, key="to_cap",
+                                     help="Potenza elettrica nominale dell'impianto sotto tolling.")
+        with to2:
+            to_hr = st.number_input("Heat rate (MWh th / MWh e)", min_value=0.1, value=2.0, step=0.1, key="to_hr",
+                                    help="Consumo di gas per MWh elettrico: 2.0 = efficienza ~50% (CCGT).")
+        with to3:
+            to_gas = st.number_input("Prezzo gas (€/MWh th)", min_value=0.0, value=35.0, step=1.0, key="to_gas",
+                                      help="Costo del combustibile per MWh termico.")
+        with to4:
+            to_vom = st.number_input("VOM (€/MWh e)", min_value=0.0, value=4.0, step=0.5, key="to_vom",
+                                     help="Costi variabili di O&M per MWh elettrico prodotto.")
+        to5, to6, to7 = st.columns(3)
+        with to5:
+            to_co2 = st.number_input("Costo CO2 (€/MWh e)", min_value=0.0, value=8.0, step=0.5, key="to_co2",
+                                     help="Costo delle quote CO2 per MWh elettrico prodotto.")
+        with to6:
+            to_cavv = st.number_input("Costo avviamento (€/MW per start)", min_value=0.0, value=60.0, step=5.0, key="to_cavv",
+                                      help="Costo di ogni avviamento per MW di capacita' (usura + combustibile di start).")
+        with to7:
+            to_fee = st.number_input("Fee capacita' (€/MW/mese)", min_value=0.0, value=8000.0, step=500.0, key="to_fee",
+                                     help="Canone fisso pagato al proprietario dell'impianto, anche nei mesi in cui non produce.")
+
+        res_to = calcola_tolling(prezzi, to_cap, to_hr, to_gas, to_vom, to_co2, to_cavv, to_fee)
+        if res_to["mesi_attivi"] == 0 or to_cap <= 0:
+            st.warning("Seleziona un periodo con dati e una capacita' > 0 per valutare il tolling.")
+        else:
+            k1, k2, k3, k4 = st.columns(4)
+            render_kpi("Valore netto periodo (€)", f"{res_to['valore']:,.0f}", k1)
+            render_kpi("Valore per MW (€/MW)", f"{res_to['valore_per_mw']:,.0f}", k2)
+            render_kpi("Valore intrinseco (€)", f"{res_to['intrinseco']:,.0f}", k3)
+            render_kpi("Fee totale (€)", f"{res_to['fee_tot']:,.0f}", k4)
+            k5, k6, k7, k8 = st.columns(4)
+            render_kpi("Ore in-the-money", f"{res_to['ore_itm']:,.0f}", k5)
+            render_kpi("Share ITM (%)", f"{res_to['share_itm']*100:,.1f}", k6)
+            render_kpi("Avviamenti", f"{res_to['avviamenti']:,.0f}", k7)
+            render_kpi("Costo avviamenti (€)", f"{res_to['costo_avvii']:,.0f}", k8)
+            k9, k10, k11, k12 = st.columns(4)
+            render_kpi("Margine medio ITM (€/MWh)", f"{res_to['margine_medio_itm']:,.2f}", k9)
+            render_kpi("Spark medio (€/MWh)", f"{res_to['spark_medio']:,.2f}", k10)
+            render_kpi("Break-even fee (€/MW/mese)",
+                       f"{res_to['break_even_fee']:,.0f}" if res_to['break_even_fee'] is not None else "—", k11)
+            render_kpi("Break-even gas (€/MWh th)",
+                       f"{res_to['break_even_gas']:,.2f}" if res_to['break_even_gas'] is not None else "—", k12)
+            if res_to["break_even_fee"] is not None:
+                _verbo_fee = "e' sotto" if to_fee <= res_to["break_even_fee"] else "supera"
+                _be_txt = (f"la fee di **{to_fee:,.0f} €/MW/mese** "
+                           f"{_verbo_fee} il break-even di "
+                           f"**{res_to['break_even_fee']:,.0f} €/MW/mese**.")
+            else:
+                _be_txt = "il break-even fee non e' calcolabile su questo periodo."
+            st.caption(f"💡 Lettura: l'impianto e' in-the-money il **{res_to['share_itm']*100:,.1f}%** delle ore "
+                       f"con spark medio di **{res_to['spark_medio']:,.2f} €/MWh**; {_be_txt}")
+
+            df_tom = res_to["df_mesi"]
+            if len(df_tom):
+                fig_to1 = go.Figure()
+                fig_to1.add_trace(go.Bar(x=df_tom["Mese"], y=df_tom["Valore intrinseco (€)"], name="Intrinseco",
+                                         marker_color="#22c55e",
+                                         hovertemplate="%{x}<br>Intrinseco: €%{y:,.0f}<extra></extra>"))
+                fig_to1.add_trace(go.Bar(x=df_tom["Mese"], y=-df_tom["Fee (€)"], name="Fee (costo)",
+                                         marker_color="#ef4444",
+                                         hovertemplate="%{x}<br>Fee: €%{y:,.0f}<extra></extra>"))
+                fig_to1.add_trace(go.Scatter(x=df_tom["Mese"], y=df_tom["Valore netto (€)"], name="Valore netto",
+                                             mode="lines+markers", line=dict(color="#3b82f6", width=2),
+                                             hovertemplate="%{x}<br>Netto: €%{y:,.0f}<extra></extra>"))
+                fig_to1.update_layout(template="plotly_dark", height=340,
+                                       title="Valore mensile: intrinseco vs fee (€)",
+                                       xaxis_title="Mese", yaxis_title="€")
+                st.plotly_chart(fig_to1, use_container_width=True)
+                st.markdown("**Dettaglio mensile**")
+                st.dataframe(df_tom, use_container_width=True, hide_index=True)
+                st.download_button(
+                    "⬇️ Esporta tolling mensile (CSV)",
+                    df_tom.to_csv(index=False).encode("utf-8"),
+                    file_name=f"tolling_mensile_{d0}_{d1}.csv",
+                    mime="text/csv",
+                    help="Scarica il dettaglio mensile: ore ITM, avviamenti, intrinseco, fee, valore netto.",
+                    key="csv_to_mesi",
+                )
+            df_tog = res_to["df_giorni"]
+            st.markdown("**Top 10 giorni per valore intrinseco**")
+            st.dataframe(df_tog.sort_values("Valore intrinseco (€)", ascending=False).head(10),
+                         use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta tolling giornaliero (CSV)",
+                df_tog.to_csv(index=False).encode("utf-8"),
+                file_name=f"tolling_giornaliero_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica la serie giornaliera: ore ITM e valore intrinseco.",
+                key="csv_to_giorni",
+            )
+            df_toh = res_to["df_ore"]
+            if len(df_toh):
+                fig_to2 = go.Figure()
+                fig_to2.add_trace(go.Bar(x=df_toh["Ora del giorno"], y=df_toh["Ore ITM"],
+                                         name="Ore ITM", marker_color="#22c55e",
+                                         hovertemplate="Ora %{x}: %{y} ore<extra></extra>"))
+                fig_to2.update_layout(template="plotly_dark", height=300,
+                                       title="Quando l'impianto produce: ore in-the-money per ora del giorno",
+                                       xaxis_title="Ora", yaxis_title="Ore ITM")
+                st.plotly_chart(fig_to2, use_container_width=True)
+            c1, c2 = st.columns(2)
+            with c1:
+                df_togas = res_to["df_gas"]
+                if len(df_togas):
+                    fig_to3 = go.Figure()
+                    fig_to3.add_trace(go.Scatter(x=df_togas["Prezzo gas (€/MWh th)"], y=df_togas["Valore (€)"],
+                                                 mode="lines+markers", name="Valore",
+                                                 line=dict(color="#f59e0b", width=2),
+                                                 hovertemplate="Gas: €%{x:,.1f}<br>Valore: €%{y:,.0f}<extra></extra>"))
+                    fig_to3.add_vline(x=to_gas, line_dash="dash", line_color="#3b82f6",
+                                       annotation_text=f"Gas {to_gas:,.0f}")
+                    if res_to["break_even_gas"] is not None:
+                        fig_to3.add_vline(x=res_to["break_even_gas"], line_dash="dot", line_color="#22c55e",
+                                           annotation_text=f"BE {res_to['break_even_gas']:,.1f}")
+                    fig_to3.add_hline(y=0, line_color="#64748b", line_width=1)
+                    fig_to3.update_layout(template="plotly_dark", height=320,
+                                           title="Valore tolling vs prezzo gas (€)",
+                                           xaxis_title="Prezzo gas (€/MWh th)", yaxis_title="Valore (€)")
+                    st.plotly_chart(fig_to3, use_container_width=True)
+            with c2:
+                df_tohr = res_to["df_hr"]
+                if len(df_tohr):
+                    fig_to4 = go.Figure()
+                    fig_to4.add_trace(go.Scatter(x=df_tohr["Heat rate"], y=df_tohr["Valore (€)"],
+                                                 mode="lines+markers", name="Valore",
+                                                 line=dict(color="#8b5cf6", width=2),
+                                                 hovertemplate="HR: %{x:.2f}<br>Valore: €%{y:,.0f}<extra></extra>"))
+                    fig_to4.add_vline(x=to_hr, line_dash="dash", line_color="#f59e0b",
+                                       annotation_text=f"HR {to_hr:.1f}")
+                    fig_to4.add_hline(y=0, line_color="#64748b", line_width=1)
+                    fig_to4.update_layout(template="plotly_dark", height=320,
+                                           title="Valore tolling vs heat rate (€)",
+                                           xaxis_title="Heat rate (MWh th / MWh e)", yaxis_title="Valore (€)")
+                    st.plotly_chart(fig_to4, use_container_width=True)
+            st.caption("💡 Uso pratico: il break-even fee e' il tetto in negoziazione con il proprietario dell'impianto — sopra quella fee il tolling distrugge valore; il break-even gas dice fino a che prezzo del combustibile il contratto resta conveniente (utile per decidere se coprire il gas a termine); la curva sull'heat rate quantifica quanto vale un impianto piu' efficiente (CCGT vs OCGT) a parita' di fee.")
 
 
 # Footer
