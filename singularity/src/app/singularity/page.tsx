@@ -1,5 +1,9 @@
 import Link from "next/link";
 
+const STREAMLIT_URL =
+  process.env.NEXT_PUBLIC_STREAMLIT_URL ??
+  "https://czpox8o8x6arnxw96txnvt.streamlit.app";
+
 export default function SingularityPage() {
   return (
     <div className="w-full h-screen bg-[#030712] flex flex-col">
@@ -17,7 +21,7 @@ export default function SingularityPage() {
       {/* Dashboard Streamlit con permessi abilitati */}
       <div className="flex-grow w-full relative">
         <iframe
-          src="https://czpox8o8x6arnxw96txnvt.streamlit.app/?embed=true"
+          src={`${STREAMLIT_URL}/?embed=true`}
           className="absolute inset-0 w-full h-full border-none"
           title="Singularity ETRM Dashboard"
           sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox"
