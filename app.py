@@ -4836,6 +4836,171 @@ def calcola_giorni_critici(prezzi, w_prezzo=1.0, w_vola=1.0, w_neg=1.0,
     return out
 
 
+def calcola_tranche_acquisto(prezzi, mw_f1, mw_f2, mw_f3, tranche):
+    """Tranche di acquisto (fixing ladder): tracking delle quote fissate a prezzo fisso.
+
+    Domanda operativa dell'energy buyer: "ho fissato il 40% del volume a
+    85 EUR/MWh a marzo e il 30% a 92 a maggio — quanto sto risparmiando
+    rispetto a comprare tutto a mercato?" Lo strumento confronta il costo
+    ibrido (quota fixata + residuo a mercato) con il costo tutto-a-mercato
+    del profilo F1/F2/F3 e calcola il MtM di ogni singola tranche.
+
+    Convenzione: ACQUISTO (long) — il buyer guadagna se il mercato
+    realizzato e' SOPRA il prezzo fixato:
+    MtM_tranche = (prezzo_medio_mercato - prezzo_tranche) * MWh_tranche.
+
+    Parametri:
+    - prezzi: Series oraria in euro/MWh;
+    - mw_f1/2/3: MW del profilo di prelievo per fascia AEEGSI;
+    - tranche: DataFrame con colonne [Data fixing, Prezzo (euro/MWh), Quota %]
+      oppure lista di dict/tuple (data, prezzo, quota_pct).
+
+    Regole di sanitizzazione:
+    - ore con prezzo NaN scartate, timestamp duplicati -> primo tenuto;
+    - MW negativi clampati a 0; MW totali 0 -> 'ok' False;
+    - quota per tranche clampata a [0, 100]; se la somma supera il 100%,
+      le quote vengono riscalate proporzionalmente a 100% ('quota_riscalata'
+      True) e la nota riporta il taglio;
+    - righe con prezzo o quota non numerici/NaN scartate;
+    - nessuna tranche valida -> 'ok' False.
+
+    Ritorna dict con 'ok' (bool), 'mwh_tot', 'costo_mercato' (euro),
+    'prezzo_medio_mercato' (euro/MWh), 'quota_fixata' (%, 0-100),
+    'quota_riscalata' (bool), 'prezzo_medio_fixato' (euro/MWh|None),
+    'costo_fixato' (euro), 'costo_ibrido' (euro), 'prezzo_medio_ibrido'
+    (euro/MWh), 'risparmio_vs_mercato' (euro, + = risparmio), 'mtm_tot'
+    (euro) e 'df' (DataFrame per tranche: Data fixing, Prezzo (euro/MWh),
+    Quota %, MWh, Costo (euro), MtM (euro), MtM (euro/MWh)).
+    """
+    COLS = ["Data fixing", "Prezzo (euro/MWh)", "Quota %", "MWh",
+            "Costo (euro)", "MtM (euro)", "MtM (euro/MWh)"]
+
+    def _vuoto():
+        return {"ok": False, "mwh_tot": 0.0, "costo_mercato": None,
+                "prezzo_medio_mercato": None, "quota_fixata": 0.0,
+                "quota_riscalata": False, "prezzo_medio_fixato": None,
+                "costo_fixato": 0.0, "costo_ibrido": None,
+                "prezzo_medio_ibrido": None, "risparmio_vs_mercato": None,
+                "mtm_tot": 0.0, "df": pd.DataFrame(columns=COLS)}
+
+    try:
+        p = prezzi.astype(float)
+        p = p[~p.index.duplicated(keep="first")].sort_index().dropna()
+    except Exception:
+        return _vuoto()
+    if len(p) == 0:
+        return _vuoto()
+    try:
+        idxn = p.index.tz_localize(None) if p.index.tz is not None else p.index
+        mw_map = {"F1": max(0.0, float(mw_f1)),
+                  "F2": max(0.0, float(mw_f2)),
+                  "F3": max(0.0, float(mw_f3))}
+        mw_h = np.array([mw_map[fascia_oraria(ts)] for ts in idxn],
+                        dtype=float)
+    except Exception:
+        return _vuoto()
+    mwh_tot = float(mw_h.sum())
+    if mwh_tot <= 0:
+        return _vuoto()
+    px = p.to_numpy(dtype=float)
+    costo_mercato = float((px * mw_h).sum())
+    prezzo_medio_mercato = costo_mercato / mwh_tot
+
+    # Normalizza l'input tranche -> lista (data, prezzo, quota)
+    grezze = []
+    try:
+        if tranche is None:
+            tranche = []
+        if isinstance(tranche, pd.DataFrame):
+            for _, r in tranche.iterrows():
+                grezze.append((r.iloc[0], r.iloc[1], r.iloc[2]))
+        else:
+            for t in tranche:
+                if isinstance(t, dict):
+                    grezze.append((t.get("data"), t.get("prezzo"),
+                                   t.get("quota")))
+                else:
+                    seq = list(t)
+                    grezze.append((seq[0] if len(seq) > 0 else None,
+                                   seq[1] if len(seq) > 1 else None,
+                                   seq[2] if len(seq) > 2 else None))
+    except Exception:
+        grezze = []
+
+    pulite = []
+    for data_fx, prezzo_fx, quota_fx in grezze:
+        try:
+            pr = float(prezzo_fx)
+            q = float(quota_fx)
+        except (TypeError, ValueError):
+            continue
+        if not np.isfinite(pr) or not np.isfinite(q):
+            continue
+        q = min(100.0, max(0.0, q))
+        if q <= 0:
+            continue
+        try:
+            ts_fx = pd.to_datetime(data_fx, errors="coerce")
+            data_lab = (ts_fx.strftime("%d/%m/%Y")
+                        if ts_fx is not None and not pd.isna(ts_fx) else "—")
+        except Exception:
+            data_lab = "—"
+        pulite.append({"data_lab": data_lab, "prezzo": pr, "quota": q})
+
+    out = _vuoto()
+    out.update({"mwh_tot": round(mwh_tot, 1),
+                "costo_mercato": round(costo_mercato, 2),
+                "prezzo_medio_mercato": round(prezzo_medio_mercato, 2)})
+    if not pulite:
+        return out
+
+    quota_somma = sum(t["quota"] for t in pulite)
+    riscalata = quota_somma > 100.0
+    fattore = 100.0 / quota_somma if riscalata else 1.0
+
+    righe = []
+    costo_fixato = 0.0
+    mwh_fixati = 0.0
+    for t in pulite:
+        q_eff = t["quota"] * fattore
+        mwh_t = mwh_tot * q_eff / 100.0
+        costo_t = mwh_t * t["prezzo"]
+        mtm_t = (prezzo_medio_mercato - t["prezzo"]) * mwh_t
+        costo_fixato += costo_t
+        mwh_fixati += mwh_t
+        righe.append({
+            "Data fixing": t["data_lab"],
+            "Prezzo (euro/MWh)": round(t["prezzo"], 2),
+            "Quota %": round(q_eff, 1),
+            "MWh": round(mwh_t, 1),
+            "Costo (euro)": round(costo_t, 2),
+            "MtM (euro)": round(mtm_t, 2),
+            "MtM (euro/MWh)": round(prezzo_medio_mercato - t["prezzo"], 2),
+        })
+    quota_fixata = min(100.0, quota_somma)  # = 100.0 se riscalata
+    quota_residua = (100.0 - quota_fixata) / 100.0
+    costo_ibrido = costo_fixato + quota_residua * costo_mercato
+    prezzo_medio_fixato = costo_fixato / mwh_fixati if mwh_fixati > 0 else None
+    prezzo_medio_ibrido = costo_ibrido / mwh_tot
+    risparmio = costo_mercato - costo_ibrido
+    mtm_tot = risparmio
+
+    out.update({
+        "ok": True,
+        "quota_fixata": round(quota_fixata, 1),
+        "quota_riscalata": riscalata,
+        "prezzo_medio_fixato": (round(prezzo_medio_fixato, 2)
+                                if prezzo_medio_fixato is not None else None),
+        "costo_fixato": round(costo_fixato, 2),
+        "costo_ibrido": round(costo_ibrido, 2),
+        "prezzo_medio_ibrido": round(prezzo_medio_ibrido, 2),
+        "risparmio_vs_mercato": round(risparmio, 2),
+        "mtm_tot": round(mtm_tot, 2),
+        "df": pd.DataFrame(righe, columns=COLS),
+    })
+    return out
+
+
 def calcola_climatologia_prezzo(prezzi, soglia=100.0):
     """Climatologia del prezzo: probabilita' di superare una soglia per giorno della settimana e ora.
 
@@ -7483,7 +7648,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -12165,6 +12330,99 @@ elif workspace == _('ws8'):
             if gc["giorni_scarto"]:
                 st.caption(f"\u2139\ufe0f {gc['giorni_scarto']} giorni incompleti scartati (es. cambi ora legale).")
             st.caption("\U0001f4a1 Peso alto sul picco e sulle rampe: score da usare per calibrare gli alert intraday. Peso alto sul prezzo medio: score da usare per il post-mortem del costo.")
+
+    with tab70:
+        titolo_ta = edu("Tranche di acquisto", "Le TRANCHE DI ACQUISTO sono le quote di volume che hai FISSATO a prezzo fisso (fixing) in momenti diversi: e' la strategia classica dell'energy buyer che compra 'a ladder' invece di restare tutto a mercato. Inserisci per ogni fixing la data, il prezzo pattuito e la quota di volume coperta: la dashboard calcola il costo ibrido (fisso + residuo a mercato), il prezzo medio ponderato e il MtM di ogni tranche contro il prezzo medio realizzato del periodo. Un MtM positivo vuol dire che il fixing ha fatto risparmiare, negativo che avresti speso meno restando a mercato. Diverso dal tab \U0001f4c8 MtM hedging (contratti forward con delivery su date future): qui le tranche coprono il volume del periodo analizzato, come una fotografia del portafoglio fissato.")
+        st.markdown(titolo_ta, unsafe_allow_html=True)
+
+        ta1, ta2, ta3 = st.columns(3)
+        with ta1:
+            ta_mw_f1 = st.number_input("Profilo: MW in F1", min_value=0.0, value=1.0, step=0.5,
+                                       key="ta_mw_f1", help="Potenza prelevata nelle ore di punta (lun-ven 08:00-19:00).")
+        with ta2:
+            ta_mw_f2 = st.number_input("Profilo: MW in F2", min_value=0.0, value=1.0, step=0.5,
+                                       key="ta_mw_f2", help="Potenza prelevata nelle ore intermedie.")
+        with ta3:
+            ta_mw_f3 = st.number_input("Profilo: MW in F3", min_value=0.0, value=1.0, step=0.5,
+                                       key="ta_mw_f3", help="Potenza prelevata nelle ore fuori punta.")
+
+        st.markdown("**Fixing eseguiti** (aggiungi righe con il tasto + sotto la tabella)")
+        df_ta_default = pd.DataFrame([
+            {"Data fixing": "2026-07-01", "Prezzo (€/MWh)": 85.0, "Quota %": 30.0},
+            {"Data fixing": "2026-08-15", "Prezzo (€/MWh)": 92.0, "Quota %": 25.0},
+        ])
+        df_ta_in = st.data_editor(
+            df_ta_default, num_rows="dynamic", use_container_width=True,
+            key="ta_editor",
+            column_config={
+                "Data fixing": st.column_config.TextColumn("Data fixing", help="Data del fixing (formato AAAA-MM-GG)."),
+                "Prezzo (€/MWh)": st.column_config.NumberColumn("Prezzo (€/MWh)", min_value=-1000.0, max_value=10000.0, format="%.2f"),
+                "Quota %": st.column_config.NumberColumn("Quota %", min_value=0.0, max_value=100.0, format="%.1f",
+                                                         help="Quota del volume del periodo coperta da questa tranche."),
+            },
+            help="Quota % = percentuale del volume totale del periodo acquistata a questo prezzo.",
+        )
+
+        ta = calcola_tranche_acquisto(prezzi, ta_mw_f1, ta_mw_f2, ta_mw_f3, df_ta_in)
+        if not ta["ok"]:
+            if ta["mwh_tot"] and ta["mwh_tot"] > 0:
+                st.info("Inserisci almeno una tranche valida (prezzo e quota numerici, quota > 0) per vedere il confronto.")
+            else:
+                st.warning("Imposta una potenza maggiore di zero in almeno una fascia per calcolare il volume.")
+        else:
+            k1, k2, k3, k4 = st.columns(4)
+            render_kpi(edu("Copertura fixata", "Percentuale del volume del periodo acquistata a prezzo fisso: il resto resta esposto al mercato."),
+                       f"{ta['quota_fixata']:.1f} %", k1)
+            render_kpi(edu("Prezzo medio fixato", "Prezzo medio ponderato delle tranche: il prezzo 'bloccato' del portafoglio."),
+                       f"{ta['prezzo_medio_fixato']:,.2f} €/MWh" if ta["prezzo_medio_fixato"] is not None else "n/d", k2)
+            render_kpi(edu("Costo ibrido", "Costo totale = tranche a prezzo fisso + residuo a mercato: quello che paghi davvero."),
+                       f"{ta['costo_ibrido']:,.2f} €", k3)
+            seg = "🟢" if ta["risparmio_vs_mercato"] >= 0 else "🔴"
+            render_kpi(edu("Risparmio vs tutto-a-mercato", "Differenza tra comprare tutto a mercato e la strategia ibrida: positivo = il ladder ha fatto risparmiare."),
+                       f"{seg} {ta['risparmio_vs_mercato']:+,.2f} €", k4)
+            st.caption(f"Mercato di riferimento: {ta['mwh_tot']:,.1f} MWh a {ta['prezzo_medio_mercato']:,.2f} €/MWh "
+                       f"(costo {ta['costo_mercato']:,.2f} €) | Prezzo medio ibrido: {ta['prezzo_medio_ibrido']:,.2f} €/MWh")
+            if ta["quota_riscalata"]:
+                st.caption("ℹ️ Le quote inserite superavano il 100%: sono state riscalate proporzionalmente a copertura totale.")
+
+            st.markdown("**MtM per tranche** (positivo = fixing sotto mercato, hai risparmiato)")
+            dft = ta["df"]
+            fig_ta = go.Figure()
+            fig_ta.add_trace(go.Bar(
+                x=dft["Data fixing"], y=dft["MtM (euro)"],
+                marker_color=["#22c55e" if v >= 0 else "#ef4444" for v in dft["MtM (euro)"]],
+                hovertemplate="%{x}: MtM %{y:+,.2f} € — prezzo %{customdata[0]:,.2f} €/MWh, quota %{customdata[1]:.1f} %<extra></extra>",
+                customdata=np.stack([dft["Prezzo (euro/MWh)"].to_numpy(),
+                                     dft["Quota %"].to_numpy()], axis=1)))
+            fig_ta.add_hline(y=0, line_dash="dash", line_color="#9ca3af")
+            fig_ta.update_layout(template="plotly_dark", height=340,
+                                 title="Mark-to-market di ogni fixing",
+                                 xaxis_title="Data fixing", yaxis_title="MtM (€)")
+            st.plotly_chart(fig_ta, use_container_width=True)
+
+            st.markdown("**Mercato vs ibrido**")
+            fig_ta2 = go.Figure()
+            fig_ta2.add_trace(go.Bar(
+                x=["Tutto a mercato", "Ibrido (tranche + mercato)"],
+                y=[ta["costo_mercato"], ta["costo_ibrido"]],
+                marker_color=["#6b7280", "#3b82f6"],
+                hovertemplate="%{x}: %{y:,.2f} €<extra></extra>"))
+            fig_ta2.update_layout(template="plotly_dark", height=300,
+                                  title="Costo totale del periodo",
+                                  yaxis_title="€")
+            st.plotly_chart(fig_ta2, use_container_width=True)
+
+            st.markdown("**Dettaglio tranche**")
+            st.dataframe(dft, use_container_width=True, hide_index=True)
+            st.download_button(
+                "\u2b07\ufe0f Esporta tranche (CSV)",
+                dft.to_csv(index=False).encode("utf-8"),
+                file_name=f"tranche_acquisto_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica il dettaglio delle tranche: prezzo, quota, MWh, costo e MtM.",
+                key="csv_ta_det",
+            )
+            st.caption("\U0001f4a1 Usa questo tab a ogni nuovo fixing: aggiungi la riga e confronta subito il prezzo pattuito con il mercato realizzato.")
 
 # Footer
 
