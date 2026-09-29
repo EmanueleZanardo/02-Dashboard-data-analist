@@ -1673,6 +1673,106 @@ def calcola_dark_spread(prezzi, coal_eur_mwh, eff_pct, co2_eur_t, ef_tco2_mwh=0.
     return ds, stats, durata
 
 
+def calcola_lcoe(capex_eur_kw, opex_eur_kw_anno, vita_anni, tasso_pct, cf_pct):
+    """LCOE (Levelized Cost of Energy) in €/MWh di un nuovo impianto.
+
+    capex_eur_kw: costo di investimento €/kW. opex_eur_kw_anno: costi fissi
+    operativi €/kW/anno. vita_anni: vita utile. tasso_pct: WACC in %.
+    cf_pct: fattore di capacità in %.
+    LCOE = (CAPEX * CRF + OPEX) / (8760 * CF), con CRF = r(1+r)^n/((1+r)^n-1)
+    (r=0 -> CRF = 1/n). NaN-safe: input non validi -> nan; CF<=0 -> inf
+    (nessuna produzione, costo per MWh indefinito)."""
+    try:
+        capex = float(capex_eur_kw)
+        opex = float(opex_eur_kw_anno)
+        n = float(vita_anni)
+        r = float(tasso_pct) / 100.0
+        cf = float(cf_pct) / 100.0
+    except (TypeError, ValueError):
+        return float("nan")
+    if not all(np.isfinite(v) for v in (capex, opex, n, r, cf)):
+        return float("nan")
+    if capex < 0 or opex < 0 or n <= 0:
+        return float("nan")
+    if r < 0:
+        return float("nan")
+    if cf <= 0:
+        return float("inf")
+    if r == 0.0:
+        crf = 1.0 / n
+    else:
+        fattore = (1.0 + r) ** n
+        crf = r * fattore / (fattore - 1.0)
+    costo_annuo_kw = capex * crf + opex
+    energia_annua_mwh = 8.76 * cf
+    return float(costo_annuo_kw / energia_annua_mwh)
+
+
+def profilo_cattura(ore, tecnologia):
+    """Pesi orari di produzione (0..1) per tecnologia, per il prezzo catturato.
+
+    ore: Series/array di ore del giorno (0-23). tecnologia: 'Solare FV'
+    (campana diurna 6-20, picco a mezzogiorno), 'Eolico onshore' (quasi
+    piatto con lieve prevalenza notturna), 'Base (piatto)' (produzione
+    costante, es. nucleare/idro fluente). Ritorna array di pesi."""
+    try:
+        h = np.asarray(ore, dtype=float)
+    except (TypeError, ValueError):
+        return np.array([])
+    if tecnologia == "Solare FV":
+        campana = np.maximum(np.sin(np.pi * (h - 6.0) / 14.0), 0.0) ** 1.2
+        w = np.where((h >= 6) & (h <= 20), campana, 0.0)
+    elif tecnologia == "Eolico onshore":
+        w = 1.0 + 0.25 * np.sin(2.0 * np.pi * (h - 3.0) / 24.0)
+    else:
+        w = np.ones_like(h)
+    return np.clip(w, 0.0, None)
+
+
+def calcola_prezzo_catturato(prezzi, tecnologia):
+    """Prezzo medio catturato (€/MWh) da una tecnologia sul periodo.
+
+    Media dei prezzi spot ponderata per il profilo di produzione orario della
+    tecnologia (vedi profilo_cattura). Il solare cattura soprattutto le ore
+    diurne (spesso piu' economiche -> prezzo catturato < media spot);
+    il profilo base cattura esattamente la media. NaN-safe: serie vuota o
+    pesi nulli -> nan."""
+    try:
+        px = pd.Series(prezzi).dropna()
+    except (TypeError, ValueError):
+        return float("nan")
+    if px.empty:
+        return float("nan")
+    try:
+        ore = px.index.hour
+    except AttributeError:
+        return float("nan")
+    w = profilo_cattura(ore, tecnologia)
+    if w.size != len(px) or w.sum() <= 0:
+        return float("nan")
+    v = px.values.astype(float)
+    return float(np.sum(v * w) / np.sum(w))
+
+
+def calcola_lcoe_break_even_cf(capex_eur_kw, opex_eur_kw_anno, vita_anni,
+                               tasso_pct, prezzo_catturato):
+    """Fattore di capacità (%) di pareggio: CF al quale LCOE = prezzo catturato.
+
+    CF_be = (CAPEX*CRF + OPEX) / (8760 * prezzo_catturato). NaN-safe:
+    prezzo non positivo o input non validi -> nan."""
+    try:
+        p = float(prezzo_catturato)
+    except (TypeError, ValueError):
+        return float("nan")
+    if not np.isfinite(p) or p <= 0:
+        return float("nan")
+    lcoe_al_100 = calcola_lcoe(capex_eur_kw, opex_eur_kw_anno, vita_anni,
+                               tasso_pct, 100.0)
+    if not np.isfinite(lcoe_al_100):
+        return float("nan")
+    return float(lcoe_al_100 / p * 100.0)
+
+
 def calcola_fuel_switching(prezzi, gas_eur_mwh, eff_gas_pct, coal_eur_mwh,
                            eff_coal_pct, co2_eur_t, ef_gas=0.4, ef_coal=0.9):
     """Fuel switching gas <-> carbone (tab 'Fuel switching').
@@ -10308,7 +10408,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -17143,6 +17243,106 @@ elif workspace == _('ws8'):
                 key="csv_dark",
             )
         st.caption("Uso pratico: dark spread > spark spread = il carbone e' piu' economico del gas nell'ordine di merito (confronta con il tab Spark spread); con EUA sopra il prezzo di switch del tab Fuel switching il dark spread collassa e le centrali a carbone escono dal mercato.")
+
+
+    with tab91:
+        banner_demo("LCOE vs prezzo catturato (confronto nuovo impianto vs mercato) su prezzi reali o sintetici")
+        titolo_lc = edu("LCOE vs prezzo catturato", "L'LCOE (Levelized Cost of Energy) e' il costo medio per MWh prodotto da un NUOVO impianto lungo la sua vita: (CAPEX x CRF + OPEX annuo) / energia annua, con CRF il fattore di recupero del capitale al tasso scelto (WACC). Il PREZZO CATTURATO e' invece quanto il mercato paga davvero quell'energia: media dei prezzi spot ponderata per il profilo di produzione della tecnologia. Se prezzo catturato > LCOE il nuovo impianto crea valore; se < LCOE distrugge valore. Attenzione al solare: produce di giorno quando i prezzi sono spesso piu' bassi (cannibalizzazione), quindi cattura quasi sempre SOTTO la media spot.")
+        st.markdown(f"**{titolo_lc}**: conviene costruire un nuovo impianto ai prezzi di mercato del periodo?", unsafe_allow_html=True)
+
+        lc1, lc2, lc3 = st.columns(3)
+        with lc1:
+            tec_lc = st.selectbox("Tecnologia", ["Solare FV", "Eolico onshore", "Base (piatto)"],
+                                  key="lc_tec",
+                                  help="Profilo di produzione usato per pesare i prezzi: il solare produce di giorno, l'eolico quasi piatto, la base costante.")
+        with lc2:
+            capex_lc = st.number_input("CAPEX (€/kW)", min_value=0.0, value=900.0, step=50.0, key="lc_capex",
+                                       help="Costo di investimento tutto incluso per kW installato.")
+        with lc3:
+            opex_lc = st.number_input("OPEX (€/kW/anno)", min_value=0.0, value=15.0, step=1.0, key="lc_opex",
+                                      help="Costi fissi operativi annui per kW (manutenzione, assicurazione, affitto terreno).")
+        lc4, lc5, lc6 = st.columns(3)
+        with lc4:
+            vita_lc = st.number_input("Vita utile (anni)", min_value=1, max_value=50, value=25, step=1, key="lc_vita")
+        with lc5:
+            tasso_lc = st.number_input("Tasso di sconto / WACC (%)", min_value=0.0, max_value=20.0, value=5.0, step=0.5, key="lc_tasso",
+                                       help="Costo del capitale: piu' e' alto, piu' il CAPEX pesa sul LCOE.")
+        with lc6:
+            cf_lc = st.number_input("Fattore di capacità (%)", min_value=0.1, max_value=100.0, value=14.0, step=0.5, key="lc_cf",
+                                    help="Energia annua prodotta / (potenza x 8760 h). Tipico: solare CH 11-14%, eolico 20-30%, base 85-90%.")
+
+        lcoe_v = calcola_lcoe(capex_lc, opex_lc, vita_lc, tasso_lc, cf_lc)
+        catt_v = calcola_prezzo_catturato(prezzi, tec_lc)
+        marg_v = catt_v - lcoe_v if np.isfinite(catt_v) and np.isfinite(lcoe_v) else float("nan")
+        be_cf = calcola_lcoe_break_even_cf(capex_lc, opex_lc, vita_lc, tasso_lc, catt_v)
+
+        k1, k2, k3, k4 = st.columns(4)
+        render_kpi("LCOE (€/MWh)", f"{lcoe_v:,.1f}" if np.isfinite(lcoe_v) else "n.d.", k1)
+        render_kpi(f"Prezzo catturato {tec_lc} (€/MWh)", f"{catt_v:,.1f}" if np.isfinite(catt_v) else "n.d.", k2)
+        if np.isfinite(marg_v):
+            segno_lc = "🟢" if marg_v > 0 else ("🔴" if marg_v < 0 else "⚪")
+            render_kpi(f"{segno_lc} Margine vs mercato (€/MWh)", f"{marg_v:+,.1f}", k3)
+        else:
+            render_kpi("Margine vs mercato (€/MWh)", "n.d.", k3)
+        render_kpi("CF di pareggio (%)", f"{be_cf:.1f} %" if np.isfinite(be_cf) else "n.d.", k4)
+        if np.isfinite(be_cf):
+            st.caption(f"Con questi costi e questo mercato l'impianto pareggia con un fattore di capacita' del **{be_cf:.1f} %** (tu hai impostato {cf_lc:.1f} %): se il sito produce meno del pareggio, il progetto distrugge valore.")
+
+        if np.isfinite(catt_v) and np.isfinite(lcoe_v):
+            mens_lc = pd.DataFrame({"Data": prezzi.index, "Prezzo": prezzi.values.astype(float)})
+            mens_lc["Mese"] = pd.to_datetime(mens_lc["Data"]).dt.to_period("M").astype(str)
+            ore_m = mens_lc["Data"].dt.hour
+            pesi_m = profilo_cattura(ore_m, tec_lc)
+            mens_lc["Peso"] = pesi_m
+            agg = mens_lc.groupby("Mese").apply(
+                lambda g: pd.Series({"Catturato": float(np.sum(g['Prezzo'] * g['Peso']) / g['Peso'].sum()
+                                                        if g['Peso'].sum() > 0 else np.nan),
+                                     "Media spot": float(g["Prezzo"].mean())}),
+                include_groups=False).reset_index()
+            fig_lc = go.Figure()
+            fig_lc.add_trace(go.Bar(x=agg["Mese"], y=agg["Catturato"], name=f"Catturato {tec_lc}",
+                                    marker_color="#F59E0B",
+                                    hovertemplate="Mese: %{x}<br>Catturato: %{y:,.1f} €/MWh<extra></extra>"))
+            fig_lc.add_trace(go.Bar(x=agg["Mese"], y=agg["Media spot"], name="Media spot",
+                                    marker_color="#3B82F6", opacity=0.55,
+                                    hovertemplate="Mese: %{x}<br>Media spot: %{y:,.1f} €/MWh<extra></extra>"))
+            fig_lc.add_hline(y=lcoe_v, line_dash="dash", line_color="#EF4444",
+                             annotation_text=f"LCOE {lcoe_v:,.1f} €/MWh", annotation_position="top right")
+            fig_lc.update_layout(template="plotly_dark", height=380, barmode="group",
+                                 title=f"Prezzo catturato mensile vs LCOE ({tec_lc})",
+                                 xaxis_title="Mese", yaxis_title="€/MWh")
+            st.plotly_chart(fig_lc, use_container_width=True)
+
+            cf_grid = np.linspace(max(1.0, cf_lc * 0.3), min(100.0, cf_lc * 2.5), 60)
+            lcoe_grid = [calcola_lcoe(capex_lc, opex_lc, vita_lc, tasso_lc, c) for c in cf_grid]
+            fig_s = go.Figure()
+            fig_s.add_trace(go.Scatter(x=cf_grid, y=lcoe_grid, mode="lines",
+                                       line=dict(color="#F59E0B"), name="LCOE",
+                                       hovertemplate="CF: %{x:.1f} %<br>LCOE: %{y:,.1f} €/MWh<extra></extra>"))
+            fig_s.add_hline(y=catt_v, line_dash="dot", line_color="#3B82F6",
+                            annotation_text=f"Prezzo catturato {catt_v:,.1f} €/MWh",
+                            annotation_position="bottom right")
+            fig_s.add_vline(x=cf_lc, line_dash="dot", line_color="#9ca3af",
+                            annotation_text=f"CF impostato {cf_lc:.1f} %", annotation_position="top left")
+            fig_s.update_layout(template="plotly_dark", height=320,
+                                title="Sensitività LCOE al fattore di capacità",
+                                xaxis_title="Fattore di capacità (%)", yaxis_title="LCOE (€/MWh)")
+            st.plotly_chart(fig_s, use_container_width=True)
+
+            df_lc = agg.copy()
+            df_lc["LCOE (€/MWh)"] = round(lcoe_v, 1)
+            df_lc["Margine (€/MWh)"] = round(df_lc["Catturato"] - lcoe_v, 1)
+            df_lc.columns = ["Mese", "Prezzo catturato (€/MWh)", "Media spot (€/MWh)",
+                             "LCOE (€/MWh)", "Margine (€/MWh)"]
+            st.download_button(
+                "⬇️ Esporta LCOE vs catturato (CSV)",
+                df_lc.to_csv(index=False).encode("utf-8"),
+                file_name=f"lcoe_vs_catturato_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Tabella mensile: prezzo catturato, media spot, LCOE e margine con i parametri impostati.",
+                key="csv_lcoe",
+            )
+        st.caption("Uso pratico: se il margine e' negativo, prima di archiviare il progetto gioca con le leve vere — CAPEX (preventivi), WACC (struttura del finanziamento) e CF di sito (dati di producibilita', non valori di catalogo). Confronta con il tab PPA vs merchant: un PPA sopra il LCOE ma sotto lo spot atteso puo' comunque finanziare l'impianto.")
 
 
 # Footer
