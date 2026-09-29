@@ -2548,6 +2548,97 @@ def shock_scenario(prezzi, shock_pct, volume_mwh_anno):
             "delta": (p_shock - base) * vol, "shock_pct": s}
 
 
+def calcola_costo_degrado(capex_eur_kwh, cicli_rif, dod_rif_pct, dod_op_pct,
+                          esponente_dod=1.0):
+    """Costo levelized di ciclaggio di una batteria (€/MWh scaricato).
+
+    La vita a cicli scala con la profondita' di scarica (DoD):
+        cicli_eff = cicli_rif * (dod_rif / dod_op) ** esponente_dod
+    Il costo di degrado per MWh scaricato e' il capex spalmato sul throughput
+    lifetime: capex / (cicli_eff * dod_op)  [€/kWh] -> x1000 = €/MWh.
+
+    DoD in percento (es. 80.0). NaN-safe: input non validi o non positivi ->
+    dict di zeri.
+    """
+    vuoto = {"cicli_effettivi": 0.0, "costo_eur_mwh": 0.0,
+             "throughput_mwh_per_mwh": 0.0, "dod_op_frazione": 0.0}
+    try:
+        capex = float(capex_eur_kwh)
+        n_rif = float(cicli_rif)
+        d_rif = float(dod_rif_pct) / 100.0
+        d_op = float(dod_op_pct) / 100.0
+        esp = float(esponente_dod)
+    except (TypeError, ValueError):
+        return vuoto
+    if not all(np.isfinite(v) for v in (capex, n_rif, d_rif, d_op, esp)):
+        return vuoto
+    if capex <= 0 or n_rif <= 0 or d_rif <= 0 or d_op <= 0 or esp < 0:
+        return vuoto
+    cicli_eff = n_rif * (d_rif / d_op) ** esp
+    throughput = cicli_eff * d_op  # kWh scaricati lifetime per kWh installato
+    costo = capex / throughput * 1000.0  # €/kWh -> €/MWh
+    return {"cicli_effettivi": float(cicli_eff), "costo_eur_mwh": float(costo),
+            "throughput_mwh_per_mwh": float(throughput),
+            "dod_op_frazione": float(d_op)}
+
+
+def calcola_ciclaggio_giornaliero(prezzi, costo_degrado_eur_mwh, eff_roundtrip=0.85,
+                                  durata_h=2.0, dod_op_pct=80.0):
+    """Un ciclo al giorno: compra al minimo, vendi al massimo del giorno.
+
+    Per ogni giorno: margine unitario = Pmax - Pmin/eff - degr (€/MWh scaricato).
+    Il ciclo si esegue solo se il margine e' positivo (dispatch ottimale semplice):
+    energia scaricata al giorno per MW = durata_h * dod_op.
+    Profitto giorno = margine_unit * durata_h * dod_op (0 se non profittevole).
+
+    Ritorna dict con df_giorni (Data, Pmin, Pmax, Spread, Margine unitario €/MWh,
+    Profitto €/MW), giorni_totali, giorni_profittevoli, quota_profittevoli,
+    profitto_medio_giorno_eur_mw, profitto_annuo_eur_mw. NaN-safe: serie vuota,
+    indice non datetime o parametri non validi -> df vuoto e zeri.
+    """
+    vuoto_df = pd.DataFrame(columns=["Data", "Pmin", "Pmax", "Spread",
+                                     "Margine unitario €/MWh", "Profitto €/MW"])
+    vuoto = {"df_giorni": vuoto_df, "giorni_totali": 0, "giorni_profittevoli": 0,
+             "quota_profittevoli": 0.0, "profitto_medio_giorno_eur_mw": 0.0,
+             "profitto_annuo_eur_mw": 0.0}
+    try:
+        degr = float(costo_degrado_eur_mwh)
+        eff = float(eff_roundtrip)
+        dur = float(durata_h)
+        dod = float(dod_op_pct) / 100.0
+    except (TypeError, ValueError):
+        return vuoto
+    if not all(np.isfinite(v) for v in (degr, eff, dur, dod)):
+        return vuoto
+    if degr < 0 or not (0 < eff <= 1) or dur <= 0 or not (0 < dod <= 1):
+        return vuoto
+    try:
+        px = pd.Series(prezzi).dropna()
+    except Exception:
+        return vuoto
+    if px.empty or not isinstance(px.index, pd.DatetimeIndex):
+        return vuoto
+    energia = dur * dod  # MWh scaricati per MW al giorno
+    righe = []
+    for giorno, serie in px.groupby(px.index.floor("D")):
+        pmin = float(serie.min())
+        pmax = float(serie.max())
+        margine = pmax - pmin / eff - degr
+        profitto = margine * energia if margine > 0 else 0.0
+        righe.append({"Data": giorno.date(), "Pmin": round(pmin, 2),
+                      "Pmax": round(pmax, 2), "Spread": round(pmax - pmin, 2),
+                      "Margine unitario €/MWh": round(margine, 2),
+                      "Profitto €/MW": round(profitto, 2)})
+    df = pd.DataFrame(righe)
+    n = len(df)
+    n_prof = int((df["Profitto €/MW"] > 0).sum())
+    profitto_medio = float(df["Profitto €/MW"].mean()) if n else 0.0
+    return {"df_giorni": df, "giorni_totali": n, "giorni_profittevoli": n_prof,
+            "quota_profittevoli": (n_prof / n) if n else 0.0,
+            "profitto_medio_giorno_eur_mw": profitto_medio,
+            "profitto_annuo_eur_mw": profitto_medio * 365.0}
+
+
 def calcola_fermo_ottimale(margine_orario, mw, giorni_fermo):
     """Finestra ottimale di fermo manutenzione per una centrale termoelettrica.
 
@@ -10161,7 +10252,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -16844,6 +16935,73 @@ elif workspace == _('ws8'):
             key="csv_shock",
         )
         st.caption("Uso pratico: fissa la soglia di budget oltre la quale scatta la copertura (hedge) e verifica con che shock il budget va in rosso; lo shock e' uniforme per semplicita' \u2014 per shock differenziati per fascia usa il tab Stress test.")
+    with tab89:
+        banner_demo("costo di ciclaggio levelized e strategia 1 ciclo/giorno su prezzi reali o sintetici")
+        titolo_db = edu("Degrado batteria (costo di ciclaggio)", "Ogni ciclo di carica/scarica consuma vita utile della batteria: il COSTO DI CICLAGGIO spalma il capex sul throughput lifetime e si esprime in EUR/MWh scaricato. L'arbitraggio e' profittevole solo se lo spread catturato supera degrado + perdite di efficienza. Qui calcoli il costo levelized al variare della DoD operativa e simuli una strategia semplice (1 ciclo/giorno: compra al minimo, vendi al massimo del giorno) per stimare giorni profittevoli, profitto netto annuo per MW e payback.")
+        st.markdown(f"<h1>🪫 {titolo_db}</h1>", unsafe_allow_html=True)
+        db1, db2, db3 = st.columns(3)
+        with db1:
+            db_capex = st.number_input("Capex batteria (€/kWh)", min_value=50.0, value=300.0, step=10.0, key="db_capex",
+                                      help="Costo chiavi in mano per kWh installato.")
+            db_cicli = st.number_input("Vita a cicli @ DoD rif.", min_value=500.0, value=6000.0, step=500.0, key="db_cicli",
+                                      help="Cicli di vita dichiarati alla DoD di riferimento (tipico LFP: 6000 @ 80%).")
+        with db2:
+            db_dod_rif = st.slider("DoD di riferimento (%)", min_value=20, max_value=100, value=80, step=5, key="db_dod_rif",
+                                   help="DoD a cui e' dichiarata la vita a cicli.")
+            db_dod_op = st.slider("DoD operativa (%)", min_value=20, max_value=100, value=80, step=5, key="db_dod_op",
+                                  help="Profondita' di scarica usata in esercizio: DoD piu' basse allungano la vita.")
+        with db3:
+            db_eff = st.slider("Efficienza roundtrip (%)", min_value=70, max_value=98, value=85, step=1, key="db_eff")
+            db_durata = st.number_input("Durata (h) a potenza nominale", min_value=0.5, value=2.0, step=0.5, key="db_durata",
+                                        help="Ore di scarica a piena potenza (es. 2h).")
+        degr = calcola_costo_degrado(db_capex, db_cicli, db_dod_rif, db_dod_op)
+        cyc = calcola_ciclaggio_giornaliero(prezzi, degr["costo_eur_mwh"], db_eff / 100.0, db_durata, db_dod_op)
+        capex_mw = db_capex * db_durata * 1000.0  # €/MW
+        prof_annuo = cyc["profitto_annuo_eur_mw"]
+        k1, k2, k3, k4, k5 = st.columns(5)
+        render_kpi("Costo degrado", f"€ {degr['costo_eur_mwh']:.1f}/MWh", k1)
+        render_kpi("Cicli effettivi @DoD", f"{degr['cicli_effettivi']:,.0f}", k2)
+        render_kpi("Giorni profittevoli", f"{cyc['quota_profittevoli'] * 100:.1f} %", k3)
+        render_kpi("Profitto netto annuo", f"EUR {prof_annuo:,.0f}/MW", k4)
+        render_kpi("Payback semplice", f"{capex_mw / prof_annuo:.1f} anni" if prof_annuo > 0 else "n.d.", k5)
+        df_db = cyc["df_giorni"]
+        if not df_db.empty:
+            mens_db = df_db.copy()
+            mens_db["Mese"] = pd.to_datetime(mens_db["Data"]).dt.to_period("M").astype(str)
+            prof_mese = mens_db.groupby("Mese")["Profitto €/MW"].sum().reset_index()
+            fig_db1 = go.Figure()
+            fig_db1.add_trace(go.Bar(x=prof_mese["Mese"], y=prof_mese["Profitto €/MW"],
+                                    marker_color="#22c55e", name="€/MW",
+                                    hovertemplate="%{x}<br>EUR %{y:,.0f}/MW<extra></extra>"))
+            fig_db1.update_layout(template="plotly_dark", height=320,
+                                  title="Profitto netto mensile (€/MW) — strategia 1 ciclo/giorno",
+                                  xaxis_title="Mese", yaxis_title="EUR/MW")
+            st.plotly_chart(fig_db1, use_container_width=True)
+        dod_range = list(range(20, 101, 5))
+        sens_db = [calcola_costo_degrado(db_capex, db_cicli, db_dod_rif, d)["costo_eur_mwh"] for d in dod_range]
+        fig_db2 = go.Figure()
+        fig_db2.add_trace(go.Scatter(x=dod_range, y=sens_db, mode="lines+markers",
+                                     line=dict(color="#f59e0b"), name="€/MWh",
+                                     hovertemplate="DoD %{x}%<br>€ %{y:.1f}/MWh<extra></extra>"))
+        fig_db2.add_vline(x=db_dod_op, line_dash="dash", line_color="#3b82f6",
+                          annotation_text="DoD operativa")
+        fig_db2.update_layout(template="plotly_dark", height=300,
+                              title="Sensitività: costo di ciclaggio vs DoD operativa",
+                              xaxis_title="DoD operativa (%)", yaxis_title="€/MWh scaricato")
+        st.plotly_chart(fig_db2, use_container_width=True)
+        if not df_db.empty:
+            st.markdown("**Top 15 giorni per profitto netto (€/MW)**")
+            st.dataframe(df_db.nlargest(15, "Profitto €/MW").reset_index(drop=True),
+                         use_container_width=True, hide_index=True)
+            st.download_button(
+                "Esporta ciclaggio giornaliero (CSV)",
+                df_db.to_csv(index=False).encode("utf-8"),
+                file_name="degrado_batteria_ciclaggio_giornaliero.csv",
+                mime="text/csv",
+                help="Dettaglio giornaliero della strategia 1 ciclo/giorno.",
+                key="csv_degrado",
+            )
+        st.caption("Uso pratico: se il costo di ciclaggio supera gli spread che catturi, la batteria distrugge valore anche con spread lordi positivi — confronta il profitto netto qui con il tab Arbitraggio Batteria (dispatch ottimale) e usa la DoD operativa come leva: cicli piu' superficiali costano meno per MWh ma riducono l'energia per ciclo.")
 
 
 # Footer
