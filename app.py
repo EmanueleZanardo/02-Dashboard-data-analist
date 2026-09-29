@@ -1727,6 +1727,98 @@ def calcola_fuel_switching(prezzi, gas_eur_mwh, eff_gas_pct, coal_eur_mwh,
             "ore_itm_gas": itm_g, "ore_itm_coal": itm_c,
             "df_mesi": df_mesi, "df_ore": df_ore}
 
+def calcola_power_to_heat(prezzi, gas_eur_mwh_th, eff_caldaia_pct, cop,
+                          co2_eur_t, ef_gas_th=0.2):
+    """Power-to-heat: pompa di calore (COP) vs caldaia a gas (tab 'Power-to-heat').
+
+    Confronta il costo di 1 MWh termico prodotto con una caldaia a gas contro
+    quello prodotto con una pompa di calore elettrica alimentata a spot, per
+    decidere ora per ora quale vettore e' piu' economico (switching
+    elettrico-termico: teleriscaldamento, processi industriali, hybrid heating).
+
+    Metodo (tutto deterministico a parita' di input):
+    - costo_th_gas = gas/eff_caldaia + co2 x ef_gas_th (€/MWh termico;
+      efficienza clampata >= 1%, ef default 0.2 tCO2/MWh termico)
+    - spot_break_even = costo_th_gas x cop: sotto questo livello dello spot
+      (€/MWh elettrico) conviene la pompa di calore, sopra conviene il gas
+    - per ogni ora: costo_th_pdc = spot/cop; risparmio = max(0, costo_th_gas -
+      costo_th_pdc) in €/MWh termico; ore P2H = ore con spot <= break-even
+    - valore_p2h_eur_mwth = somma(risparmio): quanto avrebbe risparmiato 1 MW
+      termico di fabbisogno commutando solo nelle ore convenienti
+
+    NaN-safe: serie vuota -> ore 0 e DataFrame con colonne giuste; input non
+    validi (COP <= 0, NaN, Serie non oraria) -> valori neutrali senza eccezioni.
+
+    Ritorna dict con 'ore', 'costo_th_gas', 'spot_break_even', 'ore_p2h',
+    'share_p2h', 'valore_p2h_eur_mwth', 'risparmio_medio_ora', 'df_mesi',
+    'df_ore'.
+    """
+    cols_m = ["Mese", "Costo gas (€/MWh th)", "Spot break-even (€/MWh el)",
+              "Ore P2H", "Share ore P2H (%)", "Risparmio (€/MWth)"]
+    cols_h = ["Data e Ora", "Spot (€/MWh)",
+              "Costo termico PDC (€/MWh th)", "Risparmio (€/MWh th)"]
+    vuoto = {"ore": 0, "costo_th_gas": float("nan"),
+             "spot_break_even": float("nan"), "ore_p2h": 0, "share_p2h": 0.0,
+             "valore_p2h_eur_mwth": 0.0, "risparmio_medio_ora": 0.0,
+             "df_mesi": pd.DataFrame(columns=cols_m),
+             "df_ore": pd.DataFrame(columns=cols_h)}
+    try:
+        eff_b = max(1.0, float(eff_caldaia_pct)) / 100.0
+        cop_f = float(cop)
+        gas = float(gas_eur_mwh_th)
+        co2 = float(co2_eur_t)
+        ef = float(ef_gas_th)
+    except (TypeError, ValueError):
+        return dict(vuoto)
+    if any(np.isnan(x) for x in (gas, co2, ef, cop_f)) or cop_f <= 0:
+        return dict(vuoto)
+    cop_f = max(0.5, cop_f)
+    try:
+        p = prezzi.astype(float).dropna()
+    except (TypeError, ValueError, AttributeError):
+        return dict(vuoto)
+    n = len(p)
+    costo_th_gas = gas / eff_b + co2 * ef
+    be = costo_th_gas * cop_f
+    if n == 0:
+        out = dict(vuoto)
+        out.update({"costo_th_gas": float(costo_th_gas),
+                    "spot_break_even": float(be)})
+        return out
+    costo_pdc = p / cop_f
+    risp = np.maximum(0.0, costo_th_gas - costo_pdc.values)
+    ore_p2h = int((p.values <= be).sum())
+    valore = float(risp.sum())
+    share = ore_p2h / n if n else 0.0
+    df_ore = pd.DataFrame({
+        "Data e Ora": p.index.strftime("%d/%m/%Y %H:%M"),
+        "Spot (€/MWh)": np.round(p.values, 2),
+        "Costo termico PDC (€/MWh th)": np.round(costo_pdc.values, 2),
+        "Risparmio (€/MWh th)": np.round(risp, 2),
+    })
+    try:
+        mesi = p.index.to_period("M")
+        righe = []
+        for per, grp in p.groupby(mesi):
+            risp_g = np.maximum(0.0, costo_th_gas - (grp / cop_f).values)
+            op2h = int((grp.values <= be).sum())
+            righe.append({
+                "Mese": str(per),
+                "Costo gas (€/MWh th)": round(costo_th_gas, 2),
+                "Spot break-even (€/MWh el)": round(be, 1),
+                "Ore P2H": op2h,
+                "Share ore P2H (%)": round(op2h / len(grp) * 100, 1) if len(grp) else 0.0,
+                "Risparmio (€/MWth)": round(float(risp_g.sum()), 1),
+            })
+        df_mesi = pd.DataFrame(righe, columns=cols_m)
+    except (TypeError, ValueError, AttributeError):
+        df_mesi = pd.DataFrame(columns=cols_m)
+    return {"ore": int(n), "costo_th_gas": float(costo_th_gas),
+            "spot_break_even": float(be), "ore_p2h": ore_p2h,
+            "share_p2h": float(share), "valore_p2h_eur_mwth": valore,
+            "risparmio_medio_ora": valore / n if n else 0.0,
+            "df_mesi": df_mesi, "df_ore": df_ore}
+
 def calcola_shape_fattori(prezzi):
     """Fattori di shape stagionale dallo spot storico (per costruire curve forward 'shaped').
     Ritorna un dict:
@@ -9266,7 +9358,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -15252,7 +15344,89 @@ elif workspace == _('ws8'):
                 help="Scarica la serie oraria: spot, spark, dark e margini opzione con i parametri impostati.",
                 key="csv_fs_ore",
             )
-            st.caption("💡 Uso pratico: se l'EUA sta sopra lo switch, il mercato premia le coperture gas-power contro il carbone — e un nuovo CCGT ha piu' ore in-the-money di una centrale a carbone. La distanza dallo switch e' il segnale per la scommessa direzionale sul carbon price.")
+    with tab81:
+        titolo_p2h = edu("Power-to-heat (pompa di calore ↔ caldaia gas)", "Chi ha un fabbisogno di calore puo' commutare tra caldaia a gas e pompa di calore elettrica: sotto lo SPOT BREAK-EVEN (costo termico del gas x COP) conviene la pompa di calore, sopra conviene il gas. Il 'valore P2H' e' quanto avrebbe risparmiato 1 MW termico di fabbisogno commutando solo nelle ore convenienti: misura il premio della flessibilita' elettrico-termica (teleriscaldamento, processi industriali, hybrid heating) nel periodo. Il break-even e' la soglia da monitorare per i segnali di trading TTF/EUA/power.")
+        st.markdown(titolo_p2h, unsafe_allow_html=True)
+
+        p1, p2, p3 = st.columns(3)
+        with p1:
+            p2h_gas = st.number_input("Prezzo gas (€/MWh termico)", min_value=0.0, value=35.0, step=1.0, key="p2h_gas",
+                                      help="Prezzo del gas combustibile (TTF o PSV).")
+        with p2:
+            p2h_eff = st.number_input("Efficienza caldaia gas (%)", min_value=50.0, max_value=100.0, value=92.0, step=1.0, key="p2h_eff",
+                                      help="Rendimento termico della caldaia: una condensazione moderna sta intorno al 92-95%.")
+        with p3:
+            p2h_cop = st.number_input("COP pompa di calore", min_value=1.0, max_value=6.0, value=3.0, step=0.1, key="p2h_cop",
+                                      help="Coefficiente di prestazione stagionale: 2.5-3.5 per aria/acqua, 4+ per acqua-acqua.")
+        q1, q2 = st.columns(2)
+        with q1:
+            p2h_co2 = st.number_input("Prezzo CO2 (€/t)", min_value=0.0, value=70.0, step=1.0, key="p2h_co2",
+                                      help="Prezzo delle quote EUA (EU ETS), se la caldaia e' soggetta.")
+        with q2:
+            p2h_ef = st.number_input("Fattore emissivo gas (tCO2/MWh termico)", min_value=0.0, max_value=0.5, value=0.2, step=0.01, key="p2h_ef",
+                                      help="Default 0.2 per il gas naturale per MWh termico.")
+
+        res_p2h = calcola_power_to_heat(prezzi, p2h_gas, p2h_eff, p2h_cop, p2h_co2, p2h_ef)
+        if res_p2h["ore"] == 0:
+            st.warning("Seleziona un periodo con dati per calcolare il power-to-heat.")
+        else:
+            be_p2h = res_p2h["spot_break_even"]
+            k1, k2, k3, k4 = st.columns(4)
+            render_kpi("Costo termico gas (€/MWh th)", f"{res_p2h['costo_th_gas']:,.2f}", k1)
+            render_kpi("Spot break-even (€/MWh el)", f"{be_p2h:,.1f}", k2)
+            render_kpi("Ore P2H convenienti", f"{res_p2h['ore_p2h']:,} ({res_p2h['share_p2h']*100:,.1f}%)", k3)
+            render_kpi("Valore P2H (€/MWth)", f"{res_p2h['valore_p2h_eur_mwth']:,.0f}", k4)
+            k5, k6 = st.columns(2)
+            render_kpi("Risparmio medio per ora (€/MWh th)", f"{res_p2h['risparmio_medio_ora']:,.2f}", k5)
+            giudizio = "🟢 P2H conviene nella maggioranza delle ore" if res_p2h["share_p2h"] >= 0.5 else "🔴 il gas resta piu' economico nella maggioranza delle ore"
+            render_kpi("Giudizio periodo", giudizio, k6)
+            st.caption(f"💡 Lettura: con questi parametri la pompa di calore batte la caldaia quando lo spot scende sotto **{be_p2h:,.1f} €/MWh** (costo termico gas {res_p2h['costo_th_gas']:,.2f} €/MWh th x COP {p2h_cop:,.1f}).")
+
+            fig_p2h1 = go.Figure()
+            fig_p2h1.add_trace(go.Scatter(x=prezzi.index, y=prezzi.values, mode="lines",
+                                         name="Spot", line=dict(color="#9ca3af", width=1),
+                                         hovertemplate="Ora: %{x}<br>Spot: %{y:,.1f} €/MWh<extra></extra>"))
+            fig_p2h1.add_hline(y=be_p2h, line_dash="dash", line_color="#f59e0b",
+                               annotation_text=f"Break-even {be_p2h:,.1f}",
+                               annotation_position="top right")
+            fig_p2h1.update_layout(template="plotly_dark", height=380,
+                                   title="Spot vs break-even: le ore sotto la retta convengono alla pompa di calore",
+                                   xaxis_title="Data e Ora", yaxis_title="€/MWh")
+            st.plotly_chart(fig_p2h1, use_container_width=True)
+
+            df_p2hm = res_p2h["df_mesi"]
+            if len(df_p2hm):
+                fig_p2h2 = go.Figure()
+                fig_p2h2.add_trace(go.Bar(x=df_p2hm["Mese"], y=df_p2hm["Risparmio (€/MWth)"], name="Risparmio P2H",
+                                          marker_color="#f59e0b",
+                                          hovertemplate="%{x}<br>Risparmio: €%{y:,.0f}/MWth<extra></extra>"))
+                fig_p2h2.update_layout(template="plotly_dark", height=340,
+                                       title="Risparmio P2H mensile per MW termico (€/MWth)",
+                                       xaxis_title="Mese", yaxis_title="€/MWth")
+                st.plotly_chart(fig_p2h2, use_container_width=True)
+                st.markdown("**Dettaglio mensile**")
+                st.dataframe(df_p2hm, use_container_width=True, hide_index=True)
+                st.download_button(
+                    "⬇️ Esporta power-to-heat mensile (CSV)",
+                    df_p2hm.to_csv(index=False).encode("utf-8"),
+                    file_name=f"power_to_heat_mensile_{d0}_{d1}.csv",
+                    mime="text/csv",
+                    help="Scarica il dettaglio mensile: costo termico gas, break-even, ore e share P2H, risparmio.",
+                    key="csv_p2h_mesi",
+                )
+            df_p2hh = res_p2h["df_ore"]
+            st.markdown("**Top 10 ore per risparmio P2H**")
+            st.dataframe(df_p2hh.sort_values("Risparmio (€/MWh th)", ascending=False).head(10),
+                         use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta power-to-heat orario (CSV)",
+                df_p2hh.to_csv(index=False).encode("utf-8"),
+                file_name=f"power_to_heat_orario_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica la serie oraria: spot, costo termico della pompa di calore e risparmio con i parametri impostati.",
+                key="csv_p2h_ore",
+            )
+            st.caption("💡 Uso pratico: la distanza dello spot dal break-even e' il segnale operativo per commutare caldaia/pompa di calore (ibrido) o per dimensionare l'accumulo termico; un COP piu' alto o una CO2 piu' cara spostano il break-even verso l'alto e allargano le ore P2H.")
 
 
 # Footer
