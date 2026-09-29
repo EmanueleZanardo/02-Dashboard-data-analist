@@ -1617,6 +1617,62 @@ def calcola_spark_spread(prezzi, gas_eur_mwh, eff_pct, co2_eur_t, ef_tco2_mwh=0.
     }
     return ss, stats
 
+
+def calcola_dark_spread(prezzi, coal_eur_mwh, eff_pct, co2_eur_t, ef_tco2_mwh=0.9):
+    """Dark spread orario di una centrale a carbone contro lo spot elettrico.
+
+    prezzi: Series oraria in €/MWh (indice tz-aware). coal_eur_mwh: prezzo
+    carbone €/MWh termico (ARA). eff_pct: efficienza elettrica della centrale
+    (%). co2_eur_t: prezzo CO2 €/t. ef_tco2_mwh: fattore di emissione tCO2 per
+    MWh elettrico prodotto (default 0.9, centrale a carbone).
+    Dark spread = prezzo_elettrico - carbone/efficienza - co2*ef.
+    Positivo = la centrale gira in utile; negativo = meglio comprare sul mercato.
+    Ritorna (serie_oraria, stats, durata): serie in €/MWh sull'indice pulito;
+    stats e' un dict con medio, pct_ore_positive, best_ora, best_val,
+    worst_ora, worst_val, ore_totali, srmc; durata = serie valida ordinata
+    decrescente con indice resettato (curva di durata). NaN-safe: input non
+    validi -> serie vuote e stats neutre senza eccezioni."""
+    vuoto_stats = {"medio": float("nan"), "pct_ore_positive": 0.0,
+                   "best_ora": None, "best_val": float("nan"),
+                   "worst_ora": None, "worst_val": float("nan"),
+                   "ore_totali": 0, "srmc": float("nan")}
+    vuoto_serie = pd.Series(dtype=float, name="Dark spread (€/MWh)")
+    try:
+        px = pd.Series(prezzi).dropna()
+        eff = max(1.0, float(eff_pct)) / 100.0
+        coal = float(coal_eur_mwh)
+        co2 = float(co2_eur_t)
+        ef = float(ef_tco2_mwh)
+    except (TypeError, ValueError):
+        return vuoto_serie, vuoto_stats, vuoto_serie
+    if not all(np.isfinite(v) for v in (eff, coal, co2, ef)):
+        return vuoto_serie, vuoto_stats, vuoto_serie
+    if coal < 0 or co2 < 0 or ef < 0:
+        return vuoto_serie, vuoto_stats, vuoto_serie
+    srmc = coal / eff + co2 * ef
+    if px.empty:
+        vuoto_stats["srmc"] = float(srmc)
+        return vuoto_serie, vuoto_stats, vuoto_serie
+    v = px.values.astype(float)
+    ds = pd.Series(v - srmc, index=px.index, name="Dark spread (€/MWh)")
+    validi = ds.dropna()
+    vuoto_stats["srmc"] = float(srmc)
+    if not len(validi):
+        return ds, vuoto_stats, vuoto_serie
+    stats = {
+        "medio": float(validi.mean()),
+        "pct_ore_positive": float((validi > 0).mean() * 100),
+        "best_ora": validi.idxmax(),
+        "best_val": float(validi.max()),
+        "worst_ora": validi.idxmin(),
+        "worst_val": float(validi.min()),
+        "ore_totali": int(len(validi)),
+        "srmc": float(srmc),
+    }
+    durata = validi.sort_values(ascending=False).reset_index(drop=True)
+    return ds, stats, durata
+
+
 def calcola_fuel_switching(prezzi, gas_eur_mwh, eff_gas_pct, coal_eur_mwh,
                            eff_coal_pct, co2_eur_t, ef_gas=0.4, ef_coal=0.9):
     """Fuel switching gas <-> carbone (tab 'Fuel switching').
@@ -10252,7 +10308,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -17002,6 +17058,91 @@ elif workspace == _('ws8'):
                 key="csv_degrado",
             )
         st.caption("Uso pratico: se il costo di ciclaggio supera gli spread che catturi, la batteria distrugge valore anche con spread lordi positivi — confronta il profitto netto qui con il tab Arbitraggio Batteria (dispatch ottimale) e usa la DoD operativa come leva: cicli piu' superficiali costano meno per MWh ma riducono l'energia per ciclo.")
+
+
+    with tab90:
+        banner_demo("dark spread orario (margine lordo centrale a carbone) su prezzi reali o sintetici")
+        titolo_dks = edu("Dark spread (margine della centrale a carbone)", "Il DARK SPREAD e' il margine lordo di una centrale elettrica a carbone: prezzo dell'elettricita' MENO il costo del carbone (prezzo_carbone / efficienza) MENO il costo della CO2 (prezzo_CO2 x fattore di emissione, tipico 0.9 tCO2/MWh). Con l'EU ETS alto il dark spread e' spesso piu' basso dello spark spread: quando il dark spread va negativo le centrali a carbone escono dall'ordine di merito e conviene comprare sul mercato. E' la controparte 'sporca' dello spark spread e il termometro della transizione gas-vs-carbone.")
+        st.markdown(f"**{titolo_dks}**: margine orario di una centrale a carbone contro lo spot del periodo.", unsafe_allow_html=True)
+
+        dk1, dk2, dk3, dk4 = st.columns(4)
+        with dk1:
+            coal_p = st.number_input("Prezzo carbone (€/MWh termico)", min_value=0.0, value=12.0, step=0.5, key="dk_coal",
+                                     help="Prezzo del carbone combustibile (ARA).")
+        with dk2:
+            eff_c = st.number_input("Efficienza centrale (%)", min_value=10.0, max_value=50.0, value=38.0, step=1.0, key="dk_eff",
+                                    help="Efficienza elettrica: una centrale a carbone moderna sta intorno al 38-42%.")
+        with dk3:
+            co2_c = st.number_input("Prezzo CO2 (€/t)", min_value=0.0, value=70.0, step=1.0, key="dk_co2",
+                                    help="Prezzo delle quote EUA (EU ETS).")
+        with dk4:
+            ef_c = st.number_input("Fattore emissivo (tCO2/MWh el.)", min_value=0.0, max_value=1.5, value=0.9, step=0.05, key="dk_ef",
+                                   help="Default 0.9 per una centrale a carbone.")
+
+        ds, ds_stats, ds_dur = calcola_dark_spread(prezzi, coal_p, eff_c, co2_c, ef_c)
+        srmc_ds = ds_stats["srmc"]
+        st.caption(f"SRMC stimato della centrale: carbone {coal_p/max(1.0, eff_c)*100:,.1f} €/MWh + CO2 {co2_c*ef_c:,.1f} €/MWh = **{srmc_ds:,.1f} €/MWh** — le ore con spot sopra questo livello hanno dark spread positivo.")
+
+        k1, k2, k3, k4 = st.columns(4)
+        segno_ds = "🟢" if ds_stats["medio"] > 0 else ("🔴" if ds_stats["medio"] < 0 else "⚪")
+        medio_ds = f"{ds_stats['medio']:+,.2f}" if np.isfinite(ds_stats["medio"]) else "n.d."
+        render_kpi(f"{segno_ds} Dark spread medio (€/MWh)", medio_ds, k1)
+        render_kpi("Ore in utile (%)", f"{ds_stats['pct_ore_positive']:.1f} %", k2)
+        if ds_stats["best_ora"] is not None:
+            render_kpi("Miglior ora", f"{ds_stats['best_val']:+,.1f} €/MWh", k3)
+            render_kpi("Peggior ora", f"{ds_stats['worst_val']:+,.1f} €/MWh", k4)
+            st.caption(f"📅 Miglior ora: {ds_stats['best_ora'].strftime('%d/%m/%Y %H:%M')} — Peggior ora: {ds_stats['worst_ora'].strftime('%d/%m/%Y %H:%M')}.")
+
+        if not ds.dropna().empty:
+            fig_ds = go.Figure()
+            pos = ds[ds >= 0]
+            neg = ds[ds < 0]
+            fig_ds.add_trace(go.Bar(x=pos.index, y=pos.values, name="Spread ≥ 0",
+                                    marker_color="#78716c",
+                                    hovertemplate="Ora: %{x}<br>Spread: %{y:+,.1f} €/MWh<extra></extra>"))
+            fig_ds.add_trace(go.Bar(x=neg.index, y=neg.values, name="Spread < 0",
+                                    marker_color="#EF4444",
+                                    hovertemplate="Ora: %{x}<br>Spread: %{y:+,.1f} €/MWh<extra></extra>"))
+            fig_ds.add_hline(y=0, line_dash="dot", line_color="#9ca3af")
+            fig_ds.update_layout(template="plotly_dark", height=380, barmode="overlay",
+                                 title=f"Dark spread orario (medio {medio_ds} €/MWh)",
+                                 xaxis_title="Data e Ora", yaxis_title="Dark spread (€/MWh)")
+            st.plotly_chart(fig_ds, use_container_width=True)
+
+            fig_dd = go.Figure()
+            fig_dd.add_trace(go.Scatter(x=np.arange(1, len(ds_dur) + 1), y=ds_dur.values,
+                                        mode="lines", line=dict(color="#a8a29e"),
+                                        fill="tozeroy", fillcolor="rgba(168,162,158,0.25)",
+                                        name="Dark spread",
+                                        hovertemplate="Ora #%{x}<br>Spread: %{y:+,.1f} €/MWh<extra></extra>"))
+            fig_dd.add_hline(y=0, line_dash="dot", line_color="#9ca3af")
+            fig_dd.update_layout(template="plotly_dark", height=300,
+                                 title="Curva di durata del dark spread",
+                                 xaxis_title="Ore ordinate (decrescenti)", yaxis_title="Dark spread (€/MWh)")
+            st.plotly_chart(fig_dd, use_container_width=True)
+
+            mens_ds = pd.DataFrame({"Data": ds.index, "Dark spread": ds.values})
+            mens_ds["Mese"] = pd.to_datetime(mens_ds["Data"]).dt.to_period("M").astype(str)
+            tab_m = mens_ds.groupby("Mese").agg(Media=("Dark spread", "mean"),
+                                                Min=("Dark spread", "min"),
+                                                Max=("Dark spread", "max"),
+                                                Ore_ITM=("Dark spread", lambda s: int((s > 0).sum()))).reset_index()
+            tab_m[["Media", "Min", "Max"]] = tab_m[["Media", "Min", "Max"]].round(1)
+            st.markdown("**Statistiche mensili**")
+            st.dataframe(tab_m, use_container_width=True, hide_index=True)
+
+            df_ds = pd.DataFrame({"Data e Ora": ds.index.strftime("%d/%m/%Y %H:%M"),
+                                  "Prezzo spot (€/MWh)": np.round(prezzi.loc[ds.index].values.astype(float), 2),
+                                  "Dark spread (€/MWh)": np.round(ds.values, 2)})
+            st.download_button(
+                "⬇️ Esporta dark spread (CSV)",
+                df_ds.to_csv(index=False).encode("utf-8"),
+                file_name=f"dark_spread_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica la serie oraria: prezzo spot e dark spread con i parametri impostati.",
+                key="csv_dark",
+            )
+        st.caption("Uso pratico: dark spread > spark spread = il carbone e' piu' economico del gas nell'ordine di merito (confronta con il tab Spark spread); con EUA sopra il prezzo di switch del tab Fuel switching il dark spread collassa e le centrali a carbone escono dal mercato.")
 
 
 # Footer
