@@ -95,6 +95,20 @@ def edu(term, explanation):
         return f'<div class="edu-tooltip">{term}<span class="edu-tooltiptext"><b>💡 Lo Sapevi?</b><br><br>{explanation}</span></div>'
     return term
 
+
+def banner_demo(origine="dati sintetici"):
+    """Banner DEMO obbligatorio in testa a ogni workspace/tab con dati simulati.
+
+    La dashboard e' anche portfolio da energy analyst: i numeri finti non devono
+    mai sembrare reali. Origine descrive cosa e' sintetico (es. "serie oraria
+    Swissix sintetica (Mock)").
+    """
+    st.warning(
+        f"🧪 **DEMO \u2014 dati sintetici** ({origine}): i numeri mostrati sono "
+        "simulati a scopo dimostrativo e non rappresentano dati di mercato reali."
+    )
+
+
 # ==========================================
 # 3. AUTENTICAZIONE
 # ==========================================
@@ -2477,6 +2491,61 @@ def calcola_tolling(prezzi, capacita_mw, heat_rate, prezzo_gas_mwh_th,
             "break_even_fee": be_fee, "break_even_gas": be_gas,
             "df_mesi": df_mesi, "df_giorni": df_giorni, "df_ore": df_ore,
             "df_gas": df_gas, "df_hr": df_hr}
+
+
+PROFILI_CARICO_TIPO = {
+    "Industriale 3 turni": [0.85] * 24,
+    "Uffici (lun-ven 8-19)": [0.06, 0.05, 0.05, 0.05, 0.05, 0.06, 0.15, 0.35, 0.70, 0.95,
+                              1.00, 0.95, 0.80, 0.90, 1.00, 0.95, 0.85, 0.60, 0.30, 0.12,
+                              0.08, 0.07, 0.06, 0.06],
+    "GDO / Supermercato": [0.10, 0.10, 0.10, 0.10, 0.10, 0.12, 0.25, 0.45, 0.70, 0.90,
+                           1.00, 1.00, 0.95, 0.95, 1.00, 1.00, 0.95, 0.90, 0.75, 0.55,
+                           0.35, 0.20, 0.12, 0.10],
+}
+
+
+def profilo_carico_tipo(tipo, picco_mw):
+    """Profilo di carico orario tipo (24h) in MW — SINTETICO, solo didattico.
+
+    tipo: una chiave di PROFILI_CARICO_TIPO. picco_mw: potenza di picco (MW).
+    Ritorna Series indicizzata 0-23 con i MW orari. NaN-safe: parametri non
+    validi o picco <= 0 -> serie di zeri.
+    """
+    try:
+        picco = float(picco_mw)
+    except (TypeError, ValueError):
+        picco = 0.0
+    fattori = PROFILI_CARICO_TIPO.get(tipo, PROFILI_CARICO_TIPO["Industriale 3 turni"])
+    if not np.isfinite(picco) or picco <= 0:
+        return pd.Series([0.0] * 24, index=range(24), name="MW")
+    return pd.Series([round(picco * f, 4) for f in fattori], index=range(24), name="MW")
+
+
+def shock_scenario(prezzi, shock_pct, volume_mwh_anno):
+    """What-if deterministico: shock % uniforme applicato alla serie prezzi.
+
+    prezzi: Series oraria in euro/MWh. shock_pct: es. 25 = +25%. volume_mwh_anno:
+    volume annuo del portafoglio (MWh). Ritorna dict con prezzo_medio_base,
+    prezzo_medio_shock, costo_base, costo_shock, delta, shock_pct. NaN-safe:
+    serie vuota o parametri non validi -> zeri.
+    """
+    vuoto = {"prezzo_medio_base": 0.0, "prezzo_medio_shock": 0.0, "costo_base": 0.0,
+             "costo_shock": 0.0, "delta": 0.0, "shock_pct": 0.0}
+    try:
+        s = float(shock_pct)
+        vol = float(volume_mwh_anno)
+    except (TypeError, ValueError):
+        return vuoto
+    try:
+        base = float(pd.Series(prezzi).dropna().mean())
+    except Exception:
+        return vuoto
+    if not np.isfinite(base) or vol < 0:
+        return vuoto
+    p_shock = base * (1.0 + s / 100.0)
+    return {"prezzo_medio_base": base, "prezzo_medio_shock": p_shock,
+            "costo_base": base * vol, "costo_shock": p_shock * vol,
+            "delta": (p_shock - base) * vol, "shock_pct": s}
 
 
 def calcola_fermo_ottimale(margine_orario, mw, giorni_fermo):
@@ -9454,6 +9523,7 @@ def render_kpi(title, value, col):
 # ==========================================
 if workspace == _('ws1'):
     st.markdown(f"<h1>{_('ws1')}</h1>", unsafe_allow_html=True)
+    banner_demo("simulatore strategico: margini, centrali e curve simulate")
     st.info("📌 **Nota Operativa:** Il grafico calcola i margini operativi lordi. Attiva o disattiva le centrali per sovrapporre le rette di profittabilità e confrontare i costi marginali (Punto di Break-Even).")
 
     chart_container = st.container()
@@ -9750,6 +9820,7 @@ elif workspace == _('ws2'):
 elif workspace == _('ws3'):
     titolo_marl = edu("Multi-Agent Reinforcement Learning (MARL)", "Nel MARL, algoritmi (agenti) operano in un ambiente simulato, compiendo azioni (compra/vendi) e ricevendo una ricompensa (Profitto) o una penalità (Perdita). Col tempo, la rete neurale 'impara' le strategie ottimali senza programmazione esplicita.")
     st.markdown(f"<h1>🤖 {titolo_marl}</h1>", unsafe_allow_html=True)
+    banner_demo("ambiente simulato MARL: agenti, prezzi e ricompense sintetici")
     
     c1, c2, c3, c4 = st.columns(4)
     render_kpi("Stato Agente AI", "🟢 ACTIVE", c1)
@@ -9782,6 +9853,7 @@ elif workspace == _('ws3'):
 # ==========================================
 elif workspace == _('ws4'):
     st.markdown(f"<h1>{_('ws4')}</h1>", unsafe_allow_html=True)
+    banner_demo("climate & grid intel: scenari e dati climatici simulati")
     
     c1, c2, c3, c4 = st.columns(4)
     enso_html = edu("ENSO Index", "El Niño-Southern Oscillation. Fenomeno climatico nel Pacifico. I trader energetici lo osservano perché anomalie qui influenzano la rigidità degli inverni in Europa, e di conseguenza la domanda di gas e power.")
@@ -9826,6 +9898,7 @@ elif workspace == _('ws4'):
 # ==========================================
 elif workspace == _('ws5'):
     st.markdown(f"<h1>{_('ws5')}</h1>", unsafe_allow_html=True)
+    banner_demo("exotics & structuring: pricing di derivati su modelli simulati")
     
     c1, c2, c3 = st.columns(3)
     render_kpi(edu("SABR Alpha", "Parametro del modello SABR (Stochastic Alpha Beta Rho) che governa il livello iniziale della volatilità stocastica."), "0.354", c1)
@@ -9853,6 +9926,7 @@ elif workspace == _('ws5'):
 # ==========================================
 elif workspace == _('ws6'):
     st.markdown(f"<h1>{_('ws6')}</h1>", unsafe_allow_html=True)
+    banner_demo("enterprise risk & XVA: portafogli e scenari di rischio simulati")
     
     msg_error = edu("SIMM MARGIN Breach", "Standard Initial Margin Model: calcolo standard ISDA. Margin Breach significa che le perdite stimate superano la garanzia (collaterale) versata in borsa, innescando una chiamata a margine immediata.")
     st.markdown(f"<div style='background-color:rgba(255, 75, 75, 0.15); color:#ff4b4b; padding:1rem; border:1px solid #ff4b4b; border-radius:0.5rem; margin-bottom:1rem;'>🚨 **{msg_error} WARNING:** ICE Endex.</div>", unsafe_allow_html=True)
@@ -9885,6 +9959,7 @@ elif workspace == _('ws6'):
 # ==========================================
 elif workspace == _('ws7'):
     st.markdown("<h1>📈 Framework STAR & Metriche di Performance (Quant Trading)</h1>", unsafe_allow_html=True)
+    banner_demo("metriche quant su serie simulate a scopo didattico")
     st.markdown("<p style='color: #9CA3AF;'>Approccio strutturato per la valorizzazione delle competenze tecniche e quantitative in ambito Energy Trading (es. DXT Commodities).</p>", unsafe_allow_html=True)
     st.markdown("---")
     
@@ -9962,6 +10037,11 @@ elif workspace == _('ws8'):
     if d0 > d1:
         st.error("La data di inizio deve precedere la data di fine.")
         st.stop()
+
+    if sorgente.startswith("🧪"):
+        banner_demo("serie oraria Swissix sintetica (Mock): profilo giornaliero + stagionalita', non prezzi reali")
+    else:
+        st.success("🌐 Dati reali: prezzi day-ahead CH dalla Transparency Platform ENTSO-E.")
 
     st.subheader("🏭 Impianti / Siti")
     assets_sel = st.multiselect(
@@ -10081,7 +10161,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -16690,6 +16770,80 @@ elif workspace == _('ws8'):
                     key="csv_fo_giorni",
                 )
             st.caption("Uso pratico: la finestra ottimale e' dove programmare la manutenzione (tipicamente shoulder season con spark bassi); il 'margine preservato' quantifica il valore della buona pianificazione e giustifica spostare il fermo anche pagando penali ai manutentori; se il margine perso ottimale e' vicino a zero, il fermo e' quasi gratis — segnale per anticipare manutenzioni straordinarie.")
+
+    with tab87:
+        banner_demo("profilo di carico sintetico: curve tipo didattiche, non misure reali")
+        titolo_pc = edu("Profilo di carico tipo", "Il PROFILO DI CARICO dice quanta potenza (MW) un'utenza assorbe in ciascuna ora del giorno. Da qui si ricavano energia giornaliera (MWh), fattore di carico (potenza media / picco: piu' e' alto, meglio si usa la potenza contrattuale) e il costo stimato valorizzando ogni ora al prezzo medio osservato per quell'ora. Utile per dimensionare forniture e confrontare tipologie di utenza.")
+        st.markdown(f"<h1>📊 {titolo_pc}</h1>", unsafe_allow_html=True)
+        pc1, pc2 = st.columns(2)
+        with pc1:
+            pc_tipo = st.selectbox("Tipo di utenza", list(PROFILI_CARICO_TIPO.keys()), key="pc_tipo",
+                                   help="Curva tipo sintetica a scopo didattico.")
+        with pc2:
+            pc_picco = st.number_input("Picco di potenza (MW)", min_value=0.1, value=5.0, step=0.5, key="pc_picco",
+                                       help="Potenza massima assorbita dall'utenza.")
+        prof = profilo_carico_tipo(pc_tipo, pc_picco)
+        energia_gg = float(prof.sum())
+        fattore_carico = float(prof.mean() / prof.max() * 100) if prof.max() > 0 else 0.0
+        try:
+            px = pd.Series(prezzi).dropna()
+            px_ora = px.groupby(px.index.hour).mean()
+            px_h = px_ora.reindex(range(24)).fillna(px_ora.mean()).to_numpy()
+            costo_gg = float((prof.to_numpy() * px_h).sum())
+        except Exception:
+            costo_gg = 0.0
+        k1, k2, k3 = st.columns(3)
+        render_kpi("Energia giornaliera", f"{energia_gg:,.1f} MWh", k1)
+        render_kpi("Fattore di carico", f"{fattore_carico:.1f} %", k2)
+        render_kpi("Costo giornaliero stimato", f"EUR {costo_gg:,.0f}", k3)
+        fig_pc = go.Figure()
+        fig_pc.add_trace(go.Bar(x=[f"{h:02d}:00" for h in range(24)], y=prof.values,
+                                marker_color="#3b82f6", name="MW",
+                                hovertemplate="Ora %{x}<br>Potenza: %{y:.2f} MW<extra></extra>"))
+        fig_pc.update_layout(template="plotly_dark", height=340,
+                             title="Profilo di carico orario tipo (MW) \u2014 sintetico",
+                             xaxis_title="Ora del giorno", yaxis_title="MW")
+        st.plotly_chart(fig_pc, use_container_width=True)
+        st.caption("Uso pratico: un fattore di carico basso (uffici ~35-40%) significa che paghi potenza che usi poche ore \u2014 leva per contratti con potenza modulata o spostamento dei carichi; il costo e' valorizzato ai prezzi medi orari del periodo selezionato (Mock o ENTSO-E live a seconda della sorgente).")
+
+    with tab88:
+        banner_demo("what-if deterministico: shock uniforme applicato ai prezzi, non una previsione")
+        titolo_ss = edu("Shock di scenario", "Uno SHOCK DI SCENARIO applica una variazione percentuale uniforme (es. +25%) a tutta la serie dei prezzi e ricalcola il costo annuo del portafoglio. E' un what-if deterministico \u2014 non una previsione \u2014 utile per stressare il budget: 'se i prezzi salissero del 25%, quanto costerebbe in piu' all'anno?'.")
+        st.markdown(f"<h1>🧪 {titolo_ss}</h1>", unsafe_allow_html=True)
+        ss1, ss2 = st.columns(2)
+        with ss1:
+            ss_shock = st.slider("Shock prezzo (%)", min_value=-50.0, max_value=200.0, value=25.0, step=5.0,
+                                 key="ss_shock", help="Variazione uniforme applicata a ogni ora della serie.")
+        with ss2:
+            ss_vol = st.number_input("Volume annuo (MWh)", min_value=0.0, value=50000.0, step=1000.0, key="ss_vol",
+                                     help="Energia annua del portafoglio a prezzo variabile.")
+        res_ss = shock_scenario(prezzi, ss_shock, ss_vol)
+        k1, k2, k3, k4 = st.columns(4)
+        render_kpi("Prezzo medio base", f"€ {res_ss['prezzo_medio_base']:.2f}/MWh", k1)
+        render_kpi("Prezzo medio shock", f"€ {res_ss['prezzo_medio_shock']:.2f}/MWh", k2)
+        render_kpi("Costo annuo base", f"EUR {res_ss['costo_base']:,.0f}", k3)
+        render_kpi("Delta annuo", f"{'+' if res_ss['delta'] >= 0 else ''}EUR {res_ss['delta']:,.0f}", k4)
+        fig_ss = go.Figure()
+        fig_ss.add_trace(go.Bar(x=["Costo base", f"Costo shock ({ss_shock:+.0f}%)"],
+                                y=[res_ss["costo_base"], res_ss["costo_shock"]],
+                                marker_color=["#3b82f6", "#ef4444" if res_ss["delta"] >= 0 else "#22c55e"],
+                                hovertemplate="%{x}<br>EUR %{y:,.0f}<extra></extra>"))
+        fig_ss.update_layout(template="plotly_dark", height=320,
+                             title="Costo annuo portafoglio: base vs scenario",
+                             xaxis_title="", yaxis_title="EUR/anno")
+        st.plotly_chart(fig_ss, use_container_width=True)
+        st.download_button(
+            "Esporta scenario (CSV)",
+            pd.DataFrame([{"shock_pct": res_ss["shock_pct"], "prezzo_medio_base": res_ss["prezzo_medio_base"],
+                           "prezzo_medio_shock": res_ss["prezzo_medio_shock"], "volume_mwh": ss_vol,
+                           "costo_base_eur": res_ss["costo_base"], "costo_shock_eur": res_ss["costo_shock"],
+                           "delta_eur": res_ss["delta"]}]).to_csv(index=False).encode("utf-8"),
+            file_name=f"shock_scenario_{ss_shock:+.0f}pct.csv",
+            mime="text/csv",
+            help="Riepilogo dello scenario in CSV.",
+            key="csv_shock",
+        )
+        st.caption("Uso pratico: fissa la soglia di budget oltre la quale scatta la copertura (hedge) e verifica con che shock il budget va in rosso; lo shock e' uniforme per semplicita' \u2014 per shock differenziati per fascia usa il tab Stress test.")
 
 
 # Footer
