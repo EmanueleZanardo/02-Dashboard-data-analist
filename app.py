@@ -7887,6 +7887,135 @@ def calcola_take_or_pay(prezzi, mw_f1, mw_f2, mw_f3, prezzo_fisso,
             "df_ore": df_ore, "df_mesi": df_mesi, "df_sweep": df_sweep}
 
 
+def _irr_sizing(netto_annuo, capex, anni, degrado, tol=1e-6):
+    """Tasso interno di rendimento: risolve NPV(r) = 0 con ricavi netti in degrado
+    geometrico annuo. Ritorna la percentuale arrotondata, None se non converge."""
+    if netto_annuo is None or capex is None or netto_annuo <= 0 or capex <= 0 or anni <= 0:
+        return None
+
+    def npv_r(r):
+        if r <= -1.0:
+            return float("inf")
+        q = (1.0 - degrado) / (1.0 + r)
+        f = float(anni) if abs(1.0 - q) < 1e-12 else q * (1.0 - q ** anni) / (1.0 - q)
+        return netto_annuo * f - capex
+
+    lo, hi = -0.999, 10.0
+    if npv_r(lo) < 0 or npv_r(hi) > 0:
+        return None
+    for _ in range(100):
+        mid = 0.5 * (lo + hi)
+        if npv_r(mid) > 0:
+            lo = mid
+        else:
+            hi = mid
+        if hi - lo < tol:
+            break
+    return round(0.5 * (lo + hi) * 100.0, 1)
+
+
+def calcola_sizing_batteria(prezzi, eff=0.85, cap_max=20.0, pot_max=10.0,
+                            step=2.0, ore_finestra=2.0, cicli_giorno=1,
+                            capex_kwh=250.0, capex_kw=150.0, opex_pct=0.02,
+                            anni=15, tasso=0.06, degrado_annuo=0.02,
+                            budget_max=1_500_000.0, payback_target=8.0):
+    """Sizing batteria per arbitraggio: sweep su griglia capacita' (MWh) x potenza (MW).
+
+    Strategia: cicli_giorno cicli/giorno, carica all'ora piu' economica e scarica a quella
+    piu' cara di ogni giorno; spread netto = max(0, p_max - p_min / eff), energia per
+    ciclo = min(cap, pot * ore_finestra) (la potenza limita quanto riesci a muovere
+    nella finestra di prezzo). Spread annualizzato sul periodo disponibile.
+    Economia: CAPEX = cap*capex_kwh + pot*capex_kw, OPEX annuo = CAPEX*opex_pct,
+    ricavi netti in degrado geometrico, NPV con tasso di sconto, PI = NPV/CAPEX.
+    Ottimo = max NPV entro budget_max; target = min CAPEX con payback <= payback_target.
+    Ritorna dict con ok, df_grid, matrici per heatmap, ottimo, target_payback."""
+    try:
+        p = pd.Series(prezzi).astype(float).dropna()
+    except Exception:
+        return {"ok": False, "errore": "prezzi non validi"}
+    if not isinstance(p.index, pd.DatetimeIndex):
+        return {"ok": False, "errore": "indice temporale non valido"}
+    if len(p) < 24 or not (0 < eff <= 1) or step <= 0 or cap_max <= 0 or pot_max <= 0:
+        return {"ok": False, "errore": "parametri non validi o dati insufficienti"}
+    if anni <= 0 or not (0 <= degrado_annuo < 1):
+        return {"ok": False, "errore": "parametri non validi o dati insufficienti"}
+    try:
+        giorni = p.index.normalize()
+    except Exception:
+        return {"ok": False, "errore": "indice temporale non valido"}
+    dmin = p.groupby(giorni).min()
+    dmax = p.groupby(giorni).max()
+    spread = (dmax - dmin / eff).clip(lower=0.0)
+    n_giorni = int(len(spread))
+    if n_giorni == 0:
+        return {"ok": False, "errore": "nessun giorno completo"}
+    spread_annuo = float(spread.sum()) * (365.25 / n_giorni)
+
+    caps = np.arange(step, cap_max + step * 0.5, step)
+    pots = np.arange(step, pot_max + step * 0.5, step)
+    if len(caps) == 0 or len(pots) == 0:
+        return {"ok": False, "errore": "parametri non validi o dati insufficienti"}
+    energia = np.minimum(caps[:, None], pots[None, :] * ore_finestra) * max(1, int(cicli_giorno))
+    ricavo = spread_annuo * energia
+    capex = caps[:, None] * 1000.0 * capex_kwh + pots[None, :] * 1000.0 * capex_kw
+    opex = capex * opex_pct
+    netto = ricavo - opex
+    with np.errstate(divide="ignore", invalid="ignore"):
+        payback = np.where(netto > 0, capex / netto, np.inf)
+    q = (1.0 - degrado_annuo) / (1.0 + tasso)
+    fattore = float(anni) if abs(1.0 - q) < 1e-12 else q * (1.0 - q ** anni) / (1.0 - q)
+    npv = netto * fattore - capex
+    with np.errstate(divide="ignore", invalid="ignore"):
+        pi = np.where(capex > 0, npv / capex, 0.0)
+
+    righe = []
+    for i, c in enumerate(caps):
+        for j, pw in enumerate(pots):
+            righe.append({
+                "Capacità (MWh)": round(float(c), 2),
+                "Potenza (MW)": round(float(pw), 2),
+                "Energia ciclo (MWh)": round(float(energia[i, j]), 2),
+                "Ricavo annuo (€)": round(float(ricavo[i, j]), 0),
+                "CAPEX (€)": round(float(capex[i, j]), 0),
+                "OPEX annuo (€)": round(float(opex[i, j]), 0),
+                "Payback (anni)": round(float(payback[i, j]), 1) if np.isfinite(payback[i, j]) else None,
+                "NPV (€)": round(float(npv[i, j]), 0),
+                "PI": round(float(pi[i, j]), 2),
+            })
+    df = pd.DataFrame(righe)
+
+    def _riga(i, j):
+        netto_ij = float(netto[i, j])
+        return {"cap_mwh": float(caps[i]), "pot_mw": float(pots[j]),
+                "energia_ciclo": float(energia[i, j]),
+                "ricavo_annuo": float(ricavo[i, j]), "capex": float(capex[i, j]),
+                "opex_annuo": float(opex[i, j]), "netto_annuo": netto_ij,
+                "payback": float(payback[i, j]),
+                "npv": float(npv[i, j]), "pi": float(pi[i, j]),
+                "irr": _irr_sizing(netto_ij, float(capex[i, j]), anni, degrado_annuo)}
+
+    cand = np.ones_like(capex, dtype=bool)
+    if budget_max is not None and budget_max > 0:
+        cand = capex <= budget_max
+    ottimo = None
+    if cand.any():
+        ii, jj = np.unravel_index(np.argmax(np.where(cand, npv, -np.inf)), npv.shape)
+        ottimo = _riga(ii, jj)
+        ottimo["budget_vincolante"] = bool(budget_max is not None and budget_max > 0
+                                           and ottimo["capex"] >= 0.999 * budget_max)
+    target = None
+    okp = np.isfinite(payback) & (payback <= payback_target)
+    if okp.any():
+        ii, jj = np.unravel_index(np.argmin(np.where(okp, capex, np.inf)), capex.shape)
+        target = _riga(ii, jj)
+
+    return {"ok": True, "n_giorni": n_giorni, "spread_annuo": round(spread_annuo, 2),
+            "fattore_att": round(fattore, 4),
+            "df_grid": df, "mat_payback": payback, "mat_npv": npv, "mat_pi": pi,
+            "caps": caps.tolist(), "pots": pots.tolist(),
+            "ottimo": ottimo, "target_payback": target}
+
+
 def render_kpi(title, value, col):
     col.markdown(f"<div class='metric-container'><div class='metric-label'>{title}</div><div class='metric-val'>{value}</div></div>", unsafe_allow_html=True)
 
@@ -8522,7 +8651,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -13840,6 +13969,154 @@ elif workspace == _('ws8'):
                     key="csv_tp_ore",
                 )
             st.caption("💡 Il divario tra la curva verde e la diagonale tratteggiata e' il 'costo della rigidita'': con tolleranza 0 e volume 'profilo' il contratto e' un fisso puro (curva = diagonale). Se le ore rosse si concentrano di notte o nel weekend, il volume contrattato e' troppo alto per il tuo profilo reale: contratta una banda piu' larga o un volume piatto piu' basso.")
+
+
+    with tab76:
+        titolo_sz = edu("Sizing batteria (dimensionamento ottimale)", "Il tab Arbitraggio batteria stima il ricavo di UNA taglia fissata da te; qui la domanda e' inversa: QUALE taglia comprare. Il ricavo di ogni combinazione capacita' x potenza viene da spread giornaliero netto (max - min/efficienza, solo se positivo) annualizzato; l'energia per ciclo e' min(capacita', potenza x ore finestra) perche' la potenza limita quanto riesci a muovere nella finestra di prezzo. CAPEX = capacita' x €/kWh + potenza x €/kW, OPEX annuo in % del CAPEX, ricavi netti in degrado geometrico annuo, NPV al tasso di sconto. L'ottimo e' il max NPV entro il tuo budget: senza vincolo di budget la scala ottimale e' illimitata (economia lineare), quindi il budget e' il vero decisore.")
+        st.markdown(titolo_sz, unsafe_allow_html=True)
+
+        sz1, sz2, sz3, sz4 = st.columns(4)
+        with sz1:
+            sz_eff = st.number_input("Efficienza round-trip (%)", min_value=50.0, max_value=100.0, value=85.0, step=1.0, key="sz_eff",
+                                     help="Perdite di conversione: per scaricare 1 MWh devi averne caricati 1/efficienza.") / 100.0
+        with sz2:
+            sz_cicli = st.number_input("Cicli al giorno", min_value=1, max_value=4, value=1, step=1, key="sz_cicli",
+                                       help="Quanti cicli completi carica/scarica al giorno (spread multipli intraday).")
+        with sz3:
+            sz_fin = st.number_input("Ore finestra di prezzo", min_value=0.5, max_value=8.0, value=2.0, step=0.5, key="sz_fin",
+                                     help="Ore disponibili per caricare+scaricare: limita l'energia per ciclo a potenza x ore.")
+        with sz4:
+            sz_step = st.number_input("Passo griglia (MW/MWh)", min_value=0.5, max_value=5.0, value=2.0, step=0.5, key="sz_step",
+                                      help="Risoluzione della sweep: valori piu' fini = piu' combinazioni da calcolare.")
+        sz5, sz6, sz7, sz8 = st.columns(4)
+        with sz5:
+            sz_capmax = st.number_input("Capacità max (MWh)", min_value=1.0, value=20.0, step=2.0, key="sz_capmax")
+        with sz6:
+            sz_potmax = st.number_input("Potenza max (MW)", min_value=0.5, value=10.0, step=1.0, key="sz_potmax")
+        with sz7:
+            sz_ckwh = st.number_input("CAPEX energia (€/kWh)", min_value=0.0, value=250.0, step=10.0, key="sz_ckwh",
+                                      help="Costo per kWh di capacita' installata (celle + BMS + installazione).")
+        with sz8:
+            sz_ckw = st.number_input("CAPEX potenza (€/kW)", min_value=0.0, value=150.0, step=10.0, key="sz_ckw",
+                                     help="Costo per kW di potenza (inverter/PCS + connessione).")
+        sz9, sz10, sz11, sz12 = st.columns(4)
+        with sz9:
+            sz_opex = st.number_input("OPEX (% CAPEX/anno)", min_value=0.0, max_value=10.0, value=2.0, step=0.5, key="sz_opex") / 100.0
+        with sz10:
+            sz_anni = st.number_input("Orizzonte (anni)", min_value=1, max_value=30, value=15, step=1, key="sz_anni")
+        with sz11:
+            sz_tasso = st.number_input("Tasso sconto (%)", min_value=0.0, max_value=20.0, value=6.0, step=0.5, key="sz_tasso") / 100.0
+        with sz12:
+            sz_degr = st.number_input("Degrado ricavi (%/anno)", min_value=0.0, max_value=10.0, value=2.0, step=0.5, key="sz_degr",
+                                      help="Perdita annua di capacita'/ricavo per invecchiamento celle.") / 100.0
+        sz13, sz14 = st.columns(2)
+        with sz13:
+            sz_budget = st.number_input("Budget max CAPEX (€)", min_value=0.0, value=1_500_000.0, step=100_000.0, key="sz_budget",
+                                        help="Vincolo di spesa: l'ottimo e' il max NPV con CAPEX entro questo budget. 0 = nessun vincolo.")
+        with sz14:
+            sz_pb_t = st.number_input("Payback target (anni)", min_value=1.0, max_value=20.0, value=8.0, step=0.5, key="sz_pb_t",
+                                      help="Trova la taglia piu' piccola che rientra entro questo payback.")
+
+        res_sz = calcola_sizing_batteria(prezzi, eff=sz_eff, cap_max=sz_capmax, pot_max=sz_potmax,
+                                         step=sz_step, ore_finestra=sz_fin, cicli_giorno=sz_cicli,
+                                         capex_kwh=sz_ckwh, capex_kw=sz_ckw, opex_pct=sz_opex,
+                                         anni=int(sz_anni), tasso=sz_tasso, degrado_annuo=sz_degr,
+                                         budget_max=sz_budget if sz_budget > 0 else None,
+                                         payback_target=sz_pb_t)
+        if not res_sz["ok"]:
+            st.warning(f"Dati insufficienti per il sizing ({res_sz.get('errore', '?')}): servono almeno 24 ore di prezzi.")
+        else:
+            ott = res_sz["ottimo"]
+            st.caption(f"📊 Spread netto medio catturabile: {res_sz['spread_annuo']:,.0f} €/MWh/anno su {res_sz['n_giorni']} giorni "
+                       f"(max-min giornaliero meno perdite di efficienza, annualizzato).")
+            if ott is None:
+                st.warning("Nessuna combinazione rientra nel budget: alza il budget o abbassa il CAPEX unitario.")
+            else:
+                k1, k2, k3, k4 = st.columns(4)
+                render_kpi("Taglia ottimale (max NPV)", f"{ott['cap_mwh']:.0f} MWh × {ott['pot_mw']:.0f} MW", k1)
+                render_kpi("CAPEX ottimo (€)", f"{ott['capex']:,.0f}", k2)
+                render_kpi("Ricavo netto/anno (€)", f"{ott['netto_annuo']:,.0f}", k3)
+                pb_txt = f"{ott['payback']:.1f} anni" if np.isfinite(ott['payback']) else "mai"
+                render_kpi("Payback", pb_txt, k4)
+                k5, k6, k7, k8 = st.columns(4)
+                render_kpi("NPV (€)", f"{ott['npv']:,.0f}", k5)
+                render_kpi("IRR (%)", f"{ott['irr']:.1f}" if ott['irr'] is not None else "n.d.", k6)
+                render_kpi("Indice di redditività (PI)", f"{ott['pi']:.2f}", k7)
+                render_kpi("Energia per ciclo (MWh)", f"{ott['energia_ciclo']:.1f}", k8)
+                if ott.get("budget_vincolante"):
+                    st.info("💡 Il budget è vincolante: l'ottimo tocca il tetto di spesa — con più budget il NPV crescerebbe ancora "
+                            "(economia lineare: ogni € in più rende PI costante).")
+                tgt = res_sz["target_payback"]
+                if tgt is not None:
+                    st.success(f"🎯 Taglia minima con payback ≤ {sz_pb_t:.0f} anni: {tgt['cap_mwh']:.0f} MWh × {tgt['pot_mw']:.0f} MW "
+                               f"— CAPEX {tgt['capex']:,.0f} €, payback {tgt['payback']:.1f} anni, NPV {tgt['npv']:,.0f} €.")
+                else:
+                    st.warning(f"Nessuna combinazione centra il payback target di {sz_pb_t:.0f} anni con questi spread/CAPEX.")
+
+            caps_l, pots_l = res_sz["caps"], res_sz["pots"]
+            mat_pb = np.array(res_sz["mat_payback"], dtype=float)
+            mat_pb_plot = np.where(np.isfinite(mat_pb), np.minimum(mat_pb, 30.0), np.nan)
+            fig_sz1 = go.Figure(data=go.Heatmap(
+                z=mat_pb_plot, x=[f"{p:.0f}" for p in pots_l], y=[f"{c:.0f}" for c in caps_l],
+                colorscale="RdYlGn_r", zmin=0, zmax=15, colorbar=dict(title="anni"),
+                hovertemplate="Pot %{x} MW × Cap %{y} MWh<br>Payback: %{z:.1f} anni<extra></extra>"))
+            if ott is not None:
+                fig_sz1.add_trace(go.Scatter(x=[f"{ott['pot_mw']:.0f}"], y=[f"{ott['cap_mwh']:.0f}"],
+                                             mode="markers", marker=dict(symbol="star", size=16, color="white",
+                                                                         line=dict(width=2, color="black")),
+                                             name="Ottimo NPV"))
+            fig_sz1.update_layout(template="plotly_dark", height=420,
+                                  title="Payback (anni) per combinazione — stella = ottimo NPV",
+                                  xaxis_title="Potenza (MW)", yaxis_title="Capacità (MWh)")
+            st.plotly_chart(fig_sz1, use_container_width=True)
+
+            fig_sz2 = go.Figure(data=go.Heatmap(
+                z=np.array(res_sz["mat_npv"]), x=[f"{p:.0f}" for p in pots_l], y=[f"{c:.0f}" for c in caps_l],
+                colorscale="RdYlGn", zmid=0, colorbar=dict(title="€"),
+                hovertemplate="Pot %{x} MW × Cap %{y} MWh<br>NPV: %{z:,.0f} €<extra></extra>"))
+            if ott is not None:
+                fig_sz2.add_trace(go.Scatter(x=[f"{ott['pot_mw']:.0f}"], y=[f"{ott['cap_mwh']:.0f}"],
+                                             mode="markers", marker=dict(symbol="star", size=16, color="white",
+                                                                         line=dict(width=2, color="black")),
+                                             name="Ottimo NPV"))
+            fig_sz2.update_layout(template="plotly_dark", height=420,
+                                  title="NPV (€) per combinazione — la diagonale efficiente è cap ≈ pot × ore finestra",
+                                  xaxis_title="Potenza (MW)", yaxis_title="Capacità (MWh)")
+            st.plotly_chart(fig_sz2, use_container_width=True)
+
+            if ott is not None:
+                df_g = res_sz["df_grid"]
+                df_pot = df_g[df_g["Potenza (MW)"] == round(ott["pot_mw"], 2)].sort_values("Capacità (MWh)")
+                kink = ott["pot_mw"] * sz_fin
+                fig_sz3 = go.Figure()
+                fig_sz3.add_trace(go.Scatter(x=df_pot["Capacità (MWh)"], y=df_pot["Ricavo annuo (€)"],
+                                             mode="lines+markers", name="Ricavo annuo lordo (€)",
+                                             hovertemplate="Cap %{x:.0f} MWh → %{y:,.0f} €/anno<extra></extra>"))
+                fig_sz3.add_trace(go.Scatter(x=df_pot["Capacità (MWh)"], y=df_pot["NPV (€)"],
+                                             mode="lines+markers", name="NPV (€)", yaxis="y2",
+                                             hovertemplate="Cap %{x:.0f} MWh → NPV %{y:,.0f} €<extra></extra>"))
+                fig_sz3.add_vline(x=kink, line_dash="dash", line_color="#f59e0b",
+                                  annotation_text=f"ginocchio: pot×ore = {kink:.0f} MWh")
+                fig_sz3.update_layout(template="plotly_dark", height=380,
+                                      title=f"Rendimenti marginali a potenza fissa ({ott['pot_mw']:.0f} MW): oltre il ginocchio la capacità extra non si cicla",
+                                      xaxis_title="Capacità (MWh)", yaxis_title="Ricavo annuo (€)",
+                                      yaxis2=dict(title="NPV (€)", overlaying="y", side="right"))
+                st.plotly_chart(fig_sz3, use_container_width=True)
+
+            st.markdown("**Top 10 combinazioni per NPV**")
+            df_top = res_sz["df_grid"].sort_values("NPV (€)", ascending=False).head(10)
+            st.dataframe(df_top, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta griglia sizing (CSV)",
+                res_sz["df_grid"].to_csv(index=False).encode("utf-8"),
+                file_name=f"sizing_batteria_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica tutte le combinazioni capacità×potenza con ricavo, CAPEX, payback, NPV e PI.",
+                key="csv_sz_grid",
+            )
+            st.caption("💡 Regola pratica: resta sulla diagonale efficiente capacità ≈ potenza × ore finestra — la capacità oltre il ginocchio "
+                       "non viene mai ciclata (ricavo piatto, CAPEX in più). Confronta il ricavo netto/anno con il tab 🔋 Arbitraggio Batteria "
+                       "per la taglia scelta e usa il tab 💰 Costo fornitura per valutare la batteria contro il picco di potenza.")
 
 
 # Footer
