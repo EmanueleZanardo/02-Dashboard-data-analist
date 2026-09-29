@@ -1603,6 +1603,130 @@ def calcola_spark_spread(prezzi, gas_eur_mwh, eff_pct, co2_eur_t, ef_tco2_mwh=0.
     }
     return ss, stats
 
+def calcola_fuel_switching(prezzi, gas_eur_mwh, eff_gas_pct, coal_eur_mwh,
+                           eff_coal_pct, co2_eur_t, ef_gas=0.4, ef_coal=0.9):
+    """Fuel switching gas <-> carbone (tab 'Fuel switching').
+
+    Confronta il costo marginale (SRMC = fuel/efficienza + CO2 x fattore di
+    emissione) di una centrale a gas (CCGT) e di una a carbone contro lo spot
+    elettrico, e calcola il prezzo di switch della CO2: il livello delle quote
+    EUA oltre il quale il gas diventa piu' economico del carbone nell'ordine
+    di merito (segnale di trading TTF/ARA/EUA).
+
+    Metodo (tutto deterministico a parita' di input):
+    - srmc_gas = gas/eff_gas + co2 x ef_gas;
+      srmc_coal = coal/eff_coal + co2 x ef_coal (efficienze clampate >= 1%)
+    - prezzo di switch: gas/eff_g + s x ef_gas = coal/eff_c + s x ef_coal ->
+      s = (gas/eff_g - coal/eff_c) / (ef_coal - ef_gas); None se i fattori di
+      emissione coincidono (divisione per zero) o gli input non sono validi
+    - per ogni ora: spark = spot - srmc_gas; dark = spot - srmc_coal;
+      valore opzione = somma(max(0, spark/dark)) in €/MW sul periodo
+      (centrale flessibile che gira solo quando in-the-money);
+      ore ITM = ore con spark/dark > 0
+    - 'migliore': 'gas' se opt_gas > opt_coal, 'carbone' se minore, 'pari'
+    - distanza = co2 - switch (positiva = EUA sopra lo switch -> gas piu'
+      economico del carbone nell'ordine di merito)
+    - df_mesi: per mese Mese, Opzione gas (€/MW), Opzione carbone (€/MW),
+      Ore ITM gas, Ore ITM carbone, Delta opzione (€/MW, gas - carbone)
+    - df_ore: Data e Ora, Spot (€/MWh), Spark (€/MWh), Dark (€/MWh),
+      Opzione gas (€/MWh), Opzione carbone (€/MWh)
+
+    NaN-safe: serie vuota -> ore 0 e DataFrame con colonne giuste; input
+    non validi (efficienza <= 0, NaN, Serie non oraria) -> valori neutrali
+    senza eccezioni.
+
+    Ritorna dict con 'ore', 'srmc_gas', 'srmc_coal', 'switch_co2',
+    'distanza_co2', 'opt_gas_eur_mw', 'opt_coal_eur_mw', 'migliore',
+    'ore_itm_gas', 'ore_itm_coal', 'df_mesi', 'df_ore'.
+    """
+    cols_m = ["Mese", "Opzione gas (€/MW)", "Opzione carbone (€/MW)",
+              "Ore ITM gas", "Ore ITM carbone", "Delta opzione (€/MW)"]
+    cols_h = ["Data e Ora", "Spot (€/MWh)", "Spark (€/MWh)", "Dark (€/MWh)",
+              "Opzione gas (€/MWh)", "Opzione carbone (€/MWh)"]
+    vuoto = {"ore": 0, "srmc_gas": float("nan"), "srmc_coal": float("nan"),
+             "switch_co2": None, "distanza_co2": None,
+             "opt_gas_eur_mw": 0.0, "opt_coal_eur_mw": 0.0, "migliore": "n/d",
+             "ore_itm_gas": 0, "ore_itm_coal": 0,
+             "df_mesi": pd.DataFrame(columns=cols_m),
+             "df_ore": pd.DataFrame(columns=cols_h)}
+    try:
+        eff_g = max(1.0, float(eff_gas_pct)) / 100.0
+        eff_c = max(1.0, float(eff_coal_pct)) / 100.0
+        gas = float(gas_eur_mwh)
+        coal = float(coal_eur_mwh)
+        co2 = float(co2_eur_t)
+        ef_g = float(ef_gas)
+        ef_c = float(ef_coal)
+    except (TypeError, ValueError):
+        return dict(vuoto)
+    if any(np.isnan(x) for x in (gas, coal, co2, ef_g, ef_c)):
+        return dict(vuoto)
+    try:
+        p = prezzi.astype(float).dropna()
+    except (TypeError, ValueError, AttributeError):
+        return dict(vuoto)
+    n = len(p)
+    srmc_gas = gas / eff_g + co2 * ef_g
+    srmc_coal = coal / eff_c + co2 * ef_c
+    denom = ef_c - ef_g
+    if abs(denom) > 1e-9:
+        switch = (gas / eff_g - coal / eff_c) / denom
+        distanza = co2 - switch
+    else:
+        switch, distanza = None, None
+    if n == 0:
+        out = dict(vuoto)
+        out.update({"srmc_gas": float(srmc_gas), "srmc_coal": float(srmc_coal),
+                    "switch_co2": switch, "distanza_co2": distanza})
+        return out
+    spark = p - srmc_gas
+    dark = p - srmc_coal
+    opt_g = np.maximum(0.0, spark.values)
+    opt_c = np.maximum(0.0, dark.values)
+    opt_gas = float(opt_g.sum())
+    opt_coal = float(opt_c.sum())
+    itm_g = int((spark > 0).sum())
+    itm_c = int((dark > 0).sum())
+    if opt_gas > opt_coal:
+        migliore = "gas"
+    elif opt_coal > opt_gas:
+        migliore = "carbone"
+    else:
+        migliore = "pari"
+    df_ore = pd.DataFrame({
+        "Data e Ora": p.index.strftime("%d/%m/%Y %H:%M"),
+        "Spot (€/MWh)": np.round(p.values, 2),
+        "Spark (€/MWh)": np.round(spark.values, 2),
+        "Dark (€/MWh)": np.round(dark.values, 2),
+        "Opzione gas (€/MWh)": np.round(opt_g, 2),
+        "Opzione carbone (€/MWh)": np.round(opt_c, 2),
+    })
+    try:
+        mesi = p.index.to_period("M")
+        righe = []
+        for per, grp in p.groupby(mesi):
+            sg = grp - srmc_gas
+            sc = grp - srmc_coal
+            og = float(np.maximum(0.0, sg.values).sum())
+            oc = float(np.maximum(0.0, sc.values).sum())
+            righe.append({
+                "Mese": str(per),
+                "Opzione gas (€/MW)": round(og, 1),
+                "Opzione carbone (€/MW)": round(oc, 1),
+                "Ore ITM gas": int((sg > 0).sum()),
+                "Ore ITM carbone": int((sc > 0).sum()),
+                "Delta opzione (€/MW)": round(og - oc, 1),
+            })
+        df_mesi = pd.DataFrame(righe, columns=cols_m)
+    except (TypeError, ValueError, AttributeError):
+        df_mesi = pd.DataFrame(columns=cols_m)
+    return {"ore": int(n), "srmc_gas": float(srmc_gas),
+            "srmc_coal": float(srmc_coal), "switch_co2": switch,
+            "distanza_co2": distanza, "opt_gas_eur_mw": opt_gas,
+            "opt_coal_eur_mw": opt_coal, "migliore": migliore,
+            "ore_itm_gas": itm_g, "ore_itm_coal": itm_c,
+            "df_mesi": df_mesi, "df_ore": df_ore}
+
 def calcola_shape_fattori(prezzi):
     """Fattori di shape stagionale dallo spot storico (per costruire curve forward 'shaped').
     Ritorna un dict:
@@ -9142,7 +9266,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -15020,6 +15144,115 @@ elif workspace == _('ws8'):
                 key="csv_nc_confronto",
             )
             st.caption("💡 Uso pratico: la ricarica notturna e' quasi sempre il profilo piu' economico per MWh; confronta il delta vs carico esistente per capire se il nuovo carico migliora o peggiora la tua forma media. Se il picco coincidente e' minore della potenza nominale, stai sfruttando ore in cui il sito ha margine: vale oro quando paghi il corrispettivo di potenza.")
+
+
+    with tab80:
+        titolo_fs = edu("Fuel switching (gas ↔ carbone)", "Gas e carbone competono nell'ordine di merito: gira prima la centrale col costo marginale (SRMC = fuel/efficienza + CO2 x fattore di emissione) piu' basso. Il PREZZO DI SWITCH e' il livello delle quote EUA che pareggia i due SRMC: se l'EUA reale sta SOPRA lo switch, il gas e' piu' economico del carbone e lo spiazza; se sta SOTTO, conviene il carbone. E' il segnale di trading classico TTF/ARA/EUA. Il 'valore opzione' e' quanto avrebbe guadagnato 1 MW flessibile girando solo nelle ore in-the-money (spot > SRMC): misura il premio della flessibilita' di ciascuna tecnologia nel periodo.")
+        st.markdown(titolo_fs, unsafe_allow_html=True)
+
+        f1, f2, f3, f4 = st.columns(4)
+        with f1:
+            fs_gas = st.number_input("Prezzo gas (€/MWh termico)", min_value=0.0, value=35.0, step=1.0, key="fs_gas",
+                                    help="Prezzo del gas combustibile (TTF o PSV).")
+        with f2:
+            fs_eff_g = st.number_input("Efficienza gas (%)", min_value=10.0, max_value=65.0, value=55.0, step=1.0, key="fs_eff_g",
+                                       help="Efficienza elettrica del CCGT: un ciclo combinato moderno sta intorno al 55-60%.")
+        with f3:
+            fs_coal = st.number_input("Prezzo carbone (€/MWh termico)", min_value=0.0, value=15.0, step=1.0, key="fs_coal",
+                                      help="Prezzo del carbone (API2/ARA) convertito in €/MWh termico.")
+        with f4:
+            fs_eff_c = st.number_input("Efficienza carbone (%)", min_value=10.0, max_value=50.0, value=45.0, step=1.0, key="fs_eff_c",
+                                       help="Efficienza elettrica di una centrale a carbone: tipicamente 40-45%.")
+        g1, g2, g3 = st.columns(3)
+        with g1:
+            fs_co2 = st.number_input("Prezzo CO2 (€/t)", min_value=0.0, value=70.0, step=1.0, key="fs_co2",
+                                     help="Prezzo delle quote EUA (EU ETS).")
+        with g2:
+            fs_ef_g = st.number_input("Fattore emissivo gas (tCO2/MWh el.)", min_value=0.0, max_value=1.0, value=0.4, step=0.05, key="fs_ef_g",
+                                      help="Default 0.4 per un ciclo combinato (CCGT).")
+        with g3:
+            fs_ef_c = st.number_input("Fattore emissivo carbone (tCO2/MWh el.)", min_value=0.0, max_value=1.5, value=0.9, step=0.05, key="fs_ef_c",
+                                      help="Default 0.9 per una centrale a carbone.")
+
+        res_fs = calcola_fuel_switching(prezzi, fs_gas, fs_eff_g, fs_coal,
+                                        fs_eff_c, fs_co2, fs_ef_g, fs_ef_c)
+        if res_fs["ore"] == 0:
+            st.warning("Seleziona un periodo con dati per calcolare il fuel switching.")
+        else:
+            st.caption(f"SRMC stimato: gas **{res_fs['srmc_gas']:,.1f} €/MWh** ({fs_gas/max(1.0, fs_eff_g)*100:,.1f} fuel + {fs_co2*fs_ef_g:,.1f} CO2) vs carbone **{res_fs['srmc_coal']:,.1f} €/MWh** ({fs_coal/max(1.0, fs_eff_c)*100:,.1f} fuel + {fs_co2*fs_ef_c:,.1f} CO2) — la centrale col SRMC piu' basso gira prima nell'ordine di merito.")
+            sw = res_fs["switch_co2"]
+            dist = res_fs["distanza_co2"]
+            if sw is not None and dist is not None:
+                if dist > 0:
+                    sw_txt, dist_txt = f"{sw:,.1f} €/t", f"+{dist:,.1f} €/t (🟢 gas in vantaggio)"
+                elif dist < 0:
+                    sw_txt, dist_txt = f"{sw:,.1f} €/t", f"{dist:,.1f} €/t (🔴 carbone in vantaggio)"
+                else:
+                    sw_txt, dist_txt = f"{sw:,.1f} €/t", "0,0 €/t (⚪ pareggio)"
+            else:
+                sw_txt, dist_txt = "n/d", "n/d"
+            k1, k2, k3, k4 = st.columns(4)
+            render_kpi("SRMC gas (€/MWh)", f"{res_fs['srmc_gas']:,.2f}", k1)
+            render_kpi("SRMC carbone (€/MWh)", f"{res_fs['srmc_coal']:,.2f}", k2)
+            render_kpi("Prezzo di switch CO2", sw_txt, k3)
+            render_kpi("Distanza EUA dallo switch", dist_txt, k4)
+            k5, k6, k7, k8 = st.columns(4)
+            render_kpi("Valore opzione gas (€/MW)", f"{res_fs['opt_gas_eur_mw']:,.0f}", k5)
+            render_kpi("Valore opzione carbone (€/MW)", f"{res_fs['opt_coal_eur_mw']:,.0f}", k6)
+            render_kpi("Tecnologia in vantaggio", res_fs["migliore"].capitalize(), k7)
+            render_kpi("Ore ITM gas / carbone", f"{res_fs['ore_itm_gas']:,} / {res_fs['ore_itm_coal']:,}", k8)
+
+            fig_fs1 = go.Figure()
+            fig_fs1.add_trace(go.Scatter(x=prezzi.index, y=prezzi.values, mode="lines",
+                                         name="Spot", line=dict(color="#9ca3af", width=1),
+                                         hovertemplate="Ora: %{x}<br>Spot: %{y:,.1f} €/MWh<extra></extra>"))
+            fig_fs1.add_hline(y=res_fs["srmc_gas"], line_dash="dash", line_color="#10B981",
+                              annotation_text=f"SRMC gas {res_fs['srmc_gas']:,.1f}",
+                              annotation_position="top right")
+            fig_fs1.add_hline(y=res_fs["srmc_coal"], line_dash="dash", line_color="#a78bfa",
+                              annotation_text=f"SRMC carbone {res_fs['srmc_coal']:,.1f}",
+                              annotation_position="bottom right")
+            fig_fs1.update_layout(template="plotly_dark", height=380,
+                                  title="Spot vs SRMC: le ore con spot sopra una retta sono in-the-money per quella tecnologia",
+                                  xaxis_title="Data e Ora", yaxis_title="€/MWh")
+            st.plotly_chart(fig_fs1, use_container_width=True)
+
+            df_fsm = res_fs["df_mesi"]
+            if len(df_fsm):
+                fig_fs2 = go.Figure()
+                fig_fs2.add_trace(go.Bar(x=df_fsm["Mese"], y=df_fsm["Opzione gas (€/MW)"], name="Opzione gas",
+                                         marker_color="#10B981",
+                                         hovertemplate="%{x}<br>Gas: €%{y:,.0f}/MW<extra></extra>"))
+                fig_fs2.add_trace(go.Bar(x=df_fsm["Mese"], y=df_fsm["Opzione carbone (€/MW)"], name="Opzione carbone",
+                                         marker_color="#a78bfa",
+                                         hovertemplate="%{x}<br>Carbone: €%{y:,.0f}/MW<extra></extra>"))
+                fig_fs2.update_layout(template="plotly_dark", height=340, barmode="group",
+                                      title="Valore opzione mensile per MW flessibile (€/MW)",
+                                      xaxis_title="Mese", yaxis_title="€/MW")
+                st.plotly_chart(fig_fs2, use_container_width=True)
+                st.markdown("**Dettaglio mensile**")
+                st.dataframe(df_fsm, use_container_width=True, hide_index=True)
+                st.download_button(
+                    "⬇️ Esporta fuel switching mensile (CSV)",
+                    df_fsm.to_csv(index=False).encode("utf-8"),
+                    file_name=f"fuel_switching_mensile_{d0}_{d1}.csv",
+                    mime="text/csv",
+                    help="Scarica il dettaglio mensile: valore opzione gas/carbone, ore in-the-money e delta.",
+                    key="csv_fs_mesi",
+                )
+            df_fsh = res_fs["df_ore"]
+            st.markdown("**Top 10 ore per margine opzione gas**")
+            st.dataframe(df_fsh.sort_values("Opzione gas (€/MWh)", ascending=False).head(10),
+                         use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta fuel switching orario (CSV)",
+                df_fsh.to_csv(index=False).encode("utf-8"),
+                file_name=f"fuel_switching_orario_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica la serie oraria: spot, spark, dark e margini opzione con i parametri impostati.",
+                key="csv_fs_ore",
+            )
+            st.caption("💡 Uso pratico: se l'EUA sta sopra lo switch, il mercato premia le coperture gas-power contro il carbone — e un nuovo CCGT ha piu' ore in-the-money di una centrale a carbone. La distanza dallo switch e' il segnale per la scommessa direzionale sul carbon price.")
 
 
 # Footer
