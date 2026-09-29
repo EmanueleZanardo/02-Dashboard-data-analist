@@ -8016,6 +8016,147 @@ def calcola_sizing_batteria(prezzi, eff=0.85, cap_max=20.0, pot_max=10.0,
             "ottimo": ottimo, "target_payback": target}
 
 
+# Metriche giornaliere disponibili per gli alert personalizzati (tab77)
+METRICHE_ALERT = {
+    "max_orario": "Max orario del giorno (€/MWh)",
+    "min_orario": "Min orario del giorno (€/MWh)",
+    "media_giorno": "Media giornaliera (€/MWh)",
+    "spread_giorno": "Spread giornaliero max-min (€/MWh)",
+    "ore_sopra_livello": "Ore sopra il livello critico (n. ore)",
+    "ore_sotto_livello": "Ore sotto il livello basso (n. ore)",
+    "var_media_7gg": "Variazione % media vs 7 giorni prima (%)",
+}
+_LABEL2KEY_ALERT = {v: k for k, v in METRICHE_ALERT.items()}
+_OPERATORI_ALERT = {
+    ">": np.greater,
+    ">=": np.greater_equal,
+    "<": np.less,
+    "<=": np.less_equal,
+}
+
+
+def calcola_alert_personalizzati(prezzi, regole, livello_critico=150.0, livello_basso=20.0, k_critico=2):
+    """Motore di alert personalizzati: valuta regole di monitoraggio sui prezzi orari.
+
+    Ogni regola e' un dict {nome, metrica, operatore, soglia} dove metrica e' una
+    delle chiavi di METRICHE_ALERT (o la sua label), operatore in > >= < <= e
+    soglia un numero finito. Le metriche sono calcolate per giorno di calendario:
+    max/min/media/spread orari, n. ore sopra il livello critico o sotto il livello
+    basso, variazione % della media vs la media dei 7 giorni precedenti.
+    Un giorno e' 'critico' se almeno k_critico regole scattano insieme.
+    I NaN (es. var_media_7gg nei primi 7 giorni) non fanno mai scattare una regola.
+    Ritorna dict con ok, df_giorni (bool per regola + conteggi), df_regole
+    (statistiche per regola), serie metriche giornaliere e conteggi aggregati.
+    """
+    try:
+        p = pd.Series(prezzi).astype(float).dropna()
+    except Exception:
+        return {"ok": False, "errore": "prezzi non validi"}
+    if not isinstance(p.index, pd.DatetimeIndex):
+        return {"ok": False, "errore": "indice temporale non valido"}
+    if len(p) < 24:
+        return {"ok": False, "errore": "servono almeno 24 ore di prezzi"}
+    try:
+        giorni = p.index.normalize()
+    except Exception:
+        return {"ok": False, "errore": "indice temporale non valido"}
+    g = p.groupby(giorni)
+    dmax = g.max()
+    dmin = g.min()
+    dmean = g.mean()
+    spread = dmax - dmin
+    ore_sopra = g.apply(lambda s: int((s > float(livello_critico)).sum()))
+    ore_sotto = g.apply(lambda s: int((s < float(livello_basso)).sum()))
+    media_7gg = dmean.shift(7)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        var_7gg = np.where(media_7gg.abs() > 1e-9,
+                           (dmean - media_7gg) / media_7gg.abs() * 100.0, np.nan)
+    var_7gg = pd.Series(var_7gg, index=dmean.index)
+    metriche = {
+        "max_orario": dmax,
+        "min_orario": dmin,
+        "media_giorno": dmean,
+        "spread_giorno": spread,
+        "ore_sopra_livello": ore_sopra,
+        "ore_sotto_livello": ore_sotto,
+        "var_media_7gg": var_7gg,
+    }
+
+    valide, scartate, visti = [], 0, set()
+    for r in (regole or []):
+        try:
+            nome = str(r.get("nome", "")).strip()
+            met = str(r.get("metrica", "")).strip()
+            op = str(r.get("operatore", "")).strip()
+            soglia = float(r.get("soglia"))
+        except (TypeError, ValueError, AttributeError):
+            scartate += 1
+            continue
+        if met in _LABEL2KEY_ALERT:
+            met = _LABEL2KEY_ALERT[met]
+        if (not nome or met not in metriche or op not in _OPERATORI_ALERT
+                or not np.isfinite(soglia) or nome in visti):
+            scartate += 1
+            continue
+        visti.add(nome)
+        valide.append({"nome": nome, "metrica": met, "operatore": op, "soglia": soglia})
+    if not valide:
+        return {"ok": False, "errore": "nessuna regola valida"}
+
+    date_idx = dmean.index
+    nomi = [rv["nome"] for rv in valide]
+    df = pd.DataFrame(index=date_idx)
+    serie_metriche = {}
+    for rv in valide:
+        s = metriche[rv["metrica"]].reindex(date_idx)
+        serie_metriche[rv["nome"]] = s
+        fill = -np.inf if rv["operatore"] in (">", ">=") else np.inf
+        trig = _OPERATORI_ALERT[rv["operatore"]](s.fillna(fill).to_numpy(), rv["soglia"])
+        df[rv["nome"]] = pd.Series(np.asarray(trig, dtype=bool), index=date_idx)
+    df["n_regole_attive"] = df[nomi].sum(axis=1).astype(int)
+    k = max(1, int(k_critico))
+    df["giorno_critico"] = df["n_regole_attive"] >= k
+
+    righe = []
+    for rv in valide:
+        t = df[rv["nome"]]
+        n_trig = int(t.sum())
+        ultimo = df.index[t].max() if n_trig else None
+        estremo = None
+        if n_trig:
+            sv = serie_metriche[rv["nome"]][t].dropna()
+            if len(sv):
+                estremo = float(sv.max()) if rv["operatore"] in (">", ">=") else float(sv.min())
+        righe.append({
+            "Regola": rv["nome"],
+            "Metrica": METRICHE_ALERT[rv["metrica"]],
+            "Operatore": rv["operatore"],
+            "Soglia": rv["soglia"],
+            "N. trigger": n_trig,
+            "% giorni": round(100.0 * n_trig / len(date_idx), 1),
+            "Ultimo trigger": ultimo,
+            "Valore estremo": round(estremo, 2) if estremo is not None else None,
+        })
+    df_regole = pd.DataFrame(righe)
+
+    attive = df[nomi].apply(lambda row: ", ".join([c for c in nomi if row[c]]), axis=1)
+    df_out = pd.DataFrame({
+        "Data": date_idx,
+        "N. regole attive": df["n_regole_attive"].to_numpy(),
+        "Giorno critico": np.where(df["giorno_critico"].to_numpy(), "sì", "no"),
+        "Regole attive": attive.to_numpy(),
+    })
+    return {"ok": True, "n_giorni": len(date_idx),
+            "n_con_alert": int((df["n_regole_attive"] > 0).sum()),
+            "n_critici": int(df["giorno_critico"].sum()),
+            "n_scartate": scartate, "k_critico": k,
+            "livello_critico": float(livello_critico), "livello_basso": float(livello_basso),
+            "df_giorni": df_out, "df_bool": df[nomi], "df_regole": df_regole,
+            "serie_metriche": serie_metriche,
+            "serie_media": dmean, "serie_max": dmax,
+            "regole_valide": valide}
+
+
 def render_kpi(title, value, col):
     col.markdown(f"<div class='metric-container'><div class='metric-label'>{title}</div><div class='metric-val'>{value}</div></div>", unsafe_allow_html=True)
 
@@ -8651,7 +8792,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -14117,6 +14258,156 @@ elif workspace == _('ws8'):
             st.caption("💡 Regola pratica: resta sulla diagonale efficiente capacità ≈ potenza × ore finestra — la capacità oltre il ginocchio "
                        "non viene mai ciclata (ricavo piatto, CAPEX in più). Confronta il ricavo netto/anno con il tab 🔋 Arbitraggio Batteria "
                        "per la taglia scelta e usa il tab 💰 Costo fornitura per valutare la batteria contro il picco di potenza.")
+
+
+    with tab77:
+        titolo_al = edu("Alert personalizzati (monitoraggio a regole)", "Definisci le TUE regole di monitoraggio: ogni regola = una metrica giornaliera (max/min/media/spread orari, ore sopra o sotto una soglia, rincaro vs 7 giorni prima) + un operatore + una soglia. Il motore valuta ogni giorno del periodo: un giorno e' 'critico' se almeno K regole scattano insieme. Usalo come check mattutino: quali giorni avrebbero meritato un'azione (fixing, shifting, copertura). Le regole con metrica 'ore sopra/sotto livello' usano i due livelli globali qui sotto.")
+        st.markdown(titolo_al, unsafe_allow_html=True)
+
+        al1, al2, al3 = st.columns(3)
+        with al1:
+            al_liv_crit = st.number_input("Livello prezzo critico (€/MWh)", min_value=0.0, value=150.0, step=10.0, key="al_liv_crit",
+                                         help="Soglia di prezzo per la metrica 'Ore sopra il livello critico'.")
+        with al2:
+            al_liv_basso = st.number_input("Livello prezzo basso (€/MWh)", value=20.0, step=5.0, key="al_liv_basso",
+                                          help="Soglia di prezzo per la metrica 'Ore sotto il livello basso'.")
+        with al3:
+            al_k = st.number_input("K: regole per giorno critico", min_value=1, max_value=10, value=2, step=1, key="al_k",
+                                  help="Un giorno e' critico se almeno K regole scattano insieme.")
+
+        st.markdown("**Regole di monitoraggio** (aggiungi righe con il tasto + sotto la tabella)")
+        df_al_default = pd.DataFrame([
+            {"Nome": "Picco estremo", "Metrica": METRICHE_ALERT["max_orario"], "Operatore": ">", "Soglia": 200.0},
+            {"Nome": "Giornata cara", "Metrica": METRICHE_ALERT["media_giorno"], "Operatore": ">", "Soglia": 120.0},
+            {"Nome": "Spread ampio", "Metrica": METRICHE_ALERT["spread_giorno"], "Operatore": ">", "Soglia": 80.0},
+            {"Nome": "Troppe ore care", "Metrica": METRICHE_ALERT["ore_sopra_livello"], "Operatore": ">=", "Soglia": 4.0},
+            {"Nome": "Crollo / negativi", "Metrica": METRICHE_ALERT["min_orario"], "Operatore": "<", "Soglia": 0.0},
+            {"Nome": "Rincaro settimanale", "Metrica": METRICHE_ALERT["var_media_7gg"], "Operatore": ">", "Soglia": 25.0},
+        ])
+        df_al_in = st.data_editor(
+            df_al_default, num_rows="dynamic", use_container_width=True,
+            key="al_editor",
+            column_config={
+                "Nome": st.column_config.TextColumn("Nome", help="Nome univoco della regola."),
+                "Metrica": st.column_config.SelectboxColumn("Metrica", options=list(METRICHE_ALERT.values()),
+                                                            help="Metrica giornaliera calcolata sui prezzi orari."),
+                "Operatore": st.column_config.SelectboxColumn("Operatore", options=[">", ">=", "<", "<="]),
+                "Soglia": st.column_config.NumberColumn("Soglia", format="%.2f",
+                                                        help="Soglia di scatto (€/MWh, n. ore o % a seconda della metrica)."),
+            },
+            help="Ogni riga valida diventa una regola attiva; le righe incomplete o con nome duplicato vengono ignorate.",
+        )
+        regole_al = [{"nome": r["Nome"], "metrica": r["Metrica"], "operatore": r["Operatore"], "soglia": r["Soglia"]}
+                     for _, r in df_al_in.iterrows()]
+        res_al = calcola_alert_personalizzati(prezzi, regole_al, livello_critico=al_liv_crit,
+                                             livello_basso=al_liv_basso, k_critico=int(al_k))
+        if not res_al["ok"]:
+            st.warning(f"Definisci almeno una regola valida per attivare il monitoraggio ({res_al.get('errore', '?')}).")
+        else:
+            if res_al["n_scartate"]:
+                st.caption(f"ℹ️ {res_al['n_scartate']} riga/e ignorata/e (incomplete, nome duplicato o metrica non valida).")
+            k1, k2, k3, k4 = st.columns(4)
+            pct_al = 100.0 * res_al["n_con_alert"] / res_al["n_giorni"] if res_al["n_giorni"] else 0.0
+            render_kpi(edu("Giorni con alert", "Giorni in cui almeno una regola e' scattata: la 'pressione' del mercato nel periodo."),
+                       f"{res_al['n_con_alert']} ({pct_al:.1f} %)", k1)
+            render_kpi(edu("Giorni critici", f"Giorni in cui almeno {res_al['k_critico']} regole sono scattate insieme: i giorni che avrebbero meritato un'azione."),
+                       f"{res_al['n_critici']}", k2)
+            df_rg = res_al["df_regole"]
+            top_rg = df_rg.sort_values("N. trigger", ascending=False).iloc[0]
+            render_kpi(edu("Regola più attiva", "La regola scattata piu' spesso nel periodo: il pattern dominante da monitorare."),
+                       f"{top_rg['Regola']}: {int(top_rg['N. trigger'])}", k3)
+            df_gg = res_al["df_giorni"]
+            critici = df_gg[df_gg["Giorno critico"] == "sì"]
+            ult_crit = critici["Data"].max() if len(critici) else None
+            render_kpi(edu("Ultimo giorno critico", "Il giorno critico piu' recente: se e' vicino a oggi, il mercato e' ancora caldo."),
+                       ult_crit.strftime("%d/%m/%Y") if ult_crit is not None else "—", k4)
+
+            date_str = [d.strftime("%Y-%m-%d") for d in res_al["serie_media"].index]
+            fig_al1 = go.Figure()
+            fig_al1.add_trace(go.Scatter(x=date_str, y=res_al["serie_media"].to_numpy(),
+                                        mode="lines", name="Media giornaliera",
+                                        line=dict(color="#38bdf8", width=1.5),
+                                        hovertemplate="%{x}<br>Media: %{y:,.1f} €/MWh<extra></extra>"))
+            fig_al1.add_trace(go.Scatter(x=date_str, y=res_al["serie_max"].to_numpy(),
+                                        mode="lines", name="Max orario",
+                                        line=dict(color="#475569", width=1, dash="dot"),
+                                        hovertemplate="%{x}<br>Max: %{y:,.1f} €/MWh<extra></extra>"))
+            mask_c = (df_gg["Giorno critico"] == "sì").to_numpy()
+            mask_a = ((df_gg["N. regole attive"] > 0) & (df_gg["Giorno critico"] == "no")).to_numpy()
+            media_np = res_al["serie_media"].to_numpy()
+            if mask_c.any():
+                fig_al1.add_trace(go.Scatter(
+                    x=[date_str[i] for i in np.where(mask_c)[0]], y=media_np[mask_c],
+                    mode="markers", name=f"Giorno critico (≥{res_al['k_critico']} regole)",
+                    marker=dict(symbol="diamond", size=10, color="#ef4444", line=dict(width=1, color="white")),
+                    hovertemplate="%{x}<br>CRITICO: %{y:,.1f} €/MWh<extra></extra>"))
+            if mask_a.any():
+                fig_al1.add_trace(go.Scatter(
+                    x=[date_str[i] for i in np.where(mask_a)[0]], y=media_np[mask_a],
+                    mode="markers", name="Giorno con alert",
+                    marker=dict(symbol="circle", size=7, color="#f59e0b"),
+                    hovertemplate="%{x}<br>Alert: %{y:,.1f} €/MWh<extra></extra>"))
+            fig_al1.update_layout(template="plotly_dark", height=380,
+                                  title="Prezzo giornaliero con giorni di alert (arancione) e critici (rossi)",
+                                  xaxis_title="Giorno", yaxis_title="€/MWh")
+            st.plotly_chart(fig_al1, use_container_width=True)
+
+            bool_mat = res_al["df_bool"].to_numpy(dtype=int).T
+            fig_al2 = go.Figure(data=go.Heatmap(
+                z=bool_mat, x=date_str, y=res_al["df_regole"]["Regola"].tolist(),
+                colorscale=[[0, "#1e293b"], [1, "#ef4444"]], zmin=0, zmax=1, showscale=False,
+                hovertemplate="Regola %{y}<br>Giorno %{x}<br>Scattata: %{z}<extra></extra>"))
+            fig_al2.update_layout(template="plotly_dark", height=max(260, 60 * len(df_rg) + 80),
+                                  title="Mappa di scatto: quale regola, in quale giorno",
+                                  xaxis_title="Giorno", yaxis_title="Regola")
+            st.plotly_chart(fig_al2, use_container_width=True)
+
+            fig_al3 = go.Figure()
+            df_m = res_al["df_bool"].copy()
+            df_m.index = pd.DatetimeIndex(res_al["serie_media"].index)
+            df_mm = df_m.resample("ME").sum()
+            mesi = [d.strftime("%Y-%m") for d in df_mm.index]
+            for col in df_mm.columns:
+                fig_al3.add_trace(go.Bar(x=mesi, y=df_mm[col].to_numpy(), name=col,
+                                         hovertemplate=f"%{{x}}<br>{col}: %{{y}} giorni<extra></extra>"))
+            crit_m = pd.Series(((df_gg["Giorno critico"] == "sì").to_numpy()),
+                               index=pd.DatetimeIndex(res_al["serie_media"].index)).resample("ME").sum()
+            fig_al3.add_trace(go.Scatter(x=mesi, y=crit_m.to_numpy(), mode="lines+markers",
+                                        name=f"Giorni critici (≥{res_al['k_critico']})",
+                                        line=dict(color="#ef4444", width=2.5),
+                                        hovertemplate="%{x}<br>Critici: %{y}<extra></extra>"))
+            fig_al3.update_layout(template="plotly_dark", height=380, barmode="stack",
+                                  title="Trigger per mese (barre impilate per regola) e giorni critici (linea)",
+                                  xaxis_title="Mese", yaxis_title="Giorni con trigger")
+            st.plotly_chart(fig_al3, use_container_width=True)
+
+            st.markdown("**Giorni con alert**")
+            df_show = df_gg[df_gg["N. regole attive"] > 0].copy()
+            df_show["Data"] = pd.to_datetime(df_show["Data"]).dt.strftime("%d/%m/%Y")
+            st.dataframe(df_show, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta giorni con alert (CSV)",
+                df_show.to_csv(index=False).encode("utf-8"),
+                file_name=f"alert_giorni_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica i giorni con almeno una regola scattata, con conteggio e regole attive.",
+                key="csv_al_giorni",
+            )
+            st.markdown("**Dettaglio regole**")
+            df_rg_show = df_rg.copy()
+            df_rg_show["Ultimo trigger"] = pd.to_datetime(df_rg_show["Ultimo trigger"]).dt.strftime("%d/%m/%Y")
+            st.dataframe(df_rg_show, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta dettaglio regole (CSV)",
+                df_rg.to_csv(index=False).encode("utf-8"),
+                file_name=f"alert_regole_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Scarica le statistiche per regola: trigger, % giorni, ultimo scatto, valore estremo.",
+                key="csv_al_regole",
+            )
+            st.caption("💡 Uso pratico: parti dalle 6 regole preimpostate e stringi/allarga le soglie finché i giorni critici "
+                       "corrispondono a quelli in cui saresti davvero intervenuto (fixing, shifting dei carichi, copertura). "
+                       "Se una regola non scatta mai nel periodo, la soglia e' troppo severa; se scatta sempre, e' rumore.")
 
 
 # Footer
