@@ -2479,6 +2479,69 @@ def calcola_tolling(prezzi, capacita_mw, heat_rate, prezzo_gas_mwh_th,
             "df_gas": df_gas, "df_hr": df_hr}
 
 
+def calcola_fermo_ottimale(margine_orario, mw, giorni_fermo):
+    """Finestra ottimale di fermo manutenzione per una centrale termoelettrica.
+
+    margine_orario: Series oraria in euro/MWh (spark o dark spread). La centrale gira
+      solo nelle ore con margine positivo, quindi il margine PERSO per ogni ora di
+      fermo e' max(0, margine) * mw. La finestra ottimale di N giorni CONSECUTIVI
+      e' quella che minimizza il margine perso totale.
+    mw: potenza della centrale (MW). giorni_fermo: durata del fermo (giorni, >=1).
+    Ritorna dict con df_giorni (Data, Margine giornaliero euro), df_finestre
+    (Inizio, Fine, Margine perso euro — tutte le finestre consecutive ordinate per
+    margine perso crescente), best/worst (dict inizio/fine/margine_perso),
+    margine_periodo (euro), margine_preservato (euro = worst - best), giorni,
+    durata_gg. NaN-safe: serie vuota o parametri non validi -> strutture vuote e
+    best/worst None.
+    """
+    cols_g = ["Data", "Margine giornaliero (EUR)"]
+    cols_f = ["Inizio", "Fine", "Margine perso (EUR)"]
+    vuoto = {"df_giorni": pd.DataFrame(columns=cols_g),
+             "df_finestre": pd.DataFrame(columns=cols_f),
+             "best": None, "worst": None, "margine_periodo": 0.0,
+             "margine_preservato": 0.0, "giorni": 0, "durata_gg": 0}
+    try:
+        mw = float(mw)
+        d = int(float(giorni_fermo))
+    except (TypeError, ValueError):
+        return vuoto
+    if not np.isfinite(mw) or mw <= 0 or d < 1:
+        return vuoto
+    try:
+        s = pd.Series(margine_orario, dtype=float).dropna()
+    except (TypeError, ValueError):
+        return vuoto
+    if len(s) == 0:
+        return vuoto
+    perso_orario = s.clip(lower=0.0) * mw
+    giornaliero = perso_orario.resample("D").sum()
+    giornaliero.index = pd.to_datetime(giornaliero.index.date)
+    n = len(giornaliero)
+    if n == 0:
+        return vuoto
+    d = min(d, n)
+    roll = giornaliero.rolling(d, min_periods=d).sum().dropna()
+    righe = [{"Inizio": (fine - pd.Timedelta(days=d - 1)).date(),
+              "Fine": fine.date(),
+              "Margine perso (EUR)": float(roll.loc[fine])} for fine in roll.index]
+    df_finestre = (pd.DataFrame(righe, columns=cols_f)
+                     .sort_values("Margine perso (EUR)", kind="mergesort")
+                     .reset_index(drop=True))
+    df_giorni = pd.DataFrame({"Data": giornaliero.index.date,
+                              "Margine giornaliero (EUR)": giornaliero.values})
+    margine_periodo = float(giornaliero.sum())
+    b0 = df_finestre.iloc[0]
+    w0 = df_finestre.iloc[-1]
+    best = {"inizio": b0["Inizio"], "fine": b0["Fine"],
+            "margine_perso": float(b0["Margine perso (EUR)"])}
+    worst = {"inizio": w0["Inizio"], "fine": w0["Fine"],
+             "margine_perso": float(w0["Margine perso (EUR)"])}
+    return {"df_giorni": df_giorni, "df_finestre": df_finestre,
+            "best": best, "worst": worst, "margine_periodo": margine_periodo,
+            "margine_preservato": float(worst["margine_perso"] - best["margine_perso"]),
+            "giorni": n, "durata_gg": d}
+
+
 def calcola_shape_fattori(prezzi):
     """Fattori di shape stagionale dallo spot storico (per costruire curve forward 'shaped').
     Ritorna un dict:
@@ -10018,7 +10081,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -16540,6 +16603,93 @@ elif workspace == _('ws8'):
                                            xaxis_title="Heat rate (MWh th / MWh e)", yaxis_title="Valore (€)")
                     st.plotly_chart(fig_to4, use_container_width=True)
             st.caption("💡 Uso pratico: il break-even fee e' il tetto in negoziazione con il proprietario dell'impianto — sopra quella fee il tolling distrugge valore; il break-even gas dice fino a che prezzo del combustibile il contratto resta conveniente (utile per decidere se coprire il gas a termine); la curva sull'heat rate quantifica quanto vale un impianto piu' efficiente (CCGT vs OCGT) a parita' di fee.")
+
+
+    with tab86:
+        titolo_fo = edu("Pianificazione fermo impianto (outage scheduling)", "Un FERMO DI MANUTENZIONE spegne la centrale per N giorni consecutivi: in quelle ore perdi il margine che avresti fatto producendo. Contano solo le ore con spark spread positivo (nelle altre la centrale sarebbe rimasta ferma comunque). Questo tab trova la finestra di N giorni che MINIMIZZA il margine perso, la confronta con la peggiore — il costo di una pianificazione sbagliata — e mostra il margine giornaliero del periodo.")
+        st.markdown(titolo_fo, unsafe_allow_html=True)
+
+        fo1, fo2, fo3, fo4 = st.columns(4)
+        with fo1:
+            fo_cap = st.number_input("Capacita' (MW)", min_value=0.0, value=400.0, step=10.0, key="fo_cap",
+                                     help="Potenza elettrica della centrale da fermare per manutenzione.")
+        with fo2:
+            fo_gas = st.number_input("Prezzo gas (EUR/MWh termico)", min_value=0.0, value=35.0, step=1.0, key="fo_gas",
+                                     help="Costo del combustibile (TTF o PSV).")
+        with fo3:
+            fo_eff = st.number_input("Efficienza centrale (%)", min_value=10.0, max_value=65.0, value=55.0, step=1.0, key="fo_eff",
+                                     help="Efficienza elettrica: un CCGT moderno sta intorno al 55-60%.")
+        with fo4:
+            fo_co2 = st.number_input("Prezzo CO2 (EUR/t)", min_value=0.0, value=70.0, step=1.0, key="fo_co2",
+                                     help="Prezzo delle quote EUA (EU ETS).")
+        fo5, fo6 = st.columns(2)
+        with fo5:
+            fo_ef = st.number_input("Fattore emissivo (tCO2/MWh el.)", min_value=0.0, max_value=1.0, value=0.4, step=0.05, key="fo_ef",
+                                    help="Default 0.4 per un ciclo combinato (CCGT).")
+        with fo6:
+            fo_gg = st.slider("Durata fermo (giorni consecutivi)", min_value=1, max_value=90, value=14, key="fo_gg",
+                              help="Quanti giorni consecutivi dura la manutenzione programmata.")
+
+        ss_fo, _ = calcola_spark_spread(prezzi, fo_gas, fo_eff, fo_co2, fo_ef)
+        res_fo = calcola_fermo_ottimale(ss_fo, fo_cap, fo_gg)
+        if res_fo["best"] is None:
+            st.warning("Dati insufficienti: serie prezzi vuota o parametri non validi.")
+        else:
+            b_fo, w_fo = res_fo["best"], res_fo["worst"]
+            k1, k2, k3, k4 = st.columns(4)
+            render_kpi("Finestra ottimale", f"{b_fo['inizio'].strftime('%d/%m')} - {b_fo['fine'].strftime('%d/%m/%Y')}", k1)
+            render_kpi("Margine perso (ottimale)", f"EUR {b_fo['margine_perso']:,.0f}", k2)
+            render_kpi("Margine preservato vs peggiore", f"EUR {res_fo['margine_preservato']:,.0f}", k3)
+            render_kpi("Peggior finestra", f"{w_fo['inizio'].strftime('%d/%m')} - {w_fo['fine'].strftime('%d/%m/%Y')}", k4)
+            st.caption(f"Peggior finestra: margine perso EUR {w_fo['margine_perso']:,.0f} — pianificare il fermo li' costerebbe EUR {res_fo['margine_preservato']:,.0f} in piu' rispetto all'ottimo. Margine totale del periodo: EUR {res_fo['margine_periodo']:,.0f} su {res_fo['giorni']} giorni analizzati.")
+
+            df_fog = res_fo["df_giorni"]
+            if len(df_fog):
+                colori_fo = ["#22c55e" if b_fo["inizio"] <= dt <= b_fo["fine"]
+                             else ("#ef4444" if w_fo["inizio"] <= dt <= w_fo["fine"] else "#3b82f6")
+                             for dt in df_fog["Data"]]
+                fig_fo1 = go.Figure()
+                fig_fo1.add_trace(go.Bar(x=df_fog["Data"], y=df_fog["Margine giornaliero (EUR)"],
+                                         marker_color=colori_fo,
+                                         hovertemplate="%{x}<br>Margine: EUR %{y:,.0f}<extra></extra>"))
+                fig_fo1.update_layout(template="plotly_dark", height=340,
+                                      title="Margine giornaliero perso in caso di fermo (EUR) — verde = finestra ottimale, rosso = peggiore",
+                                      xaxis_title="Data", yaxis_title="EUR")
+                st.plotly_chart(fig_fo1, use_container_width=True)
+
+                mens_fo = df_fog.copy()
+                mens_fo["Mese"] = pd.to_datetime(mens_fo["Data"]).dt.to_period("M").astype(str)
+                df_fom = mens_fo.groupby("Mese", as_index=False)["Margine giornaliero (EUR)"].mean()
+                fig_fo2 = go.Figure()
+                fig_fo2.add_trace(go.Bar(x=df_fom["Mese"], y=df_fom["Margine giornaliero (EUR)"],
+                                         marker_color="#8b5cf6",
+                                         hovertemplate="%{x}<br>Media gg: EUR %{y:,.0f}<extra></extra>"))
+                fig_fo2.update_layout(template="plotly_dark", height=300,
+                                      title="Margine giornaliero medio per mese (EUR)",
+                                      xaxis_title="Mese", yaxis_title="EUR/giorno")
+                st.plotly_chart(fig_fo2, use_container_width=True)
+
+            df_fof = res_fo["df_finestre"]
+            st.markdown(f"**Top 10 finestre da {res_fo['durata_gg']} giorni con minor margine perso** (su {len(df_fof)} finestre possibili)")
+            st.dataframe(df_fof.head(10), use_container_width=True, hide_index=True)
+            st.download_button(
+                "Esporta finestre di fermo (CSV)",
+                df_fof.to_csv(index=False).encode("utf-8"),
+                file_name=f"fermo_finestre_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Tutte le finestre consecutive ordinate per margine perso crescente.",
+                key="csv_fo_finestre",
+            )
+            if len(df_fog):
+                st.download_button(
+                    "Esporta margine giornaliero (CSV)",
+                    df_fog.to_csv(index=False).encode("utf-8"),
+                    file_name=f"fermo_giornaliero_{d0}_{d1}.csv",
+                    mime="text/csv",
+                    help="Margine giornaliero perso in caso di fermo.",
+                    key="csv_fo_giorni",
+                )
+            st.caption("Uso pratico: la finestra ottimale e' dove programmare la manutenzione (tipicamente shoulder season con spark bassi); il 'margine preservato' quantifica il valore della buona pianificazione e giustifica spostare il fermo anche pagando penali ai manutentori; se il margine perso ottimale e' vicino a zero, il fermo e' quasi gratis — segnale per anticipare manutenzioni straordinarie.")
 
 
 # Footer
