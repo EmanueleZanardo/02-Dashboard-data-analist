@@ -13,7 +13,7 @@ import pandas as pd
 
 APP = os.path.join(os.path.dirname(__file__), "..", "app.py")
 WANT = {"PROFILI_CARICO_TIPO", "profilo_carico_tipo", "shock_scenario",
-        "banner_demo", "generate_mock_hourly"}
+        "banner_demo", "generate_mock_hourly", "ottimizza_ricarica_ev"}
 
 tree = ast.parse(open(APP, encoding="utf-8").read())
 
@@ -103,6 +103,37 @@ m1 = mock(__import__("datetime").date(2026, 1, 1), __import__("datetime").date(2
 m2 = mock(__import__("datetime").date(2026, 1, 1), __import__("datetime").date(2026, 1, 7))
 check("mock deterministico (seed fisso)", m1.equals(m2))
 check("mock 7gg = 168 ore", len(m1) == 168)
+
+# --- ottimizza_ricarica_ev ---
+ev = ns["ottimizza_ricarica_ev"]
+prezzi_ev = [60.0] * 24
+for h in range(17, 21):
+    prezzi_ev[h] = 180.0
+for h in range(7, 17):
+    prezzi_ev[h] = 110.0
+r = ev(prezzi_ev, 40.0, 11.0, 17, 7, 92.0, 60.0, 20.0)
+check("ev valido", r["valido"])
+check("ev risparmio >= 0", r["risparmio_eur"] >= -1e-9)
+check("ev energia conservata", abs(sum(r["schedario"]) - 40.0 / 0.92) < 1e-6)
+check("ev potenza rispettata", all(s <= 11.0 + 1e-9 for s in r["schedario"]))
+fin = set()
+hh = 17
+while True:
+    fin.add(hh)
+    hh = (hh + 1) % 24
+    if hh == 7:
+        break
+check("ev solo ore in finestra", all(r["schedario"][x] == 0.0 for x in range(24) if x not in fin))
+check("ev smart batte immediata", r["costo_immediata"] > r["costo_ottimale"])
+r2 = ev(prezzi_ev, 500.0, 11.0, 17, 19)
+check("ev finestra corta -> non valido", not r2["valido"])
+r3 = ev(prezzi_ev, 50.0, 11.0, 17, 7, 92.0, 60.0, 95.0)
+check("ev batteria piena -> non valido", not r3["valido"])
+check("ev 23 prezzi -> non valido", not ev([1.0] * 23, 10.0, 5.0)["valido"])
+check("ev energia negativa -> non valido", not ev(prezzi_ev, -5.0, 5.0)["valido"])
+check("ev potenza zero -> non valido", not ev(prezzi_ev, 10.0, 0.0)["valido"])
+r5 = ev([100.0] * 24, 22.0, 11.0, 0, 0)
+check("ev prezzi piatti -> risparmio zero", r5["valido"] and abs(r5["risparmio_eur"]) < 1e-9)
 
 print(f"{checks} check / {failed} fail")
 sys.exit(1 if failed else 0)
