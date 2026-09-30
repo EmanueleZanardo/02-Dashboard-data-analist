@@ -11623,6 +11623,160 @@ def calcola_quanto(forward, strike, mesi, vol_sott_pct, vol_cambio_pct, corr, ta
     return out
 
 
+def calcola_americana(forward, strike, mesi, vol_pct, tasso_pct, n_step=200):
+    """Premio di un'opzione AMERICANA su forward energetico (albero binomiale CRR).
+
+    L'opzione AMERICANA puo' essere esercitata in QUALSIASI momento prima della
+    scadenza (non solo a scadenza come l'europea): il suo prezzo incorpora la
+    flessibilita' di "uscire" quando conviene. E' il modello naturale delle
+    opzionalita' FISICHE dell'energy (una centrale che si accende/spegne ogni
+    giorno, uno stoccaggio, un tolling con esercizio giornaliero): la
+    differenza americana - europea e' l'EARLY-EXERCISE PREMIUM, cioe' quanto
+    vale poter decidere prima della scadenza.
+    Albero CRR sul forward (misura T-forward: il forward ha drift nullo):
+      dt = T/N; u = exp(sig*sqrt(dt)); d = 1/u
+      p = (1-d)/(u-d) (prob. risk-neutral); df_step = exp(-r*dt)
+    Backward induction con esercizio anticipato a ogni nodo:
+      V = max(intrinseco, df_step*(p*V_up + (1-p)*V_down))
+    Convenzione di esercizio STILE FUTURES (come le opzioni su futures
+    power/gas di EEX/ICE): l'esercizio consegna CASH pari all'intrinseco
+    (F_t - K per la call). Per questo, con tasso r > 0, l'esercizio
+    anticipato puo' essere ottimale ANCHE per la call deep ITM (si incassa
+    subito l'intrinseco e lo si mette a frutto); con r = 0 l'americana
+    coincide con l'europea. E' diverso dalle opzioni su forward OTC, dove
+    l'esercizio consegna un contratto forward (e l'americana = europea).
+    Sullo stesso albero si calcola anche l'europea (senza max) e il
+    riferimento Black-76 in forma chiusa.
+    Ancore esatte: (1) con r = 0, americana = europea sullo stesso albero
+    (nessun interesse da incassare anticipando: check a tolleranza
+    stretta); (2) parita' call-put europea ESATTA sull'albero:
+    C - P = df*(F - K); (3) T = 0 o vol = 0 -> americana = intrinseco NON
+    scontato (se ITM conviene esercitare subito), europea = df*intrinseco;
+    (4) put americana deep ITM ~= intrinseco (esercizio immediato
+    ottimale); (5) europea su albero -> Black-76 per N -> infinito
+    (convergenza CRR, verifica nel tab).
+    NaN-safe: input non validi (F <= 0, K <= 0, T < 0, vol < 0, r < 0,
+    n_step < 1 o > 2000, NaN, stringhe) -> dict neutro con valido = False.
+    Ritorna dict con: premio_am_call/put, premio_eu_call/put (stesso albero),
+    bs_call/bs_put (Black-76 di riferimento), early_premium_call/put,
+    parita_diff (~0), delta_am_call/put (dall'albero, al nodo radice),
+    esercizio_immediato_call/put (bool: alla radice conviene esercitare ora),
+    intrinseco_call/put, valido."""
+    from scipy.stats import norm as _norm
+
+    neutro = {"premio_am_call": float("nan"), "premio_am_put": float("nan"),
+              "premio_eu_call": float("nan"), "premio_eu_put": float("nan"),
+              "bs_call": float("nan"), "bs_put": float("nan"),
+              "early_premium_call": float("nan"),
+              "early_premium_put": float("nan"),
+              "parita_diff": float("nan"),
+              "delta_am_call": float("nan"), "delta_am_put": float("nan"),
+              "esercizio_immediato_call": False,
+              "esercizio_immediato_put": False,
+              "intrinseco_call": float("nan"),
+              "intrinseco_put": float("nan"), "valido": False}
+    try:
+        F = float(forward); K = float(strike); T = float(mesi) / 12.0
+        sig = float(vol_pct) / 100.0; r = float(tasso_pct) / 100.0
+        Ns = float(n_step)
+    except (TypeError, ValueError):
+        return neutro
+    if not all(np.isfinite(v) for v in (F, K, T, sig, r, Ns)):
+        return neutro
+    if F <= 0 or K <= 0 or T < 0 or sig < 0 or r < 0:
+        return neutro
+    if not Ns.is_integer() or not 1 <= Ns <= 2000:
+        return neutro
+    N = int(Ns)
+
+    df = float(np.exp(-r * T))
+    intr_c = max(F - K, 0.0)
+    intr_p = max(K - F, 0.0)
+
+    def _bs():
+        # Black-76 di riferimento (forma chiusa)
+        if T <= 0.0 or sig <= 0.0:
+            return df * intr_c, df * intr_p
+        sqt = sig * np.sqrt(T)
+        d1 = (np.log(F / K) + 0.5 * sig * sig * T) / sqt
+        d2 = d1 - sqt
+        c = df * (F * _norm.cdf(d1) - K * _norm.cdf(d2))
+        p_ = df * (K * _norm.cdf(-d2) - F * _norm.cdf(-d1))
+        return float(c), float(p_)
+
+    bs_c, bs_p = _bs()
+
+    if T <= 0.0 or sig <= 0.0:
+        # deterministico: l'americana ITM si esercita subito (non scontata)
+        out = dict(neutro)
+        out.update({"valido": True, "premio_am_call": float(intr_c),
+                    "premio_am_put": float(intr_p),
+                    "premio_eu_call": float(bs_c), "premio_eu_put": float(bs_p),
+                    "bs_call": float(bs_c), "bs_put": float(bs_p),
+                    "early_premium_call": float(intr_c - bs_c),
+                    "early_premium_put": float(intr_p - bs_p),
+                    "parita_diff": float((bs_c - bs_p) - df * (F - K)),
+                    "delta_am_call": 1.0 if F > K else 0.0,
+                    "delta_am_put": -1.0 if F < K else 0.0,
+                    "esercizio_immediato_call": bool(intr_c > 0),
+                    "esercizio_immediato_put": bool(intr_p > 0),
+                    "intrinseco_call": float(intr_c),
+                    "intrinseco_put": float(intr_p)})
+        return out
+
+    dt = T / N
+    u = float(np.exp(sig * np.sqrt(dt)))
+    d = 1.0 / u
+    disc = float(np.exp(-r * dt))
+    p = (1.0 - d) / (u - d)
+
+    j = np.arange(N + 1, dtype=float)
+    ST = F * np.power(u, j) * np.power(d, N - j)
+    Vc = np.maximum(ST - K, 0.0)   # americana call ai nodi terminali
+    Vp = np.maximum(K - ST, 0.0)   # americana put ai nodi terminali
+    Ec = Vc.copy()                 # europea call (stesso albero)
+    Ep = Vp.copy()                 # europea put (stesso albero)
+    STn = ST.copy()
+    cont_c0 = cont_p0 = None
+    Vc1 = Vp1 = ST1 = None
+    for i in range(N, 0, -1):
+        if i == 1:
+            # valori americani (con esercizio) e sottostante al passo 1:
+            # servono per delta ed esercizio-immediato alla radice
+            Vc1 = Vc.copy(); Vp1 = Vp.copy(); ST1 = STn.copy()
+        STn = STn[:-1] * u          # S(i,j) = S(i+1,j)/d = S(i+1,j)*u
+        intr_c_i = np.maximum(STn - K, 0.0)
+        intr_p_i = np.maximum(K - STn, 0.0)
+        cont_c = disc * (p * Vc[1:] + (1.0 - p) * Vc[:-1])
+        cont_p = disc * (p * Vp[1:] + (1.0 - p) * Vp[:-1])
+        if i == 1:
+            cont_c0 = float(cont_c[0]); cont_p0 = float(cont_p[0])
+        Vc = np.maximum(intr_c_i, cont_c)
+        Vp = np.maximum(intr_p_i, cont_p)
+        Ec = disc * (p * Ec[1:] + (1.0 - p) * Ec[:-1])
+        Ep = disc * (p * Ep[1:] + (1.0 - p) * Ep[:-1])
+
+    am_c = float(Vc[0]); am_p = float(Vp[0])
+    eu_c = float(Ec[0]); eu_p = float(Ep[0])
+    dST = float(ST1[1] - ST1[0])
+    delta_c = float((Vc1[1] - Vc1[0]) / dST) if dST > 0 else 0.0
+    delta_p = float((Vp1[1] - Vp1[0]) / dST) if dST > 0 else 0.0
+
+    out = dict(neutro)
+    out.update({"valido": True, "premio_am_call": am_c, "premio_am_put": am_p,
+                "premio_eu_call": eu_c, "premio_eu_put": eu_p,
+                "bs_call": bs_c, "bs_put": bs_p,
+                "early_premium_call": float(am_c - eu_c),
+                "early_premium_put": float(am_p - eu_p),
+                "parita_diff": float((eu_c - eu_p) - df * (F - K)),
+                "delta_am_call": delta_c, "delta_am_put": delta_p,
+                "esercizio_immediato_call": bool(intr_c > 0 and intr_c >= cont_c0),
+                "esercizio_immediato_put": bool(intr_p > 0 and intr_p >= cont_p0),
+                "intrinseco_call": float(intr_c),
+                "intrinseco_put": float(intr_p)})
+    return out
+
+
 def render_kpi(title, value, col):
     col.markdown(f"<div class='metric-container'><div class='metric-label'>{title}</div><div class='metric-val'>{value}</div></div>", unsafe_allow_html=True)
 
@@ -12269,7 +12423,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -21193,7 +21347,131 @@ elif workspace == _('ws8'):
                 help="Premi call/put quanto al variare della correlazione.",
                 key="csv_qto",
             )
-        st.caption("Uso pratico: la quanto elimina il rischio cambio dal payoff ma NON dal prezzo — la correlazione rho lo reintroduce nel premio. Con rho > 0 la call costa meno della vanilla (il forward quanto scende), con rho < 0 di piu'. Per un trader cross-border (es. esposizione power DE regolata in CHF) la quanto e' piu' economica della vanilla + copertura cambio separata quando la correlazione e' stabile. Limiti: forward driftless lognormale, vol e correlazione costanti, cambio di conversione davvero fisso a scadenza, niente smile.")
+    with tab109:
+        banner_demo("Opzione americana: esercizio in qualsiasi momento prima della scadenza (albero binomiale CRR)")
+        titolo_amr = edu("Opzione americana", "Un'opzione AMERICANA puo' essere esercitata in QUALSIASI momento prima della scadenza, non solo a scadenza come l'europea: il prezzo include la flessibilita' di 'uscire' quando conviene. E' il modello naturale delle opzionalita' FISICHE dell'energy — una centrale che si accende/spegne ogni giorno, uno stoccaggio, un tolling con esercizio giornaliero. La differenza americana - europea e' l'EARLY-EXERCISE PREMIUM: quanto vale poter decidere prima. Nota tecnica: l'esercizio consegna CASH pari all'intrinseco, come le opzioni su futures power/gas di EEX/ICE. Per questo, con tassi > 0, l'esercizio anticipato puo' convenire anche per la CALL deep ITM (incassi subito l'intrinseco e lo metti a frutto); con tasso = 0 l'americana coincide con l'europea.")
+        st.markdown(f"**{titolo_amr}**: prezza l'americana con l'albero binomiale CRR — confronto con l'europea sullo stesso albero e con Black-76, early-exercise premium, delta, convergenza al crescere dei passi e curva del premio per strike.", unsafe_allow_html=True)
+
+        fwd_amr_def = float(prezzi.dropna().mean()) if len(prezzi.dropna()) else float("nan")
+        vol_amr_def = vol_relativa_annua(prezzi)
+        vol_amr_def = float(vol_amr_def) if np.isfinite(vol_amr_def) else 40.0
+
+        a1, a2 = st.columns(2)
+        with a1:
+            fwd_amr = st.number_input("Prezzo forward (€/MWh)", min_value=0.1,
+                                      value=fwd_amr_def if np.isfinite(fwd_amr_def) else 100.0,
+                                      step=1.0, key="amr_fwd",
+                                      help="Default = media del periodo selezionato.")
+        with a2:
+            strike_amr = st.number_input("Strike (€/MWh)", min_value=0.1,
+                                         value=fwd_amr_def if np.isfinite(fwd_amr_def) else 100.0,
+                                         step=1.0, key="amr_k",
+                                         help="Default = at-the-money sul forward.")
+        b1, b2, b3 = st.columns(3)
+        with b1:
+            mesi_amr = st.number_input("Scadenza (mesi)", min_value=0, max_value=60,
+                                       value=12, step=1, key="amr_t",
+                                       help="Vita residua dell'opzione.")
+        with b2:
+            vol_amr = st.number_input("Volatilita' (% annua)", min_value=0.0, max_value=300.0,
+                                      value=round(vol_amr_def, 1), step=1.0, key="amr_vol",
+                                      help="Default = vol realizzata annualizzata.")
+        with b3:
+            tasso_amr = st.number_input("Tasso risk-free (%)", min_value=0.0, max_value=20.0,
+                                        value=2.0, step=0.25, key="amr_r",
+                                        help="Tasso di attualizzazione.")
+        c1_, c2_, c3_ = st.columns(3)
+        with c1_:
+            tipo_amr = st.selectbox("Tipo opzione", ["Call (tetto/cap)", "Put (pavimento/floor)"],
+                                    key="amr_tipo",
+                                    help="Call = protezione contro i rialzi; Put = protezione contro i ribassi.")
+        with c2_:
+            nstep_amr = st.selectbox("Passi dell'albero", [50, 100, 200, 500], index=2,
+                                     key="amr_n",
+                                     help="Piu' passi = piu' vicino a Black-76 (vedi grafico di convergenza).")
+        with c3_:
+            qta_amr = st.number_input("Quantita' (MWh)", min_value=0.0, value=1000.0,
+                                      step=100.0, key="amr_qta",
+                                      help="Premio totale = premio x quantita'.")
+
+        is_call_amr = tipo_amr.startswith("Call")
+        ris_amr = calcola_americana(fwd_amr, strike_amr, int(mesi_amr), vol_amr,
+                                    tasso_amr, int(nstep_amr))
+        if ris_amr["valido"]:
+            pamr = ris_amr["premio_am_call"] if is_call_amr else ris_amr["premio_am_put"]
+            peur = ris_amr["premio_eu_call"] if is_call_amr else ris_amr["premio_eu_put"]
+            pbs = ris_amr["bs_call"] if is_call_amr else ris_amr["bs_put"]
+            eep = ris_amr["early_premium_call"] if is_call_amr else ris_amr["early_premium_put"]
+            delta_amr = ris_amr["delta_am_call"] if is_call_amr else ris_amr["delta_am_put"]
+            exnow = ris_amr["esercizio_immediato_call"] if is_call_amr else ris_amr["esercizio_immediato_put"]
+            g1, g2, g3 = st.columns(3)
+            render_kpi(f"Premio americana {'call' if is_call_amr else 'put'} (€/MWh)", f"{pamr:,.3f}", g1)
+            render_kpi("Europea stesso albero (€/MWh)", f"{peur:,.3f}", g2)
+            render_kpi("Black-76 riferimento (€/MWh)", f"{pbs:,.3f}", g3)
+            h1, h2, h3 = st.columns(3)
+            render_kpi("Early-exercise premium", f"{eep:,.3f} €/MWh", h1)
+            render_kpi("Delta americana", f"{delta_amr:+.3f}", h2)
+            render_kpi("Premio totale (€)", f"{pamr * qta_amr:,.0f}", h3)
+            st.caption(f"Esercizio immediato ottimale ora: {'SI' if exnow else 'no'} · parita' call-put europea: {ris_amr['parita_diff']:.2e} (≈0) · intrinseco: {ris_amr['intrinseco_call' if is_call_amr else 'intrinseco_put']:,.3f} €/MWh")
+
+            n_grid = [25, 50, 100, 200, 350, 500]
+            eu_grid_c, eu_grid_p = [], []
+            for nn in n_grid:
+                rr_ = calcola_americana(fwd_amr, strike_amr, int(mesi_amr), vol_amr,
+                                        tasso_amr, nn)
+                eu_grid_c.append(rr_["premio_eu_call"] if rr_["valido"] else float("nan"))
+                eu_grid_p.append(rr_["premio_eu_put"] if rr_["valido"] else float("nan"))
+            fig_conv = go.Figure()
+            fig_conv.add_scatter(x=n_grid, y=eu_grid_c, mode="lines+markers",
+                                 name="Europea call (albero)",
+                                 line=dict(color="#22d3ee", width=2.5))
+            fig_conv.add_scatter(x=n_grid, y=eu_grid_p, mode="lines+markers",
+                                 name="Europea put (albero)",
+                                 line=dict(color="#f472b6", width=2.5))
+            fig_conv.add_hline(y=ris_amr["bs_call"], line_dash="dash", line_color="#22d3ee",
+                               annotation_text=f"BS call {ris_amr['bs_call']:,.3f}")
+            fig_conv.add_hline(y=ris_amr["bs_put"], line_dash="dash", line_color="#f472b6",
+                               annotation_text=f"BS put {ris_amr['bs_put']:,.3f}")
+            fig_conv.update_layout(template="plotly_dark", height=340,
+                                    title="Convergenza CRR: europea su albero vs Black-76",
+                                    xaxis_title="Passi dell'albero (N)",
+                                    yaxis_title="Premio (€/MWh)")
+            st.plotly_chart(fig_conv, use_container_width=True)
+
+            k_lo, k_hi = 0.5 * fwd_amr, 1.5 * fwd_amr
+            k_grid = [k_lo + (k_hi - k_lo) * i / 24 for i in range(25)]
+            prem_k_c, prem_k_p, eep_k = [], [], []
+            for kk in k_grid:
+                rr_ = calcola_americana(fwd_amr, kk, int(mesi_amr), vol_amr,
+                                        tasso_amr, int(nstep_amr))
+                prem_k_c.append(rr_["premio_am_call"] if rr_["valido"] else float("nan"))
+                prem_k_p.append(rr_["premio_am_put"] if rr_["valido"] else float("nan"))
+                eep_k.append(rr_["early_premium_put"] if rr_["valido"] else float("nan"))
+            fig_k = go.Figure()
+            fig_k.add_scatter(x=k_grid, y=prem_k_c, mode="lines", name="Call americana",
+                              line=dict(color="#22d3ee", width=2.5))
+            fig_k.add_scatter(x=k_grid, y=prem_k_p, mode="lines", name="Put americana",
+                              line=dict(color="#f472b6", width=2.5))
+            fig_k.update_layout(template="plotly_dark", height=340,
+                                 title="Premio americana vs strike",
+                                 xaxis_title="Strike (€/MWh)",
+                                 yaxis_title="Premio (€/MWh)")
+            st.plotly_chart(fig_k, use_container_width=True)
+
+            df_amr = pd.DataFrame({"Strike (€/MWh)": [round(v, 2) for v in k_grid],
+                                   "Premio call americana (€/MWh)": [round(v, 4) for v in prem_k_c],
+                                   "Premio put americana (€/MWh)": [round(v, 4) for v in prem_k_p],
+                                   "Early-exercise premium put (€/MWh)": [round(v, 4) for v in eep_k]})
+            st.dataframe(df_amr, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta curva americana (CSV)",
+                df_amr.to_csv(index=False).encode("utf-8"),
+                file_name=f"americana_{int(mesi_amr)}m_N{int(nstep_amr)}_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Premi call/put americana ed early-exercise premium della put al variare dello strike.",
+                key="csv_amr",
+            )
+        st.caption("Uso pratico: l'americana e' il prezzo giusto quando l'esercizio puo' avvenire prima della scadenza — opzioni su futures EEX/ICE e opzionalita' fisica (centrali, stoccaggi, tolling con esercizio giornaliero). L'early-exercise premium cresce con il tasso ed e' massimo per le put ITM e le call deep ITM; con tasso = 0 l'americana coincide con l'europea. Limiti: albero CRR a vol e tasso costanti (convergenza oscillante per N piccoli), niente smile di vol, esercizio solo ai nodi dell'albero.")
 
 # Footer
 
