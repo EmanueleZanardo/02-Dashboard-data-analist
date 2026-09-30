@@ -1966,6 +1966,81 @@ def calcola_black76(forward, strike, anni, vol_pct, tasso_pct):
     return out
 
 
+def calcola_margrabe(fp, fg, hr, vol_p_pct, vol_g_pct, rho, anni, tasso_pct):
+    """Prezzatura Margrabe di un'opzione europea sullo spark spread (scambio gas->power).
+
+    Opzione di SCAMBIO: diritto (non obbligo) a scadenza di "pagare" gas e
+    "ricevere" elettricita' — payoff = max(P - hr*G, 0) per MWh elettrico, con
+    P = prezzo power, G = prezzo gas, hr = heat rate. E' la versione opzionale
+    del tolling agreement (vedi tab Tolling): il premio vale la flessibilita'
+    di accendere la centrale solo quando lo spark spread e' positivo.
+    fp: forward power €/MWh; fg: forward gas €/MWh termico; hr: heat rate
+    (MWh termici per MWh elettrico). vol_p/vol_g: vol annue % di power e gas.
+    rho: correlazione power-gas in [-1, 1] — il driver chiave: piu' e' alta,
+    meno vale l'opzione (i due prezzi si muovono insieme). anni: scadenza;
+    tasso_pct: risk-free %.
+    Formule: F1 = fp, F2 = hr*fg; sig = sqrt(vp^2 + vg^2 - 2*rho*vp*vg);
+    d1 = [ln(F1/F2) + 0.5*sig^2*T] / (sig*sqrt(T)); d2 = d1 - sig*sqrt(T);
+    premio = df * (F1*N(d1) - F2*N(d2)); delta_power = df*N(d1);
+    delta_gas = -df*N(d2)*hr (per MWh termico).
+    Casi limite: T=0 o sig=0 -> intrinseco scontato. Con vg=0 la formula
+    coincide con la call Black-76 su fp con strike hr*fg.
+    NaN-safe: input non validi (F<=0, hr<=0, T<0, vol<0, |rho|>1, NaN,
+    stringhe) -> dict neutro con nan e senza eccezioni.
+    Ritorna dict con: premio (€/MWh el.), delta_power, delta_gas, sigma,
+    intrinseco, breakeven_power (P a scadenza che ripaga il premio a gas
+    fisso), d1, d2, f1, f2."""
+
+    neutro = {"premio": float("nan"), "delta_power": float("nan"),
+              "delta_gas": float("nan"), "sigma": float("nan"),
+              "intrinseco": float("nan"), "breakeven_power": float("nan"),
+              "d1": float("nan"), "d2": float("nan"),
+              "f1": float("nan"), "f2": float("nan")}
+    try:
+        F1 = float(fp)
+        G = float(fg)
+        HR = float(hr)
+        vp = float(vol_p_pct) / 100.0
+        vg = float(vol_g_pct) / 100.0
+        r_ho = float(rho)
+        T = float(anni)
+        r = float(tasso_pct) / 100.0
+    except (TypeError, ValueError):
+        return neutro
+    if not all(np.isfinite(v) for v in (F1, G, HR, vp, vg, r_ho, T, r)):
+        return neutro
+    if F1 <= 0 or G <= 0 or HR <= 0 or T < 0 or vp < 0 or vg < 0 or r < 0:
+        return neutro
+    if abs(r_ho) > 1.0:
+        return neutro
+    F2 = HR * G
+    df = float(np.exp(-r * T))
+    intr = max(F1 - F2, 0.0)
+    sig = float(np.sqrt(max(vp * vp + vg * vg - 2.0 * r_ho * vp * vg, 0.0)))
+    if T == 0.0 or sig == 0.0:
+        out = dict(neutro)
+        out.update({"premio": float(intr * df),
+                    "delta_power": float(df if F1 > F2 else 0.0),
+                    "delta_gas": float(-df * HR if F1 > F2 else 0.0),
+                    "sigma": float(sig), "intrinseco": float(intr),
+                    "breakeven_power": float(F2 + intr * df),
+                    "f1": float(F1), "f2": float(F2)})
+        return out
+    sqt = sig * float(np.sqrt(T))
+    d1 = (float(np.log(F1 / F2)) + 0.5 * sig * sig * T) / sqt
+    d2 = d1 - sqt
+    premio = df * (F1 * float(norm.cdf(d1)) - F2 * float(norm.cdf(d2)))
+    out = dict(neutro)
+    out.update({"premio": float(premio),
+                "delta_power": float(df * float(norm.cdf(d1))),
+                "delta_gas": float(-df * float(norm.cdf(d2)) * HR),
+                "sigma": float(sig), "intrinseco": float(intr),
+                "breakeven_power": float(F2 + premio),
+                "d1": float(d1), "d2": float(d2),
+                "f1": float(F1), "f2": float(F2)})
+    return out
+
+
 def vol_relativa_annua(prezzi):
     """Volatilita' annua (%) stimata dai rendimenti orari della serie spot.
 
@@ -10629,7 +10704,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -17778,6 +17853,111 @@ elif workspace == _('ws8'):
                 key="csv_op",
             )
         st.caption("Uso pratico: per COPRIRE un acquisto futuro compra la call con strike = prezzo massimo che accetti di pagare; il breakeven ti dice fino a dove il mercato deve salire per ripagare il premio. Per PROTEGGERE i ricavi di un impianto compra la put con strike = prezzo minimo garantito. Confronta il premio con la vol implicita quotata dai broker: se il mercato quota vol piu' alta di quella realizzata, le opzioni sono 'care' (e viceversa).")
+
+
+    with tab94:
+        banner_demo("Prezzatura di un'opzione europea sullo spark spread (formula di Margrabe) su prezzi reali o sintetici")
+        titolo_mg = edu("Opzione sullo spark spread (Margrabe)", "Un'opzione sullo SPARK SPREAD e' il diritto (non l'obbligo) di 'scambiare' gas con elettricita' a scadenza: il payoff e' max(prezzo_power - heat_rate x prezzo_gas, 0). E' la versione opzionale del tolling agreement: il premio vale la flessibilita' di accendere la centrale solo quando conviene. Il driver chiave e' la CORRELAZIONE tra power e gas: se i due prezzi si muovono insieme (correlazione alta) lo spread si muove poco e l'opzione vale poco; se si muovono per conto loro (correlazione bassa o negativa) lo spread e' volatile e l'opzione vale molto. La formula di Margrabe e' lo standard per le opzioni di scambio tra due sottostanti.")
+        st.markdown(f"**{titolo_mg}**: quanto vale il diritto di convertire gas in elettricita' solo quando conviene?", unsafe_allow_html=True)
+
+        fp_def = float(prezzi.dropna().mean()) if len(prezzi.dropna()) else float("nan")
+        fp_def = fp_def if np.isfinite(fp_def) else 100.0
+        vp_def = vol_relativa_annua(prezzi)
+        vp_def = float(vp_def) if np.isfinite(vp_def) else 40.0
+
+        mg1, mg2, mg3 = st.columns(3)
+        with mg1:
+            fp_mg = st.number_input("Forward power (€/MWh)", min_value=0.1, value=fp_def, step=1.0, key="mg_fp",
+                                    help="Prezzo forward dell'elettricita': default = media del periodo selezionato.")
+        with mg2:
+            fg_mg = st.number_input("Forward gas (€/MWh termico)", min_value=0.1, value=35.0, step=1.0, key="mg_fg",
+                                    help="Prezzo forward del gas (TTF).")
+        with mg3:
+            hr_mg = st.number_input("Heat rate (MWh_th/MWh_el)", min_value=0.5, max_value=5.0, value=2.0, step=0.1, key="mg_hr",
+                                    help="Quanto gas termico serve per 1 MWh elettrico: 2.0 = CCGT al 50% di efficienza.")
+        mg4, mg5, mg6 = st.columns(3)
+        with mg4:
+            vp_mg = st.number_input("Volatilità power (% annua)", min_value=0.0, max_value=300.0, value=round(vp_def, 1),
+                                    step=1.0, key="mg_vp",
+                                    help="Default = vol realizzata annualizzata della serie spot.")
+        with mg5:
+            vg_mg = st.number_input("Volatilità gas (% annua)", min_value=0.0, max_value=300.0, value=30.0,
+                                    step=1.0, key="mg_vg",
+                                    help="Volatilita' annua del forward gas.")
+        with mg6:
+            rho_mg = st.number_input("Correlazione power-gas", min_value=-1.0, max_value=1.0, value=0.70, step=0.05, key="mg_rho",
+                                     help="Correlazione tra i rendimenti di power e gas: il driver principale del premio.")
+        mg7, mg8, mg9 = st.columns(3)
+        with mg7:
+            mesi_mg = st.number_input("Scadenza (mesi)", min_value=0, max_value=60, value=3, step=1, key="mg_mesi",
+                                      help="Vita residua dell'opzione in mesi (0 = scadenza immediata: premio = intrinseco).")
+        with mg8:
+            tasso_mg = st.number_input("Tasso risk-free (%)", min_value=0.0, max_value=20.0, value=2.0, step=0.25, key="mg_r",
+                                       help="Tasso di attualizzazione del premio.")
+        with mg9:
+            qta_mg = st.number_input("Quantità (MWh)", min_value=0.0, value=1000.0, step=100.0, key="mg_qta",
+                                     help="Volume elettrico sottostante: il premio e' moltiplicato per questa quantita'.")
+
+        ris_mg = calcola_margrabe(fp_mg, fg_mg, hr_mg, vp_mg, vg_mg, rho_mg, mesi_mg / 12.0, tasso_mg)
+        prem_mg = ris_mg["premio"]
+        ok_mg = np.isfinite(prem_mg)
+        f2_mg = hr_mg * fg_mg
+
+        k1, k2, k3, k4 = st.columns(4)
+        render_kpi("Premio opzione (€/MWh)", f"{prem_mg:,.2f}" if ok_mg else "n.d.", k1)
+        render_kpi(f"Costo totale ({qta_mg:,.0f} MWh)", f"{prem_mg * qta_mg:,.0f} €" if ok_mg and qta_mg > 0 else "n.d.", k2)
+        render_kpi("Delta power", f"{ris_mg['delta_power']:+.2f}" if ok_mg else "n.d.", k3)
+        render_kpi("Volatilità spread eff. (%)", f"{ris_mg['sigma'] * 100:,.1f}" if ok_mg else "n.d.", k4)
+        if ok_mg:
+            money_mg = "in-the-money 🟢" if fp_mg > f2_mg else ("out-of-the-money 🔴" if fp_mg < f2_mg else "at-the-money ⚪")
+            st.caption(f"Spark forward {money_mg}: power {fp_mg:,.1f} vs costo gas equivalente {f2_mg:,.1f} €/MWh (heat rate {hr_mg:.1f} x gas {fg_mg:,.1f}). "
+                       f"Breakeven a scadenza (gas fisso): power a **{ris_mg['breakeven_power']:,.1f} €/MWh**. "
+                       f"Delta gas: {ris_mg['delta_gas']:+.2f} per MWh termico — per coprire vendi delta power di elettricita' e compri delta gas di gas.")
+
+        if ok_mg:
+            p_min = max(0.5, min(fp_mg, f2_mg) * 0.3)
+            p_max = max(fp_mg, f2_mg) * 2.2
+            p_grid = np.linspace(p_min, p_max, 120)
+            pay_mg = np.maximum(p_grid - f2_mg, 0.0) - prem_mg
+            fig_mp = go.Figure()
+            fig_mp.add_trace(go.Scatter(x=p_grid, y=pay_mg, mode="lines", name="Payoff netto",
+                                        line=dict(color="#10B981", width=2.5),
+                                        hovertemplate="Power a scadenza: %{x:,.1f}<br>P&L: %{y:+,.2f} €/MWh<extra></extra>"))
+            fig_mp.add_hline(y=0, line_dash="dot", line_color="#9ca3af")
+            fig_mp.add_vline(x=ris_mg["breakeven_power"], line_dash="dash", line_color="#10B981",
+                             annotation_text=f"BE {ris_mg['breakeven_power']:,.0f}", annotation_position="top right")
+            fig_mp.add_vline(x=f2_mg, line_dash="dot", line_color="#9ca3af",
+                             annotation_text=f"Costo gas {f2_mg:,.0f}", annotation_position="top left")
+            fig_mp.update_layout(template="plotly_dark", height=340,
+                                 title=f"Payoff a scadenza (gas fisso a {fg_mg:,.1f} €/MWh_th, al netto del premio)",
+                                 xaxis_title="Prezzo power a scadenza (€/MWh)", yaxis_title="P&L (€/MWh)")
+            st.plotly_chart(fig_mp, use_container_width=True)
+
+            rho_grid = np.linspace(-0.9, 0.99, 40)
+            pr_grid = [calcola_margrabe(fp_mg, fg_mg, hr_mg, vp_mg, vg_mg, r_, mesi_mg / 12.0, tasso_mg)["premio"]
+                       for r_ in rho_grid]
+            fig_rc = go.Figure()
+            fig_rc.add_trace(go.Scatter(x=rho_grid, y=pr_grid, mode="lines", name="Premio",
+                                        line=dict(color="#F59E0B", width=2.5),
+                                        hovertemplate="Correlazione: %{x:.2f}<br>Premio: %{y:,.2f} €/MWh<extra></extra>"))
+            fig_rc.add_vline(x=rho_mg, line_dash="dash", line_color="#9ca3af",
+                             annotation_text=f"ρ = {rho_mg:.2f}", annotation_position="top right")
+            fig_rc.update_layout(template="plotly_dark", height=320,
+                                 title="Sensitività del premio alla correlazione power-gas",
+                                 xaxis_title="Correlazione power-gas", yaxis_title="Premio (€/MWh)")
+            st.plotly_chart(fig_rc, use_container_width=True)
+
+            df_mg = pd.DataFrame({"Correlazione": np.round(rho_grid, 2),
+                                  "Premio (€/MWh)": np.round(pr_grid, 2)})
+            st.download_button(
+                "⬇️ Esporta premio vs correlazione (CSV)",
+                df_mg.to_csv(index=False).encode("utf-8"),
+                file_name=f"margrabe_correlazione_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Premio Margrabe per una griglia di correlazioni, con i parametri impostati.",
+                key="csv_margrabe",
+            )
+        st.caption("Uso pratico: il proprietario di una CCGT compra questa opzione per garantirsi un margine minimo senza impegnare la centrale; un trader la vende se crede che power e gas restino correlati. Confronta il premio con il margine del tolling agreement (tab Tolling): l'opzione sullo spark spread e' il tolling 'puro' senza costi di avviamento ne' vincoli tecnici.")
 
 
 # Footer
