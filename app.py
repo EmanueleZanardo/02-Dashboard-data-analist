@@ -1966,6 +1966,79 @@ def calcola_black76(forward, strike, anni, vol_pct, tasso_pct):
     return out
 
 
+def calcola_greche(forward, strike, anni, vol_pct, tasso_pct):
+    """Greche Black-76 di call/put europee sul forward dell'energia.
+
+    F = prezzo forward/sottostante (€/MWh), K = strike (€/MWh), T = scadenza
+    in anni, vol = volatilita' annua (%), tasso = risk-free annuo (%).
+    Derivate analitiche del premio Black-76 (vedi calcola_black76), con
+    df = exp(-r*T), d1 = [ln(F/K) + 0.5*s^2*T] / (s*sqrt(T)), d2 = d1 - s*sqrt(T):
+      delta_call = df*N(d1);  delta_put = -df*N(-d1)          (sensibilita' al forward)
+      gamma = df*n(d1) / (F*s*sqrt(T))                       (uguale per call e put)
+      vega = F*df*n(d1)*sqrt(T)                               (uguale per call e put)
+      theta_call = -F*df*n(d1)*s/(2*sqrt(T)) + r*call         (per anno; /365 al giorno)
+      theta_put  = -F*df*n(d1)*s/(2*sqrt(T)) + r*put
+      rho_call = -T*call;  rho_put = -T*put                  (sensibilita' al tasso)
+    Convenzioni esposte: vega e rho per +1 PUNTO percentuale di vol/tasso
+    (vega/100, rho/100), theta anche al giorno (per anno / 365).
+    Casi limite T=0 o vol=0: premio e delta come l'intrinseco scontato
+    (vedi calcola_black76), gamma/vega/rho = 0, theta = nan.
+    NaN-safe: input non validi -> dict neutro con nan, senza eccezioni.
+    Ritorna dict con: premio_call, premio_put, delta_call, delta_put, gamma,
+    vega_1pp, theta_call_anno, theta_put_anno, theta_call_gg, theta_put_gg,
+    rho_call_1pp, rho_put_1pp, d1, d2."""
+    neutro = {"premio_call": float("nan"), "premio_put": float("nan"),
+              "delta_call": float("nan"), "delta_put": float("nan"),
+              "gamma": float("nan"), "vega_1pp": float("nan"),
+              "theta_call_anno": float("nan"), "theta_put_anno": float("nan"),
+              "theta_call_gg": float("nan"), "theta_put_gg": float("nan"),
+              "rho_call_1pp": float("nan"), "rho_put_1pp": float("nan"),
+              "d1": float("nan"), "d2": float("nan")}
+    try:
+        F = float(forward); K = float(strike); T = float(anni)
+        sig = float(vol_pct) / 100.0; r = float(tasso_pct) / 100.0
+    except (TypeError, ValueError):
+        return neutro
+    if not all(np.isfinite(v) for v in (F, K, T, sig, r)):
+        return neutro
+    if F <= 0 or K <= 0 or T < 0 or sig < 0 or r < 0:
+        return neutro
+    df = float(np.exp(-r * T))
+    ic = max(F - K, 0.0)
+    ip = max(K - F, 0.0)
+    if T == 0.0 or sig == 0.0:
+        out = dict(neutro)
+        out.update({"premio_call": float(ic * df), "premio_put": float(ip * df),
+                    "delta_call": float(df if F > K else 0.0),
+                    "delta_put": float(-df if F < K else 0.0),
+                    "gamma": 0.0, "vega_1pp": 0.0,
+                    "rho_call_1pp": 0.0, "rho_put_1pp": 0.0})
+        return out
+    sqT = float(np.sqrt(T))
+    sqt = sig * sqT
+    d1 = (float(np.log(F / K)) + 0.5 * sig * sig * T) / sqt
+    d2 = d1 - sqt
+    call = df * (F * float(norm.cdf(d1)) - K * float(norm.cdf(d2)))
+    put = df * (K * float(norm.cdf(-d2)) - F * float(norm.cdf(-d1)))
+    nd1 = float(norm.pdf(d1))
+    gamma = df * nd1 / (F * sqt)
+    vega = F * df * nd1 * sqT
+    th_c = -F * df * nd1 * sig / (2.0 * sqT) + r * call
+    th_p = -F * df * nd1 * sig / (2.0 * sqT) + r * put
+    out = dict(neutro)
+    out.update({"premio_call": float(call), "premio_put": float(put),
+                "delta_call": float(df * float(norm.cdf(d1))),
+                "delta_put": float(-df * float(norm.cdf(-d1))),
+                "gamma": float(gamma), "vega_1pp": float(vega / 100.0),
+                "theta_call_anno": float(th_c), "theta_put_anno": float(th_p),
+                "theta_call_gg": float(th_c / 365.0),
+                "theta_put_gg": float(th_p / 365.0),
+                "rho_call_1pp": float(-T * call / 100.0),
+                "rho_put_1pp": float(-T * put / 100.0),
+                "d1": float(d1), "d2": float(d2)})
+    return out
+
+
 def calcola_margrabe(fp, fg, hr, vol_p_pct, vol_g_pct, rho, anni, tasso_pct):
     """Prezzatura Margrabe di un'opzione europea sullo spark spread (scambio gas->power).
 
@@ -11095,7 +11168,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -18761,6 +18834,122 @@ elif workspace == _('ws8'):
                 key="csv_sw_mesi",
             )
         st.caption("Uso pratico: il trader gas usa l'intrinseco per prezzare il PAVIMENTO di una swing e per costruire la nomination giornaliera da inviare al TSO; il 'costo dei vincoli globali' dice quanto si perde rispetto a una flessibilita' giornaliera pura. Attenzione: il prezzo pieno dell'opzione include anche il time value della volatilita' (qui non modellato) — l'intrinseco e' solo il punto di partenza della negoziazione.")
+
+
+    with tab98:
+        banner_demo("Prezzatura di opzioni call/put europee sul prezzo dell'energia (modello Black-76) su prezzi reali o sintetici")
+        titolo_gr = edu("Greche opzioni", "Le GRECHE misurano di quanto si muove il PREMIO di un'opzione quando cambiano i parametri di mercato. DELTA: di quanto cambia il premio se il forward si muove di 1 €/MWh — e quanti MWh di forward servono per coprirsi (delta × quantita'). GAMMA: di quanto cambia il delta stesso (rischio di secondo ordine, massimo at-the-money: li' la copertura va ribilanciata piu' spesso). VEGA: quanto vale +1 punto percentuale di volatilita'. THETA: quanto l'opzione perde ogni giorno che passa (time decay, sempre negativo a tasso zero). RHO: sensibilita' al tasso risk-free. Chi VENDE opzioni le usa per restare delta-neutral: vende la call, compra delta MWh sul forward, e ricopre quando il gamma sposta il delta.")
+        st.markdown(f"**{titolo_gr}**: quanto e' esposta la tua opzione a prezzo, vol, tempo e tassi?", unsafe_allow_html=True)
+
+        fwd_gr_def = float(prezzi.dropna().mean()) if len(prezzi.dropna()) else float("nan")
+        k_gr_def = float(round(fwd_gr_def)) if np.isfinite(fwd_gr_def) else 100.0
+        vol_gr_def = vol_relativa_annua(prezzi)
+        vol_gr_def = float(vol_gr_def) if np.isfinite(vol_gr_def) else 40.0
+
+        gr1, gr2, gr3 = st.columns(3)
+        with gr1:
+            tipo_gr = st.selectbox("Tipo opzione", ["call", "put"], key="gr_tipo",
+                                   help="Le greche di call e put condividono gamma e vega; delta, theta e rho cambiano segno/valore.")
+        with gr2:
+            fwd_gr = st.number_input("Prezzo forward/sottostante (€/MWh)", min_value=0.1,
+                                     value=fwd_gr_def if np.isfinite(fwd_gr_def) else 100.0,
+                                     step=1.0, key="gr_fwd",
+                                     help="Prezzo di riferimento dell'energia: default = media del periodo selezionato.")
+        with gr3:
+            k_gr = st.number_input("Strike (€/MWh)", min_value=0.1, value=k_gr_def, step=1.0, key="gr_k",
+                                   help="Prezzo di esercizio dell'opzione.")
+        gr4, gr5, gr6 = st.columns(3)
+        with gr4:
+            mesi_gr = st.number_input("Scadenza (mesi)", min_value=0, max_value=60, value=3, step=1, key="gr_mesi",
+                                      help="Vita residua dell'opzione in mesi (0 = scadenza immediata: premio = intrinseco, gamma/vega = 0).")
+        with gr5:
+            vol_gr = st.number_input("Volatilità annua (%)", min_value=0.0, max_value=300.0,
+                                     value=round(vol_gr_def, 1), step=1.0, key="gr_vol",
+                                     help="Default = vol realizzata annualizzata della serie. La vega misura proprio la sensibilita' a questo input.")
+        with gr6:
+            tasso_gr = st.number_input("Tasso risk-free (%)", min_value=0.0, max_value=20.0, value=2.0,
+                                       step=0.25, key="gr_r", help="Tasso di attualizzazione.")
+        qta_gr = st.number_input("Quantità (MWh)", min_value=0.0, value=1000.0, step=100.0, key="gr_qta",
+                                 help="Volume della posizione: delta, vega, theta e rho sono moltiplicati per questa quantita'.")
+
+        ris_gr = calcola_greche(fwd_gr, k_gr, mesi_gr / 12.0, vol_gr, tasso_gr)
+        ok_gr = np.isfinite(ris_gr["gamma"]) or (mesi_gr == 0 or vol_gr == 0.0)
+        ok_gr = bool(ok_gr and np.isfinite(ris_gr["premio_call"]))
+
+        if ok_gr:
+            prem_gr = ris_gr[f"premio_{tipo_gr}"]
+            dlt_gr = ris_gr[f"delta_{tipo_gr}"]
+            th_gr = ris_gr[f"theta_{tipo_gr}_gg"]
+            rho_gr = ris_gr[f"rho_{tipo_gr}_1pp"]
+            kg1, kg2, kg3 = st.columns(3)
+            render_kpi(f"Premio {tipo_gr.upper()} (€/MWh)", f"{prem_gr:,.2f}", kg1)
+            render_kpi("Delta (per MWh)", f"{dlt_gr:+.3f}", kg2)
+            render_kpi("Delta posizione (MWh eq.)", f"{dlt_gr * qta_gr:+,.0f}", kg3)
+            kg4, kg5, kg6 = st.columns(3)
+            render_kpi("Gamma (per MWh)", f"{ris_gr['gamma']:.4f}", kg4)
+            render_kpi("Vega +1pp vol (posizione)", f"{ris_gr['vega_1pp'] * qta_gr:+,.0f} €", kg5)
+            render_kpi("Theta (posizione, €/giorno)", f"{th_gr * qta_gr:+,.0f} €", kg6)
+            kg7, kg8, kg9 = st.columns(3)
+            render_kpi("Rho +1pp tasso (posizione)", f"{rho_gr * qta_gr:+,.0f} €", kg7)
+            render_kpi("Copertura delta-neutral",
+                       f"{'Compra' if dlt_gr * qta_gr < 0 else 'Vendi'} {abs(dlt_gr * qta_gr):,.0f} MWh fwd", kg8)
+            money_gr = "ITM 🟢" if (fwd_gr > k_gr if tipo_gr == "call" else fwd_gr < k_gr) else ("OTM 🔴" if fwd_gr != k_gr else "ATM ⚪")
+            render_kpi("Moneyness", money_gr, kg9)
+            if tipo_gr == "put":
+                st.caption(f"Put {money_gr}: il delta negativo indica una posizione corta implicita sul forward — per coprire una put comprata si VENDE il forward.")
+        else:
+            st.warning("Parametri non validi per il calcolo delle greche.")
+
+        if ok_gr:
+            k_grid_gr = np.linspace(max(1.0, k_gr * 0.6), k_gr * 1.6, 40)
+            dc_gr, dp_gr, gm_gr, vg_gr = [], [], [], []
+            for kk in k_grid_gr:
+                rr = calcola_greche(fwd_gr, kk, mesi_gr / 12.0, vol_gr, tasso_gr)
+                dc_gr.append(rr["delta_call"]); dp_gr.append(rr["delta_put"])
+                gm_gr.append(rr["gamma"]); vg_gr.append(rr["vega_1pp"])
+            fig_gd = go.Figure()
+            fig_gd.add_trace(go.Scatter(x=k_grid_gr, y=dc_gr, mode="lines", name="Delta call",
+                                        line=dict(color="#3B82F6"),
+                                        hovertemplate="Strike: %{x:,.1f}<br>Delta call: %{y:+.3f}<extra></extra>"))
+            fig_gd.add_trace(go.Scatter(x=k_grid_gr, y=dp_gr, mode="lines", name="Delta put",
+                                        line=dict(color="#F59E0B"),
+                                        hovertemplate="Strike: %{x:,.1f}<br>Delta put: %{y:+.3f}<extra></extra>"))
+            fig_gd.add_vline(x=fwd_gr, line_dash="dot", line_color="#9ca3af",
+                             annotation_text=f"Forward {fwd_gr:,.0f}", annotation_position="top right")
+            fig_gd.update_layout(template="plotly_dark", height=320,
+                                 title="Delta vs strike (sensibilita' al forward)",
+                                 xaxis_title="Strike (€/MWh)", yaxis_title="Delta (per MWh)")
+            st.plotly_chart(fig_gd, use_container_width=True)
+
+            fig_gv = go.Figure()
+            fig_gv.add_trace(go.Scatter(x=k_grid_gr, y=gm_gr, mode="lines", name="Gamma",
+                                        line=dict(color="#22c55e"),
+                                        hovertemplate="Strike: %{x:,.1f}<br>Gamma: %{y:.4f}<extra></extra>"))
+            fig_gv.add_trace(go.Scatter(x=k_grid_gr, y=vg_gr, mode="lines", name="Vega (+1pp)",
+                                        line=dict(color="#a855f7"), yaxis="y2",
+                                        hovertemplate="Strike: %{x:,.1f}<br>Vega: %{y:,.3f} €/MWh<extra></extra>"))
+            fig_gv.add_vline(x=fwd_gr, line_dash="dot", line_color="#9ca3af",
+                             annotation_text=f"Forward {fwd_gr:,.0f}", annotation_position="top right")
+            fig_gv.update_layout(template="plotly_dark", height=320,
+                                 title="Gamma e vega vs strike (picco at-the-money)",
+                                 xaxis_title="Strike (€/MWh)", yaxis_title="Gamma (per MWh)",
+                                 yaxis2=dict(title="Vega (€/MWh per +1pp vol)", overlaying="y", side="right"))
+            st.plotly_chart(fig_gv, use_container_width=True)
+
+            df_gr = pd.DataFrame({"Strike (€/MWh)": np.round(k_grid_gr, 1),
+                                  "Delta call": np.round(dc_gr, 3),
+                                  "Delta put": np.round(dp_gr, 3),
+                                  "Gamma": np.round(gm_gr, 4),
+                                  "Vega +1pp (€/MWh)": np.round(vg_gr, 3)})
+            st.download_button(
+                "⬇️ Esporta greche per strike (CSV)",
+                df_gr.to_csv(index=False).encode("utf-8"),
+                file_name=f"greche_strike_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Delta, gamma e vega Black-76 per una griglia di strike, con i parametri impostati.",
+                key="csv_gr",
+            )
+        st.caption("Uso pratico: hai VENDUTO una call su 1.000 MWh? Sei corto di delta: compra 'delta posizione' MWh sul forward per neutralizzarti, e ricontrolla ogni giorno — il gamma ti dice quanto il delta scappa quando il prezzo si muove. La vega ti dice quanto perdi se la vol implicita sale di un punto; la theta quanto incassi ogni giorno di time decay. Limite del modello: vol e tassi costanti, niente smile di volatilita' — per book grandi serve il ricalcolo con la vol implicita di mercato.")
 
 
 # Footer
