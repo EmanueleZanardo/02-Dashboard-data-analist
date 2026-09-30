@@ -11946,6 +11946,111 @@ def calcola_rainbow(s1, s2, strike, mesi, vol1_pct, vol2_pct, corr, tasso_pct, t
     return out
 
 
+def ottimizza_ricarica_ev(prezzi_24, energia_kwh, potenza_kw, ora_arrivo=17,
+                          ora_partenza=7, efficienza_pct=92.0, capacita_kwh=None,
+                          soc_iniziale_pct=20.0):
+    """Piano di ricarica ottimale di un veicolo elettrico sui prezzi orari.
+
+    Dato il profilo di 24 prezzi orari (€/MWh) e una finestra di sosta
+    [ora_arrivo, ora_partenza) — che puo' attraversare la mezzanotte —
+    trova il piano di ricarica a costo minimo: alloca la potenza sulle ore
+    piu' economiche della finestra. Con costi lineari e vincoli di sola
+    potenza/energia (nessuna dinamica di stato oltre il SoC finale) il
+    greedy sulle ore ordinate per prezzo e' l'ottimo esatto, non
+    un'approssimazione.
+    Confronta con la baseline "ricarica immediata" (attacca la spina
+    all'arrivo e carica a potenza massima finche' non e' pieno): il
+    risparmio e' il valore economico dello smart charging, la metrica che
+    un energy analyst usa per dimensionare tariffe ToU o wallbox
+    intelligenti per flotte aziendali.
+    Parametri: prezzi_24 sequenza di 24 prezzi orari €/MWh; energia_kwh
+    energia da immettere in batteria; potenza_kw potenza max del
+    caricatore; ora_arrivo/ora_partenza interi 0-23 (se uguali = 24h);
+    efficienza_pct rendimento di ricarica (l'energia prelevata dalla rete
+    e' energia_kwh/efficienza); capacita_kwh e soc_iniziale_pct opzionali
+    per il vincolo di capienza della batteria.
+    Ritorna dict con: schedario (lista di 24 potenze kW), costo_ottimale,
+    costo_immediata, risparmio_eur, risparmio_pct, prezzo_medio_ott
+    (€/MWh), prezzo_medio_finestra (€/MWh), ore_ricarica, energia_rete_kwh,
+    valido, motivo. NaN-safe: input non validi -> dict neutro con
+    valido=False."""
+    neutro = {"schedario": [0.0] * 24, "costo_ottimale": float("nan"),
+              "costo_immediata": float("nan"), "risparmio_eur": float("nan"),
+              "risparmio_pct": float("nan"), "prezzo_medio_ott": float("nan"),
+              "prezzo_medio_finestra": float("nan"), "ore_ricarica": 0,
+              "energia_rete_kwh": float("nan"), "valido": False,
+              "motivo": "input non validi"}
+    try:
+        pr = [float(x) for x in list(prezzi_24)[:24]]
+        en = float(energia_kwh)
+        pw = float(potenza_kw)
+        ha = int(ora_arrivo) % 24
+        hp = int(ora_partenza) % 24
+        eff = float(efficienza_pct) / 100.0
+    except (TypeError, ValueError):
+        return neutro
+    if len(pr) != 24 or not all(np.isfinite(p) for p in pr):
+        return neutro
+    if not all(np.isfinite(v) for v in (en, pw, eff)):
+        return neutro
+    if en <= 0 or pw <= 0 or not 0.0 < eff <= 1.0:
+        return dict(neutro, motivo="energia e potenza devono essere > 0, efficienza in (0,100]")
+    if capacita_kwh is not None:
+        try:
+            cap = float(capacita_kwh)
+            soc0 = float(soc_iniziale_pct)
+        except (TypeError, ValueError):
+            return dict(neutro, motivo="capacita'/SoC non numerici")
+        if not (np.isfinite(cap) and np.isfinite(soc0)) or cap <= 0:
+            return dict(neutro, motivo="capacita' batteria non valida")
+        spazio = cap * max(0.0, 1.0 - soc0 / 100.0)
+        if en > spazio + 1e-9:
+            return dict(neutro, motivo=f"l'energia richiesta ({en:.1f} kWh) supera lo spazio in batteria ({spazio:.1f} kWh)")
+    ore_finestra = []
+    h = ha
+    while True:
+        ore_finestra.append(h)
+        h = (h + 1) % 24
+        if h == hp:
+            break
+    energia_rete = en / eff
+    if len(ore_finestra) * pw < energia_rete - 1e-9:
+        return dict(neutro, motivo="finestra troppo corta: servono piu' ore o piu' potenza")
+    # Ottimo: ore della finestra ordinate per prezzo crescente (stabile per ora)
+    ordine_ott = sorted(ore_finestra, key=lambda hh: (pr[hh], hh))
+    sched = [0.0] * 24
+    residuo = energia_rete
+    for hh in ordine_ott:
+        q = min(pw, residuo)
+        sched[hh] = q
+        residuo -= q
+        if residuo <= 1e-9:
+            break
+    # Baseline: ricarica immediata dall'arrivo a potenza massima
+    sched_naive = [0.0] * 24
+    residuo = energia_rete
+    for hh in ore_finestra:
+        q = min(pw, residuo)
+        sched_naive[hh] = q
+        residuo -= q
+        if residuo <= 1e-9:
+            break
+    costo_ott = sum(sched[hh] * pr[hh] for hh in ore_finestra) / 1000.0
+    costo_nav = sum(sched_naive[hh] * pr[hh] for hh in ore_finestra) / 1000.0
+    risparmio = costo_nav - costo_ott
+    out = dict(neutro)
+    out.update({"schedario": sched, "costo_ottimale": float(costo_ott),
+                "costo_immediata": float(costo_nav),
+                "risparmio_eur": float(risparmio),
+                "risparmio_pct": float(100.0 * risparmio / costo_nav) if costo_nav > 0 else 0.0,
+                "prezzo_medio_ott": float(costo_ott / en * 1000.0),
+                "prezzo_medio_finestra": float(sum(pr[hh] for hh in ore_finestra) / len(ore_finestra)),
+                "ore_ricarica": int(sum(1 for hh in ore_finestra if sched[hh] > 1e-9)),
+                "energia_rete_kwh": float(energia_rete),
+                "valido": True, "motivo": ""})
+    return out
+
+
 def calcola_americana(forward, strike, mesi, vol_pct, tasso_pct, n_step=200):
     """Premio di un'opzione AMERICANA su forward energetico (albero binomiale CRR).
 
@@ -12746,7 +12851,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -21878,6 +21983,84 @@ elif workspace == _('ws8'):
         else:
             st.warning("Input non validi per l'opzione rainbow (prezzi/strike > 0, vol >= 0, |correlazione| <= 1).")
         st.caption("Uso pratico: il best-of prezza la flessibilita' di vendere sul mercato migliore (capacita' di interconnessione, portafoglio multi-hub); il worst-of il costo del fuel switching e le strutture che pagano sul mercato piu' debole. L'extra vs vanilla misura il valore dell'opzionalita' di scelta e crolla quando la correlazione sale. Limiti: due soli sottostanti lognormali a vol/correlazione costanti, esercizio solo europeo a scadenza, niente smile di vol, niente costi di transito/fuel-switch nel premio.")
+
+    with tab111:
+        banner_demo("Ricarica EV: profilo giornaliero medio dei prezzi orari")
+        titolo_ev = edu("Ricarica EV ottimale", "Lo SMART CHARGING sposta la ricarica nelle ore piu' economiche della sosta — tipicamente di notte, quando lo spot crolla — invece di caricare subito all'arrivo a potenza massima. Con costi lineari e vincoli di sola potenza/energia, caricare le ore piu' economiche per prime e' l'ottimo esatto. Il risparmio vs ricarica immediata e' il valore economico che giustifica wallbox intelligenti e tariffe time-of-use per flotte aziendali.")
+        st.markdown(f"**{titolo_ev}**: piano di ricarica a costo minimo nella finestra di sosta (puo' attraversare la mezzanotte) sul profilo giornaliero medio dei prezzi — confronto con la ricarica immediata, piano orario esportabile.", unsafe_allow_html=True)
+
+        prof_ev = prezzi.groupby(prezzi.index.hour).mean()
+        prezzi_24_ev = [float(prof_ev.get(h, np.nan)) for h in range(24)]
+        ce1, ce2, ce3, ce4 = st.columns(4)
+        with ce1:
+            arr_ev = st.slider("Ora di arrivo", 0, 23, 17, key="ev_arr",
+                               help="Inizio della sosta (auto collegata).")
+            part_ev = st.slider("Ora di partenza", 0, 23, 7, key="ev_part",
+                                help="Fine della sosta. Se uguale all'arrivo = 24h.")
+        with ce2:
+            en_ev = st.number_input("Energia da caricare (kWh)", value=40.0, min_value=0.1, step=5.0, key="ev_en")
+            pw_ev = st.number_input("Potenza caricatore (kW)", value=11.0, min_value=0.1, step=1.0, key="ev_pw")
+        with ce3:
+            eff_ev = st.number_input("Efficienza ricarica (%)", value=92.0, min_value=50.0, max_value=100.0, step=1.0, key="ev_eff")
+            cap_ev = st.number_input("Batteria (kWh, 0 = ignora)", value=60.0, min_value=0.0, step=5.0, key="ev_cap")
+        with ce4:
+            soc_ev = st.number_input("SoC all'arrivo (%)", value=20.0, min_value=0.0, max_value=100.0, step=5.0, key="ev_soc")
+        ris_ev = ottimizza_ricarica_ev(prezzi_24_ev, float(en_ev), float(pw_ev),
+                                       int(arr_ev), int(part_ev), float(eff_ev),
+                                       float(cap_ev) if float(cap_ev) > 0 else None,
+                                       float(soc_ev))
+        if ris_ev["valido"] and all(np.isfinite(prezzi_24_ev)):
+            ke1, ke2, ke3 = st.columns(3)
+            render_kpi("Costo smart charging (€)", f"{ris_ev['costo_ottimale']:,.2f}", ke1)
+            render_kpi("Costo ricarica immediata (€)", f"{ris_ev['costo_immediata']:,.2f}", ke2)
+            render_kpi("Risparmio (€ / %)", f"{ris_ev['risparmio_eur']:,.2f} / {ris_ev['risparmio_pct']:.1f}%", ke3)
+            ke4, ke5, ke6 = st.columns(3)
+            render_kpi("Prezzo medio smart (€/MWh)", f"{ris_ev['prezzo_medio_ott']:,.1f}", ke4)
+            render_kpi("Prezzo medio finestra (€/MWh)", f"{ris_ev['prezzo_medio_finestra']:,.1f}", ke5)
+            render_kpi("Ore di ricarica", f"{ris_ev['ore_ricarica']}", ke6)
+            st.caption(f"Energia prelevata dalla rete: {ris_ev['energia_rete_kwh']:,.1f} kWh (efficienza {eff_ev:.0f}%).")
+            fin_ev = set()
+            hh = int(arr_ev)
+            while True:
+                fin_ev.add(hh)
+                hh = (hh + 1) % 24
+                if hh == int(part_ev):
+                    break
+            colori_ev = ["#3b82f6" if h in fin_ev else "#4b5563" for h in range(24)]
+            fig_ev = make_subplots(specs=[{"secondary_y": True}])
+            fig_ev.add_trace(go.Bar(x=list(range(24)), y=prezzi_24_ev, name="Prezzo orario",
+                                    marker_color=colori_ev, opacity=0.85,
+                                    hovertemplate="Ora %{x}: %{y:,.1f} €/MWh<extra></extra>"),
+                             secondary_y=False)
+            fig_ev.add_trace(go.Scatter(x=list(range(24)), y=ris_ev["schedario"], name="Potenza smart (kW)",
+                                        mode="lines+markers", line=dict(color="#10B981", width=3),
+                                        hovertemplate="Ora %{x}: %{y:,.1f} kW<extra></extra>"),
+                             secondary_y=True)
+            fig_ev.update_layout(template="plotly_dark", height=400,
+                                 title="Prezzo orario (blu = finestra di sosta) + piano di ricarica ottimale",
+                                 xaxis_title="Ora del giorno", barmode="group",
+                                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+            fig_ev.update_yaxes(title_text="Prezzo (€/MWh)", secondary_y=False)
+            fig_ev.update_yaxes(title_text="Potenza (kW)", secondary_y=True)
+            st.plotly_chart(fig_ev, use_container_width=True)
+            df_ev = pd.DataFrame({
+                "ora": sorted(fin_ev),
+                "prezzo_eur_mwh": [round(prezzi_24_ev[h], 1) for h in sorted(fin_ev)],
+                "potenza_kw": [round(ris_ev["schedario"][h], 2) for h in sorted(fin_ev)],
+                "costo_eur": [round(ris_ev["schedario"][h] * prezzi_24_ev[h] / 1000.0, 3) for h in sorted(fin_ev)],
+            })
+            st.dataframe(df_ev, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta piano di ricarica (CSV)",
+                df_ev.to_csv(index=False).encode("utf-8"),
+                file_name=f"ricarica_ev_{int(arr_ev):02d}-{int(part_ev):02d}_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Piano orario di ricarica ottimale nella finestra di sosta.",
+                key="csv_ev",
+            )
+        else:
+            st.warning(ris_ev["motivo"] if not ris_ev["valido"] else "Profilo prezzi non disponibile per tutte le 24 ore.")
+        st.caption("Uso pratico: dimensiona il valore dello smart charging per flotte aziendali o colonnine condominiali — il risparmio % scala con lo spread notte/giorno dello spot. Limiti: profilo giornaliero medio (non il giorno specifico), potenza costante per ora, niente degrado batteria accelerato da ricariche notturne lente (anzi favorevole), niente vincoli di rete locale o potenza contrattuale condivisa.")
 
 # Footer
 
