@@ -1601,6 +1601,188 @@ def calcola_confronto_tariffe(prezzi, mw_f1, mw_f2, mw_f3, p_flat, p_f1, p_f2, p
         "risparmio_max_pct": (peggiore - migliore_costo) / peggiore * 100 if peggiore > 0 else 0.0,
     }
 
+def parse_csv_carico(contenuto):
+    """Parsing robusto di un CSV con il profilo di carico orario (o sub-orario) dell'utente.
+
+    Input: bytes o str con il contenuto del CSV. Colonne auto-riconosciute
+    (case-insensitive):
+      - timestamp: 'timestamp','datetime','data_ora','data','date','ora','time'
+        (fallback: prima colonna);
+      - potenza: 'mw','potenza_mw','power_mw','potenza','power','load','carico',
+        'kw','potenza_kw','kwh','energia_mwh','mwh' (fallback: seconda colonna).
+    Separatori provati: virgola, punto e virgola, tab.
+    Conversioni unita': nome con 'kwh' = energia per step -> MW = valore/ore-step;
+    nome con 'kw' (non kwh) = /1000; euristica: mediana dei valori assoluti > 500
+    con nome generico -> presunti kW (/1000, segnalato in 'nota_conversione').
+    Righe con data o potenza non valide: scartate e contate. Potenze negative:
+    azzerate e contate. Timestamp duplicati: primo tenuto. Risoluzione mediana
+    < 55 min -> ricampionamento orario (media). Indice tz-naive -> Europe/Zurich,
+    tz-aware -> convertito a Europe/Zurich.
+    Ritorna dict: 'valido', 'carico' (Series MW oraria, tz Europe/Zurich),
+    'righe_lette', 'righe_valide', 'righe_scartate', 'negative_azzerate',
+    'risoluzione_min', 'unita_orig', 'nota_conversione', 'motivo' (se non valido).
+    """
+    import io
+    if isinstance(contenuto, (bytes, bytearray)):
+        testo = None
+        for enc in ("utf-8-sig", "utf-8", "latin-1"):
+            try:
+                testo = bytes(contenuto).decode(enc)
+                break
+            except Exception:
+                continue
+        if testo is None:
+            return {"valido": False, "motivo": "encoding non riconosciuto"}
+    else:
+        testo = str(contenuto)
+    righe_lette = max(0, len([r for r in testo.splitlines() if r.strip()]) - 1)
+    df = None
+    for sep in (",", ";", "\t"):
+        try:
+            cand = pd.read_csv(io.StringIO(testo), sep=sep)
+            if cand.shape[1] >= 2:
+                df = cand
+                break
+        except Exception:
+            continue
+    if df is None or df.shape[1] < 2 or df.empty:
+        return {"valido": False, "motivo": "CSV illeggibile o con meno di 2 colonne"}
+    cols = {str(c).strip().lower(): c for c in df.columns}
+    ts_cands = ["timestamp", "datetime", "data_ora", "dataora", "data", "date",
+                "ora", "time", "index", "unnamed: 0"]
+    pw_cands = ["mw", "potenza_mw", "power_mw", "potenza", "power", "load",
+                "carico", "kw", "potenza_kw", "power_kw", "kwh", "energia_mwh",
+                "mwh", "energia"]
+    col_ts = next((cols[k] for k in ts_cands if k in cols), df.columns[0])
+    col_pw = next((cols[k] for k in pw_cands if k in cols), df.columns[1])
+    nome_pw = str(col_pw).strip().lower()
+    ts = pd.to_datetime(df[col_ts], errors="coerce")
+    pw = pd.to_numeric(df[col_pw], errors="coerce")
+    ok = ts.notna() & pw.notna()
+    scartate = int((~ok).sum())
+    ts, pw = ts[ok], pw[ok]
+    if ts.empty:
+        return {"valido": False, "motivo": "nessuna riga con data e potenza valide"}
+    diffs_pre = pd.Series(ts.values).sort_values().diff().dt.total_seconds().dropna() / 60.0
+    med_min_pre = float(diffs_pre.median()) if len(diffs_pre) else 60.0
+    if med_min_pre <= 0:
+        med_min_pre = 60.0
+    fattore, unita, nota = 1.0, "MW", ""
+    if "kwh" in nome_pw:
+        fattore = 1.0 / (med_min_pre / 60.0)
+        unita = "kWh/step"
+        nota = f"kWh per step ({med_min_pre:.0f} min) -> MW"
+    elif "kw" in nome_pw:
+        fattore = 1.0 / 1000.0
+        unita = "kW"
+        nota = "kW -> MW (/1000)"
+    else:
+        med = float(pw.abs().median()) if len(pw) else 0.0
+        if med > 500:
+            fattore = 1.0 / 1000.0
+            nota = f"valori mediani {med:,.0f}: presunti kW -> MW (/1000)"
+    pw = pw * fattore
+    neg = int((pw < 0).sum())
+    pw = pw.clip(lower=0.0)
+    s = pd.Series(pw.values, index=pd.DatetimeIndex(ts.values))
+    s = s[~s.index.duplicated(keep="first")].sort_index()
+    diffs = s.index.to_series().diff().dt.total_seconds().dropna() / 60.0
+    med_min = float(diffs.median()) if len(diffs) else 60.0
+    if med_min <= 0:
+        med_min = 60.0
+    risoluzione = round(med_min, 1)
+    if med_min < 55:
+        s = s.resample("h").mean().dropna()
+    if s.index.tz is None:
+        s = s.tz_localize("Europe/Zurich", nonexistent="shift_forward", ambiguous="NaT")
+        s = s[s.index.notna()]
+    else:
+        s = s.tz_convert("Europe/Zurich")
+    s.name = "MW"
+    if s.empty:
+        return {"valido": False, "motivo": "nessun dato dopo la normalizzazione"}
+    return {"valido": True, "carico": s, "righe_lette": int(righe_lette),
+            "righe_valide": int(len(s)), "righe_scartate": int(scartate),
+            "negative_azzerate": int(neg), "risoluzione_min": risoluzione,
+            "unita_orig": unita, "nota_conversione": nota, "motivo": ""}
+
+
+def calcola_analisi_carico_reale(carico, prezzi):
+    """Analisi di un profilo di carico reale (Series MW) contro i prezzi spot.
+
+    carico: Series (anche sub-oraria, verra' ricampionata) in MW, indice datetime
+      tz-aware o naive. prezzi: Series oraria in EUR/MWh. Allineamento
+      sull'intersezione degli indici (i prezzi vengono portati sul tz del
+      carico); ore con NaN in una delle due serie scartate.
+    KPI: ore, energia_mwh, picco/minimo/media (MW), fattore_carico_pct
+    (media/picco*100), ore_sopra_90pct (ore >= 90% del picco),
+    quota_base_pct (minimo*ore/energia: quota coperta dal carico di base),
+    costo_spot_eur, prezzo_medio_pagato (EUR/MWh), correlazione (Pearson
+    carico-prezzo, None se una serie e' costante), quota_costo_top10_pct
+    (% del costo nel 10% di ore piu' care per costo orario), curva_durata
+    (array MW ordinati desc), df (Timestamp, MW, Prezzo, Costo orario).
+    Ritorna {'valido': False} se: serie vuote/non numeriche, nessuna ora in
+    comune, energia nulla.
+    """
+    try:
+        c = pd.Series(carico, dtype=float)
+        p = pd.Series(prezzi, dtype=float)
+    except Exception:
+        return {"valido": False}
+    try:
+        if c.index.tz is None and p.index.tz is not None:
+            c = c.tz_localize(p.index.tz)
+        elif c.index.tz is not None and p.index.tz is None:
+            p = p.tz_localize(c.index.tz)
+        elif (c.index.tz is not None and p.index.tz is not None
+              and str(c.index.tz) != str(p.index.tz)):
+            p = p.tz_convert(c.index.tz)
+    except Exception:
+        return {"valido": False}
+    try:
+        idx = c.index.intersection(p.index)
+    except Exception:
+        return {"valido": False}
+    if idx.empty:
+        return {"valido": False}
+    cc = c.loc[idx].astype(float)
+    pp = p.loc[idx].astype(float)
+    ok = cc.notna() & pp.notna() & (cc >= 0)
+    cc, pp = cc[ok], pp[ok]
+    if cc.empty:
+        return {"valido": False}
+    ore = int(len(cc))
+    energia = float(cc.sum())
+    if energia <= 0:
+        return {"valido": False}
+    picco = float(cc.max())
+    minimo = float(cc.min())
+    media = float(cc.mean())
+    costo_orario = (cc * pp).to_numpy()
+    costo = float(costo_orario.sum())
+    corr = None
+    try:
+        if float(cc.std()) > 0 and float(pp.std()) > 0:
+            corr = float(cc.corr(pp))
+    except Exception:
+        corr = None
+    n_top = max(1, ore // 10)
+    top10 = float(np.sort(costo_orario)[-n_top:].sum())
+    return {
+        "valido": True, "ore": ore, "energia_mwh": energia, "picco_mw": picco,
+        "minimo_mw": minimo, "potenza_media_mw": media,
+        "fattore_carico_pct": media / picco * 100 if picco > 0 else None,
+        "ore_sopra_90pct": int((cc >= 0.9 * picco).sum()),
+        "quota_base_pct": minimo * ore / energia * 100,
+        "costo_spot_eur": costo, "prezzo_medio_pagato": costo / energia,
+        "correlazione": corr,
+        "quota_costo_top10_pct": top10 / costo * 100 if costo > 0 else 0.0,
+        "curva_durata": np.sort(cc.to_numpy())[::-1],
+        "df": pd.DataFrame({"Timestamp": cc.index, "MW": cc.to_numpy(),
+                            "Prezzo (EUR/MWh)": pp.to_numpy(),
+                            "Costo orario (EUR)": costo_orario}),
+    }
+
 def calcola_mtm(prezzi, contratti):
     """Mark-to-market di contratti forward a prezzo fisso contro lo spot realizzato del periodo.
     prezzi: Series oraria in €/MWh (indice tz-aware).
@@ -13114,7 +13296,7 @@ elif workspace == _('ws7'):
 # ==========================================
 elif workspace == _('ws8'):
     st.markdown(f"<h1>{_('ws8')}</h1>", unsafe_allow_html=True)
-    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread, shaping curva, spread weekend, price capture, volatilità realizzata, confronto anno-su-anno, analisi prezzi negativi, spread intra-day, picchi di prezzo, profilo settimanale tipo, curva di durata, concentrazione del costo di fornitura, simulazione demand shifting, finestre di acquisto ottimali, stagionalità mensile, monitoraggio del budget energetico annuale, analisi di sensitività del costo al profilo di prelievo, Value-at-Risk Monte Carlo del costo di fornitura, classifica dei giorni di calendario più costosi per il profilo di prelievo, fasce tariffarie orarie ottimali derivate dal profilo di prezzo osservato, autocorrelazione del prezzo spot (persistenza e stagionalità), stress test deterministico del costo di fornitura sotto shock di prezzo, previsione naive-stagionale del prezzo del giorno successivo con backtest di accuratezza, decomposizione stagionale del prezzo (trend + pattern giornaliero/settimanale + residuo) con export CSV, margine di contribuzione per impianto con scomposizione mensile e analisi di concentrazione del margine, classificazione dei giorni in giorni tipo di prezzo (clustering deterministico dei profili giornalieri), confronto di sei strutture tariffarie sullo stesso profilo di prelievo (comparatore tariffe) con export CSV.")
+    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread, shaping curva, spread weekend, price capture, volatilità realizzata, confronto anno-su-anno, analisi prezzi negativi, spread intra-day, picchi di prezzo, profilo settimanale tipo, curva di durata, concentrazione del costo di fornitura, simulazione demand shifting, finestre di acquisto ottimali, stagionalità mensile, monitoraggio del budget energetico annuale, analisi di sensitività del costo al profilo di prelievo, Value-at-Risk Monte Carlo del costo di fornitura, classifica dei giorni di calendario più costosi per il profilo di prelievo, fasce tariffarie orarie ottimali derivate dal profilo di prezzo osservato, autocorrelazione del prezzo spot (persistenza e stagionalità), stress test deterministico del costo di fornitura sotto shock di prezzo, previsione naive-stagionale del prezzo del giorno successivo con backtest di accuratezza, decomposizione stagionale del prezzo (trend + pattern giornaliero/settimanale + residuo) con export CSV, margine di contribuzione per impianto con scomposizione mensile e analisi di concentrazione del margine, classificazione dei giorni in giorni tipo di prezzo (clustering deterministico dei profili giornalieri), confronto di sei strutture tariffarie sullo stesso profilo di prelievo (comparatore tariffe) con export CSV, caricamento e analisi del proprio profilo di carico reale da CSV (curva di durata, fattore di carico, costo a spot, correlazione col prezzo) con export CSV.")
 
     # ---------- Controlli: sorgente, periodo, impianti ----------
     st.subheader("⚙️ Sorgente dati & Timeframe")
@@ -13262,7 +13444,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -22802,6 +22984,104 @@ elif workspace == _('ws8'):
                 key="csv_ct",
             )
         st.caption("Uso pratico: confronto offerte fornitura a parità di profilo (gare di fornitura, rinnovi contrattuali). Limiti: solo componente energia, niente costi fissi mensili né oneri di rete/dispacciamento; profilo a potenza costante per fascia.")
+    with tab116:
+        titolo_cr = edu("Il mio carico", "IL TUO PROFILO REALE: finora tutti i tab lavorano su un profilo 'piatto per fascia' (MW costanti in F1/F2/F3). Qui carichi il CSV con le letture del tuo contatore (orarie o quartorarie, in MW/kW/kWh) e la dashboard calcola sul TUO carico vero: energia, picco, fattore di carico, curva di durata, costo valorizzato allo spot del periodo, prezzo medio pagato e correlazione col prezzo. E' il ponte tra l'analisi standard e i dati del cliente: la curva di durata qui ha la forma reale del prelievo, non tre gradini.")
+        st.markdown(f"<h1>📤 {titolo_cr}</h1>", unsafe_allow_html=True)
+        st.info("Il profilo caricato resta nella tua sessione (nessun invio esterno); i prezzi usati sono quelli della sorgente selezionata in sidebar (Mock = sintetici, ENTSO-E = reali).")
+        c1, c2 = st.columns([2, 1])
+        with c1:
+            up = st.file_uploader("CSV con timestamp e potenza", type=["csv"], key="cr_up",
+                                  help="Colonne riconosciute: timestamp/data/datetime + mw/potenza/kw/kwh. Separatore , ; o tab. Risoluzioni sub-orarie ricampionate a ora.")
+        with c2:
+            st.markdown("**Template CSV**")
+            st.download_button("⬇️ Scarica template", "timestamp,MW\n2026-01-01 00:00,1.20\n2026-01-01 01:00,1.15\n".encode("utf-8"),
+                               file_name="template_carico.csv", mime="text/csv", key="cr_tmpl",
+                               help="Esempio di formato atteso: una riga per ora (o per quarto d'ora).")
+            demo = st.checkbox("Usa profilo demo (uffici, seed fisso)", value=False, key="cr_demo",
+                               help="Profilo sintetico deterministico: uffici 8-19 lun-ven, picco ~2 MW, per provare il tab senza CSV.")
+        s_carico, info_parse = None, None
+        if demo:
+            rng = np.random.default_rng(7)
+            idx_d = pd.date_range("2026-09-28", periods=24 * 14, freq="h", tz="Europe/Zurich")
+            lav = ((idx_d.hour >= 8) & (idx_d.hour < 19) & (idx_d.dayofweek < 5)).astype(float)
+            s_carico = pd.Series(np.maximum(0.05, 0.4 + 1.6 * lav + rng.normal(0, 0.08, len(idx_d))),
+                                 index=idx_d, name="MW")
+            info_parse = {"valido": True, "righe_valide": len(s_carico), "righe_scartate": 0,
+                          "negative_azzerate": 0, "risoluzione_min": 60.0,
+                          "unita_orig": "MW (demo)", "nota_conversione": ""}
+        elif up is not None:
+            info_parse = parse_csv_carico(up.getvalue())
+            if info_parse["valido"]:
+                s_carico = info_parse["carico"]
+        if info_parse is None:
+            st.info("Carica un CSV o attiva il profilo demo per analizzare il tuo carico reale.")
+        elif not info_parse["valido"]:
+            st.error(f"CSV non valido: {info_parse['motivo']}")
+        else:
+            dett = (f"{info_parse['righe_valide']:,} ore valide "
+                    f"(risoluzione {info_parse['risoluzione_min']:.0f} min, unità origine: {info_parse['unita_orig']})")
+            if info_parse["righe_scartate"]:
+                dett += f" — {info_parse['righe_scartate']:,} righe scartate"
+            if info_parse["negative_azzerate"]:
+                dett += f" — {info_parse['negative_azzerate']:,} valori negativi azzerati"
+            if info_parse["nota_conversione"]:
+                dett += f" — {info_parse['nota_conversione']}"
+            st.caption("📄 " + dett + ".")
+            ris_cr = calcola_analisi_carico_reale(s_carico, prezzi)
+            if not ris_cr["valido"]:
+                st.warning("Nessuna ora in comune tra il profilo caricato e la serie prezzi del periodo selezionato: allarga il periodo in sidebar.")
+            else:
+                k1, k2, k3 = st.columns(3)
+                render_kpi("Energia prelevata", f"{ris_cr['energia_mwh']:,.0f} MWh", k1)
+                render_kpi("Picco di carico", f"{ris_cr['picco_mw']:,.2f} MW", k2)
+                render_kpi("Fattore di carico", f"{ris_cr['fattore_carico_pct']:,.1f} %" if ris_cr["fattore_carico_pct"] is not None else "n/d", k3)
+                k4, k5, k6 = st.columns(3)
+                render_kpi("Costo a spot", f"EUR {ris_cr['costo_spot_eur']:,.0f}", k4)
+                render_kpi("Prezzo medio pagato", f"€ {ris_cr['prezzo_medio_pagato']:,.2f}/MWh", k5)
+                corr_txt = f"{ris_cr['correlazione']:+.2f}" if ris_cr["correlazione"] is not None else "n/d"
+                render_kpi("Correlazione carico-prezzo", corr_txt, k6)
+                st.caption(f"Carico di base (minimo): {ris_cr['minimo_mw']:,.2f} MW — copre il {ris_cr['quota_base_pct']:.1f}% dell'energia; "
+                           f"ore ≥ 90% del picco: {ris_cr['ore_sopra_90pct']:,}; "
+                           f"il 10% di ore più care assorbe il {ris_cr['quota_costo_top10_pct']:.1f}% del costo. "
+                           f"Correlazione positiva = consumi di più quando il prezzo è alto (profilo 'costoso').")
+                fig_ld = go.Figure()
+                dur = ris_cr["curva_durata"]
+                fig_ld.add_trace(go.Scatter(x=np.arange(1, len(dur) + 1), y=dur, mode="lines",
+                                            line=dict(color="#3b82f6"),
+                                            hovertemplate="Ora %{x}: %{y:.2f} MW<extra></extra>",
+                                            name="Curva di durata"))
+                fig_ld.add_hline(y=ris_cr["potenza_media_mw"], line_dash="dash", line_color="#f59e0b",
+                                 annotation_text=f"Media {ris_cr['potenza_media_mw']:.2f} MW")
+                fig_ld.update_layout(template="plotly_dark", height=340,
+                                     title="Curva di durata del carico (MW ordinati dal più alto al più basso)",
+                                     xaxis_title="Ore cumulative", yaxis_title="MW")
+                st.plotly_chart(fig_ld, use_container_width=True)
+                df_plot = ris_cr["df"]
+                if len(df_plot) > 2000:
+                    df_plot = df_plot.set_index("Timestamp").resample("D").mean(numeric_only=True).reset_index()
+                    tit_prof = "Profilo di carico (media giornaliera — periodo lungo)"
+                else:
+                    tit_prof = "Profilo di carico orario (MW)"
+                fig_pr = go.Figure(go.Scatter(x=df_plot["Timestamp"], y=df_plot["MW"], mode="lines",
+                                              line=dict(color="#22c55e"),
+                                              hovertemplate="%{x}<br>%{y:.2f} MW<extra></extra>",
+                                              name="MW"))
+                fig_pr.update_layout(template="plotly_dark", height=300, title=tit_prof,
+                                     xaxis_title="", yaxis_title="MW")
+                st.plotly_chart(fig_pr, use_container_width=True)
+                st.dataframe(ris_cr["df"].head(500), use_container_width=True, hide_index=True)
+                if len(ris_cr["df"]) > 500:
+                    st.caption(f"Tabella troncata alle prime 500 righe su {len(ris_cr['df']):,} — l'export CSV contiene tutto.")
+                st.download_button(
+                    "⬇️ Esporta analisi carico (CSV)",
+                    ris_cr["df"].to_csv(index=False).encode("utf-8"),
+                    file_name=f"analisi_carico_{d0}_{d1}.csv",
+                    mime="text/csv",
+                    help="Timestamp, MW, prezzo spot e costo orario del tuo profilo sul periodo selezionato.",
+                    key="csv_cr",
+                )
+        st.caption("Uso pratico: fattore di carico basso + picco alto = potenza impegnata costosa e margine per shifting/accumulo; correlazione positiva col prezzo = il profilo 'paga' gli spike (leva per spostare carichi o coperture). Limiti: solo componente energia a spot, niente oneri di rete; il CSV non viene salvato da nessuna parte.")
+
 
 # Footer
 
