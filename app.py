@@ -11414,7 +11414,7 @@ def calcola_forward_start(forward, alfa_pct, mesi_inizio, mesi_scadenza, vol_pct
     df(T2)*F*max(1-alfa,0) per la call, df(T2)*F*max(alfa-1,0) per la put;
     parita' call-put esatta: call_fs - put_fs = df(T2)*F*(1-alfa);
     call_fs <= vanilla call con strike alfa*F (concavita' in F);
-    prob. risk-neutral di finire ITM: call -> N(-d2*), put -> N(d2*);
+    prob. risk-neutral di finire ITM: call -> N(d2*), put -> N(-d2*);
     delta analitica: call -> df(T2)*(N(d1*) - alfa*N(d2*)) (coincide con
     premio/F), put -> df(T2)*(alfa*N(-d2*) - N(-d1*)) (positiva: lo strike
     scala con F, quindi la put forward start cresce con il forward).
@@ -11491,7 +11491,7 @@ def calcola_forward_start(forward, alfa_pct, mesi_inizio, mesi_scadenza, vol_pct
         nmd1 = 1.0 - nd1; nmd2 = 1.0 - nd2
         pc = df2 * F * (nd1 - alfa * nd2)
         pp = df2 * F * (alfa * nmd2 - nmd1)
-        prob_c = float(_norm.cdf(-d2s))
+        prob_c = float(_norm.cdf(d2s))
         dc = df2 * (nd1 - alfa * nd2)
         dp = df2 * (alfa * nmd2 - nmd1)
     prob_p = 1.0 - prob_c
@@ -11507,6 +11507,119 @@ def calcola_forward_start(forward, alfa_pct, mesi_inizio, mesi_scadenza, vol_pct
                 "intrinseco_vol0_call": float(df2 * F * max(1.0 - alfa, 0.0)),
                 "intrinseco_vol0_put": float(df2 * F * max(alfa - 1.0, 0.0)),
                 "strike_atteso": float(K)})
+    return out
+
+
+def calcola_quanto(forward, strike, mesi, vol_sott_pct, vol_cambio_pct, corr, tasso_pct, cambio=1.0):
+    """Premio di un'opzione QUANTO europea sul forward energetico (forma chiusa).
+
+    La QUANTO e' un'opzione su un sottostante denominato in VALUTA ESTERA il
+    cui payoff viene convertito in valuta domestica a un TASSO DI CAMBIO
+    FISSO X (niente rischio cambio sul payout). Nell'energia e' lo strumento
+    standard dei prodotti cross-border e dei quanto "temperatura x prezzo":
+    es. un'opzione sul forward power tedesco (EUR) regolata in CHF a cambio
+    fisso, oppure un'opzione sul prezzo con sottostante indice climatico.
+    Il pricing corregge il forward con il fattore quanto
+      Fq = F * exp(-rho * sigS * sigX * T)
+    (rho = correlazione sottostante/cambio, sigS = vol sottostante,
+    sigX = vol cambio): se sottostante e cambio si muovono insieme
+    (rho > 0), il forward quanto scende e la call vale meno della vanilla.
+    Formule Black-76 sul forward corretto:
+      d1 = (ln(Fq/K) + 0.5*sigS^2*T) / (sigS*sqrt(T)); d2 = d1 - sigS*sqrt(T)
+      call = X * df * (Fq*N(d1) - K*N(d2))
+      put  = X * df * (K*N(-d2) - Fq*N(-d1))
+    Derivazione: sotto la misura risk-neutral domestica il forward estero
+    ha drift -rho*sigS*sigX (aggiustamento di cambio numeraire), quindi il
+    suo valore atteso e' Fq; condizionando, il prezzo e' Black-76 sul
+    forward corretto con cambio fisso X.
+    Ancore esatte: rho = 0 o sigX = 0 -> vanilla Black-76 su F (x X);
+    sigS = 0 o T = 0 -> X*df*max(+- (Fq-K), 0) con Fq = F;
+    parita' call-put esatta: call - put = X*df*(Fq - K);
+    prob. risk-neutral di finire ITM: call -> N(d2), put -> N(-d2);
+    delta sul forward estero: call -> X*df*exp(-rho*sigS*sigX*T)*N(d1),
+    put -> X*df*exp(-rho*sigS*sigX*T)*(N(d1) - 1).
+    NaN-safe: input non validi (F <= 0, K <= 0, T < 0, vol < 0, |rho| > 1,
+    X <= 0, r < 0, NaN, stringhe) -> dict neutro con valido = False.
+    Ritorna dict con: premio_call, premio_put, vanilla_call, vanilla_put
+    (Black-76 con rho = 0 di confronto), diff_vs_vanilla_call/put,
+    parita_diff (~0), fattore_quanto (exp(-rho*sigS*sigX*T)),
+    forward_quanto (Fq), prob_itm_call/put, delta_call/put (sul forward
+    estero, in valuta domestica per unita' di F), intrinseco_vol0_call/put,
+    valido."""
+    from scipy.stats import norm as _norm
+
+    neutro = {"premio_call": float("nan"), "premio_put": float("nan"),
+              "vanilla_call": float("nan"), "vanilla_put": float("nan"),
+              "diff_vs_vanilla_call": float("nan"),
+              "diff_vs_vanilla_put": float("nan"),
+              "parita_diff": float("nan"),
+              "fattore_quanto": float("nan"), "forward_quanto": float("nan"),
+              "prob_itm_call": float("nan"), "prob_itm_put": float("nan"),
+              "delta_call": float("nan"), "delta_put": float("nan"),
+              "intrinseco_vol0_call": float("nan"),
+              "intrinseco_vol0_put": float("nan"), "valido": False}
+    try:
+        F = float(forward); K = float(strike); T = float(mesi) / 12.0
+        sigS = float(vol_sott_pct) / 100.0; sigX = float(vol_cambio_pct) / 100.0
+        rho = float(corr); r = float(tasso_pct) / 100.0; X = float(cambio)
+    except (TypeError, ValueError):
+        return neutro
+    if not all(np.isfinite(v) for v in (F, K, T, sigS, sigX, rho, r, X)):
+        return neutro
+    if F <= 0 or K <= 0 or T < 0 or X <= 0:
+        return neutro
+    if sigS < 0 or sigX < 0 or r < 0 or abs(rho) > 1:
+        return neutro
+
+    df = float(np.exp(-r * T))
+    adj = float(np.exp(-rho * sigS * sigX * T))
+    Fq = F * adj
+
+    def _van(ff):
+        # vanilla Black-76 sul forward ff (confronto: rho = 0 -> ff = F)
+        if T <= 0.0 or sigS <= 0.0:
+            intr_c = max(ff - K, 0.0); intr_p = max(K - ff, 0.0)
+            return X * df * intr_c, X * df * intr_p
+        sqt = sigS * np.sqrt(T)
+        d1v = (np.log(ff / K) + 0.5 * sigS * sigS * T) / sqt
+        d2v = d1v - sqt
+        vc = X * df * (ff * _norm.cdf(d1v) - K * _norm.cdf(d2v))
+        vp = X * df * (K * _norm.cdf(-d2v) - ff * _norm.cdf(-d1v))
+        return vc, vp
+
+    van_c, van_p = _van(F)
+
+    if T <= 0.0 or sigS <= 0.0:
+        # deterministico: Fq = F (adj = 1 se sigS = 0)
+        pc = X * df * max(Fq - K, 0.0)
+        pp = X * df * max(K - Fq, 0.0)
+        prob_c = 0.5 if Fq == K else (1.0 if Fq > K else 0.0)
+        dc = X * df * adj if Fq > K else 0.0
+        dp = -X * df * adj if Fq < K else 0.0
+    else:
+        sqt = sigS * np.sqrt(T)
+        d1 = (np.log(Fq / K) + 0.5 * sigS * sigS * T) / sqt
+        d2 = d1 - sqt
+        nd1 = float(_norm.cdf(d1)); nd2 = float(_norm.cdf(d2))
+        nmd1 = 1.0 - nd1; nmd2 = 1.0 - nd2
+        pc = X * df * (Fq * nd1 - K * nd2)
+        pp = X * df * (K * nmd2 - Fq * nmd1)
+        prob_c = float(_norm.cdf(d2))
+        dc = X * df * adj * nd1
+        dp = X * df * adj * (nd1 - 1.0)
+    prob_p = 1.0 - prob_c
+
+    out = dict(neutro)
+    out.update({"valido": True, "premio_call": float(pc), "premio_put": float(pp),
+                "vanilla_call": float(van_c), "vanilla_put": float(van_p),
+                "diff_vs_vanilla_call": float(van_c - pc),
+                "diff_vs_vanilla_put": float(van_p - pp),
+                "parita_diff": float((pc - pp) - X * df * (Fq - K)),
+                "fattore_quanto": float(adj), "forward_quanto": float(Fq),
+                "prob_itm_call": float(prob_c), "prob_itm_put": float(prob_p),
+                "delta_call": float(dc), "delta_put": float(dp),
+                "intrinseco_vol0_call": float(X * df * max(F - K, 0.0)),
+                "intrinseco_vol0_put": float(X * df * max(K - F, 0.0))})
     return out
 
 
@@ -12156,7 +12269,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -20951,6 +21064,136 @@ elif workspace == _('ws8'):
                     key="csv_fws",
                 )
             st.caption("Uso pratico: la forward start e' l'assicurazione sul prezzo futuro senza fissare lo strike oggi — es. un consumatore che copre il prossimo inverno: se a t1 il forward e' sceso, lo strike scende con lui (e viceversa). Il costo e' minore della vanilla a strike fisso perche' non paghi l'optionalita' prima di t1, ma se il mercato corre prima di t1 lo strike ti segue al rialzo. Limiti: forward driftless lognormale, vol e tassi costanti, niente smile, fissazione europea a t1.")
+
+    with tab108:
+        banner_demo("Opzione quanto: payoff in valuta domestica a cambio fisso su sottostante estero, pricing in forma chiusa")
+        titolo_qto = edu("Opzione quanto", "Una QUANTO e' un'opzione su un sottostante in VALUTA ESTERA il cui payoff viene convertito in valuta domestica a un CAMBIO FISSO — niente rischio cambio sul payout. Nell'energia e' lo strumento standard dei prodotti cross-border (es. opzione sul forward power tedesco regolata in CHF a cambio fisso) e dei quanto temperatura x prezzo. Il prezzo corregge il forward con il fattore exp(-rho*sigS*sigX*T): se sottostante e cambio salgono insieme (rho > 0), la call vale meno della vanilla.")
+        st.markdown(f"**{titolo_qto}**: prezza la quanto europea in forma chiusa — confronto con la vanilla, curva del premio al variare della correlazione e della volatilita' del cambio, delta e probabilita' di finire in-the-money.", unsafe_allow_html=True)
+
+        fwd_qto_def = float(prezzi.dropna().mean()) if len(prezzi.dropna()) else float("nan")
+        vol_qto_def = vol_relativa_annua(prezzi)
+        vol_qto_def = float(vol_qto_def) if np.isfinite(vol_qto_def) else 40.0
+
+        c1, c2 = st.columns(2)
+        with c1:
+            fwd_qto = st.number_input("Prezzo forward estero (€/MWh)", min_value=0.1,
+                                      value=fwd_qto_def if np.isfinite(fwd_qto_def) else 100.0,
+                                      step=1.0, key="qto_fwd",
+                                      help="Default = media del periodo selezionato.")
+        with c2:
+            strike_qto = st.number_input("Strike (€/MWh, valuta estera)", min_value=0.1,
+                                         value=fwd_qto_def if np.isfinite(fwd_qto_def) else 100.0,
+                                         step=1.0, key="qto_k",
+                                         help="Default = at-the-money sul forward.")
+        d1_, d2_, d3_ = st.columns(3)
+        with d1_:
+            mesi_qto = st.number_input("Scadenza (mesi)", min_value=0, max_value=60,
+                                       value=12, step=1, key="qto_t",
+                                       help="Vita residua dell'opzione.")
+        with d2_:
+            vol_s_qto = st.number_input("Volatilita' sottostante (%)", min_value=0.0, max_value=300.0,
+                                        value=round(vol_qto_def, 1), step=1.0, key="qto_vols",
+                                        help="Default = vol realizzata annualizzata.")
+        with d3_:
+            vol_x_qto = st.number_input("Volatilita' cambio (%)", min_value=0.0, max_value=100.0,
+                                        value=10.0, step=1.0, key="qto_volx",
+                                        help="Volatilita' del tasso di cambio sottostante/valuta domestica.")
+        e1, e2, e3 = st.columns(3)
+        with e1:
+            rho_qto = st.number_input("Correlazione sottostante/cambio", min_value=-0.99, max_value=0.99,
+                                      value=0.30, step=0.05, key="qto_rho",
+                                      help="> 0 se prezzo e cambio si muovono insieme (riduce la call).")
+        with e2:
+            tasso_qto = st.number_input("Tasso risk-free domestico (%)", min_value=0.0, max_value=20.0,
+                                        value=2.0, step=0.25, key="qto_r",
+                                        help="Tasso di attualizzazione domestico.")
+        with e3:
+            cambio_qto = st.number_input("Cambio fisso (domestica/estera)", min_value=0.01,
+                                         value=1.0, step=0.05, key="qto_x",
+                                         help="Rapporto di conversione fisso del payoff.")
+        f1_, f2_ = st.columns(2)
+        with f1_:
+            tipo_qto = st.selectbox("Tipo opzione", ["Call (tetto/cap)", "Put (pavimento/floor)"],
+                                    key="qto_tipo",
+                                    help="Call = protezione contro i rialzi; Put = protezione contro i ribassi.")
+        with f2_:
+            qta_qto = st.number_input("Quantita' (MWh)", min_value=0.0, value=1000.0,
+                                      step=100.0, key="qto_qta",
+                                      help="Premio totale = premio x quantita'.")
+
+        is_call_qto = tipo_qto.startswith("Call")
+        ris_qto = calcola_quanto(fwd_qto, strike_qto, int(mesi_qto), vol_s_qto,
+                                 vol_x_qto, rho_qto, tasso_qto, cambio_qto)
+        if ris_qto["valido"]:
+            pc_qto = ris_qto["premio_call"] if is_call_qto else ris_qto["premio_put"]
+            van_qto = ris_qto["vanilla_call"] if is_call_qto else ris_qto["vanilla_put"]
+            diff_qto = ris_qto["diff_vs_vanilla_call"] if is_call_qto else ris_qto["diff_vs_vanilla_put"]
+            prob_qto = ris_qto["prob_itm_call"] if is_call_qto else ris_qto["prob_itm_put"]
+            delta_qto = ris_qto["delta_call"] if is_call_qto else ris_qto["delta_put"]
+            g1, g2, g3 = st.columns(3)
+            render_kpi(f"Premio quanto {'call' if is_call_qto else 'put'} (€/MWh)", f"{pc_qto:,.3f}", g1)
+            render_kpi("Vanilla di confronto (€/MWh)", f"{van_qto:,.3f}", g2)
+            render_kpi("Differenza vs vanilla", f"{diff_qto:,.3f} €/MWh", g3)
+            h1, h2 = st.columns(2)
+            render_kpi("Prob. ITM a scadenza", f"{100.0 * prob_qto:.1f}%", h1)
+            render_kpi("Delta (sul forward estero)", f"{delta_qto:+.3f}", h2)
+            st.caption(f"Fattore quanto: {ris_qto['fattore_quanto']:.4f} · forward quanto: {ris_qto['forward_quanto']:,.2f} €/MWh · "
+                       f"premio posizione: {pc_qto * qta_qto:+,.0f} € totali · "
+                       f"parita' call-put verificata (scostamento {ris_qto['parita_diff']:.2e})")
+
+            # curva: premio vs correlazione
+            rho_grid = np.linspace(-0.9, 0.9, 37)
+            prem_c_qto, prem_p_qto = [], []
+            for rg in rho_grid:
+                rr_ = calcola_quanto(fwd_qto, strike_qto, int(mesi_qto), vol_s_qto,
+                                     vol_x_qto, float(rg), tasso_qto, cambio_qto)
+                prem_c_qto.append(rr_["premio_call"] if rr_["valido"] else float("nan"))
+                prem_p_qto.append(rr_["premio_put"] if rr_["valido"] else float("nan"))
+            fig_qto = go.Figure()
+            fig_qto.add_scatter(x=rho_grid, y=prem_c_qto, mode="lines", name="Call quanto",
+                                line=dict(color="#22d3ee", width=2.5))
+            fig_qto.add_scatter(x=rho_grid, y=prem_p_qto, mode="lines", name="Put quanto",
+                                line=dict(color="#f472b6", width=2.5))
+            fig_qto.add_vline(x=0.0, line_dash="dot", line_color="#4b5563",
+                              annotation_text="Vanilla (rho=0)", annotation_position="top")
+            fig_qto.update_layout(template="plotly_dark", height=400,
+                                   title="Premio quanto vs correlazione sottostante/cambio",
+                                   xaxis_title="Correlazione rho",
+                                   yaxis_title="Premio (€/MWh)")
+            st.plotly_chart(fig_qto, use_container_width=True)
+
+            # curva: premio vs vol cambio
+            vx_grid = np.linspace(0.0, 30.0, 31)
+            prem_vx_c, prem_vx_p = [], []
+            for vx in vx_grid:
+                rr_ = calcola_quanto(fwd_qto, strike_qto, int(mesi_qto), vol_s_qto,
+                                     float(vx), rho_qto, tasso_qto, cambio_qto)
+                prem_vx_c.append(rr_["premio_call"] if rr_["valido"] else float("nan"))
+                prem_vx_p.append(rr_["premio_put"] if rr_["valido"] else float("nan"))
+            fig_qx = go.Figure()
+            fig_qx.add_scatter(x=vx_grid, y=prem_vx_c, mode="lines", name="Call",
+                               line=dict(color="#22d3ee", width=2.5))
+            fig_qx.add_scatter(x=vx_grid, y=prem_vx_p, mode="lines", name="Put",
+                               line=dict(color="#f472b6", width=2.5))
+            fig_qx.update_layout(template="plotly_dark", height=340,
+                                  title="Premio quanto vs volatilita' del cambio",
+                                  xaxis_title="Volatilita' cambio (%)",
+                                  yaxis_title="Premio (€/MWh)")
+            st.plotly_chart(fig_qx, use_container_width=True)
+
+            df_qto = pd.DataFrame({"Correlazione rho": [round(v, 3) for v in rho_grid],
+                                   "Premio call (€/MWh)": [round(v, 4) for v in prem_c_qto],
+                                   "Premio put (€/MWh)": [round(v, 4) for v in prem_p_qto]})
+            st.dataframe(df_qto, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta curva quanto (CSV)",
+                df_qto.to_csv(index=False).encode("utf-8"),
+                file_name=f"quanto_{int(mesi_qto)}m_rho{rho_qto:+.2f}_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Premi call/put quanto al variare della correlazione.",
+                key="csv_qto",
+            )
+        st.caption("Uso pratico: la quanto elimina il rischio cambio dal payoff ma NON dal prezzo — la correlazione rho lo reintroduce nel premio. Con rho > 0 la call costa meno della vanilla (il forward quanto scende), con rho < 0 di piu'. Per un trader cross-border (es. esposizione power DE regolata in CHF) la quanto e' piu' economica della vanilla + copertura cambio separata quando la correlazione e' stabile. Limiti: forward driftless lognormale, vol e correlazione costanti, cambio di conversione davvero fisso a scadenza, niente smile.")
 
 # Footer
 
