@@ -11302,6 +11302,90 @@ def calcola_digitale(payoff, tipo, forward, strike, mesi, vol_pct, tasso_pct):
     out["delta"] = float((_premio(F * (1 + h)) - _premio(F * (1 - h))) / (2 * F * h))
     return out
 
+def calcola_chooser(forward, strike, mesi_scelta, mesi_scadenza, vol_pct, tasso_pct):
+    """Premio di un'opzione CHOOSER semplice sul forward energetico (forma chiusa di Rubinstein).
+
+    La chooser scade a T2 ma a una data di SCELTA t1 <= T2 il detentore decide
+    se tenerla come call o come put (stesso strike K, stessa scadenza T2):
+    valore a t1 = max(C(t1), P(t1)), dove C/P sono i valori Black-76 con vita
+    residua T2-t1. Nell'energia serve a comprare oggi l'optionalita' sulla
+    DIREZIONE del prezzo prima di un evento noto a data certa (asta di
+    capacita', decisione regolatoria, stagione meteo): a t1, se il forward
+    supera K si prende la call, altrimenti la put. Costa meno di uno straddle
+    perche' a t1 se ne esercita una sola gamba invece di pagarle due oggi.
+    Formule (Rubinstein 1991, forward driftless, r = risk-free):
+      chooser = C(F, K, T2) + exp(-r*(T2-t1)) * P(F, K, t1)
+    con C/P = call/put Black-76 (vedi calcola_black76). Intuizione: il primo
+    termine e' il valore atteso della call a T2; il secondo e' l'extra dato
+    dalla possibilita' di ripiegare sulla put (per parita' C-P = df*(F-K), a
+    t1 si sceglie la call sse F(t1) > K, quindi la prob. risk-neutral di
+    scegliere la call e' N(d2(F, K, t1))).
+    Ancore esatte: t1 = 0 -> max(call, put) a T2 (scelta immediata); t1 = T2 ->
+    call + put = straddle (a scadenza una gamba vale zero e l'altra |F-K|);
+    vol = 0 -> df(T2)*|F-K| (deterministico); il premio e' sempre compreso tra
+    max(call, put) e straddle, e cresce con la data di scelta t1.
+    NaN-safe: input non validi (F <= 0, K <= 0, mesi < 0, t1 > T2, vol/tasso
+    < 0, NaN, stringhe) -> dict neutro con valido = False.
+    Ritorna dict con: premio, call, put (vanilla Black-76 a T2), straddle,
+    risparmio_vs_straddle, prob_scelta_call, delta (bump sul forward),
+    intrinseco (df*|F-K|), valido."""
+    from scipy.stats import norm as _norm
+
+    neutro = {"premio": float("nan"), "call": float("nan"), "put": float("nan"),
+              "straddle": float("nan"), "risparmio_vs_straddle": float("nan"),
+              "prob_scelta_call": float("nan"), "delta": float("nan"),
+              "intrinseco": float("nan"), "valido": False}
+    try:
+        F = float(forward); K = float(strike)
+        t1 = float(mesi_scelta) / 12.0; T2 = float(mesi_scadenza) / 12.0
+        sig = float(vol_pct) / 100.0; r = float(tasso_pct) / 100.0
+    except (TypeError, ValueError):
+        return neutro
+    if not all(np.isfinite(v) for v in (F, K, t1, T2, sig, r)):
+        return neutro
+    if F <= 0 or K <= 0 or t1 < 0 or T2 <= 0 or t1 > T2:
+        return neutro
+    if sig < 0 or r < 0:
+        return neutro
+
+    def _b76(ff, kk, tt, cp):
+        # Black-76 scalare; cp True = call, False = put
+        dff = float(np.exp(-r * tt))
+        if tt <= 0.0 or sig <= 0.0:
+            intr = max(ff - kk, 0.0) if cp else max(kk - ff, 0.0)
+            return dff * intr
+        sqt = sig * np.sqrt(tt)
+        d1 = (np.log(ff / kk) + 0.5 * sig * sig * tt) / sqt
+        d2 = d1 - sqt
+        if cp:
+            return dff * (ff * _norm.cdf(d1) - kk * _norm.cdf(d2))
+        return dff * (kk * _norm.cdf(-d2) - ff * _norm.cdf(-d1))
+
+    def _premio(ff):
+        cc = _b76(ff, K, T2, True)
+        pp = _b76(ff, K, t1, False)
+        return cc + float(np.exp(-r * (T2 - t1))) * pp
+
+    C = _b76(F, K, T2, True)
+    P = _b76(F, K, T2, False)
+    straddle = C + P
+    premio = _premio(F)
+    if t1 > 0.0 and sig > 0.0:
+        sqt1 = sig * np.sqrt(t1)
+        d2t1 = (np.log(F / K) + 0.5 * sig * sig * t1) / sqt1 - sqt1
+        prob_c = float(_norm.cdf(d2t1))
+    else:
+        prob_c = 0.5 if F == K else (1.0 if F > K else 0.0)
+    out = dict(neutro)
+    out.update({"valido": True, "premio": float(premio), "call": float(C),
+                "put": float(P), "straddle": float(straddle),
+                "risparmio_vs_straddle": float(straddle - premio),
+                "prob_scelta_call": prob_c,
+                "intrinseco": float(np.exp(-r * T2) * abs(F - K))})
+    h = 0.01
+    out["delta"] = float((_premio(F * (1 + h)) - _premio(F * (1 - h))) / (2 * F * h))
+    return out
+
 
 def render_kpi(title, value, col):
     col.markdown(f"<div class='metric-container'><div class='metric-label'>{title}</div><div class='metric-val'>{value}</div></div>", unsafe_allow_html=True)
@@ -11949,7 +12033,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -20493,6 +20577,130 @@ elif workspace == _('ws8'):
             )
         st.caption("Uso pratico: la cash call e' il 'biglietto' su un evento prezzo — es. scommetti sul PUN sopra 200 €/MWh pagando poco invece di una call vanilla; l'asset-or-nothing vale il prezzo stesso se scatta. Attenzione al rischio pin: vicino a scadenza e vicino allo strike il delta esplode e il premio salta tra 0 e il payout pieno. Limiti: Black-76 driftless in forma chiusa, vol e tassi costanti, niente smile, esercizio europeo.")
 
+    with tab106:
+        banner_demo("Opzione chooser: scegli call o put alla data di scelta, pricing Rubinstein in forma chiusa")
+        titolo_cho = edu("Opzione chooser", "Una CHOOSER semplice scade a T2 ma a una data di SCELTA t1 decidi se tenerla come call o come put, con lo stesso strike. Paghi oggi il diritto di scegliere la DIREZIONE dopo aver visto come evolve il mercato — ideale prima di un evento a data nota (asta di capacita', decisione regolatoria, inverno). Costa meno di uno straddle perche' a t1 ne eserciti una sola gamba. La scelta ottimale a t1 e' meccanica: call se il forward supera lo strike, put altrimenti.")
+        st.markdown(f"**{titolo_cho}**: prezza la chooser semplice sui forward energetici con la formula chiusa di Rubinstein — confronto con straddle e max(call, put), probabilita' di scegliere la call, curva del premio al variare della data di scelta e valore a t1.", unsafe_allow_html=True)
+
+        fwd_cho_def = float(prezzi.dropna().mean()) if len(prezzi.dropna()) else float("nan")
+        vol_cho_def = vol_relativa_annua(prezzi)
+        vol_cho_def = float(vol_cho_def) if np.isfinite(vol_cho_def) else 40.0
+
+        c1, c2 = st.columns(2)
+        with c1:
+            fwd_cho = st.number_input("Prezzo forward (€/MWh)", min_value=0.1,
+                                      value=fwd_cho_def if np.isfinite(fwd_cho_def) else 100.0,
+                                      step=1.0, key="cho_fwd",
+                                      help="Default = media del periodo selezionato.")
+        with c2:
+            strike_cho = st.number_input("Strike K (€/MWh)", min_value=0.1,
+                                         value=fwd_cho_def if np.isfinite(fwd_cho_def) else 100.0,
+                                         step=1.0, key="cho_k",
+                                         help="Strike comune a call e put.")
+        d1_, d2_, d3_ = st.columns(3)
+        with d1_:
+            mesi_scelta_cho = st.number_input("Data di scelta (mesi da oggi)", min_value=0, max_value=60,
+                                              value=6, step=1, key="cho_t1",
+                                              help="Quando decidi se call o put. 0 = scelta immediata.")
+        with d2_:
+            mesi_scad_cho = st.number_input("Scadenza (mesi da oggi)", min_value=1, max_value=60,
+                                            value=12, step=1, key="cho_t2",
+                                            help="Deve essere >= data di scelta.")
+        with d3_:
+            vol_cho = st.number_input("Volatilità annua (%)", min_value=0.0, max_value=300.0,
+                                      value=round(vol_cho_def, 1), step=1.0, key="cho_vol",
+                                      help="Default = vol realizzata annualizzata.")
+        e1, e2 = st.columns(2)
+        with e1:
+            tasso_cho = st.number_input("Tasso risk-free (%)", min_value=0.0, max_value=20.0,
+                                        value=2.0, step=0.25, key="cho_r",
+                                        help="Tasso di attualizzazione.")
+        with e2:
+            qta_cho = st.number_input("Quantità (MWh)", min_value=0.0, value=1000.0,
+                                      step=100.0, key="cho_qta",
+                                      help="Premio totale = premio × quantità.")
+
+        if int(mesi_scelta_cho) > int(mesi_scad_cho):
+            st.error("La data di scelta non può superare la scadenza.")
+        else:
+            ris_cho = calcola_chooser(fwd_cho, strike_cho, int(mesi_scelta_cho),
+                                      int(mesi_scad_cho), vol_cho, tasso_cho)
+            if ris_cho["valido"]:
+                pc_cho = ris_cho["premio"]
+                f1, f2, f3 = st.columns(3)
+                render_kpi("Premio chooser (€/MWh)", f"{pc_cho:,.3f}", f1)
+                render_kpi("Straddle (€/MWh)", f"{ris_cho['straddle']:,.3f}", f2)
+                render_kpi("Risparmio vs straddle", f"{ris_cho['risparmio_vs_straddle']:,.3f} €/MWh", f3)
+                g1, g2 = st.columns(2)
+                render_kpi("Prob. scelta call a t1", f"{100.0 * ris_cho['prob_scelta_call']:.1f}%", g1)
+                render_kpi("Delta", f"{ris_cho['delta']:+.3f}", g2)
+                st.caption(f"Premio posizione: {pc_cho * qta_cho:+,.0f} € totali · "
+                           f"max(call, put) a confronto: {max(ris_cho['call'], ris_cho['put']):,.3f} €/MWh · "
+                           f"a t1 scegli la call se il forward supera {strike_cho:,.0f} €/MWh, altrimenti la put")
+
+                # curva: premio chooser vs data di scelta
+                t1_grid = np.linspace(0.0, float(mesi_scad_cho), 41)
+                prem_cho, prob_cho = [], []
+                for tg in t1_grid:
+                    rr_ = calcola_chooser(fwd_cho, strike_cho, float(tg),
+                                          int(mesi_scad_cho), vol_cho, tasso_cho)
+                    prem_cho.append(rr_["premio"] if rr_["valido"] else float("nan"))
+                    prob_cho.append(100.0 * rr_["prob_scelta_call"] if rr_["valido"] else float("nan"))
+                fig_cho = go.Figure()
+                fig_cho.add_scatter(x=t1_grid, y=prem_cho, mode="lines", name="Chooser",
+                                    line=dict(color="#22d3ee", width=2.5))
+                fig_cho.add_hline(y=ris_cho["straddle"], line_dash="dash", line_color="#f472b6",
+                                  annotation_text="Straddle", annotation_position="top left")
+                fig_cho.add_hline(y=max(ris_cho["call"], ris_cho["put"]), line_dash="dot",
+                                  line_color="#4b5563",
+                                  annotation_text="max(call, put)", annotation_position="bottom left")
+                fig_cho.add_scatter(x=t1_grid, y=prob_cho, mode="lines", name="Prob. scelta call (%)",
+                                    line=dict(color="#a3e635", dash="dot"), yaxis="y2")
+                fig_cho.update_layout(template="plotly_dark", height=400,
+                                       title="Premio chooser vs data di scelta",
+                                       xaxis_title="Data di scelta (mesi da oggi)",
+                                       yaxis_title="Premio (€/MWh)",
+                                       yaxis2=dict(title="Prob. scelta call (%)", overlaying="y",
+                                                   side="right", range=[0, 100]))
+                st.plotly_chart(fig_cho, use_container_width=True)
+
+                # valore a t1 in funzione del forward a t1: max(call, put)
+                trem_cho = (int(mesi_scad_cho) - int(mesi_scelta_cho)) / 12.0
+                f1_grid = np.linspace(max(0.1, 0.5 * strike_cho), 2.0 * strike_cho, 121)
+                val_c, val_p = [], []
+                for fg in f1_grid:
+                    bb_ = calcola_black76(float(fg), strike_cho, trem_cho, vol_cho, tasso_cho)
+                    val_c.append(bb_["call"])
+                    val_p.append(bb_["put"])
+                val_cho_t1 = np.maximum(val_c, val_p)
+                fig_vt1 = go.Figure()
+                fig_vt1.add_scatter(x=f1_grid, y=val_c, mode="lines", name="Call a t1",
+                                    line=dict(color="#22d3ee", dash="dash"))
+                fig_vt1.add_scatter(x=f1_grid, y=val_p, mode="lines", name="Put a t1",
+                                    line=dict(color="#f472b6", dash="dash"))
+                fig_vt1.add_scatter(x=f1_grid, y=val_cho_t1, mode="lines", name="Chooser a t1 = max",
+                                    line=dict(color="#a3e635", width=2.5))
+                fig_vt1.add_vline(x=strike_cho, line_dash="dot", line_color="#4b5563",
+                                  annotation_text="K (soglia di scelta)", annotation_position="top")
+                fig_vt1.update_layout(template="plotly_dark", height=340,
+                                       title=f"Valore alla data di scelta ({int(mesi_scelta_cho)} mesi) vs forward",
+                                       xaxis_title="Forward alla data di scelta (€/MWh)",
+                                       yaxis_title="Valore (€/MWh)")
+                st.plotly_chart(fig_vt1, use_container_width=True)
+
+                df_cho = pd.DataFrame({"Data di scelta (mesi)": [round(v, 2) for v in t1_grid],
+                                       "Premio chooser (€/MWh)": [round(v, 4) for v in prem_cho],
+                                       "Prob. scelta call (%)": [round(v, 2) for v in prob_cho]})
+                st.dataframe(df_cho, use_container_width=True, hide_index=True)
+                st.download_button(
+                    "⬇️ Esporta curva chooser (CSV)",
+                    df_cho.to_csv(index=False).encode("utf-8"),
+                    file_name=f"chooser_{int(mesi_scelta_cho)}m_{int(mesi_scad_cho)}m_{d0}_{d1}.csv",
+                    mime="text/csv",
+                    help="Premio chooser e probabilita' di scelta call al variare della data di scelta.",
+                    key="csv_cho",
+                )
+            st.caption("Uso pratico: la chooser e' l'assicurazione sulla direzione prima di un evento noto — es. prima dell'asta di capacita' compri il diritto di scegliere tra protezione long (call) e short (put) una volta visto il prezzo. Risparmi rispetto allo straddle perche' eserciti una sola gamba, ma rinunci al payoff dell'altra se il mercato corre in quella direzione. Limiti: Rubinstein in forma chiusa su forward driftless, vol e tassi costanti, niente smile, scelta europea alla data t1.")
 
 # Footer
 
