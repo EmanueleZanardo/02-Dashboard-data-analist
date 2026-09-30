@@ -12076,7 +12076,8 @@ def generate_mock_gas(start_date, end_date):
 
 def calcola_stoccaggio_gas(prezzi_gas, capacita_gwh, inj_rate_gwh_g, wd_rate_gwh_g,
                            costo_inj_eur_mwh=0.4, costo_wd_eur_mwh=0.4,
-                           inv_iniziale_pct=50.0, inv_finale_pct=50.0):
+                           inv_iniziale_pct=50.0, inv_finale_pct=50.0,
+                           solo_valore=False):
     """Valore INTRINSECO di uno stoccaggio gas (ottimizzazione LP esatta).
 
     Massimizza, su prezzi giornalieri noti (perfect foresight),
@@ -12102,10 +12103,13 @@ def calcola_stoccaggio_gas(prezzi_gas, capacita_gwh, inj_rate_gwh_g, wd_rate_gwh
     prezzo_medio_acquisto, prezzo_medio_vendita, spread_medio_catturato,
     pnl_mensile (DataFrame), serie inventario/iniezioni/prelievi.
     Meno di 2 giorni validi, capacita' o tassi non positivi -> valido=False.
+    solo_valore=True: percorso veloce (solo valido/n_giorni/
+    valore_intrinseco_eur, niente DataFrame) per il Monte Carlo.
     """
     out = {"valido": False}
     try:
         from scipy.optimize import linprog as _linprog
+        from scipy import sparse as _sparse
         p = pd.to_numeric(prezzi_gas, errors="coerce")
         if not isinstance(p, pd.Series):
             p = pd.Series(p)
@@ -12128,11 +12132,14 @@ def calcola_stoccaggio_gas(prezzi_gas, capacita_gwh, inj_rate_gwh_g, wd_rate_gwh
         if not np.all(np.isfinite(P)):
             return out
         # x = [inj_0..inj_{n-1}, wd_0..wd_{n-1}]; minimizza c^T x
+        # Matrici sparse: ~5x piu' veloci di quelle dense su questo LP
+        # (critico per il Monte Carlo dello stoccaggio estrinseco).
         c = np.concatenate([P + ci, -(P - cw)])
-        L = np.tril(np.ones((n, n)))
-        A_ub = np.vstack([np.hstack([L, -L]), np.hstack([-L, L])])
+        L = _sparse.tril(_sparse.csr_matrix(np.ones((n, n))))
+        A_ub = _sparse.vstack([_sparse.hstack([L, -L]),
+                               _sparse.hstack([-L, L])]).tocsr()
         b_ub = np.concatenate([np.full(n, cap - s0), np.full(n, s0)])
-        A_eq = np.concatenate([np.ones(n), -np.ones(n)]).reshape(1, -1)
+        A_eq = _sparse.csr_matrix(np.concatenate([np.ones(n), -np.ones(n)]).reshape(1, -1))
         b_eq = np.array([st_ - s0])
         bounds = [(0.0, ri)] * n + [(0.0, rw)] * n
         res = _linprog(c, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq,
@@ -12145,6 +12152,11 @@ def calcola_stoccaggio_gas(prezzi_gas, capacita_gwh, inj_rate_gwh_g, wd_rate_gwh
         valore = float(-res.fun)
         if valore < 0 and valore > -1e-6:
             valore = 0.0
+        if solo_valore:
+            # Percorso veloce per il Monte Carlo: solo l'ottimo, niente DataFrame
+            out.update({"valido": True, "n_giorni": int(n),
+                        "valore_intrinseco_eur": valore})
+            return out
         e_inj = float(inj.sum())
         e_wd = float(wd.sum())
         pa = float((inj * P).sum() / e_inj) if e_inj > 0 else float("nan")
@@ -12177,6 +12189,105 @@ def calcola_stoccaggio_gas(prezzi_gas, capacita_gwh, inj_rate_gwh_g, wd_rate_gwh
             "giacenza_finale_gwh": float(st_),
             "pnl_mensile": pnl_m,
             "serie_giornaliera": df_g,
+        })
+    except Exception:
+        return {"valido": False}
+    return out
+
+
+@st.cache_data(show_spinner=False)
+def calcola_stoccaggio_estrinseco(prezzi_gas, capacita_gwh, inj_rate_gwh_g, wd_rate_gwh_g,
+                                  costo_inj_eur_mwh=0.4, costo_wd_eur_mwh=0.4,
+                                  inv_iniziale_pct=50.0, inv_finale_pct=50.0,
+                                  n_scenari=100, vol_annua_pct=35.0,
+                                  mean_reversion_giorni=30.0, seed=1234):
+    """Valore ESTRINSECO di uno stoccaggio gas (Monte Carlo su prezzi stocastici).
+
+    Il tab 'Stoccaggio gas' calcola il valore INTRINSECO: floor deterministico
+    sotto perfect foresight. Nella realta' i prezzi futuri sono incerti e lo
+    stoccaggio puo' ribilanciare le nomine in corso d'opera: questa
+    opzionalita' operativa vale >= 0 e qui viene prezzata con Monte Carlo.
+
+    Per ogni scenario si simula un percorso giornaliero del prezzo gas:
+    GBM lognormale con mean reversion alla curva base deterministica
+    (deviazioni AR(1): X_t = phi*X_{t-1} + sigma_d*z_t, phi = exp(-1/mr)),
+    seed fisso -> completamente riproducibile. Su ciascun percorso si
+    ricalcola il valore intrinseco ottimale con la stessa LP esatta; il valore
+    estrinseco e' la MEDIA dei valori ottimali per scenario.
+
+    Per convessita' del valore LP nei prezzi, E[V(P)] >= V(E[P]): a meno del
+    rumore di simulazione l'estrinseco e' sempre >= dell'intrinseco.
+    La differenza e' il premio di flessibilita' operativa (numero da portare
+    alle aste di capacita' e alle due diligence).
+
+    Parametri prezzi_*/capacita'/tassi/costi/giacenze come in
+    calcola_stoccaggio_gas. n_scenari: percorsi simulati (20-300 consigliati).
+    vol_annua_pct: volatilita' logaritmica annua dei prezzi gas.
+    mean_reversion_giorni: scala temporale di rientro delle deviazioni.
+    Ritorna dict: valido, n_giorni, n_scenari, vol_annua_pct,
+    valore_intrinseco_eur, valore_estrinseco_eur, p10_eur, p90_eur, std_eur,
+    premio_estrinseco_eur, premio_pct, valori_eur (lista). Input non validi
+    (meno di 2 giorni, capacita'/tassi non positivi, vol negativa) ->
+    {"valido": False}.
+    """
+    out = {"valido": False}
+    try:
+        base = calcola_stoccaggio_gas(prezzi_gas, capacita_gwh, inj_rate_gwh_g,
+                                      wd_rate_gwh_g, costo_inj_eur_mwh,
+                                      costo_wd_eur_mwh, inv_iniziale_pct,
+                                      inv_finale_pct)
+        if not base.get("valido"):
+            return out
+        p = pd.to_numeric(prezzi_gas, errors="coerce")
+        if not isinstance(p, pd.Series):
+            p = pd.Series(p)
+        p = p.resample("D").mean().dropna().clip(lower=0.5)
+        n = len(p)
+        if n < 2:
+            return out
+        nsc = max(1, int(n_scenari))
+        vol = float(vol_annua_pct) / 100.0
+        mr = max(1.0, float(mean_reversion_giorni))
+        if not np.isfinite(vol) or vol < 0 or not np.isfinite(mr):
+            return out
+        phi = float(np.exp(-1.0 / mr))
+        sig_d = vol / np.sqrt(365.0)
+        rng = np.random.default_rng(int(seed))
+        logb = np.log(p.to_numpy())
+        intr = float(base["valore_intrinseco_eur"])
+        # Deviazioni log-prezzo AR(1) stazionarie a media zero
+        z = rng.standard_normal((nsc, n))
+        xs = np.empty((nsc, n))
+        x = np.zeros(nsc)
+        for t in range(n):
+            x = phi * x + sig_d * z[:, t]
+            xs[:, t] = x
+        valori = np.empty(nsc)
+        for i in range(nsc):
+            ps = pd.Series(np.exp(logb + xs[i]), index=p.index)
+            r = calcola_stoccaggio_gas(ps, capacita_gwh, inj_rate_gwh_g,
+                                       wd_rate_gwh_g, costo_inj_eur_mwh,
+                                       costo_wd_eur_mwh, inv_iniziale_pct,
+                                       inv_finale_pct, solo_valore=True)
+            valori[i] = float(r["valore_intrinseco_eur"]) if r.get("valido") else float("nan")
+        ok = valori[np.isfinite(valori)]
+        if len(ok) == 0:
+            return out
+        estr = float(ok.mean())
+        premio = estr - intr
+        out.update({
+            "valido": True,
+            "n_giorni": int(n),
+            "n_scenari": int(nsc),
+            "vol_annua_pct": float(vol_annua_pct),
+            "valore_intrinseco_eur": intr,
+            "valore_estrinseco_eur": estr,
+            "p10_eur": float(np.percentile(ok, 10)),
+            "p90_eur": float(np.percentile(ok, 90)),
+            "std_eur": float(ok.std()),
+            "premio_estrinseco_eur": float(premio),
+            "premio_pct": float(100.0 * premio / intr) if intr > 0 else float("nan"),
+            "valori_eur": [float(v) for v in ok],
         })
     except Exception:
         return {"valido": False}
@@ -13088,7 +13199,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -22480,6 +22591,70 @@ elif workspace == _('ws8'):
         else:
             st.warning("Dati insufficienti per lo stoccaggio: servono almeno 2 giorni di prezzi gas e tassi/capacita' positivi.")
         st.caption("Uso pratico: floor del valore di un sito di stoccaggio (asta di capacita', due diligence) e confronto tra siti con diversi tassi di iniezione/erogazione. Limiti: perfect foresight (prezzi noti in anticipo), costi variabili costanti, niente vincoli di pressione né cushion gas, prezzo gas sintetico in demo.")
+
+    with tab114:
+        banner_demo("prezzo gas TTF sintetico deterministico + percorsi Monte Carlo simulati (GBM mean-reverting, seed fisso)")
+        titolo_se = edu("Valore estrinseco stoccaggio gas", "Il valore INTRINSECO (tab precedente) è il floor deterministico: compra/vendi conoscendo già i prezzi. Ma nella realtà i prezzi futuri sono INCERTI e puoi cambiare le nomine in corso d'opera: questa flessibilità vale di più quando i prezzi sono volatili. Il valore ESTRINSECO simula N percorsi di prezzo (GBM con mean reversion alla curva base, seed fisso = riproducibile), ricalcola il piano ottimale su ciascuno e ne fa la media. Per convessità del valore nei prezzi, estrinseco >= intrinseco: la differenza è il premio di flessibilità operativa.")
+        st.markdown(f"**{titolo_se}**: quanto vale poter ribilanciare iniezioni/erogazioni mentre i prezzi si muovono — Monte Carlo sulla stessa LP esatta dello stoccaggio.", unsafe_allow_html=True)
+
+        se1, se2, se3 = st.columns(3)
+        with se1:
+            cap_se = st.number_input("Working gas (GWh)", value=500.0, min_value=1.0, step=50.0, key="se_cap")
+        with se2:
+            inj_se = st.number_input("Tasso max iniezione (GWh/giorno)", value=8.0, min_value=0.1, step=1.0, key="se_inj")
+        with se3:
+            wd_se = st.number_input("Tasso max erogazione (GWh/giorno)", value=12.0, min_value=0.1, step=1.0, key="se_wd")
+        se4, se5, se6 = st.columns(3)
+        with se4:
+            nsc_se = st.slider("Scenari Monte Carlo", 20, 300, 50, step=10, key="se_nsc",
+                               help="Più scenari = stima più stabile, calcolo più lento (100 scenari ≈ qualche decina di secondi al primo calcolo; poi la cache rende istantanee le modifiche).")
+        with se5:
+            vol_se = st.slider("Volatilità annua prezzi gas (%)", 10.0, 80.0, 35.0, step=5.0, key="se_vol",
+                               help="Deviazione standard logaritmica annua dei percorsi simulati.")
+        with se6:
+            mr_se = st.slider("Mean reversion (giorni)", 5.0, 180.0, 30.0, step=5.0, key="se_mr",
+                              help="Quanto in fretta le deviazioni di prezzo rientrano sulla curva base: bassa = shock più persistenti e sfruttabli.")
+
+        gas_se = generate_mock_gas(d0, d1).dropna()
+        with st.spinner("Simulazione Monte Carlo in corso..."):
+            ris_se = calcola_stoccaggio_estrinseco(gas_se, float(cap_se), float(inj_se), float(wd_se),
+                                                  n_scenari=int(nsc_se), vol_annua_pct=float(vol_se),
+                                                  mean_reversion_giorni=float(mr_se))
+        if ris_se["valido"]:
+            k1, k2, k3 = st.columns(3)
+            render_kpi("Valore intrinseco (floor) (€)", f"{ris_se['valore_intrinseco_eur']:,.0f}", k1)
+            render_kpi("Valore estrinseco — media MC (€)", f"{ris_se['valore_estrinseco_eur']:,.0f}", k2)
+            premio = ris_se["premio_estrinseco_eur"]
+            pp = ris_se["premio_pct"]
+            render_kpi("Premio di flessibilità (€)", f"{premio:,.0f}" + (f" (+{pp:,.1f}%)" if np.isfinite(pp) else ""), k3)
+            k4, k5 = st.columns(2)
+            render_kpi("P10 — P90 della distribuzione (€)",
+                       f"{ris_se['p10_eur']:,.0f} — {ris_se['p90_eur']:,.0f}", k4)
+            render_kpi("Deviazione std tra scenari (€)", f"{ris_se['std_eur']:,.0f}", k5)
+            st.caption(f"Scenari: {ris_se['n_scenari']} su {ris_se['n_giorni']} giorni — volatilità {ris_se['vol_annua_pct']:,.0f}% annua, seed fisso (risultato riproducibile).")
+            fig_se = go.Figure()
+            fig_se.add_trace(go.Histogram(x=ris_se["valori_eur"], nbinsx=30,
+                                          marker_color="#8b5cf6", name="Valore per scenario",
+                                          hovertemplate="Valore: %{x:,.0f} €<extra></extra>"))
+            fig_se.add_vline(x=ris_se["valore_intrinseco_eur"], line_dash="dash", line_color="#f59e0b",
+                             annotation_text="Intrinseco (floor)", annotation_position="top left")
+            fig_se.add_vline(x=ris_se["valore_estrinseco_eur"], line_dash="solid", line_color="#10B981",
+                             annotation_text="Estrinseco (media)", annotation_position="top right")
+            fig_se.update_layout(template="plotly_dark", height=320,
+                                 title="Distribuzione del valore dello stoccaggio sugli scenari",
+                                 xaxis_title="Valore (€)", yaxis_title="Scenari")
+            st.plotly_chart(fig_se, use_container_width=True)
+            st.download_button(
+                "⬇️ Esporta distribuzione valori (CSV)",
+                pd.DataFrame({"valore_eur": ris_se["valori_eur"]}).to_csv(index=False).encode("utf-8"),
+                file_name=f"stoccaggio_estrinseco_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Valore ottimale dello stoccaggio per ciascuno scenario simulato.",
+                key="csv_se",
+            )
+        else:
+            st.warning("Dati insufficienti: servono almeno 2 giorni di prezzi gas e parametri positivi.")
+        st.caption("Uso pratico: il premio estrinseco è il numero da portare alle aste di capacità e alle due diligence — cresce con volatilità e persistenza degli shock. Limiti: prezzi sintetici in demo, costi variabili costanti, niente vincoli di pressione né cushion gas, ribilanciamento giornaliero senza costi di transazione.")
 
 # Footer
 
