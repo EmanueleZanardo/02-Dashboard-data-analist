@@ -10752,6 +10752,121 @@ def calcola_strategia_opzionaria(tipo, forward, anni, vol_pct, tasso_pct,
             "max_loss": float(np.min(y)), "forward": float(F)}
 
 
+def _prezzo_berm_tree(F, K, T, sig, r, tipo, n_esercizi, n_steps):
+    """Motore binomiale CRR sul FORWARD (martingala risk-neutral: p=(1-d)/(u-d)).
+
+    Ritorna (premio_bermudiana, premio_europeo): l'europea usa lo stesso albero
+    senza esercizio anticipato (solo a scadenza). Date di esercizio: k*T/n_esercizi
+    (k=1..n_esercizi), mappate sullo step piu' vicino.
+    Convenzione di liquidazione: CASH all'esercizio — esercitando alla data t si
+    incassa subito l'intrinseco max(F_t-K,0) / max(K-F_t,0) (non scontato), come
+    nei contratti fisici energy (paghi K, ritiri la commodity). Con questa
+    convenzione la put ha in genere un early exercise premium > 0; la call ha
+    premio extra solo se deep ITM con tassi alti (valore temporale del cash).
+    Assume input gia' validati: F>0, K>0, T>0, sig>0, r>=0, n_esercizi>=1, n_steps>=10."""
+    dt = T / n_steps
+    u = float(np.exp(sig * np.sqrt(dt)))
+    d = 1.0 / u
+    p = (1.0 - d) / (u - d)
+    df_step = float(np.exp(-r * dt))
+    ex_steps = sorted({min(n_steps, max(0, int(round(k * n_steps / n_esercizi))))
+                       for k in range(1, n_esercizi + 1)})
+    ex_steps[-1] = n_steps  # l'ultima data coincide sempre con la scadenza
+    ex_set = set(ex_steps)
+    is_call = (tipo == "call")
+    # payoff a scadenza
+    Vb = np.empty(n_steps + 1)
+    Ve = np.empty(n_steps + 1)
+    for j in range(n_steps + 1):
+        s = F * (u ** j) * (d ** (n_steps - j))
+        pay = max(s - K, 0.0) if is_call else max(K - s, 0.0)
+        Vb[j] = pay
+        Ve[j] = pay
+    # induzione all'indietro
+    for i in range(n_steps - 1, -1, -1):
+        for j in range(i + 1):
+            cont_b = df_step * (p * Vb[j + 1] + (1.0 - p) * Vb[j])
+            cont_e = df_step * (p * Ve[j + 1] + (1.0 - p) * Ve[j])
+            Ve[j] = cont_e
+            if i in ex_set:
+                s = F * (u ** j) * (d ** (i - j))
+                intr = max(s - K, 0.0) if is_call else max(K - s, 0.0)
+                Vb[j] = cont_b if cont_b >= intr else intr
+            else:
+                Vb[j] = cont_b
+    return float(Vb[0]), float(Ve[0])
+
+
+def calcola_bermudiana(tipo, forward, strike, anni, vol_pct, tasso_pct,
+                       n_esercizi=4, n_steps=400):
+    """Premio di un'opzione BERMUDIANA sul forward dell'energia (albero binomiale CRR).
+
+    La Bermudiana si puo' esercitare solo in date discrete (es. mensili o
+    trimestrali): e' il modello naturale per opzioni su periodi di consegna
+    energetici e per contratti storage/swing semplificati. Pricing con albero
+    binomiale CRR sul forward (martingala risk-neutral, p=(1-d)/(u-d)),
+    esercizio anticipato solo agli step corrispondenti alle date k*T/n_esercizi.
+    Ritorna anche il premio EUROPEO sullo stesso albero: la differenza e'
+    il valore dell'esercizio anticipato (early exercise premium).
+    Note: l'esercizio e' cash-settled (intrinseco incassato subito alla data di
+    esercizio). La put ha in genere un early exercise premium > 0; la call ha
+    premio extra solo se deep ITM con tassi alti. Casi limite: T=0 -> intrinseco;
+    vol=0 -> bermudiana = intrinseco (esercizio immediato), europea scontata.
+    NaN-safe: input non validi -> dict neutro con nan e senza eccezioni.
+    Ritorna dict con: premio, premio_europeo, premio_early (€/MWh),
+    premio_early_pct (%), delta (bump centrale), intrinseco, valido,
+    n_esercizi, n_steps, date_esercizio (anni)."""
+    neutro = {"premio": float("nan"), "premio_europeo": float("nan"),
+              "premio_early": float("nan"), "premio_early_pct": float("nan"),
+              "delta": float("nan"), "intrinseco": float("nan"),
+              "valido": False, "n_esercizi": 0, "n_steps": 0,
+              "date_esercizio": []}
+    try:
+        F = float(forward); K = float(strike); T = float(anni)
+        sig = float(vol_pct) / 100.0; r = float(tasso_pct) / 100.0
+        ne = int(round(float(n_esercizi))); ns = int(round(float(n_steps)))
+        tp = str(tipo).strip().lower()
+    except (TypeError, ValueError):
+        return neutro
+    if not all(np.isfinite(v) for v in (F, K, T, sig, r)):
+        return neutro
+    if tp not in ("call", "put"):
+        return neutro
+    if F <= 0 or K <= 0 or T < 0 or sig < 0 or r < 0 or ne < 1:
+        return neutro
+    ns = min(max(ns, 10), 2000)
+    out = dict(neutro)
+    out.update({"valido": True, "n_esercizi": ne, "n_steps": ns,
+                "date_esercizio": [round(k * T / ne, 6) for k in range(1, ne + 1)]})
+    is_call = (tp == "call")
+    intr = max(F - K, 0.0) if is_call else max(K - F, 0.0)
+    out["intrinseco"] = float(intr)
+    df = float(np.exp(-r * T))
+    if T == 0.0:
+        out.update({"premio": float(intr), "premio_europeo": float(intr),
+                    "premio_early": 0.0, "premio_early_pct": 0.0,
+                    "delta": float(1.0 if (is_call and F > K) else (-1.0 if (not is_call and F < K) else 0.0))})
+        return out
+    if sig == 0.0:
+        # senza vol: esercizio immediato se in-the-money (cash settlement)
+        out.update({"premio": float(intr), "premio_europeo": float(intr * df),
+                    "premio_early": float(intr * (1.0 - df)),
+                    "delta": float(1.0 if (is_call and F > K) else (-1.0 if (not is_call and F < K) else 0.0))})
+        out["premio_early_pct"] = float(100.0 * out["premio_early"] / out["premio"]) \
+            if out["premio"] > 0 else 0.0
+        return out
+    pb, pe = _prezzo_berm_tree(F, K, T, sig, r, tp, ne, ns)
+    early = max(pb - pe, 0.0)  # tolleranza numerica: mai negativo
+    h = 0.01
+    pb_up, _ = _prezzo_berm_tree(F * (1.0 + h), K, T, sig, r, tp, ne, ns)
+    pb_dn, _ = _prezzo_berm_tree(F * (1.0 - h), K, T, sig, r, tp, ne, ns)
+    delta = (pb_up - pb_dn) / (2.0 * F * h)
+    out.update({"premio": float(pb), "premio_europeo": float(pe),
+                "premio_early": float(early), "delta": float(delta)})
+    out["premio_early_pct"] = float(100.0 * early / pb) if pb > 0 else 0.0
+    return out
+
+
 def render_kpi(title, value, col):
     col.markdown(f"<div class='metric-container'><div class='metric-label'>{title}</div><div class='metric-val'>{value}</div></div>", unsafe_allow_html=True)
 
@@ -11398,7 +11513,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -19398,6 +19513,104 @@ elif workspace == _('ws8'):
                 key="csv_so",
             )
         st.caption("Uso pratico: un produttore che teme il crollo dei prezzi compra il collar produttore (floor garantito, cap ceduto); un buyer industriale che teme i rialzi usa il collar consumatore, spesso a premio netto ~0. Straddle/strangle prima di eventi incerti (inverno, decisioni regolatorie): paghi il premio e guadagni se il mercato si muove forte in qualsiasi direzione. Limiti: opzioni EUROPEE (niente esercizio anticipato), vol e tassi costanti, payoff solo a scadenza — il valore intermedio (mark-to-market) segue le greche del tab98.")
+
+    with tab101:
+        banner_demo("Opzione Bermudiana: esercizio solo in date discrete (mensili/trimestrali) con pricing binomiale CRR")
+        titolo_berm = edu("Opzione Bermudiana", "Un'opzione BERMUDIANA si puo' esercitare solo in alcune date prefissate (es. ogni mese o trimestre), non tutti i giorni come l'americana e non solo a scadenza come l'europea. Nell'energia e' la struttura naturale delle opzioni su periodi di consegna e dei contratti flessibili tipo swing/storage. Il premio extra rispetto all'europea (early exercise premium) misura quanto vale la flessibilita' di esercizio: cresce con piu' date di esercizio, piu' volatilita' e tassi piu' alti (per le put).")
+        st.markdown(f"**{titolo_berm}**: prezzo un'opzione esercitabile in date discrete e quantifica il valore dell'esercizio anticipato.", unsafe_allow_html=True)
+
+        fwd_berm_def = float(prezzi.dropna().mean()) if len(prezzi.dropna()) else float("nan")
+        vol_berm_def = vol_relativa_annua(prezzi)
+        vol_berm_def = float(vol_berm_def) if np.isfinite(vol_berm_def) else 40.0
+
+        b1, b2, b3 = st.columns(3)
+        with b1:
+            tipo_berm = st.selectbox("Tipo di opzione", ["Put", "Call"], key="berm_tipo",
+                                     help="Put: protezione contro il crollo dei prezzi (l'esercizio anticipato vale di piu'). Call: l'esercizio anticipato conviene solo se deep ITM con tassi alti; di solito il premio extra e' piccolo.")
+        with b2:
+            fwd_berm = st.number_input("Prezzo forward (€/MWh)", min_value=0.1,
+                                       value=fwd_berm_def if np.isfinite(fwd_berm_def) else 100.0,
+                                       step=1.0, key="berm_fwd",
+                                       help="Default = media del periodo selezionato.")
+        with b3:
+            k_berm = st.number_input("Strike (€/MWh)", min_value=0.1,
+                                     value=fwd_berm_def if np.isfinite(fwd_berm_def) else 100.0,
+                                     step=1.0, key="berm_k",
+                                     help="Default = ATM (uguale al forward).")
+        b4, b5, b6 = st.columns(3)
+        with b4:
+            mesi_berm = st.number_input("Scadenza (mesi)", min_value=1, max_value=60, value=12,
+                                        step=1, key="berm_mesi",
+                                        help="Orizzonte dell'opzione.")
+        with b5:
+            vol_berm = st.number_input("Volatilità annua (%)", min_value=0.0, max_value=300.0,
+                                       value=round(vol_berm_def, 1), step=1.0, key="berm_vol",
+                                       help="Default = vol realizzata annualizzata.")
+        with b6:
+            tasso_berm = st.number_input("Tasso risk-free (%)", min_value=0.0, max_value=20.0,
+                                         value=2.0, step=0.25, key="berm_r",
+                                         help="Tasso di attualizzazione.")
+        b7, b8 = st.columns(2)
+        with b7:
+            ne_berm = st.number_input("Date di esercizio", min_value=1, max_value=12, value=4,
+                                      step=1, key="berm_ne",
+                                      help="1 = europea; 4 = trimestrale; 12 = mensile. Piu' date = piu' flessibilita' = premio piu' alto.")
+        with b8:
+            qta_berm = st.number_input("Quantità (MWh)", min_value=0.0, value=1000.0,
+                                       step=100.0, key="berm_qta",
+                                       help="Volume della posizione: premio totale = premio × quantita'.")
+
+        ris_berm = calcola_bermudiana(tipo_berm.lower(), fwd_berm, k_berm, mesi_berm / 12.0,
+                                      vol_berm, tasso_berm, n_esercizi=int(ne_berm))
+        ok_berm = bool(ris_berm["valido"])
+
+        if ok_berm:
+            pb, pe, pee = ris_berm["premio"], ris_berm["premio_europeo"], ris_berm["premio_early"]
+            c1, c2, c3 = st.columns(3)
+            render_kpi("Premio Bermudiana (€/MWh)", f"{pb:,.3f}", c1)
+            render_kpi("Premio Europea (€/MWh)", f"{pe:,.3f}", c2)
+            render_kpi("Early exercise premium (€/MWh)", f"{pee:,.3f}", c3)
+            c4, c5, c6 = st.columns(3)
+            render_kpi("Early exercise premium (%)", f"{ris_berm['premio_early_pct']:.1f}%", c4)
+            render_kpi("Delta", f"{ris_berm['delta']:+.3f}", c5)
+            render_kpi("Premio posizione (tot €)", f"{pb * qta_berm:+,.0f}", c6)
+            st.caption(f"Intrinseco: {ris_berm['intrinseco']:,.2f} €/MWh · "
+                       f"Date di esercizio (anni): {', '.join(f'{d:.3f}' for d in ris_berm['date_esercizio'])}")
+
+            # curva: premio vs numero di date di esercizio (1..12)
+            ne_max = 12
+            curve_pb, curve_pee = [], []
+            for ne_c in range(1, ne_max + 1):
+                rc = calcola_bermudiana(tipo_berm.lower(), fwd_berm, k_berm, mesi_berm / 12.0,
+                                        vol_berm, tasso_berm, n_esercizi=ne_c)
+                curve_pb.append(rc["premio"] if rc["valido"] else float("nan"))
+                curve_pee.append(rc["premio_early"] if rc["valido"] else float("nan"))
+            fig_berm = go.Figure()
+            fig_berm.add_scatter(x=list(range(1, ne_max + 1)), y=curve_pb, mode="lines+markers",
+                                 name="Premio Bermudiana", line=dict(color="#38bdf8"))
+            fig_berm.add_scatter(x=list(range(1, ne_max + 1)), y=curve_pee, mode="lines+markers",
+                                 name="Early exercise premium", line=dict(color="#f59e0b"))
+            fig_berm.add_hline(y=pe, line_dash="dash", line_color="#4b5563",
+                               annotation_text=f"Europea {pe:,.2f}", annotation_position="right")
+            fig_berm.update_layout(template="plotly_dark", height=380,
+                                   title=f"Premio vs frequenza di esercizio — {tipo_berm} K={k_berm:,.0f} €/MWh",
+                                   xaxis_title="Date di esercizio (1=europea, 12=mensile)",
+                                   yaxis_title="Premio (€/MWh)")
+            st.plotly_chart(fig_berm, use_container_width=True)
+
+            df_berm = pd.DataFrame({"Date di esercizio": list(range(1, ne_max + 1)),
+                                    "Premio Bermudiana (€/MWh)": [round(v, 4) for v in curve_pb],
+                                    "Early exercise premium (€/MWh)": [round(v, 4) for v in curve_pee]})
+            st.dataframe(df_berm, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta curva esercizio (CSV)",
+                df_berm.to_csv(index=False).encode("utf-8"),
+                file_name=f"bermudiana_{tipo_berm.lower()}_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Premio Bermudiana ed early exercise premium al variare delle date di esercizio.",
+                key="csv_berm",
+            )
+        st.caption("Uso pratico: una put Bermudiana mensile su un trimestre di consegna protegge un produttore dal crollo prezzi con la flessibilita' di esercitare ogni mese; l'early premium dice quanto paghi in piu' rispetto all'europea. La call ha premio extra solo se deep ITM con tassi alti (valore temporale del cash incassato subito). Limiti: liquidazione cash all'esercizio, albero binomiale CRR (vol e tassi costanti, niente smile), esercizio solo alle date indicate — l'americana vera (esercizio continuo) vale di piu'.")
 
 
 # Footer
