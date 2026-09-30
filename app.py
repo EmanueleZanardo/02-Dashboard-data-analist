@@ -10522,6 +10522,113 @@ def calcola_nuovo_carico(prezzi, profilo_24, potenza_mw, mw_f1, mw_f2, mw_f3,
     return out
 
 
+def calcola_opzione_asiatica(forward, strike, anni, vol_pct, tasso_pct, tipo="call",
+                            n_fixing=12, n_sim=20000, seed=7):
+    """Prezzatura di un'opzione ASIATICA (payoff sulla MEDIA dei prezzi) sul forward dell'energia.
+
+    Le opzioni energy si regolano quasi sempre sulla media (settlement mensile
+    = media dei giornalieri): un'opzione asiatica replica questo payoff e costa
+    meno di una vanilla europea sullo stesso sottostante.
+
+    Metodo: geometrica asiatica con formula chiusa di Kemna-Vorst (esatta);
+    aritmetica asiatica via Monte Carlo con VARIABILE DI CONTROLLO sulla
+    geometrica (stesso browniano, prezzo esatto noto -> errore std ridotto).
+    Il forward e' trattato come martingala (drift zero, modello Black-76).
+    n_fixing=1 -> la media coincide con il fixing unico: il prezzo asiatico
+    e' identico alla vanilla europea (errore MC = 0, sconto = 0).
+    NaN-safe: input non validi (F/K<=0, T<0, vol<0, tasso<0, NaN, stringhe)
+    -> dict neutro con nan e senza eccezioni. n_fixing<1 -> 1; n_sim<100 -> 100.
+    Ritorna dict con: call_arith/put_arith (MC, €/MWh), call_geom/put_geom
+    (Kemna-Vorst), err_std_call/err_std_put, vanilla_call/vanilla_put
+    (da calcola_black76), sconto_call_pct/sconto_put_pct (vs vanilla),
+    n_fixing, n_sim. Ipotesi: prezzo lognormale, vol/tassi costanti, fixing
+    equispaziati da T/n a T.
+    """
+    neutro = {"call_arith": float("nan"), "put_arith": float("nan"),
+              "call_geom": float("nan"), "put_geom": float("nan"),
+              "err_std_call": float("nan"), "err_std_put": float("nan"),
+              "vanilla_call": float("nan"), "vanilla_put": float("nan"),
+              "sconto_call_pct": float("nan"), "sconto_put_pct": float("nan"),
+              "n_fixing": None, "n_sim": None}
+    try:
+        F = float(forward); K = float(strike); T = float(anni)
+        sig = float(vol_pct) / 100.0; r = float(tasso_pct) / 100.0
+    except (TypeError, ValueError):
+        return neutro
+    if not all(np.isfinite(v) for v in (F, K, T, sig, r)):
+        return neutro
+    if F <= 0 or K <= 0 or T < 0 or sig < 0 or r < 0:
+        return neutro
+    try:
+        n = max(1, int(n_fixing))
+    except (TypeError, ValueError):
+        return neutro
+    try:
+        nsim = int(n_sim)
+    except (TypeError, ValueError):
+        nsim = 20000
+    nsim = max(100, nsim)
+    df = float(np.exp(-r * T))
+    vanilla = calcola_black76(F, K, T, sig * 100.0, r * 100.0)
+    vc = float(vanilla["call"]); vp = float(vanilla["put"])
+    if n == 1:
+        # Un solo fixing: la media coincide col prezzo finale -> vanilla esatta.
+        return {"call_arith": vc, "put_arith": vp,
+                "call_geom": vc, "put_geom": vp,
+                "err_std_call": 0.0, "err_std_put": 0.0,
+                "vanilla_call": vc, "vanilla_put": vp,
+                "sconto_call_pct": 0.0, "sconto_put_pct": 0.0,
+                "n_fixing": 1, "n_sim": nsim}
+    if T == 0.0 or sig == 0.0:
+        ic, ip = max(F - K, 0.0), max(K - F, 0.0)
+        return {"call_arith": float(ic * df), "put_arith": float(ip * df),
+                "call_geom": float(ic * df), "put_geom": float(ip * df),
+                "err_std_call": 0.0, "err_std_put": 0.0,
+                "vanilla_call": float(vanilla["call"]),
+                "vanilla_put": float(vanilla["put"]),
+                "sconto_call_pct": 0.0, "sconto_put_pct": 0.0,
+                "n_fixing": n, "n_sim": nsim}
+    # --- Kemna-Vorst: media GEOMETRICA (formula chiusa) ---
+    t_i = T * np.arange(1, n + 1) / n
+    tbar = float(t_i.mean())
+    var_g = float(sig ** 2 * ((n + 1) * (2 * n + 1)) / (6.0 * n ** 2) * T)
+    sig_a = float(np.sqrt(var_g / T))
+    f_a = F * float(np.exp(-0.5 * sig ** 2 * tbar + 0.5 * var_g))
+    sqt_a = sig_a * float(np.sqrt(T))
+    d1g = (float(np.log(f_a / K)) + 0.5 * var_g) / sqt_a
+    d2g = d1g - sqt_a
+    cg = df * (f_a * float(norm.cdf(d1g)) - K * float(norm.cdf(d2g)))
+    pg = df * (K * float(norm.cdf(-d2g)) - f_a * float(norm.cdf(-d1g)))
+    # --- Monte Carlo: media ARITMETICA con controllo sulla geometrica ---
+    rng = np.random.default_rng(int(seed))
+    dt = T / n
+    incr = rng.normal(0.0, 1.0, size=(nsim, n)) * float(np.sqrt(dt))
+    w_t = np.cumsum(incr, axis=1)
+    drift = -0.5 * sig ** 2 * t_i
+    spot_t = F * np.exp(drift + sig * w_t)
+    media_a = spot_t.mean(axis=1)
+    media_g = np.exp(np.log(spot_t).mean(axis=1))
+    pay_a_c = np.maximum(media_a - K, 0.0)
+    pay_a_p = np.maximum(K - media_a, 0.0)
+    pay_g_c = np.maximum(media_g - K, 0.0)
+    pay_g_p = np.maximum(K - media_g, 0.0)
+    adj_c = pay_a_c - pay_g_c
+    adj_p = pay_a_p - pay_g_p
+    ca = float(cg + df * adj_c.mean())
+    pa = float(pg + df * adj_p.mean())
+    err_c = float(df * adj_c.std(ddof=1) / np.sqrt(nsim))
+    err_p = float(df * adj_p.std(ddof=1) / np.sqrt(nsim))
+    vc = float(vanilla["call"]); vp = float(vanilla["put"])
+    sc = float(100.0 * (vc - ca) / vc) if vc and np.isfinite(vc) and vc > 0 else 0.0
+    sp = float(100.0 * (vp - pa) / vp) if vp and np.isfinite(vp) and vp > 0 else 0.0
+    return {"call_arith": ca, "put_arith": pa,
+            "call_geom": float(cg), "put_geom": float(pg),
+            "err_std_call": err_c, "err_std_put": err_p,
+            "vanilla_call": vc, "vanilla_put": vp,
+            "sconto_call_pct": sc, "sconto_put_pct": sp,
+            "n_fixing": n, "n_sim": nsim}
+
+
 def render_kpi(title, value, col):
     col.markdown(f"<div class='metric-container'><div class='metric-label'>{title}</div><div class='metric-val'>{value}</div></div>", unsafe_allow_html=True)
 
@@ -11168,7 +11275,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -18950,6 +19057,103 @@ elif workspace == _('ws8'):
                 key="csv_gr",
             )
         st.caption("Uso pratico: hai VENDUTO una call su 1.000 MWh? Sei corto di delta: compra 'delta posizione' MWh sul forward per neutralizzarti, e ricontrolla ogni giorno — il gamma ti dice quanto il delta scappa quando il prezzo si muove. La vega ti dice quanto perdi se la vol implicita sale di un punto; la theta quanto incassi ogni giorno di time decay. Limite del modello: vol e tassi costanti, niente smile di volatilita' — per book grandi serve il ricalcolo con la vol implicita di mercato.")
+
+
+    with tab99:
+        banner_demo("Prezzatura di opzioni asiatiche (payoff sulla media dei prezzi) con formula Kemna-Vorst + Monte Carlo con variabile di controllo")
+        titolo_as = edu("Opzione asiatica", "Un'opzione ASIATICA non paga sulla differenza tra prezzo finale e strike, ma sulla differenza tra la MEDIA dei prezzi nel periodo e lo strike. Nell'energy e' lo strumento standard: i future e le opzioni power/gas si regolano sulla media mensile (settlement = media dei giornalieri). La media e' meno volatile del prezzo finale, quindi l'asiatica COSTA MENO di una vanilla europea sullo stesso sottostante — lo sconto cresce con la volatilita' e con il numero di fixing. Prezzatura: media geometrica con formula chiusa di Kemna-Vorst, media aritmetica via Monte Carlo con la geometrica come variabile di controllo (errore ridotto a parita' di simulazioni).")
+        st.markdown(f"**{titolo_as}**: quanto costa un'opzione sul prezzo MEDIO invece che sul prezzo finale?", unsafe_allow_html=True)
+
+        fwd_as_def = float(prezzi.dropna().mean()) if len(prezzi.dropna()) else float("nan")
+        k_as_def = float(round(fwd_as_def)) if np.isfinite(fwd_as_def) else 100.0
+        vol_as_def = vol_relativa_annua(prezzi)
+        vol_as_def = float(vol_as_def) if np.isfinite(vol_as_def) else 40.0
+
+        a1, a2, a3 = st.columns(3)
+        with a1:
+            tipo_as = st.selectbox("Tipo opzione", ["call", "put"], key="as_tipo",
+                                   help="Call asiatica: paga max(media - strike, 0). Put: max(strike - media, 0).")
+        with a2:
+            fwd_as = st.number_input("Prezzo forward/sottostante (€/MWh)", min_value=0.1,
+                                    value=fwd_as_def if np.isfinite(fwd_as_def) else 100.0,
+                                    step=1.0, key="as_fwd",
+                                    help="Default = media del periodo selezionato.")
+        with a3:
+            k_as = st.number_input("Strike (€/MWh)", min_value=0.1, value=k_as_def, step=1.0, key="as_k",
+                                   help="Strike sul prezzo medio del periodo.")
+        a4, a5, a6 = st.columns(3)
+        with a4:
+            mesi_as = st.number_input("Scadenza (mesi)", min_value=0, max_value=60, value=3, step=1, key="as_mesi",
+                                      help="I fixing sono equispaziati tra T/n e T (es. 12 fixing mensili in 12 mesi).")
+        with a5:
+            vol_as = st.number_input("Volatilità annua (%)", min_value=0.0, max_value=300.0,
+                                     value=round(vol_as_def, 1), step=1.0, key="as_vol",
+                                     help="Default = vol realizzata annualizzata. Lo sconto asiatica-vs-vanilla cresce con la vol.")
+        with a6:
+            tasso_as = st.number_input("Tasso risk-free (%)", min_value=0.0, max_value=20.0, value=2.0,
+                                       step=0.25, key="as_r", help="Tasso di attualizzazione.")
+        a7, a8 = st.columns(2)
+        with a7:
+            fix_as = st.slider("Numero di fixing (media su n prezzi)", min_value=1, max_value=24,
+                               value=12, step=1, key="as_fix",
+                               help="1 fixing = opzione europea vanilla; 12 = media mensile su un anno; 24 = bimensile.")
+        with a8:
+            qta_as = st.number_input("Quantità (MWh)", min_value=0.0, value=1000.0, step=100.0, key="as_qta",
+                                     help="Volume della posizione: il premio totale e' premio × quantita'.")
+
+        ris_as = calcola_opzione_asiatica(fwd_as, k_as, mesi_as / 12.0, vol_as, tasso_as,
+                                          tipo=tipo_as, n_fixing=fix_as)
+        ok_as = bool(np.isfinite(ris_as["call_arith"]))
+
+        if ok_as:
+            prem_as = ris_as[f"{tipo_as}_arith"]
+            prem_g = ris_as[f"{tipo_as}_geom"]
+            van_as = ris_as[f"vanilla_{tipo_as}"]
+            sc_as = ris_as[f"sconto_{tipo_as}_pct"]
+            err_as = ris_as[f"err_std_{tipo_as}"]
+            ka1, ka2, ka3 = st.columns(3)
+            render_kpi(f"Premio asiatica {tipo_as.upper()} (€/MWh)", f"{prem_as:,.2f}", ka1)
+            render_kpi("Premio vanilla europea (€/MWh)", f"{van_as:,.2f}", ka2)
+            render_kpi("Sconto asiatica vs vanilla", f"{sc_as:+.1f}%", ka3)
+            ka4, ka5, ka6 = st.columns(3)
+            render_kpi("Geometrica Kemna-Vorst (€/MWh)", f"{prem_g:,.2f}", ka4)
+            render_kpi("Errore std Monte Carlo (€/MWh)", f"±{err_as:,.3f}", ka5)
+            render_kpi("Premio posizione (MWh × premio)", f"{prem_as * qta_as:,.0f} €", ka6)
+            money_as = "ITM 🟢" if (fwd_as > k_as if tipo_as == "call" else fwd_as < k_as) else ("OTM 🔴" if fwd_as != k_as else "ATM ⚪")
+            st.caption(f"Moneyness vs forward: {money_as}. Fixing simulati: {ris_as['n_fixing']} — Monte Carlo {ris_as['n_sim']:,} path con variabile di controllo.")
+        else:
+            st.warning("Parametri non validi per il calcolo dell'opzione asiatica.")
+
+        if ok_as:
+            curve_x, curve_y = [], []
+            for nn in range(1, 25):
+                rr = calcola_opzione_asiatica(fwd_as, k_as, mesi_as / 12.0, vol_as, tasso_as,
+                                              tipo=tipo_as, n_fixing=nn, n_sim=4000,
+                                              seed=1234)
+                curve_x.append(nn); curve_y.append(rr[f"{tipo_as}_arith"])
+            fig_ac = go.Figure()
+            fig_ac.add_trace(go.Scatter(x=curve_x, y=curve_y, mode="lines+markers", name="Asiatica",
+                                        line=dict(color="#22c55e"),
+                                        hovertemplate="Fixing: %{x}<br>Premio: %{y:,.2f} €/MWh<extra></extra>"))
+            fig_ac.add_hline(y=ris_as[f"vanilla_{tipo_as}"], line_dash="dash", line_color="#9ca3af",
+                             annotation_text=f"Vanilla: {ris_as[f'vanilla_{tipo_as}']:,.2f}",
+                             annotation_position="top right")
+            fig_ac.update_layout(template="plotly_dark", height=320,
+                                 title=f"Premio {tipo_as} vs numero di fixing (a 1 fixing = vanilla)",
+                                 xaxis_title="Numero di fixing", yaxis_title="Premio (€/MWh)")
+            st.plotly_chart(fig_ac, use_container_width=True)
+
+            df_as = pd.DataFrame({"Fixing": curve_x,
+                                  f"Premio {tipo_as} (€/MWh)": np.round(curve_y, 3)})
+            st.download_button(
+                "⬇️ Esporta premio vs fixing (CSV)",
+                df_as.to_csv(index=False).encode("utf-8"),
+                file_name=f"asiatica_fixing_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Premio dell'opzione asiatica per numero di fixing 1-24, con i parametri impostati.",
+                key="csv_as",
+            )
+        st.caption("Uso pratico: devi coprire il prezzo MEDIO del prossimo trimestre (es. un contratto indicizzato alla media mensile PUN)? Un'opzione asiatica costa meno della vanilla perche' la media smorza gli spike: il grafico mostra come il premio scende all'aumentare dei fixing. Limiti del modello: fixing equispaziati, vol e tassi costanti, prezzo lognormale senza salti — nei mercati energy con spike forti la formula sottostima; per book grandi calibrare la vol sulla media dei fixing, non sullo spot.")
 
 
 # Footer
