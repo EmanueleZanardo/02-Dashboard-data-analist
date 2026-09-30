@@ -1538,6 +1538,69 @@ def calcola_costo_fornitura(prezzi, mw_f1, mw_f2, mw_f3):
     ponderato = totale / mwh if mwh > 0 else float("nan")
     return {"totale": totale, "mwh": mwh, "ponderato": ponderato, "per_fascia": per_fascia}
 
+def calcola_confronto_tariffe(prezzi, mw_f1, mw_f2, mw_f3, p_flat, p_f1, p_f2, p_f3,
+                              p_peak, p_offpeak, spread, cap):
+    """Confronto di 6 strutture tariffarie sullo stesso profilo di prelievo F1/F2/F3 (AEEGSI).
+    prezzi: Series oraria in €/MWh (indice datetime; i NaN vengono scartati).
+    mw_f1/2/3: potenza prelevata (MW) nelle ore di ciascuna fascia; negativi = 0.
+    Tariffe confrontate, tutte sullo stesso profilo orario:
+      'Spot indicizzata' = prezzo spot orario x potenza di fascia (baseline come tab8);
+      'Flat' = prezzo fisso p_flat su tutta l'energia;
+      'F1/F2/F3' = prezzo per fascia (p_f1, p_f2, p_f3);
+      'Peak/Off-peak' = p_peak nelle ore F1, p_offpeak in F2+F3;
+      'Spot + spread' = spot + spread (€/MWh) su tutta l'energia;
+      'Spot con cap' = min(spot, cap) su tutta l'energia.
+    Ritorna un dict con:
+      'valido' (False se serie vuota dopo dropna o energia nulla),
+      'mwh' = energia totale prelevata (MWh), 'ore' = numero ore,
+      'righe' = lista di dict ordinata per costo crescente, ciascuno con
+        'nome', 'costo' (€), 'mwh', 'prezzo_medio' (€/MWh),
+        'risparmio_vs_peggiore' (€) e 'risparmio_pct' (% vs tariffa peggiore),
+      'migliore'/'peggiore' = nomi delle tariffe agli estremi,
+      'risparmio_max' (€) e 'risparmio_max_pct' (%)."""
+    try:
+        prezzi = pd.Series(prezzi, dtype=float).dropna()
+    except Exception:
+        return {"valido": False}
+    if prezzi.empty:
+        return {"valido": False}
+    profilo = {"F1": max(0.0, float(mw_f1)), "F2": max(0.0, float(mw_f2)), "F3": max(0.0, float(mw_f3))}
+    df = pd.DataFrame({"prezzo": prezzi.values.astype(float), "fascia": prezzi.index.map(fascia_oraria)})
+    df["mw"] = df["fascia"].map(profilo)
+    mwh = float(df["mw"].sum())
+    if mwh <= 0:
+        return {"valido": False}
+    spot = df["prezzo"].to_numpy()
+    fasce = df["fascia"].to_numpy()
+    mwv = df["mw"].to_numpy()
+    costi_orari = {
+        "Spot indicizzata": spot * mwv,
+        "Flat": np.full(len(df), float(p_flat)) * mwv,
+        "F1/F2/F3": np.array([{"F1": float(p_f1), "F2": float(p_f2), "F3": float(p_f3)}[f] for f in fasce]) * mwv,
+        "Peak/Off-peak": np.where(fasce == "F1", float(p_peak), float(p_offpeak)) * mwv,
+        "Spot + spread": (spot + float(spread)) * mwv,
+        "Spot con cap": np.minimum(spot, float(cap)) * mwv,
+    }
+    costi = {k: float(v.sum()) for k, v in costi_orari.items()}
+    peggiore = max(costi.values())
+    righe = []
+    for nome, costo in sorted(costi.items(), key=lambda kv: kv[1]):
+        risp = peggiore - costo
+        righe.append({
+            "nome": nome, "costo": costo, "mwh": mwh,
+            "prezzo_medio": costo / mwh if mwh > 0 else float("nan"),
+            "risparmio_vs_peggiore": risp,
+            "risparmio_pct": risp / peggiore * 100 if peggiore > 0 else 0.0,
+        })
+    migliore_costo = righe[0]["costo"]
+    return {
+        "valido": True, "mwh": mwh, "ore": int(len(df)), "righe": righe,
+        "migliore": righe[0]["nome"], "peggiore": righe[-1]["nome"],
+        "costo_migliore": migliore_costo, "costo_peggiore": peggiore,
+        "risparmio_max": peggiore - migliore_costo,
+        "risparmio_max_pct": (peggiore - migliore_costo) / peggiore * 100 if peggiore > 0 else 0.0,
+    }
+
 def calcola_mtm(prezzi, contratti):
     """Mark-to-market di contratti forward a prezzo fisso contro lo spot realizzato del periodo.
     prezzi: Series oraria in €/MWh (indice tz-aware).
@@ -13051,7 +13114,7 @@ elif workspace == _('ws7'):
 # ==========================================
 elif workspace == _('ws8'):
     st.markdown(f"<h1>{_('ws8')}</h1>", unsafe_allow_html=True)
-    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread, shaping curva, spread weekend, price capture, volatilità realizzata, confronto anno-su-anno, analisi prezzi negativi, spread intra-day, picchi di prezzo, profilo settimanale tipo, curva di durata, concentrazione del costo di fornitura, simulazione demand shifting, finestre di acquisto ottimali, stagionalità mensile, monitoraggio del budget energetico annuale, analisi di sensitività del costo al profilo di prelievo, Value-at-Risk Monte Carlo del costo di fornitura, classifica dei giorni di calendario più costosi per il profilo di prelievo, fasce tariffarie orarie ottimali derivate dal profilo di prezzo osservato, autocorrelazione del prezzo spot (persistenza e stagionalità), stress test deterministico del costo di fornitura sotto shock di prezzo, previsione naive-stagionale del prezzo del giorno successivo con backtest di accuratezza, decomposizione stagionale del prezzo (trend + pattern giornaliero/settimanale + residuo) con export CSV, margine di contribuzione per impianto con scomposizione mensile e analisi di concentrazione del margine, classificazione dei giorni in giorni tipo di prezzo (clustering deterministico dei profili giornalieri).")
+    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread, shaping curva, spread weekend, price capture, volatilità realizzata, confronto anno-su-anno, analisi prezzi negativi, spread intra-day, picchi di prezzo, profilo settimanale tipo, curva di durata, concentrazione del costo di fornitura, simulazione demand shifting, finestre di acquisto ottimali, stagionalità mensile, monitoraggio del budget energetico annuale, analisi di sensitività del costo al profilo di prelievo, Value-at-Risk Monte Carlo del costo di fornitura, classifica dei giorni di calendario più costosi per il profilo di prelievo, fasce tariffarie orarie ottimali derivate dal profilo di prezzo osservato, autocorrelazione del prezzo spot (persistenza e stagionalità), stress test deterministico del costo di fornitura sotto shock di prezzo, previsione naive-stagionale del prezzo del giorno successivo con backtest di accuratezza, decomposizione stagionale del prezzo (trend + pattern giornaliero/settimanale + residuo) con export CSV, margine di contribuzione per impianto con scomposizione mensile e analisi di concentrazione del margine, classificazione dei giorni in giorni tipo di prezzo (clustering deterministico dei profili giornalieri), confronto di sei strutture tariffarie sullo stesso profilo di prelievo (comparatore tariffe) con export CSV.")
 
     # ---------- Controlli: sorgente, periodo, impianti ----------
     st.subheader("⚙️ Sorgente dati & Timeframe")
@@ -13199,7 +13262,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -22655,6 +22718,90 @@ elif workspace == _('ws8'):
         else:
             st.warning("Dati insufficienti: servono almeno 2 giorni di prezzi gas e parametri positivi.")
         st.caption("Uso pratico: il premio estrinseco è il numero da portare alle aste di capacità e alle due diligence — cresce con volatilità e persistenza degli shock. Limiti: prezzi sintetici in demo, costi variabili costanti, niente vincoli di pressione né cushion gas, ribilanciamento giornaliero senza costi di transazione.")
+
+    with tab115:
+        banner_demo("prezzi spot sintetici (Mock) o reali ENTSO-E a seconda della sorgente selezionata")
+        titolo_ct = edu("Comparatore tariffe", "Un energy analyst confronta le OFFERTE dei fornitori sullo STESSO profilo di consumo del cliente: chi offre 'prezzi per fascia più bassi' ma con un fisso mensile alto può costare di più. Qui 6 strutture tariffarie (spot indicizzata, flat, F1/F2/F3, peak/off-peak, spot+spread, spot con cap) vengono applicate ora per ora allo stesso prelievo: vince quella con il costo totale più basso sul periodo, a parità di energia.")
+        st.markdown(f"**{titolo_ct}**: sei strutture tariffarie sullo stesso profilo di prelievo — quale costa di meno davvero.", unsafe_allow_html=True)
+
+        ct1, ct2, ct3 = st.columns(3)
+        with ct1:
+            ct_mw1 = st.number_input("Potenza in F1 (MW)", min_value=0.0, value=1.0, step=0.5, key="ct_mw1",
+                                    help="Ore di punta: lun–ven 08:00–19:00.")
+        with ct2:
+            ct_mw2 = st.number_input("Potenza in F2 (MW)", min_value=0.0, value=1.0, step=0.5, key="ct_mw2",
+                                    help="Ore intermedie: lun–ven 07:00–08:00 e 19:00–23:00, sab 07:00–23:00.")
+        with ct3:
+            ct_mw3 = st.number_input("Potenza in F3 (MW)", min_value=0.0, value=1.0, step=0.5, key="ct_mw3",
+                                    help="Ore fuori punta: notti, domeniche e festivi.")
+
+        st.markdown("**Parametri delle tariffe candidate (€/MWh)**")
+        cp1, cp2, cp3, cp4 = st.columns(4)
+        with cp1:
+            ct_p_flat = st.number_input("Tariffa Flat", min_value=0.0, value=95.0, step=1.0, key="ct_p_flat")
+        with cp2:
+            ct_p_f1 = st.number_input("Prezzo F1", min_value=0.0, value=120.0, step=1.0, key="ct_p_f1")
+        with cp3:
+            ct_p_f2 = st.number_input("Prezzo F2", min_value=0.0, value=100.0, step=1.0, key="ct_p_f2")
+        with cp4:
+            ct_p_f3 = st.number_input("Prezzo F3", min_value=0.0, value=80.0, step=1.0, key="ct_p_f3")
+        cq1, cq2, cq3, cq4 = st.columns(4)
+        with cq1:
+            ct_p_peak = st.number_input("Prezzo Peak", min_value=0.0, value=130.0, step=1.0, key="ct_p_peak",
+                                        help="Tariffa Peak/Off-peak: peak nelle ore F1.")
+        with cq2:
+            ct_p_off = st.number_input("Prezzo Off-peak", min_value=0.0, value=90.0, step=1.0, key="ct_p_off",
+                                       help="Tariffa Peak/Off-peak: off-peak in F2+F3.")
+        with cq3:
+            ct_spread = st.number_input("Spread sullo spot", min_value=0.0, value=2.0, step=0.5, key="ct_spread",
+                                        help="Tariffa 'Spot + spread': ricarico del fornitore sullo spot.")
+        with cq4:
+            ct_cap = st.number_input("Cap sullo spot", min_value=0.0, value=150.0, step=5.0, key="ct_cap",
+                                     help="Tariffa 'Spot con cap': lo spot oltre questo tetto non si paga.")
+
+        ris_ct = calcola_confronto_tariffe(prezzi, ct_mw1, ct_mw2, ct_mw3, ct_p_flat, ct_p_f1, ct_p_f2,
+                                           ct_p_f3, ct_p_peak, ct_p_off, ct_spread, ct_cap)
+        if not ris_ct["valido"]:
+            st.warning("Imposta una potenza maggiore di zero in almeno una fascia per confrontare le tariffe.")
+        else:
+            k1, k2, k3, k4 = st.columns(4)
+            render_kpi("🏆 Tariffa più conveniente", ris_ct["migliore"], k1)
+            render_kpi("Risparmio vs peggiore (€)", f"{ris_ct['risparmio_max']:,.0f}", k2)
+            render_kpi("Risparmio vs peggiore (%)", f"{ris_ct['risparmio_max_pct']:,.1f} %", k3)
+            render_kpi("Energia prelevata (MWh)", f"{ris_ct['mwh']:,.0f}", k4)
+            st.caption(f"Tariffa peggiore: **{ris_ct['peggiore']}** ({ris_ct['costo_peggiore']:,.0f} €) — "
+                       f"la migliore costa {ris_ct['costo_migliore']:,.0f} € su {ris_ct['ore']:,} ore.")
+
+            nomi_ct = [r["nome"] for r in ris_ct["righe"]]
+            costi_ct = [r["costo"] for r in ris_ct["righe"]]
+            fig_ct = go.Figure(go.Bar(
+                x=costi_ct, y=nomi_ct, orientation="h",
+                marker_color=["#10B981" if n == ris_ct["migliore"] else
+                              ("#ef4444" if n == ris_ct["peggiore"] else "#3b82f6") for n in nomi_ct],
+                hovertemplate="%{y}: %{x:,.0f} €<extra></extra>",
+            ))
+            fig_ct.update_layout(template="plotly_dark", height=320,
+                                 title="Costo totale per tariffa (verde = migliore, rosso = peggiore)",
+                                 xaxis_title="Costo (€)", yaxis_title="")
+            st.plotly_chart(fig_ct, use_container_width=True)
+
+            df_ct = pd.DataFrame([{
+                "Tariffa": r["nome"], "Costo (€)": round(r["costo"], 0),
+                "Energia (MWh)": round(r["mwh"], 0),
+                "Prezzo medio (€/MWh)": round(r["prezzo_medio"], 2),
+                "Risparmio vs peggiore (€)": round(r["risparmio_vs_peggiore"], 0),
+                "Risparmio (%)": round(r["risparmio_pct"], 1),
+            } for r in ris_ct["righe"]])
+            st.dataframe(df_ct, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta confronto tariffe (CSV)",
+                df_ct.to_csv(index=False).encode("utf-8"),
+                file_name=f"comparatore_tariffe_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Costo, prezzo medio e risparmio di ogni tariffa sullo stesso profilo di prelievo.",
+                key="csv_ct",
+            )
+        st.caption("Uso pratico: confronto offerte fornitura a parità di profilo (gare di fornitura, rinnovi contrattuali). Limiti: solo componente energia, niente costi fissi mensili né oneri di rete/dispacciamento; profilo a potenza costante per fascia.")
 
 # Footer
 
