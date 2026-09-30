@@ -146,12 +146,12 @@ if not st.session_state.authenticated:
 # 4. CORE DATA ENGINE & API ENTSO-E
 # ==========================================
 @st.cache_data(ttl=3600, show_spinner=False)
-def scarica_dati_entsoe(api_key, start_date, end_date):
+def scarica_dati_entsoe(api_key, start_date, end_date, country="CH"):
     from entsoe import EntsoePandasClient
     client = EntsoePandasClient(api_key=api_key)
     inizio_tz = pd.Timestamp(start_date, tz='Europe/Zurich')
     fine_tz = pd.Timestamp(end_date, tz='Europe/Zurich') + pd.Timedelta(days=1) - pd.Timedelta(hours=1)
-    prezzi = client.query_day_ahead_prices('CH', start=inizio_tz, end=fine_tz)
+    prezzi = client.query_day_ahead_prices(country, start=inizio_tz, end=fine_tz)
     prezzi.name = "Prezzo Spot (€/MWh)"
     prezzi.index.name = "Data e Ora"
     return prezzi
@@ -11946,6 +11946,110 @@ def calcola_rainbow(s1, s2, strike, mesi, vol1_pct, vol2_pct, corr, tasso_pct, t
     return out
 
 
+# Zone supportate dal tab Spread transfrontaliero: codice ENTSO-E (live)
+# e parametri del mock deterministico (demo). Offset/profili riflettono
+# differenze tipiche reali: DE-LU piu' volatile con duck curve solare,
+# FR piu' piatta (nucleare baseload), IT-NORD con picco serale e premio
+# di congestione strutturale vs CH.
+ZONE_XB = {
+    "🇩🇪 Germania/Lussemburgo (DE-LU)": {"codice": "DE_LU", "seed": 21,
+                                         "base": -4.0, "vol": 1.35,
+                                         "duck": -14.0, "picco_serale": 0.0},
+    "🇫🇷 Francia (FR)": {"codice": "FR", "seed": 33,
+                         "base": -2.0, "vol": 0.80,
+                         "duck": 0.0, "picco_serale": 4.0},
+    "🇮🇹 Italia Nord (IT-NORD)": {"codice": "IT_North", "seed": 55,
+                                 "base": 8.0, "vol": 1.10,
+                                 "duck": 0.0, "picco_serale": 22.0},
+}
+
+
+def generate_mock_zona(start_date, end_date, zona):
+    """Mock deterministico di una seconda zona di prezzo per lo spread transfrontaliero.
+
+    Stesso profilo giornaliero/stagionalita' di generate_mock_hourly ma con
+    seed, base, volatilita' e forma diversi per zona (vedi ZONE_XB): la
+    correlazione imperfetta tra le due serie genera spread realistici con
+    episodi di congestione. Deterministico: stesso input -> stessa serie.
+    Zona sconosciuta -> serie vuota (valido=False a valle)."""
+    cfg = ZONE_XB.get(zona)
+    if cfg is None:
+        return pd.Series(dtype=float, name="Prezzo Spot (€/MWh)")
+    rng = np.random.default_rng(cfg["seed"])
+    idx = pd.date_range(
+        start=pd.Timestamp(start_date),
+        end=pd.Timestamp(end_date) + pd.Timedelta(days=1) - pd.Timedelta(hours=1),
+        freq="h", tz="Europe/Zurich",
+    )
+    ore = idx.hour.to_numpy()
+    wd = idx.weekday.to_numpy()
+    profilo_giornaliero = 25 * np.sin(2 * np.pi * (ore - 6) / 24) + 18 * np.sin(4 * np.pi * (ore - 9) / 24)
+    # Duck curve tedesca: crollo dei prezzi a meta' giornata per il solare
+    duck = np.where((ore >= 10) & (ore <= 15), cfg["duck"] * np.sin(np.pi * (ore - 10) / 5.0), 0.0)
+    # Picco serale accentuato (es. domanda italiana 19-21)
+    picco = np.where((ore >= 18) & (ore <= 21), cfg["picco_serale"], 0.0)
+    sconto_weekend = np.where(wd < 5, 12.0, -18.0)
+    trend = np.linspace(0, 15, len(idx))
+    rumore = rng.normal(0, 9 * cfg["vol"], len(idx))
+    spike = np.where(rng.random(len(idx)) < 0.008, rng.uniform(60, 160, len(idx)), 0.0)
+    prezzi = np.clip(95 + cfg["base"] + profilo_giornaliero + duck + picco
+                     + sconto_weekend + trend + rumore + spike, 5, None)
+    s = pd.Series(prezzi, index=idx, name="Prezzo Spot (€/MWh)")
+    s.index.name = "Data e Ora"
+    return s
+
+
+def calcola_spread_xb(pa, pb, capacita_mw=1.0):
+    """Statistiche dello spread transfrontaliero tra due serie orarie.
+
+    spread = pb - pa: con capacita' di interconnessione A->B, ogni ora con
+    spread > 0 rende spread * capacita' € (arbitraggio perfetto, senza
+    costi di transito/allocazione e senza vincoli di nomina). Il valore
+    totale e' la somma dei max(spread, 0) — stima "intrinsic" della
+    capacita', cioe' il floor sotto cui un'opzione best-of (tab rainbow)
+    non puo' mai scendere.
+
+    Le due serie vengono allineate per timestamp (inner join); le coppie
+    con NaN vengono scartate. Se restano meno di 2 ore valide -> valido=False.
+    Ritorna dict con KPI, serie dello spread allineata e profilo orario medio."""
+    out = {"valido": False}
+    try:
+        cap = float(capacita_mw)
+        if not np.isfinite(cap) or cap <= 0:
+            return out
+        a = pd.to_numeric(pa, errors="coerce")
+        b = pd.to_numeric(pb, errors="coerce")
+        df = pd.concat({"a": a, "b": b}, axis=1).dropna()
+        if len(df) < 2:
+            return out
+        spread = (df["b"] - df["a"]).to_numpy(dtype=float)
+        if not np.all(np.isfinite(spread)):
+            return out
+        pos = np.maximum(spread, 0.0)
+        valore_tot = float(pos.sum()) * cap  # €: spread €/MWh * cap MW * 1h
+        giorni = max(1, int((df.index.max() - df.index.min()).total_seconds() // 86400) + 1)
+        ore_idx = df.index.hour.to_numpy()
+        prof = np.array([spread[ore_idx == h].mean() if (ore_idx == h).any() else np.nan
+                         for h in range(24)])
+        out.update({
+            "valido": True,
+            "n_ore": int(len(spread)),
+            "spread_medio": float(spread.mean()),
+            "spread_max": float(spread.max()),
+            "spread_min": float(spread.min()),
+            "pct_ore_positive": float(100.0 * (spread > 0).mean()),
+            "valore_totale_eur": valore_tot,
+            "valore_giorno_eur": valore_tot / giorni,
+            "valore_mw_giorno": valore_tot / cap / giorni,
+            "correlazione": float(np.corrcoef(df["a"].to_numpy(), df["b"].to_numpy())[0, 1]),
+            "serie_spread": pd.Series(spread, index=df.index, name="Spread (€/MWh)"),
+            "profilo_orario": prof,
+        })
+    except Exception:
+        return {"valido": False}
+    return out
+
+
 def ottimizza_ricarica_ev(prezzi_24, energia_kwh, potenza_kw, ora_arrivo=17,
                           ora_partenza=7, efficienza_pct=92.0, capacita_kwh=None,
                           soc_iniziale_pct=20.0):
@@ -12851,7 +12955,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -22061,6 +22165,97 @@ elif workspace == _('ws8'):
         else:
             st.warning(ris_ev["motivo"] if not ris_ev["valido"] else "Profilo prezzi non disponibile per tutte le 24 ore.")
         st.caption("Uso pratico: dimensiona il valore dello smart charging per flotte aziendali o colonnine condominiali — il risparmio % scala con lo spread notte/giorno dello spot. Limiti: profilo giornaliero medio (non il giorno specifico), potenza costante per ora, niente degrado batteria accelerato da ricariche notturne lente (anzi favorevole), niente vincoli di rete locale o potenza contrattuale condivisa.")
+
+    with tab112:
+        if sorgente.startswith("🧪"):
+            banner_demo("serie CH reale + seconda zona sintetica deterministica (mock per zona)")
+        titolo_xb = edu("Spread transfrontaliero", "Due zone di prezzo adiacenti (es. Svizzera e Italia Nord) raramente valgono uguale: quando la rete di interconnessione e' satura i prezzi divergono e si forma uno SPREAD. Chi detiene capacita' di trasporto puo' comprare dove costa meno e vendere dove costa di piu': il ricavo teorico per MW di capacita' e' la somma, ora per ora, degli spread positivi. Il prezzo FORWARD di questa capacita' e' un'opzione best-of (tab rainbow): il valore storico 'intrinsic' calcolato qui e' il floor del suo prezzo.")
+        st.markdown(f"**{titolo_xb}**: confronto tra lo Swissix (zona A) e una seconda bidding zone (zona B) — valore di arbitraggio della capacita' di interconnessione, ore di congestione e profilo orario dello spread.", unsafe_allow_html=True)
+
+        xb1, xb2, xb3 = st.columns(3)
+        with xb1:
+            zona_b = st.selectbox("Zona B (confronto)", list(ZONE_XB.keys()), index=2, key="xb_zona")
+        with xb2:
+            cap_xb = st.number_input("Capacita' interconnessione (MW)", value=100.0, min_value=1.0, step=10.0, key="xb_cap")
+        with xb3:
+            st.write("")
+            st.caption("Senso A→B: ricavo quando zona B > zona A (esporti dalla zona economica).")
+
+        def carica_zona_b(a, b):
+            if sorgente.startswith("🌐"):
+                key = get_entsoe_key()
+                if not key:
+                    st.warning("🔑 Chiave API ENTSO-E non configurata: aggiungi `ENTSOE_API_KEY` a `.streamlit/secrets.toml`.")
+                    st.stop()
+                return scarica_dati_entsoe(key, a, b, country=ZONE_XB[zona_b]["codice"]).dropna()
+            return generate_mock_zona(a, b, zona_b).dropna()
+
+        try:
+            with st.spinner("⏳ Caricamento zona B..."):
+                prezzi_b = carica_zona_b(d0, d1)
+        except Exception as e:
+            st.error(f"Errore nel caricamento della zona B: {e}")
+            prezzi_b = pd.Series(dtype=float)
+        ris_xb = calcola_spread_xb(prezzi, prezzi_b, float(cap_xb))
+        if ris_xb["valido"]:
+            kx1, kx2, kx3 = st.columns(3)
+            render_kpi("Spread medio B−A (€/MWh)", f"{ris_xb['spread_medio']:,.1f}", kx1)
+            render_kpi("Ore con spread > 0", f"{ris_xb['pct_ore_positive']:.1f}%", kx2)
+            render_kpi("Correlazione A/B", f"{ris_xb['correlazione']:,.2f}", kx3)
+            kx4, kx5, kx6 = st.columns(3)
+            render_kpi("Valore arbitraggio periodo (€)", f"{ris_xb['valore_totale_eur']:,.0f}", kx4)
+            render_kpi("Valore per MW (€/MW/giorno)", f"{ris_xb['valore_mw_giorno']:,.1f}", kx5)
+            render_kpi("Spread max / min (€/MWh)", f"{ris_xb['spread_max']:,.0f} / {ris_xb['spread_min']:,.0f}", kx6)
+            st.caption(f"Ore analizzate: {ris_xb['n_ore']:,} — il valore di arbitraggio e' la somma degli spread orari positivi x {cap_xb:,.0f} MW (stima 'intrinsic', senza costi di transito).")
+            ss = ris_xb["serie_spread"]
+            fig_xb = go.Figure()
+            fig_xb.add_trace(go.Scatter(x=ss.index, y=ss.values, mode="lines",
+                                        line=dict(color="#8b5cf6", width=1.5), name="Spread B−A"))
+            fig_xb.add_hline(y=0, line_dash="dash", line_color="gray")
+            fig_xb.update_layout(template="plotly_dark", height=320,
+                                 title="Spread orario zona B − zona A (sopra lo zero = congestione esportabile)",
+                                 xaxis_title="Data", yaxis_title="Spread (€/MWh)")
+            st.plotly_chart(fig_xb, use_container_width=True)
+            gx1, gx2 = st.columns(2)
+            with gx1:
+                fig_xb_hist = px.histogram(x=ss.values, nbins=50)
+                fig_xb_hist.update_layout(template="plotly_dark", height=300,
+                                          title="Distribuzione dello spread orario",
+                                          xaxis_title="Spread (€/MWh)", yaxis_title="Ore")
+                st.plotly_chart(fig_xb_hist, use_container_width=True)
+            with gx2:
+                prof = ris_xb["profilo_orario"]
+                colori_xb = ["#10B981" if np.isfinite(v) and v > 0 else "#4b5563" for v in prof]
+                fig_xb_prof = go.Figure(go.Bar(x=list(range(24)), y=np.nan_to_num(prof),
+                                               marker_color=colori_xb,
+                                               hovertemplate="Ora %{x}: %{y:,.1f} €/MWh<extra></extra>"))
+                fig_xb_prof.update_layout(template="plotly_dark", height=300,
+                                           title="Spread medio per ora del giorno (verde = congestione tipica)",
+                                           xaxis_title="Ora", yaxis_title="Spread medio (€/MWh)")
+                st.plotly_chart(fig_xb_prof, use_container_width=True)
+            gidx = ss.index.tz_convert("Europe/Zurich") if ss.index.tz is not None else ss.index
+            val_giorno = ss.groupby(gidx.date).apply(lambda x: float(np.maximum(x.values, 0.0).sum() * cap_xb))
+            top_g = val_giorno.sort_values(ascending=False).head(10)
+            fig_xb_top = go.Figure(go.Bar(x=[d.strftime("%Y-%m-%d") for d in top_g.index],
+                                          y=top_g.values, marker_color="#f59e0b",
+                                          hovertemplate="%{x}: %{y:,.0f} €<extra></extra>"))
+            fig_xb_top.update_layout(template="plotly_dark", height=280,
+                                      title=f"Top 10 giorni per valore di arbitraggio ({cap_xb:,.0f} MW)",
+                                      xaxis_title="Giorno", yaxis_title="Valore (€)")
+            st.plotly_chart(fig_xb_top, use_container_width=True)
+            df_xb = pd.DataFrame({"data_ora": ss.index, "spread_eur_mwh": np.round(ss.values, 2),
+                                  "valore_eur": np.round(np.maximum(ss.values, 0.0) * cap_xb, 2)})
+            st.download_button(
+                "⬇️ Esporta serie spread + valore orario (CSV)",
+                df_xb.to_csv(index=False).encode("utf-8"),
+                file_name=f"spread_xb_{ZONE_XB[zona_b]['codice']}_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Spread orario zona B − zona A e valore di arbitraggio per la capacita' impostata.",
+                key="csv_xb",
+            )
+        else:
+            st.warning("Dati insufficienti per lo spread: servono almeno 2 ore valide in entrambe le zone.")
+        st.caption("Uso pratico: stima il ricavo 'intrinsic' di un'interconnessione (JAA/explicit auction) e il floor del prezzo forward della capacita', che si prezza come opzione best-of (tab rainbow). La correlazione bassa tra le zone aumenta il valore dell'opzionalita'. Limiti: arbitraggio perfetto senza costi di transito, nomina o perdite; niente vincoli di allocazione della capacita'; in demo la zona B e' sintetica.")
 
 # Footer
 
