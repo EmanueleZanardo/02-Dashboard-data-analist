@@ -3119,6 +3119,110 @@ def ottimizza_dispatch(spark, costo_avvio=0.0, costo_fisso_orario=0.0,
             "schedule": sched, "spark": s, "index": serie.index, "n_ore": n}
 
 
+def calcola_portafoglio_dispatch(unita, prezzi):
+    """Dispatch ottimale di un portafoglio di centrali termoelettriche
+    (tab 'Dispatch di portafoglio').
+
+    Ogni unita' viene dispacciata in modo ottimale e INDIPENDENTE con
+    `ottimizza_dispatch` (costi di avviamento + min up/down propri): non ci
+    sono vincoli di accoppiamento tra unita' (niente limiti di potenza
+    simultanea o contratti gas condivisi), quindi il valore di portafoglio e'
+    la somma dei valori ottimali delle singole unita'.
+
+    unita: lista di dict con chiavi 'nome' (str), 'capacita_mw' (> 0),
+        'heat_rate' (MWh th / MWh e, > 0), 'gas_eur_mwh_th', 'vom_eur_mwh',
+        'co2_eur_mwh', 'costo_avvio_eur_mw', 'costo_fisso_eur_mw_h',
+        'min_up', 'min_down' (interi >= 1), 'attiva' (bool, default True).
+        Lo spark orario dell'unita' i e': prezzi - heat_rate*gas - vom - co2.
+    prezzi: Series oraria dei prezzi elettrici (€/MWh).
+
+    Ritorna dict con 'unita' (lista di dict arricchiti: 'nome',
+    'capacita_mw', 'heat_rate', 'costo_marginale' (€/MWh = gas*heat_rate +
+    vom + co2), 'costo_avvio_eur_mw', 'costo_fisso_eur_mw_h',
+    'ris' = dict di ottimizza_dispatch, 'valore_eur', 'frictionless_eur',
+    'costo_vincoli_eur', 'valore_per_mw_eur'), 'n_unita', 'index', 'n_ore',
+    'cap_tot_mw', 'valore_tot_eur', 'frictionless_tot_eur',
+    'costo_vincoli_tot_eur', 'avviamenti_tot', 'ore_mw_on' (somma su ore e
+    unita' dei MW accesi), 'ore_equivalenti' (= ore_mw_on / cap_tot),
+    'utilizzo_portafoglio_pct', 'migliore' (nome dell'unita' col valore netto
+    max, None se nessuna), 'matrice_on' (DataFrame: MW accesi per unita',
+    0 quando OFF).
+    NaN-safe: prezzi vuoti/tutti-NaN o nessuna unita' valida/attiva ->
+    dict neutro con 'n_ore' = 0 (chiavi numeriche a zero, liste vuote).
+    """
+    neutro = {"unita": [], "n_unita": 0, "index": None, "n_ore": 0,
+              "cap_tot_mw": 0.0, "valore_tot_eur": 0.0,
+              "frictionless_tot_eur": 0.0, "costo_vincoli_tot_eur": 0.0,
+              "avviamenti_tot": 0, "ore_mw_on": 0.0, "ore_equivalenti": 0.0,
+              "utilizzo_portafoglio_pct": 0.0, "migliore": None,
+              "matrice_on": pd.DataFrame()}
+    try:
+        serie = pd.Series(prezzi).dropna()
+    except (TypeError, ValueError):
+        return dict(neutro)
+    if serie.empty or not isinstance(unita, (list, tuple)) or not unita:
+        return dict(neutro)
+    arr = []
+    visti = set()
+    for u in unita:
+        try:
+            if not isinstance(u, dict) or not u.get("attiva", True):
+                continue
+            cap = float(u.get("capacita_mw", 0.0))
+            hr = float(u.get("heat_rate", 0.0))
+            gas = float(u.get("gas_eur_mwh_th", 0.0))
+            vom = float(u.get("vom_eur_mwh", 0.0))
+            co2 = float(u.get("co2_eur_mwh", 0.0))
+            ca = float(u.get("costo_avvio_eur_mw", 0.0))
+            cf = float(u.get("costo_fisso_eur_mw_h", 0.0))
+            mu = int(u.get("min_up", 1))
+            md = int(u.get("min_down", 1))
+            nome = str(u.get("nome", "Unita'")).strip() or "Unita'"
+        except (TypeError, ValueError):
+            continue
+        if not (np.isfinite(cap) and cap > 0 and np.isfinite(hr) and hr > 0):
+            continue
+        if not all(np.isfinite(x) for x in (gas, vom, co2, ca, cf)):
+            continue
+        if mu < 1 or md < 1:
+            continue
+        base = nome
+        k = 2
+        while nome in visti:
+            nome = f"{base} ({k})"
+            k += 1
+        visti.add(nome)
+        spark = serie - hr * gas - vom - co2
+        ris = ottimizza_dispatch(spark, ca, cf, mu, md)
+        arr.append({"nome": nome, "capacita_mw": cap, "heat_rate": hr,
+                    "costo_marginale": hr * gas + vom + co2,
+                    "costo_avvio_eur_mw": ca, "costo_fisso_eur_mw_h": cf,
+                    "ris": ris, "valore_eur": ris["valore"] * cap,
+                    "frictionless_eur": ris["valore_frictionless"] * cap,
+                    "costo_vincoli_eur": ris["costo_vincoli"] * cap,
+                    "valore_per_mw_eur": ris["valore"]})
+    if not arr:
+        return dict(neutro)
+    idx = arr[0]["ris"]["index"]
+    n = arr[0]["ris"]["n_ore"]
+    mat = pd.DataFrame({a["nome"]: np.where(a["ris"]["schedule"],
+                                           a["capacita_mw"], 0.0)
+                        for a in arr}, index=idx)
+    valore_tot = sum(a["valore_eur"] for a in arr)
+    fric_tot = sum(a["frictionless_eur"] for a in arr)
+    ore_mw = float(mat.to_numpy().sum())
+    cap_tot = sum(a["capacita_mw"] for a in arr)
+    return {"unita": arr, "n_unita": len(arr), "index": idx, "n_ore": n,
+            "cap_tot_mw": cap_tot, "valore_tot_eur": valore_tot,
+            "frictionless_tot_eur": fric_tot,
+            "costo_vincoli_tot_eur": fric_tot - valore_tot,
+            "avviamenti_tot": sum(a["ris"]["avviamenti"] for a in arr),
+            "ore_mw_on": ore_mw, "ore_equivalenti": ore_mw / cap_tot,
+            "utilizzo_portafoglio_pct": ore_mw / (cap_tot * n) * 100.0,
+            "migliore": max(arr, key=lambda a: a["valore_eur"])["nome"],
+            "matrice_on": mat}
+
+
 PROFILI_CARICO_TIPO = {
     "Industriale 3 turni": [0.85] * 24,
     "Uffici (lun-ven 8-19)": [0.06, 0.05, 0.05, 0.05, 0.05, 0.06, 0.15, 0.35, 0.70, 0.95,
@@ -10878,7 +10982,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -17199,7 +17303,7 @@ elif workspace == _('ws8'):
                     file_name=f"carico_interrompibile_mensile_{d0}_{d1}.csv",
                     mime="text/csv",
                     help="Scarica il dettaglio mensile: ore attivate, MWh ridotti, premio, ricavo, valore.",
-                    key="csv_ci_mesi",
+                    key="csv_cin_mesi",
                 )
             df_cio = res_ci["df_ore"]
             if len(df_cio):
@@ -18259,6 +18363,173 @@ elif workspace == _('ws8'):
                 key="csv_dc_sched",
             )
         st.caption("Uso pratico: il trader asset-backed usa questo schedule per decidere quando nominare la centrale sul mercato del giorno prima; il confronto col tab Tolling mostra quanto vale la flessibilita' 'vera' (con vincoli) rispetto al limite teorico. Aumenta il costo di avviamento per vedere come gli avviamenti crollano e il costo dei vincoli sale.")
+
+    with tab96:
+        banner_demo("Dispatch ottimale di un intero PORTAFOGLIO di centrali termoelettriche: ogni unita' corre sul proprio schedule ottimo, il portafoglio si legge in aggregato")
+        titolo_pf = edu("Dispatch di portafoglio", "Nella REALTA' un produttore non gestisce una centrale sola ma un PARCO impianti con efficienze diverse: il CCGT base gira quasi sempre, il CCGT di punta solo nelle ore buone, l'OCGT solo nei picchi. Ogni unita' ha il suo heat rate, i suoi costi di avviamento e i suoi tempi minimi di marcia/fermo: qui ognuna viene dispacciata in modo OTTIMALE e indipendente (stessa programmazione dinamica del tab Dispatch), poi i risultati si sommano per MW di capacita'. Il MERITO ECONOMICO decide da solo: l'unita' col costo marginale piu' basso (gas x heat rate + VOM + CO2) macina piu' ore, quella cara resta spenta. Niente vincoli di accoppiamento tra unita' (limiti di potenza simultanea, gas condiviso): il valore di portafoglio e' la somma dei valori ottimali.")
+        st.markdown(titolo_pf, unsafe_allow_html=True)
+
+        pf_gas = st.number_input("Prezzo gas comune (€/MWh th)", min_value=0.0, value=35.0, step=1.0, key="pf_gas",
+                                 help="Prezzo del gas (TTF) applicato a tutte le unita' del portafoglio.")
+        pf_n = st.slider("Numero di unita' nel portafoglio", min_value=1, max_value=4, value=3, step=1, key="pf_n",
+                         help="Quante centrali compongono il portafoglio (max 4).")
+        pf_default = [
+            {"nome": "CCGT base", "capacita_mw": 400.0, "heat_rate": 1.85, "vom_eur_mwh": 3.0, "co2_eur_mwh": 15.0,
+             "costo_avvio_eur_mw": 40.0, "costo_fisso_eur_mw_h": 2.0, "min_up": 6, "min_down": 4},
+            {"nome": "CCGT punta", "capacita_mw": 200.0, "heat_rate": 2.00, "vom_eur_mwh": 3.0, "co2_eur_mwh": 15.0,
+             "costo_avvio_eur_mw": 50.0, "costo_fisso_eur_mw_h": 2.0, "min_up": 4, "min_down": 2},
+            {"nome": "OCGT", "capacita_mw": 100.0, "heat_rate": 2.60, "vom_eur_mwh": 4.0, "co2_eur_mwh": 15.0,
+             "costo_avvio_eur_mw": 25.0, "costo_fisso_eur_mw_h": 1.0, "min_up": 1, "min_down": 1},
+            {"nome": "CCGT extra", "capacita_mw": 150.0, "heat_rate": 1.95, "vom_eur_mwh": 3.0, "co2_eur_mwh": 15.0,
+             "costo_avvio_eur_mw": 45.0, "costo_fisso_eur_mw_h": 2.0, "min_up": 4, "min_down": 3},
+        ]
+        pf_units = []
+        for pfi in range(int(pf_n)):
+            pfd = pf_default[pfi]
+            with st.expander(f"Unita' {pfi + 1}: {pfd['nome']}", expanded=(pfi == 0)):
+                pfc1, pfc2, pfc3 = st.columns(3)
+                with pfc1:
+                    pf_att = st.checkbox("Attiva", value=True, key=f"pf_att_{pfi}")
+                    pf_nome = st.text_input("Nome", value=pfd["nome"], key=f"pf_nome_{pfi}")
+                    pf_cap = st.number_input("Capacita' (MW)", min_value=0.0, value=pfd["capacita_mw"], step=10.0, key=f"pf_cap_{pfi}")
+                with pfc2:
+                    pf_hr = st.number_input("Heat rate (MWh th / MWh e)", min_value=0.1, value=pfd["heat_rate"], step=0.05, key=f"pf_hr_{pfi}")
+                    pf_vom = st.number_input("VOM (€/MWh)", min_value=0.0, value=pfd["vom_eur_mwh"], step=0.5, key=f"pf_vom_{pfi}")
+                    pf_co2 = st.number_input("Costo CO2 (€/MWh)", min_value=0.0, value=pfd["co2_eur_mwh"], step=1.0, key=f"pf_co2_{pfi}")
+                with pfc3:
+                    pf_ca = st.number_input("Costo avviamento (€/MW)", min_value=0.0, value=pfd["costo_avvio_eur_mw"], step=5.0, key=f"pf_ca_{pfi}")
+                    pf_cfh = st.number_input("Costo fisso orario (€/MW/h)", min_value=0.0, value=pfd["costo_fisso_eur_mw_h"], step=0.5, key=f"pf_cfh_{pfi}")
+                    pf_mu = st.number_input("Min up (ore)", min_value=1, value=pfd["min_up"], step=1, key=f"pf_mu_{pfi}")
+                    pf_md = st.number_input("Min down (ore)", min_value=1, value=pfd["min_down"], step=1, key=f"pf_md_{pfi}")
+                pf_units.append({"nome": pf_nome, "capacita_mw": pf_cap, "heat_rate": pf_hr,
+                                 "gas_eur_mwh_th": pf_gas, "vom_eur_mwh": pf_vom, "co2_eur_mwh": pf_co2,
+                                 "costo_avvio_eur_mw": pf_ca, "costo_fisso_eur_mw_h": pf_cfh,
+                                 "min_up": int(pf_mu), "min_down": int(pf_md), "attiva": bool(pf_att)})
+        res_pf = calcola_portafoglio_dispatch(pf_units, prezzi)
+        if res_pf["n_ore"] == 0 or res_pf["n_unita"] == 0:
+            st.warning("Nessun dato valido: verifica i prezzi nel periodo selezionato e che almeno un'unita' sia attiva con capacita' > 0.")
+        else:
+            kpf1, kpf2, kpf3, kpf4 = st.columns(4)
+            render_kpi("Valore netto portafoglio (€)", f"{res_pf['valore_tot_eur']:,.0f}", kpf1)
+            render_kpi("Costo dei vincoli (€)", f"{res_pf['costo_vincoli_tot_eur']:,.0f}", kpf2)
+            render_kpi("Avviamenti totali", f"{res_pf['avviamenti_tot']:,}", kpf3)
+            render_kpi("Utilizzo portafoglio (%)", f"{res_pf['utilizzo_portafoglio_pct']:,.1f}", kpf4)
+            kpf5, kpf6, kpf7, kpf8 = st.columns(4)
+            render_kpi("Valore frictionless (€)", f"{res_pf['frictionless_tot_eur']:,.0f}", kpf5)
+            render_kpi("Ore equiv. full-load", f"{res_pf['ore_equivalenti']:,.0f}", kpf6)
+            render_kpi("Migliore unita'", f"{res_pf['migliore']}", kpf7)
+            render_kpi("Capacita' totale (MW)", f"{res_pf['cap_tot_mw']:,.0f}", kpf8)
+            st.caption(f"💡 Lettura: il portafoglio vale **{res_pf['valore_tot_eur']:,.0f} €** netti con **{res_pf['avviamenti_tot']:,}** avviamenti complessivi; l'utilizzo medio pesato e' **{res_pf['utilizzo_portafoglio_pct']:,.1f}%** ({res_pf['ore_equivalenti']:,.0f} ore equivalenti a pieno carico). I vincoli tecnici costano **{res_pf['costo_vincoli_tot_eur']:,.0f} €** rispetto all'ideale senza vincoli.")
+
+            idx_pf = res_pf["index"]
+            mat_pf = res_pf["matrice_on"]
+            pf_colors = ["#22c55e", "#3b82f6", "#f59e0b", "#a855f7"]
+            fig_pf1 = go.Figure()
+            for pfj, pfcol in enumerate(mat_pf.columns):
+                fig_pf1.add_trace(go.Scatter(x=idx_pf, y=mat_pf[pfcol], mode="lines", name=pfcol,
+                                             stackgroup="one",
+                                             line=dict(width=0.5, color=pf_colors[pfj % len(pf_colors)]),
+                                             hovertemplate="%{x}<br>" + pfcol + ": %{y:,.0f} MW accesi<extra></extra>"))
+            fig_pf1.update_layout(template="plotly_dark", height=340,
+                                  title="Potenza accesa per unita' (area impilata, MW)",
+                                  xaxis_title="Data", yaxis_title="MW")
+            st.plotly_chart(fig_pf1, use_container_width=True)
+
+            pfn = res_pf["n_ore"]
+            pf_marg = np.zeros(pfn)
+            pf_start_e = np.zeros(pfn)
+            pf_start_n = np.zeros(pfn)
+            pf_fric = np.zeros(pfn)
+            for pfa in res_pf["unita"]:
+                pfr = pfa["ris"]
+                pfsch = pfr["schedule"]
+                pfcap = pfa["capacita_mw"]
+                pfcf = pfa["costo_fisso_eur_mw_h"]
+                pfca = pfa["costo_avvio_eur_mw"]
+                pf_marg += np.where(pfsch, pfr["spark"] - pfcf, 0.0) * pfcap
+                pfavv = (pfsch & ~np.concatenate([[False], pfsch[:-1]])).astype(float)
+                pf_start_n += pfavv
+                pf_start_e += pfavv * pfca * pfcap
+                pf_fric += np.maximum(pfr["spark"], 0.0) * pfcap
+            pf_cum_opt = np.cumsum(pf_marg - pf_start_e)
+            pf_cum_fric = np.cumsum(pf_fric)
+            fig_pf2 = go.Figure()
+            fig_pf2.add_trace(go.Scatter(x=idx_pf, y=pf_cum_opt, mode="lines", name="Ottimale",
+                                         line=dict(color="#22c55e", width=2.5),
+                                         hovertemplate="%{x}<br>Ottimale: €%{y:,.0f}<extra></extra>"))
+            fig_pf2.add_trace(go.Scatter(x=idx_pf, y=pf_cum_fric, mode="lines", name="Frictionless",
+                                         line=dict(color="#6b7280", width=1.5, dash="dash"),
+                                         hovertemplate="%{x}<br>Frictionless: €%{y:,.0f}<extra></extra>"))
+            fig_pf2.update_layout(template="plotly_dark", height=320,
+                                  title="Valore cumulato di portafoglio: ottimale vs ideale senza vincoli (€)",
+                                  xaxis_title="Data", yaxis_title="€")
+            st.plotly_chart(fig_pf2, use_container_width=True)
+
+            pf_ord = sorted(res_pf["unita"], key=lambda a: a["costo_marginale"])
+            fig_pf3 = go.Figure()
+            fig_pf3.add_trace(go.Bar(
+                x=[a["nome"] for a in pf_ord],
+                y=[a["costo_marginale"] for a in pf_ord],
+                text=[f"{a['ris']['fattore_utilizzo']:.0f}% ON" for a in pf_ord],
+                textposition="outside",
+                marker_color="#3b82f6",
+                hovertemplate="%{x}<br>Costo marginale: €%{y:,.1f}/MWh<br>%{text}<extra></extra>"))
+            fig_pf3.update_layout(template="plotly_dark", height=320,
+                                  title="Merit order: costo marginale per unita' (€/MWh) — etichetta = utilizzo",
+                                  xaxis_title="Unita'", yaxis_title="€/MWh")
+            st.plotly_chart(fig_pf3, use_container_width=True)
+
+            st.markdown("**Confronto unita'** (ordinate per valore netto)")
+            pf_righe = sorted(res_pf["unita"], key=lambda a: a["valore_eur"], reverse=True)
+            df_pf_u = pd.DataFrame([{
+                "Unita'": a["nome"],
+                "Capacita' (MW)": f"{a['capacita_mw']:,.0f}",
+                "Costo marginale (€/MWh)": round(a["costo_marginale"], 1),
+                "Valore netto (€)": f"{a['valore_eur']:,.0f}",
+                "Frictionless (€)": f"{a['frictionless_eur']:,.0f}",
+                "Costo vincoli (€)": f"{a['costo_vincoli_eur']:,.0f}",
+                "Avviamenti": f"{a['ris']['avviamenti']:,}",
+                "Ore ON": f"{a['ris']['ore_on']:,}",
+                "Utilizzo (%)": f"{a['ris']['fattore_utilizzo']:,.1f}",
+                "Valore/MW (€)": f"{a['valore_per_mw_eur']:,.0f}",
+            } for a in pf_righe])
+            st.dataframe(df_pf_u, use_container_width=True, hide_index=True)
+
+            st.markdown("**Dettaglio mensile di portafoglio**")
+            tmp_pf = pd.DataFrame({"Valore (€)": pf_marg - pf_start_e,
+                                   "MWh prodotti": mat_pf.sum(axis=1),
+                                   "Avviamenti": pf_start_n}, index=idx_pf)
+            mens_pf = tmp_pf.resample("ME").sum()
+            df_pf_mesi = pd.DataFrame({
+                "Mese": mens_pf.index.strftime("%Y-%m"),
+                "Valore (€)": mens_pf["Valore (€)"].round(0).astype(int).to_numpy(),
+                "MWh prodotti": mens_pf["MWh prodotti"].round(0).astype(int).to_numpy(),
+                "Avviamenti": mens_pf["Avviamenti"].astype(int).to_numpy(),
+            })
+            st.dataframe(df_pf_mesi, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta portafoglio mensile (CSV)",
+                df_pf_mesi.to_csv(index=False).encode("utf-8"),
+                file_name=f"portafoglio_mensile_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Dettaglio mensile del portafoglio: valore netto, MWh prodotti, avviamenti.",
+                key="csv_pf_mesi",
+            )
+            df_pf_sched = pd.DataFrame({"Data": idx_pf,
+                                        "MW accesi tot": mat_pf.sum(axis=1).round(1).to_numpy()})
+            for pfa in res_pf["unita"]:
+                df_pf_sched[pfa["nome"]] = np.where(pfa["ris"]["schedule"], "ON", "OFF")
+            st.markdown("**Prime 24 ore dello schedule**")
+            st.dataframe(df_pf_sched.head(24), use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta schedule orario (CSV)",
+                df_pf_sched.to_csv(index=False).encode("utf-8"),
+                file_name=f"portafoglio_schedule_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Schedule orario di portafoglio: stato ON/OFF per unita' e MW totali accesi.",
+                key="csv_pf_sched",
+            )
+        st.caption("Uso pratico: il gestore del parco usa il merit order per decidere quali unita' offrire sul mercato del giorno prima e a che prezzo; l'area impilata mostra le ore in cui tutto il parco e' acceso (picchi di prezzo) contro quelle in cui gira solo il base-load. Le unita' sono ottimizzate in modo indipendente: niente vincoli di accoppiamento (limite di connessione, gas condiviso). Aumenta il costo di avviamento dell'OCGT per vederlo sparire dallo schedule: e' la flessibilita' cara che non si ripaga.")
 
 
 # Footer
