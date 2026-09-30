@@ -11623,6 +11623,329 @@ def calcola_quanto(forward, strike, mesi, vol_sott_pct, vol_cambio_pct, corr, ta
     return out
 
 
+def calcola_rainbow(s1, s2, strike, mesi, vol1_pct, vol2_pct, corr, tasso_pct, tipo="call_max"):
+    """Premio di un'opzione RAINBOW europea su due forward energetici (formula chiusa di Stulz 1982).
+
+    La RAINBOW e' un'opzione sul MIGLIORE (best-of, max) o sul PEGGIORE
+    (worst-of, min) tra due sottostanti: call sul max = max(max(S1,S2)-K,0),
+    put sul max, call sul min, put sul min. Nell'energia e' lo strumento
+    naturale di due problemi ricorrenti: (1) la capacita' di
+    interconnessione/transito, che vale il diritto di vendere sul mercato
+    col prezzo piu' alto (best-of tra due hub); (2) il fuel switching, dove
+    il costo e' il combustibile piu' economico (worst-of tra due fuel).
+    Il driver chiave, oltre alle vol, e' la CORRELAZIONE: se i due prezzi si
+    muovono insieme il best-of vale poco piu' della vanilla migliore, se si
+    muovono per conto loro il premio esplode.
+    Formule (convenzione forward: S1, S2 sono prezzi forward, quindi
+    martingale; df = exp(-r*T)):
+      sig^2 = v1^2+v2^2-2*rho*v1*v2
+      y1 = (ln(S1/K)-v1^2*T/2)/(v1*sqrt(T))          [stile d2]
+      y2 = (ln(S2/K)-v2^2*T/2)/(v2*sqrt(T))
+      d   = (ln(S1/S2)+sig^2*T/2)/(sig*sqrt(T))      (soglia sotto Q1)
+      d2s = (ln(S2/S1)+sig^2*T/2)/(sig*sqrt(T))
+      e1  = (ln(S1/S2)-(v1^2-v2^2)*T/2)/(sig*sqrt(T)) (soglia sotto Q)
+      e2  = -e1
+      r1 = (v1-rho*v2)/sig;  r2 = (v2-rho*v1)/sig
+      M(a,b;r) = CDF normale bivariata standard
+      E[max] = S1*N(d)+S2*N(d2s)
+      call_max = df*(S1*M(y1+v1*sqrt(T),d;r1)+S2*M(y2+v2*sqrt(T),d2s;r2)
+                     -K*(M(y1,e1;r1)+M(y2,e2;r2)))
+      put_max  = call_max - df*(E[max]-K)            (parita' esatta)
+      call_min = BS_call(S1)+BS_call(S2)-call_max    (max+min = S1+S2)
+      put_min  = BS_put(S1)+BS_put(S2)-put_max
+      E[min]   = S1+S2-E[max]
+    Delta analitici con derivate complete dei termini bivariati (la
+    scomposizione asset-or-nothing/cash-or-nothing NON si semplifica perche'
+    i due pezzi vivono sotto misure diverse, Q1/Q2 vs Q):
+      dE[max]/dS1 = N(d)+phi(d)/(sig*sqrt(T))-S2*phi(d2s)/(S1*sig*sqrt(T))
+      dput_max = dcall_max - df*dE[max]/dS   (dalla parita')
+      dcall_min = dBS - dcall_max;  dput_min = dcall_min - df*(1-dE[max]/dS)
+    Casi degeneri esatti: T=0 -> intrinseco; v1=v2=0 -> df*intrinseco;
+    sig~0 (rho=+-1 e v1=v2) -> vanilla Black-76 sul max/min; v1=0 o v2=0 ->
+    formule chiuse col sottostante deterministico.
+    NaN-safe: input non validi -> dict neutro con valido=False.
+    Ritorna dict con: premio, delta_s1, delta_s2, fwd_maxmin (E[max]/E[min]),
+    intrinseco, vanilla_s1, vanilla_s2 (Black-76 di confronto),
+    extra_vs_vanilla (premio - max delle vanille), parita_diff (~0), valido.
+    Verifiche: cross-check Monte Carlo con antitetiche su 5 set di parametri,
+    ancore esatte T=0/vol=0/S2->0->vanilla, parita', identita' min, delta vs
+    bump, bound di arbitraggio call_max <= somma vanille
+    (vedi hidden_files/test_rainbow_2026-09-30_1940.py)."""
+    from scipy.stats import multivariate_normal as _mvn
+    from scipy.stats import norm as _norm
+
+    def _bvn(a, b, r):
+        rr = min(max(float(r), -1.0 + 1e-9), 1.0 - 1e-9)
+        return float(_mvn.cdf([float(a), float(b)], mean=[0.0, 0.0],
+                              cov=[[1.0, rr], [rr, 1.0]]))
+
+    def _bs(F, K, T, v, r):
+        """Black-76 sul forward: (call, put, delta_call, delta_put, d1, d2)."""
+        df_ = float(np.exp(-r * T))
+        ic = max(F - K, 0.0)
+        ip = max(K - F, 0.0)
+        if T <= 0.0 or v <= 0.0:
+            dc = df_ if F > K else 0.0
+            dp = -df_ if F < K else 0.0
+            return df_ * ic, df_ * ip, dc, dp, float("nan"), float("nan")
+        sqt = v * np.sqrt(T)
+        d1 = (np.log(F / K) + 0.5 * v * v * T) / sqt
+        d2 = d1 - sqt
+        c = df_ * (F * float(_norm.cdf(d1)) - K * float(_norm.cdf(d2)))
+        p = df_ * (K * float(_norm.cdf(-d2)) - F * float(_norm.cdf(-d1)))
+        return (c, p, df_ * float(_norm.cdf(d1)),
+                -df_ * float(_norm.cdf(-d1)), d1, d2)
+
+    neutro = {"premio": float("nan"), "delta_s1": float("nan"),
+              "delta_s2": float("nan"), "fwd_maxmin": float("nan"),
+              "intrinseco": float("nan"), "vanilla_s1": float("nan"),
+              "vanilla_s2": float("nan"), "extra_vs_vanilla": float("nan"),
+              "parita_diff": float("nan"), "valido": False}
+    try:
+        S1 = float(s1)
+        S2 = float(s2)
+        K = float(strike)
+        T = float(mesi) / 12.0
+        v1 = float(vol1_pct) / 100.0
+        v2 = float(vol2_pct) / 100.0
+        rho = float(corr)
+        r = float(tasso_pct) / 100.0
+        tipo = str(tipo)
+    except (TypeError, ValueError):
+        return neutro
+    if not all(np.isfinite(v) for v in (S1, S2, K, T, v1, v2, rho, r)):
+        return neutro
+    if (S1 <= 0 or S2 <= 0 or K <= 0 or T < 0 or v1 < 0 or v2 < 0
+            or abs(rho) > 1 or r < 0
+            or tipo not in ("call_max", "put_max", "call_min", "put_min")):
+        return neutro
+
+    df = float(np.exp(-r * T))
+    M0 = max(S1, S2)
+    m0 = min(S1, S2)
+    is_max = tipo.endswith("max")
+    is_call = tipo.startswith("call")
+    base = M0 if is_max else m0
+    intr = max(base - K, 0.0) if is_call else max(K - base, 0.0)
+
+    c1, p1, dc1, dp1, _, _ = _bs(S1, K, T, v1, r)
+    c2, p2, dc2, dp2, _, _ = _bs(S2, K, T, v2, r)
+
+    cmax = pmax = cmin = pmin = float("nan")
+    Emax = Emin = float("nan")
+    d1_cmax = d2_cmax = d1_pmax = d2_pmax = float("nan")
+    d1_cmin = d2_cmin = d1_pmin = d2_pmin = float("nan")
+
+    if T == 0.0:
+        cmax = max(M0 - K, 0.0)
+        pmax = max(K - M0, 0.0)
+        cmin = max(m0 - K, 0.0)
+        pmin = max(K - m0, 0.0)
+        Emax, Emin = M0, m0
+        b1 = 1.0 if S1 >= S2 else 0.0
+        b2 = 1.0 - b1
+        w1 = 1.0 if S1 <= S2 else 0.0
+        w2 = 1.0 - w1
+        d1_cmax = b1 if S1 > K else 0.0
+        d2_cmax = b2 if S2 > K else 0.0
+        d1_pmax = -b1 if S1 < K else 0.0
+        d2_pmax = -b2 if S2 < K else 0.0
+        d1_cmin = w1 if S1 > K else 0.0
+        d2_cmin = w2 if S2 > K else 0.0
+        d1_pmin = -w1 if S1 < K else 0.0
+        d2_pmin = -w2 if S2 < K else 0.0
+    elif v1 == 0.0 and v2 == 0.0:
+        cmax = df * max(M0 - K, 0.0)
+        pmax = df * max(K - M0, 0.0)
+        cmin = df * max(m0 - K, 0.0)
+        pmin = df * max(K - m0, 0.0)
+        Emax, Emin = M0, m0
+        b1 = 1.0 if S1 >= S2 else 0.0
+        b2 = 1.0 - b1
+        w1 = 1.0 if S1 <= S2 else 0.0
+        w2 = 1.0 - w1
+        d1_cmax = df * b1 if S1 > K else 0.0
+        d2_cmax = df * b2 if S2 > K else 0.0
+        d1_pmax = -df * b1 if S1 < K else 0.0
+        d2_pmax = -df * b2 if S2 < K else 0.0
+        d1_cmin = df * w1 if S1 > K else 0.0
+        d2_cmin = df * w2 if S2 > K else 0.0
+        d1_pmin = -df * w1 if S1 < K else 0.0
+        d2_pmin = -df * w2 if S2 < K else 0.0
+    else:
+        sig2 = v1 * v1 + v2 * v2 - 2.0 * rho * v1 * v2
+        sig = float(np.sqrt(max(sig2, 0.0)))
+        if sig < 1e-12:
+            # rho = +-1 e v1 = v2: i due forward si muovono identici ->
+            # max/min e' un singolo lognormale sul max/min iniziale.
+            v = 0.5 * (v1 + v2)
+            cc, pp, dcc, dpp, _, _ = _bs(M0, K, T, v, r)
+            cmax, pmax = cc, pp
+            Emax = M0
+            i1 = 1.0 if S1 >= S2 else 0.0
+            i2 = 1.0 - i1
+            d1_cmax, d2_cmax = dcc * i1, dcc * i2
+            d1_pmax, d2_pmax = dcc * i1 - df * i1, dcc * i2 - df * i2
+            cmin = c1 + c2 - cmax
+            pmin = p1 + p2 - pmax
+            Emin = S1 + S2 - Emax
+            d1_cmin = dc1 - d1_cmax
+            d2_cmin = dc2 - d2_cmax
+            d1_pmin = d1_cmin - df * (1.0 - i1)
+            d2_pmin = d2_cmin - df * (1.0 - i2)
+        elif v1 == 0.0 or v2 == 0.0:
+            # Un sottostante deterministico (Sd), l'altro lognormale (Ss).
+            if v1 == 0.0:
+                Sd, Ss, vs, swap = S1, S2, v2, False
+            else:
+                Sd, Ss, vs, swap = S2, S1, v1, True
+            ks = max(Sd, K)
+            bs_ks = _bs(Ss, ks, T, vs, r)
+            bs_sd = _bs(Ss, Sd, T, vs, r)
+            cmax = df * max(Sd - K, 0.0) + bs_ks[0]
+            Emax = Sd + bs_sd[0] / df
+            pmax = cmax - df * (Emax - K)
+            cmin = c1 + c2 - cmax
+            pmin = p1 + p2 - pmax
+            Emin = S1 + S2 - Emax
+            nd2_sd = float(_norm.cdf(bs_sd[5]))
+            nd1_sd = float(_norm.cdf(bs_sd[4]))
+            dd_cmax = df * (1.0 - nd2_sd) if Sd >= K else 0.0
+            ds_cmax = bs_ks[2]
+            ed_d = 1.0 - nd2_sd
+            ed_s = nd1_sd
+            dd_pmax = dd_cmax - df * ed_d
+            ds_pmax = ds_cmax - df * ed_s
+            if not swap:
+                d1_cmax, d2_cmax = dd_cmax, ds_cmax
+                d1_pmax, d2_pmax = dd_pmax, ds_pmax
+                d1_cmin = dc1 - d1_cmax
+                d2_cmin = dc2 - d2_cmax
+                d1_pmin = d1_cmin - df * (1.0 - ed_d)
+                d2_pmin = d2_cmin - df * (1.0 - ed_s)
+            else:
+                d2_cmax, d1_cmax = dd_cmax, ds_cmax
+                d2_pmax, d1_pmax = dd_pmax, ds_pmax
+                d1_cmin = dc1 - d1_cmax
+                d2_cmin = dc2 - d2_cmax
+                d1_pmin = d1_cmin - df * (1.0 - ed_s)
+                d2_pmin = d2_cmin - df * (1.0 - ed_d)
+        else:
+            sqT = float(np.sqrt(T))
+            sqt1 = v1 * sqT
+            sqt2 = v2 * sqT
+            sqtS = sig * sqT
+            y1 = (float(np.log(S1 / K)) - 0.5 * v1 * v1 * T) / sqt1
+            y2 = (float(np.log(S2 / K)) - 0.5 * v2 * v2 * T) / sqt2
+            d_ = (float(np.log(S1 / S2)) + 0.5 * sig * sig * T) / sqtS
+            d2s = (float(np.log(S2 / S1)) + 0.5 * sig * sig * T) / sqtS
+            e1 = (float(np.log(S1 / S2)) - 0.5 * (v1 * v1 - v2 * v2) * T) / sqtS
+            e2 = -e1
+            r1 = (v1 - rho * v2) / sig
+            r2 = (v2 - rho * v1) / sig
+            Ma = _bvn(y1 + sqt1, d_, r1)
+            Mb = _bvn(y2 + sqt2, d2s, r2)
+            Mq1 = _bvn(y1, e1, r1)
+            Mq2 = _bvn(y2, e2, r2)
+            nd = float(_norm.cdf(d_))
+            nd2s = float(_norm.cdf(d2s))
+            Emax = S1 * nd + S2 * nd2s
+            cmax = df * (S1 * Ma + S2 * Mb - K * (Mq1 + Mq2))
+            pmax = cmax - df * (Emax - K)
+            cmin = c1 + c2 - cmax
+            pmin = p1 + p2 - pmax
+            Emin = S1 + S2 - Emax
+            s1q = float(np.sqrt(max(1.0 - r1 * r1, 1e-24)))
+            s2q = float(np.sqrt(max(1.0 - r2 * r2, 1e-24)))
+            ph = _norm.pdf
+            N = _norm.cdf
+            if s1q > 1e-4 and s2q > 1e-4:
+                dMa_dS1 = (ph(y1 + sqt1) * N((d_ - r1 * (y1 + sqt1)) / s1q) / (S1 * sqt1)
+                           + ph(d_) * N((y1 + sqt1 - r1 * d_) / s1q) / (S1 * sqtS))
+                dMq1_dS1 = (ph(y1) * N((e1 - r1 * y1) / s1q) / (S1 * sqt1)
+                            + ph(e1) * N((y1 - r1 * e1) / s1q) / (S1 * sqtS))
+                dT1dS1 = df * (Ma + S1 * dMa_dS1 - K * dMq1_dS1)
+                dMa_dS2 = ph(d_) * N((y1 + sqt1 - r1 * d_) / s1q) * (-1.0 / (S2 * sqtS))
+                dMq1_dS2 = ph(e1) * N((y1 - r1 * e1) / s1q) * (-1.0 / (S2 * sqtS))
+                dT1dS2 = df * (S1 * dMa_dS2 - K * dMq1_dS2)
+                dMb_dS2 = (ph(y2 + sqt2) * N((d2s - r2 * (y2 + sqt2)) / s2q) / (S2 * sqt2)
+                           + ph(d2s) * N((y2 + sqt2 - r2 * d2s) / s2q) / (S2 * sqtS))
+                dMq2_dS2 = (ph(y2) * N((e2 - r2 * y2) / s2q) / (S2 * sqt2)
+                            + ph(e2) * N((y2 - r2 * e2) / s2q) / (S2 * sqtS))
+                dT2dS2 = df * (Mb + S2 * dMb_dS2 - K * dMq2_dS2)
+                dMb_dS1 = ph(d2s) * N((y2 + sqt2 - r2 * d2s) / s2q) * (-1.0 / (S1 * sqtS))
+                dMq2_dS1 = ph(e2) * N((y2 - r2 * e2) / s2q) * (-1.0 / (S1 * sqtS))
+                dT2dS1 = df * (S2 * dMb_dS1 - K * dMq2_dS1)
+                dE_dS1 = nd + ph(d_) / sqtS - S2 * ph(d2s) / (S1 * sqtS)
+                dE_dS2 = nd2s + ph(d2s) / sqtS - S1 * ph(d_) / (S2 * sqtS)
+                d1_cmax = dT1dS1 + dT2dS1
+                d2_cmax = dT1dS2 + dT2dS2
+                d1_pmax = d1_cmax - df * dE_dS1
+                d2_pmax = d2_cmax - df * dE_dS2
+                d1_cmin = dc1 - d1_cmax
+                d2_cmin = dc2 - d2_cmax
+                d1_pmin = d1_cmin - df * (1.0 - dE_dS1)
+                d2_pmin = d2_cmin - df * (1.0 - dE_dS2)
+            if not (np.isfinite(d1_cmax) and np.isfinite(d2_cmax)):
+                # |rho| -> 1: i delta analitici sono instabili -> bump
+                # sui prezzi (esatti) del ramo generale.
+                def _px_max(Sa, Sb):
+                    sqt1_ = v1 * sqT
+                    sqt2_ = v2 * sqT
+                    sqtS_ = sig * sqT
+                    y1_ = (float(np.log(Sa / K)) - 0.5 * v1 * v1 * T) / sqt1_
+                    y2_ = (float(np.log(Sb / K)) - 0.5 * v2 * v2 * T) / sqt2_
+                    d__ = (float(np.log(Sa / Sb)) + 0.5 * sig * sig * T) / sqtS_
+                    d2s_ = (float(np.log(Sb / Sa)) + 0.5 * sig * sig * T) / sqtS_
+                    e1_ = (float(np.log(Sa / Sb)) - 0.5 * (v1 * v1 - v2 * v2) * T) / sqtS_
+                    Ma_ = _bvn(y1_ + sqt1_, d__, r1)
+                    Mb_ = _bvn(y2_ + sqt2_, d2s_, r2)
+                    Mq1_ = _bvn(y1_, e1_, r1)
+                    Mq2_ = _bvn(y2_, -e1_, r2)
+                    Emax_ = Sa * float(_norm.cdf(d__)) + Sb * float(_norm.cdf(d2s_))
+                    cmax_ = df * (Sa * Ma_ + Sb * Mb_ - K * (Mq1_ + Mq2_))
+                    return cmax_, cmax_ - df * (Emax_ - K), Emax_
+                h1 = 1e-4 * S1
+                h2 = 1e-4 * S2
+                c_up, p_up, _ = _px_max(S1 + h1, S2)
+                c_dn, p_dn, _ = _px_max(S1 - h1, S2)
+                d1_cmax = (c_up - c_dn) / (2.0 * h1)
+                d1_pmax = (p_up - p_dn) / (2.0 * h1)
+                c_up, p_up, _ = _px_max(S1, S2 + h2)
+                c_dn, p_dn, _ = _px_max(S1, S2 - h2)
+                d2_cmax = (c_up - c_dn) / (2.0 * h2)
+                d2_pmax = (p_up - p_dn) / (2.0 * h2)
+                dE_dS1 = (d1_cmax - d1_pmax) / df
+                dE_dS2 = (d2_cmax - d2_pmax) / df
+                d1_cmin = dc1 - d1_cmax
+                d2_cmin = dc2 - d2_cmax
+                d1_pmin = d1_cmin - df * (1.0 - dE_dS1)
+                d2_pmin = d2_cmin - df * (1.0 - dE_dS2)
+
+    out = dict(neutro)
+    premia = {"call_max": cmax, "put_max": pmax,
+              "call_min": cmin, "put_min": pmin}
+    deltas = {"call_max": (d1_cmax, d2_cmax), "put_max": (d1_pmax, d2_pmax),
+              "call_min": (d1_cmin, d2_cmin), "put_min": (d1_pmin, d2_pmin)}
+    d1r, d2r = deltas[tipo]
+    premio = premia[tipo]
+    vs1 = c1 if is_call else p1
+    vs2 = c2 if is_call else p2
+    if is_max:
+        par = (cmax - pmax) - df * (Emax - K)
+        fwd = Emax
+    else:
+        par = (cmin - pmin) - df * (Emin - K)
+        fwd = Emin
+    out.update({"valido": True, "premio": float(premio),
+                "delta_s1": float(d1r), "delta_s2": float(d2r),
+                "fwd_maxmin": float(fwd), "intrinseco": float(intr),
+                "vanilla_s1": float(vs1), "vanilla_s2": float(vs2),
+                "extra_vs_vanilla": float(premio - max(vs1, vs2)),
+                "parita_diff": float(par)})
+    return out
+
+
 def calcola_americana(forward, strike, mesi, vol_pct, tasso_pct, n_step=200):
     """Premio di un'opzione AMERICANA su forward energetico (albero binomiale CRR).
 
@@ -12423,7 +12746,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -21472,6 +21795,89 @@ elif workspace == _('ws8'):
                 key="csv_amr",
             )
         st.caption("Uso pratico: l'americana e' il prezzo giusto quando l'esercizio puo' avvenire prima della scadenza — opzioni su futures EEX/ICE e opzionalita' fisica (centrali, stoccaggi, tolling con esercizio giornaliero). L'early-exercise premium cresce con il tasso ed e' massimo per le put ITM e le call deep ITM; con tasso = 0 l'americana coincide con l'europea. Limiti: albero CRR a vol e tasso costanti (convergenza oscillante per N piccoli), niente smile di vol, esercizio solo ai nodi dell'albero.")
+
+    with tab110:
+        banner_demo("Opzione rainbow: best-of/worst-of su due forward (formula chiusa di Stulz 1982)")
+        titolo_rbw = edu("Opzione rainbow", "Un'opzione RAINBOW non scommette su un solo prezzo ma sul MIGLIORE (best-of, max) o sul PEGGIORE (worst-of, min) tra due sottostanti. Best-of: hai diritto al mercato col prezzo piu' alto — e' il valore di una capacita' di interconnessione o di un portafoglio con scelta di dove vendere. Worst-of: il payoff dipende dal peggiore — e' il costo del fuel switching, dove bruci il combustibile piu' economico. Il driver chiave e' la CORRELAZIONE: se i due prezzi si muovono insieme il best-of costa poco piu' della vanilla migliore; se si muovono per conto loro (correlazione bassa o negativa) il diritto di scegliere vale molto. Pricing in forma chiusa di Stulz (1982) su due forward lognormali correlati, con delta analitici sui due sottostanti.")
+        st.markdown(f"**{titolo_rbw}**: prezza le rainbow europee call/put su max/min di due forward energetici — confronto con le vanille Black-76, curva del premio al variare della correlazione e dello strike, delta sui due sottostanti.", unsafe_allow_html=True)
+
+        tipi_rbw = {"Call sul max (best-of)": "call_max", "Put sul max": "put_max",
+                    "Call sul min (worst-of)": "call_min", "Put sul min": "put_min"}
+        cr1, cr2, cr3, cr4 = st.columns(4)
+        with cr1:
+            tipo_rbw_lbl = st.selectbox("Tipo rainbow", list(tipi_rbw.keys()), key="rbw_tipo")
+            s1_rbw = st.number_input("Forward S1 (€/MWh)", value=float(prezzi.mean()), step=1.0, key="rbw_s1")
+            s2_rbw = st.number_input("Forward S2 (€/MWh)", value=float(prezzi.mean()), step=1.0, key="rbw_s2")
+        with cr2:
+            k_rbw = st.number_input("Strike K (€/MWh)", value=float(prezzi.mean()), step=1.0, key="rbw_k")
+            mesi_rbw = st.slider("Scadenza (mesi)", 1, 60, 12, key="rbw_mesi")
+            tasso_rbw = st.number_input("Tasso annuo (%)", value=2.0, step=0.25, key="rbw_tasso")
+        with cr3:
+            vol1_rbw = st.number_input("Vol S1 (%/anno)", value=round(vol_relativa_annua(prezzi) * 100, 1), step=1.0, key="rbw_v1")
+            vol2_rbw = st.number_input("Vol S2 (%/anno)", value=round(vol_relativa_annua(prezzi) * 100, 1), step=1.0, key="rbw_v2")
+        with cr4:
+            corr_rbw = st.slider("Correlazione S1-S2", -0.95, 0.99, 0.60, step=0.05, key="rbw_corr")
+            qty_rbw = st.number_input("Quantita' (MWh)", value=100.0, step=10.0, key="rbw_qty")
+        tipo_rbw = tipi_rbw[tipo_rbw_lbl]
+        ris_rbw = calcola_rainbow(s1_rbw, s2_rbw, k_rbw, int(mesi_rbw),
+                                  float(vol1_rbw), float(vol2_rbw),
+                                  float(corr_rbw), float(tasso_rbw), tipo_rbw)
+        if ris_rbw["valido"]:
+            tot_rbw = ris_rbw["premio"] * qty_rbw
+            kr1, kr2, kr3 = st.columns(3)
+            render_kpi("Premio rainbow (€/MWh)", f"{ris_rbw['premio']:,.2f}", kr1)
+            render_kpi("Controvalore (€)", f"{tot_rbw:,.0f}", kr2)
+            render_kpi("Extra vs vanilla migliore (€/MWh)", f"{ris_rbw['extra_vs_vanilla']:,.2f}", kr3)
+            kr4, kr5, kr6 = st.columns(3)
+            render_kpi("Delta S1", f"{ris_rbw['delta_s1']:,.3f}", kr4)
+            render_kpi("Delta S2", f"{ris_rbw['delta_s2']:,.3f}", kr5)
+            lbl_mm = "E[max] forward (€/MWh)" if tipo_rbw.endswith("max") else "E[min] forward (€/MWh)"
+            render_kpi(lbl_mm, f"{ris_rbw['fwd_maxmin']:,.2f}", kr6)
+            st.caption(f"Vanilla S1: {ris_rbw['vanilla_s1']:,.2f} €/MWh — Vanilla S2: {ris_rbw['vanilla_s2']:,.2f} €/MWh — Intrinseco: {ris_rbw['intrinseco']:,.2f} €/MWh — Parita' call-put (diff): {ris_rbw['parita_diff']:.2e} €/MWh.")
+            rhos_rbw = np.linspace(-0.9, 0.99, 40)
+            prem_rho_rbw = [calcola_rainbow(s1_rbw, s2_rbw, k_rbw, int(mesi_rbw),
+                                            float(vol1_rbw), float(vol2_rbw),
+                                            float(rh), float(tasso_rbw), tipo_rbw)["premio"]
+                            for rh in rhos_rbw]
+            fig_rbw_rho = px.line(x=rhos_rbw, y=prem_rho_rbw)
+            fig_rbw_rho.add_hline(y=max(ris_rbw["vanilla_s1"], ris_rbw["vanilla_s2"]),
+                                  line_dash="dash", line_color="gray")
+            fig_rbw_rho.update_layout(template="plotly_dark",
+                                      title="Premio rainbow vs correlazione (tratteggio = vanilla migliore)",
+                                      xaxis_title="Correlazione", yaxis_title="Premio (€/MWh)")
+            st.plotly_chart(fig_rbw_rho, use_container_width=True)
+            base_k_rbw = max(s1_rbw, s2_rbw) if tipo_rbw.endswith("max") else min(s1_rbw, s2_rbw)
+            ks_rbw = np.linspace(0.5 * base_k_rbw, 1.5 * base_k_rbw, 40)
+            prem_k_rbw = [calcola_rainbow(s1_rbw, s2_rbw, kk, int(mesi_rbw),
+                                          float(vol1_rbw), float(vol2_rbw),
+                                          float(corr_rbw), float(tasso_rbw), tipo_rbw)["premio"]
+                          for kk in ks_rbw]
+            anni_rbw = int(mesi_rbw) / 12.0
+            chiave_van = "call" if tipo_rbw.startswith("call") else "put"
+            van1_k_rbw = [calcola_black76(s1_rbw, kk, anni_rbw, float(vol1_rbw), float(tasso_rbw))[chiave_van]
+                          for kk in ks_rbw]
+            van2_k_rbw = [calcola_black76(s2_rbw, kk, anni_rbw, float(vol2_rbw), float(tasso_rbw))[chiave_van]
+                          for kk in ks_rbw]
+            fig_rbw_k = px.line(x=ks_rbw, y=prem_k_rbw)
+            fig_rbw_k.add_scatter(x=ks_rbw, y=van1_k_rbw, mode="lines", line=dict(dash="dash"),
+                                  name="Vanilla S1")
+            fig_rbw_k.add_scatter(x=ks_rbw, y=van2_k_rbw, mode="lines", line=dict(dash="dot"),
+                                  name="Vanilla S2")
+            fig_rbw_k.update_layout(template="plotly_dark", title="Premio rainbow vs strike",
+                                    xaxis_title="Strike (€/MWh)", yaxis_title="Premio (€/MWh)")
+            st.plotly_chart(fig_rbw_k, use_container_width=True)
+            df_rbw = pd.DataFrame({"correlazione": rhos_rbw, "premio_eur_mwh": prem_rho_rbw})
+            st.download_button(
+                "⬇️ Esporta curva rainbow vs correlazione (CSV)",
+                df_rbw.to_csv(index=False).encode("utf-8"),
+                file_name=f"rainbow_{tipo_rbw}_{int(mesi_rbw)}m_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Premio rainbow al variare della correlazione tra i due forward.",
+                key="csv_rbw",
+            )
+        else:
+            st.warning("Input non validi per l'opzione rainbow (prezzi/strike > 0, vol >= 0, |correlazione| <= 1).")
+        st.caption("Uso pratico: il best-of prezza la flessibilita' di vendere sul mercato migliore (capacita' di interconnessione, portafoglio multi-hub); il worst-of il costo del fuel switching e le strutture che pagano sul mercato piu' debole. L'extra vs vanilla misura il valore dell'opzionalita' di scelta e crolla quando la correlazione sale. Limiti: due soli sottostanti lognormali a vol/correlazione costanti, esercizio solo europeo a scadenza, niente smile di vol, niente costi di transito/fuel-switch nel premio.")
 
 # Footer
 
