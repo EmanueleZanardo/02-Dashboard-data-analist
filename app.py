@@ -3223,6 +3223,119 @@ def calcola_portafoglio_dispatch(unita, prezzi):
             "matrice_on": mat}
 
 
+def valuta_swing(prezzi_giornalieri, strike, q_min, q_max, Q_min, Q_max):
+    """Valutazione INTRINSECA di un'opzione swing (tab 'Opzione swing').
+
+    Contratto: ogni giorno t l'acquirente nomina una quantita' q_t con
+    q_min <= q_t <= q_max (MWh/giorno), pagando lo strike K per MWh; sul
+    periodo il prelievo totale deve stare in [Q_min, Q_max] (MWh).
+    Il valore intrinseco e' il max di sum((P_t - K) * q_t) sui q_t
+    ammissibili, con P_t prezzo giornaliero noto (curva forward / storico).
+
+    La soluzione greedy e' ESATTA per questo programma lineare: i margini
+    m_t = P_t - K ordinati in modo decrescente dicono dove allocare il
+    volume — prima si soddisfa Q_min partendo dai giorni col margine piu'
+    alto (anche negativi: il take-or-pay va onorato), poi si aggiunge volume
+    fino a Q_max solo sui giorni con margine positivo.
+
+    prezzi_giornalieri: Series giornaliera dei prezzi (€/MWh).
+    strike, q_min, q_max, Q_min, Q_max: float (>= 0 per le quantita').
+
+    Ritorna dict con 'fattibile' (bool), 'motivo' (str|None: perche' non
+    fattibile), 'valore_eur', 'frictionless_eur' (solo vincoli giornalieri),
+    'costo_vincoli_globali_eur' (= frictionless - valore, >= 0),
+    'prelievo_tot_mwh', 'prelievo_medio_gg_mwh', 'margine_medio_ponderato'
+    (€/MWh = valore / prelievo_tot), 'giorni_a_max', 'giorni_a_min',
+    'giorni_parziali', 'nomination' (Series giornaliera dei q_t ottimali),
+    'margini' (Series dei m_t), 'index', 'n_giorni', 'strike', 'q_min',
+    'q_max', 'Q_min', 'Q_max'.
+    NaN-safe: prezzi vuoti/tutti-NaN o parametri non numerici -> dict
+    neutro con 'fattibile' = False e 'motivo' valorizzato.
+    """
+    def _neutro(motivo):
+        return {"fattibile": False, "motivo": motivo, "valore_eur": 0.0,
+                "frictionless_eur": 0.0, "costo_vincoli_globali_eur": 0.0,
+                "prelievo_tot_mwh": 0.0, "prelievo_medio_gg_mwh": 0.0,
+                "margine_medio_ponderato": 0.0, "giorni_a_max": 0,
+                "giorni_a_min": 0, "giorni_parziali": 0,
+                "nomination": pd.Series(dtype=float),
+                "margini": pd.Series(dtype=float), "index": None,
+                "n_giorni": 0, "strike": 0.0, "q_min": 0.0, "q_max": 0.0,
+                "Q_min": 0.0, "Q_max": 0.0}
+
+    try:
+        serie = pd.Series(prezzi_giornalieri).dropna()
+    except (TypeError, ValueError):
+        return _neutro("Prezzi non validi.")
+    if serie.empty:
+        return _neutro("Nessun prezzo giornaliero nel periodo selezionato.")
+    try:
+        K = float(strike)
+        qmn = float(q_min)
+        qmx = float(q_max)
+        Qmn = float(Q_min)
+        Qmx = float(Q_max)
+    except (TypeError, ValueError):
+        return _neutro("Parametri del contratto non numerici.")
+    if not np.isfinite(K) or K < 0:
+        return _neutro("Strike non valido (deve essere >= 0).")
+    for nome, v in (("q_min", qmn), ("q_max", qmx), ("Q_min", Qmn), ("Q_max", Qmx)):
+        if not np.isfinite(v) or v < 0:
+            return _neutro(f"{nome} non valido (deve essere >= 0).")
+    if qmn > qmx:
+        return _neutro("q_min > q_max: vincolo giornaliero impossibile.")
+    if Qmn > Qmx:
+        return _neutro("Q_min > Q_max: vincolo globale impossibile.")
+    n = len(serie)
+    if Qmn > n * qmx + 1e-9:
+        return _neutro(f"Q_min ({Qmn:,.0f}) > capacita' massima totale "
+                       f"({n * qmx:,.0f} MWh): take-or-pay non onorabile.")
+    if Qmx < n * qmn - 1e-9:
+        return _neutro(f"Q_max ({Qmx:,.0f}) < prelievo minimo obbligatorio "
+                       f"({n * qmn:,.0f} MWh): vincolo globale impossibile.")
+
+    m = serie.to_numpy(dtype=float) - K
+    q = np.full(n, qmn)
+
+    # Fase 1: soddisfa Q_min partendo dai margini piu' alti (take-or-pay)
+    ordine = np.argsort(-m, kind="stable")
+    residuo = Qmn - n * qmn
+    for i in ordine:
+        if residuo <= 1e-9:
+            break
+        take = min(qmx - q[i], residuo)
+        q[i] += take
+        residuo -= take
+
+    # Fase 2: volume extra fino a Q_max solo dove il margine e' positivo
+    extra = Qmx - q.sum()
+    for i in ordine:
+        if extra <= 1e-9 or m[i] <= 0.0:
+            break
+        add = min(qmx - q[i], extra)
+        q[i] += add
+        extra -= add
+
+    valore = float(np.sum(m * q))
+    q_fric = np.where(m > 0.0, qmx, qmn)
+    frictionless = float(np.sum(m * q_fric))
+    prelievo = float(q.sum())
+    tol = 1e-6
+    return {"fattibile": True, "motivo": None, "valore_eur": valore,
+            "frictionless_eur": frictionless,
+            "costo_vincoli_globali_eur": frictionless - valore,
+            "prelievo_tot_mwh": prelievo,
+            "prelievo_medio_gg_mwh": prelievo / n,
+            "margine_medio_ponderato": valore / prelievo if prelievo > 0 else 0.0,
+            "giorni_a_max": int(np.sum(q >= qmx - tol)),
+            "giorni_a_min": int(np.sum(q <= qmn + tol)),
+            "giorni_parziali": int(np.sum((q > qmn + tol) & (q < qmx - tol))),
+            "nomination": pd.Series(q, index=serie.index),
+            "margini": pd.Series(m, index=serie.index),
+            "index": serie.index, "n_giorni": n, "strike": K,
+            "q_min": qmn, "q_max": qmx, "Q_min": Qmn, "Q_max": Qmx}
+
+
 PROFILI_CARICO_TIPO = {
     "Industriale 3 turni": [0.85] * 24,
     "Uffici (lun-ven 8-19)": [0.06, 0.05, 0.05, 0.05, 0.05, 0.06, 0.15, 0.35, 0.70, 0.95,
@@ -10982,7 +11095,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -18530,6 +18643,124 @@ elif workspace == _('ws8'):
                 key="csv_pf_sched",
             )
         st.caption("Uso pratico: il gestore del parco usa il merit order per decidere quali unita' offrire sul mercato del giorno prima e a che prezzo; l'area impilata mostra le ore in cui tutto il parco e' acceso (picchi di prezzo) contro quelle in cui gira solo il base-load. Le unita' sono ottimizzate in modo indipendente: niente vincoli di accoppiamento (limite di connessione, gas condiviso). Aumenta il costo di avviamento dell'OCGT per vederlo sparire dallo schedule: e' la flessibilita' cara che non si ripaga.")
+
+
+    with tab97:
+        banner_demo("curva prezzi giornaliera (storico o mock)")
+        titolo_sw = edu("Opzione swing", "Nella REALTA' i contratti gas non sono 'prendi o lascia': una SWING OPTION da' all'acquirente il DIRITTO (non l'obbligo) di modulare i prelievi giorno per giorno tra un minimo e un massimo, con un take-or-pay minimo e un tetto massimo sul periodo, pagando sempre lo strike K per MWh. Il valore INTRINSECO si calcola a prezzi noti (curva forward o storico): prelevi il MASSIMO quando il prezzo batte lo strike, il MINIMO quando sta sotto, onorando comunque il take-or-pay. Quello che qui NON c'e' e' il time value legato alla volatilita' futura: l'intrinseco e' il PAVIMENTO del prezzo dell'opzione.")
+        st.markdown(titolo_sw, unsafe_allow_html=True)
+
+        swc1, swc2, swc3 = st.columns(3)
+        with swc1:
+            sw_strike = st.number_input("Strike K (€/MWh)", min_value=0.0, value=50.0, step=1.0, key="sw_strike",
+                                        help="Prezzo fisso pagato per ogni MWh prelevato con la swing.")
+            sw_qmin = st.number_input("Prelievo min giornaliero (MWh/g)", min_value=0.0, value=0.0, step=10.0, key="sw_qmin",
+                                      help="Quantita' minima nominabile in un giorno.")
+        with swc2:
+            sw_qmax = st.number_input("Prelievo max giornaliero (MWh/g)", min_value=0.0, value=100.0, step=10.0, key="sw_qmax",
+                                      help="Quantita' massima nominabile in un giorno.")
+            sw_Qmin = st.number_input("Take-or-pay periodo (MWh)", min_value=0.0, value=0.0, step=100.0, key="sw_Qmin",
+                                      help="Prelievo totale minimo sul periodo (take-or-pay): va onorato anche nei giorni col margine negativo.")
+        with swc3:
+            sw_Qmax = st.number_input("Tetto periodo (MWh)", min_value=0.0, value=3000.0, step=100.0, key="sw_Qmax",
+                                      help="Prelievo totale massimo sul periodo.")
+            st.caption("💡 Prova: alza lo strike sopra il prezzo medio e guarda il valore crollare al take-or-pay.")
+
+        prezzi_sw = prezzi.resample("D").mean().dropna()
+        res_sw = valuta_swing(prezzi_sw, sw_strike, sw_qmin, sw_qmax, sw_Qmin, sw_Qmax)
+        if not res_sw["fattibile"]:
+            st.warning(f"⚠️ Contratto non valutabile: {res_sw['motivo']}")
+        else:
+            ksw1, ksw2, ksw3, ksw4 = st.columns(4)
+            render_kpi("Valore intrinseco (€)", f"{res_sw['valore_eur']:,.0f}", ksw1)
+            render_kpi("Prelievo totale (MWh)", f"{res_sw['prelievo_tot_mwh']:,.0f}", ksw2)
+            render_kpi("Margine medio ponderato (€/MWh)", f"{res_sw['margine_medio_ponderato']:,.2f}", ksw3)
+            render_kpi("Giorni a max", f"{res_sw['giorni_a_max']:,}", ksw4)
+            ksw5, ksw6, ksw7, ksw8 = st.columns(4)
+            render_kpi("Frictionless (€)", f"{res_sw['frictionless_eur']:,.0f}", ksw5)
+            render_kpi("Costo vincoli globali (€)", f"{res_sw['costo_vincoli_globali_eur']:,.0f}", ksw6)
+            render_kpi("Prelievo medio (MWh/g)", f"{res_sw['prelievo_medio_gg_mwh']:,.1f}", ksw7)
+            render_kpi("Giorni a min / parziali", f"{res_sw['giorni_a_min']:,} / {res_sw['giorni_parziali']:,}", ksw8)
+            st.caption(f"💡 Lettura: la swing vale **{res_sw['valore_eur']:,.0f} €** intrinseci con **{res_sw['prelievo_tot_mwh']:,.0f} MWh** prelevati in **{res_sw['n_giorni']:,}** giorni (margine medio **{res_sw['margine_medio_ponderato']:,.2f} €/MWh**). I vincoli globali (take-or-pay + tetto) costano **{res_sw['costo_vincoli_globali_eur']:,.0f} €** rispetto alla flessibilita' giornaliera pura.")
+
+            idx_sw = res_sw["index"]
+            nom_sw = res_sw["nomination"]
+            mg_sw = res_sw["margini"]
+            col_sw = np.where(mg_sw.to_numpy() > 0.0, "#22c55e", "#ef4444")
+            fig_sw1 = go.Figure()
+            fig_sw1.add_trace(go.Bar(x=idx_sw, y=nom_sw, name="Nomination",
+                                     marker_color=col_sw,
+                                     hovertemplate="%{x}<br>Nomination: %{y:,.1f} MWh<br>Margine: €" +
+                                     "%{customdata:,.2f}/MWh<extra></extra>",
+                                     customdata=mg_sw.to_numpy()))
+            fig_sw1.add_trace(go.Scatter(x=idx_sw, y=prezzi_sw.reindex(idx_sw), mode="lines",
+                                         name="Prezzo (€/MWh)", yaxis="y2",
+                                         line=dict(color="#f59e0b", width=1.5),
+                                         hovertemplate="%{x}<br>Prezzo: €%{y:,.2f}/MWh<extra></extra>"))
+            fig_sw1.update_layout(template="plotly_dark", height=340,
+                                  title="Nomination ottimale giornaliera (verde = margine positivo, rosso = take-or-pay) e prezzo",
+                                  xaxis_title="Data", yaxis_title="MWh/giorno",
+                                  yaxis2=dict(title="€/MWh", overlaying="y", side="right", showgrid=False))
+            st.plotly_chart(fig_sw1, use_container_width=True)
+
+            val_cum_sw = np.cumsum(mg_sw.to_numpy() * nom_sw.to_numpy())
+            fig_sw2 = go.Figure()
+            fig_sw2.add_trace(go.Scatter(x=idx_sw, y=val_cum_sw, mode="lines", name="Valore cumulato",
+                                         line=dict(color="#22c55e", width=2.5),
+                                         hovertemplate="%{x}<br>Valore cumulato: €%{y:,.0f}<extra></extra>"))
+            fig_sw2.update_layout(template="plotly_dark", height=300,
+                                  title="Valore intrinseco cumulato (€)",
+                                  xaxis_title="Data", yaxis_title="€")
+            st.plotly_chart(fig_sw2, use_container_width=True)
+
+            ord_sw = np.argsort(-mg_sw.to_numpy(), kind="stable")
+            fig_sw3 = go.Figure()
+            fig_sw3.add_trace(go.Bar(x=np.arange(1, res_sw["n_giorni"] + 1), y=mg_sw.to_numpy()[ord_sw],
+                                     name="Margine", marker_color="#3b82f6",
+                                     hovertemplate="Giorno %{x}<br>Margine: €%{y:,.2f}/MWh<extra></extra>"))
+            fig_sw3.add_hline(y=0.0, line_dash="dash", line_color="#6b7280")
+            fig_sw3.update_layout(template="plotly_dark", height=300,
+                                  title="Curva di durata dei margini giornalieri (€/MWh, ordinati) — il prelievo si concentra a sinistra",
+                                  xaxis_title="Giorni (ordinati per margine)", yaxis_title="€/MWh")
+            st.plotly_chart(fig_sw3, use_container_width=True)
+
+            st.markdown("**Dettaglio giornaliero nomination**")
+            df_sw = pd.DataFrame({
+                "Data": idx_sw,
+                "Prezzo (€/MWh)": prezzi_sw.reindex(idx_sw).round(2).to_numpy(),
+                "Margine (€/MWh)": mg_sw.round(2).to_numpy(),
+                "Nomination (MWh)": nom_sw.round(1).to_numpy(),
+                "Valore (€)": (mg_sw * nom_sw).round(0).astype(int).to_numpy(),
+            })
+            st.dataframe(df_sw, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta nomination giornaliera (CSV)",
+                df_sw.to_csv(index=False).encode("utf-8"),
+                file_name=f"swing_nomination_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Nomination giornaliera ottimale: prezzo, margine vs strike, quantita' e valore per giorno.",
+                key="csv_sw_gg",
+            )
+
+            st.markdown("**Dettaglio mensile**")
+            tmp_sw = pd.DataFrame({"Valore (€)": mg_sw * nom_sw,
+                                   "MWh prelevati": nom_sw}, index=idx_sw)
+            mens_sw = tmp_sw.resample("ME").sum()
+            df_sw_mesi = pd.DataFrame({
+                "Mese": mens_sw.index.strftime("%Y-%m"),
+                "Valore (€)": mens_sw["Valore (€)"].round(0).astype(int).to_numpy(),
+                "MWh prelevati": mens_sw["MWh prelevati"].round(0).astype(int).to_numpy(),
+            })
+            st.dataframe(df_sw_mesi, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta swing mensile (CSV)",
+                df_sw_mesi.to_csv(index=False).encode("utf-8"),
+                file_name=f"swing_mensile_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Dettaglio mensile della swing: valore intrinseco e MWh prelevati.",
+                key="csv_sw_mesi",
+            )
+        st.caption("Uso pratico: il trader gas usa l'intrinseco per prezzare il PAVIMENTO di una swing e per costruire la nomination giornaliera da inviare al TSO; il 'costo dei vincoli globali' dice quanto si perde rispetto a una flessibilita' giornaliera pura. Attenzione: il prezzo pieno dell'opzione include anche il time value della volatilita' (qui non modellato) — l'intrinseco e' solo il punto di partenza della negoziazione.")
 
 
 # Footer
