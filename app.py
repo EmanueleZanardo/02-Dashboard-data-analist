@@ -12050,6 +12050,139 @@ def calcola_spread_xb(pa, pb, capacita_mw=1.0):
     return out
 
 
+def generate_mock_gas(start_date, end_date):
+    """Serie GIORNALIERA sintetica del prezzo gas TTF (€/MWh termico).
+
+    Base ~38 €/MWh con premio invernale (+14 a gennaio) e sconto estivo
+    (-14 a luglio), trend e spike casuali (seed fisso). Deterministica:
+    stesso input -> stessa serie. ENTSO-E non pubblica prezzi gas, quindi
+    la tab 'Stoccaggio gas' usa sempre questo mock (dichiarato nel banner).
+    Se start > end -> serie vuota."""
+    rng = np.random.default_rng(1234)
+    idx = pd.date_range(start=pd.Timestamp(start_date), end=pd.Timestamp(end_date),
+                        freq="D", tz="Europe/Zurich")
+    if len(idx) == 0:
+        return pd.Series(dtype=float, name="Prezzo Gas TTF (€/MWh)")
+    doy = idx.dayofyear.to_numpy()
+    stag = 14.0 * np.cos(2 * np.pi * (doy - 15) / 365.25)
+    trend = np.linspace(0, 6, len(idx))
+    rumore = rng.normal(0, 2.5, len(idx))
+    spike = np.where(rng.random(len(idx)) < 0.02, rng.uniform(8, 25, len(idx)), 0.0)
+    prezzi = np.clip(38 + stag + trend + rumore + spike, 12, None)
+    s = pd.Series(prezzi, index=idx, name="Prezzo Gas TTF (€/MWh)")
+    s.index.name = "Giorno"
+    return s
+
+
+def calcola_stoccaggio_gas(prezzi_gas, capacita_gwh, inj_rate_gwh_g, wd_rate_gwh_g,
+                           costo_inj_eur_mwh=0.4, costo_wd_eur_mwh=0.4,
+                           inv_iniziale_pct=50.0, inv_finale_pct=50.0):
+    """Valore INTRINSECO di uno stoccaggio gas (ottimizzazione LP esatta).
+
+    Massimizza, su prezzi giornalieri noti (perfect foresight),
+      sum_d [ wd_d * (P_d - c_wd) - inj_d * (P_d + c_inj) ]
+    con vincoli: 0 <= inj_d <= tasso_iniezione, 0 <= wd_d <= tasso_erogazione,
+    giacenza S_d = S0 + cumsum(inj - wd) in [0, capacita'], S_N = giacenza finale
+    target. Risolto con programmazione lineare (scipy HiGHS): l'ottimo e'
+    esatto, non euristico.
+
+    Il valore intrinseco e' il FLOOR del valore dello stoccaggio: la
+    flessibilita' di ribilanciare le nomine in corso d'opera (valore
+    ESTRINSECO) vale >= 0 e si prezza con modelli stocastici.
+
+    Parametri prezzi_gas: Series (qualsiasi frequenza: viene ricampionata a
+    media giornaliera). capacita_gwh: working gas. Tassi in GWh/giorno.
+    Costi variabili in €/MWh. Giacenze in % della capacita'.
+
+    Se giacenza finale != iniziale, il valore include il costo/ricavo forzato
+    del riempimento/svuotamento netto (es. obbligo di riempimento).
+
+    Ritorna dict: valido, valore_intrinseco_eur, valore_per_gwh_eur,
+    cicli_equivalenti, energia_iniettata_gwh, energia_prelevata_gwh,
+    prezzo_medio_acquisto, prezzo_medio_vendita, spread_medio_catturato,
+    pnl_mensile (DataFrame), serie inventario/iniezioni/prelievi.
+    Meno di 2 giorni validi, capacita' o tassi non positivi -> valido=False.
+    """
+    out = {"valido": False}
+    try:
+        from scipy.optimize import linprog as _linprog
+        p = pd.to_numeric(prezzi_gas, errors="coerce")
+        if not isinstance(p, pd.Series):
+            p = pd.Series(p)
+        p = p.resample("D").mean().dropna()
+        n = len(p)
+        if n < 2:
+            return out
+        cap = float(capacita_gwh)
+        ri = float(inj_rate_gwh_g)
+        rw = float(wd_rate_gwh_g)
+        ci = float(costo_inj_eur_mwh)
+        cw = float(costo_wd_eur_mwh)
+        if not all(np.isfinite([cap, ri, rw, ci, cw])) or cap <= 0 or ri <= 0 or rw <= 0:
+            return out
+        if ci < 0 or cw < 0:
+            return out
+        s0 = cap * float(np.clip(inv_iniziale_pct, 0.0, 100.0)) / 100.0
+        st_ = cap * float(np.clip(inv_finale_pct, 0.0, 100.0)) / 100.0
+        P = p.to_numpy(dtype=float)
+        if not np.all(np.isfinite(P)):
+            return out
+        # x = [inj_0..inj_{n-1}, wd_0..wd_{n-1}]; minimizza c^T x
+        c = np.concatenate([P + ci, -(P - cw)])
+        L = np.tril(np.ones((n, n)))
+        A_ub = np.vstack([np.hstack([L, -L]), np.hstack([-L, L])])
+        b_ub = np.concatenate([np.full(n, cap - s0), np.full(n, s0)])
+        A_eq = np.concatenate([np.ones(n), -np.ones(n)]).reshape(1, -1)
+        b_eq = np.array([st_ - s0])
+        bounds = [(0.0, ri)] * n + [(0.0, rw)] * n
+        res = _linprog(c, A_ub=A_ub, b_ub=b_ub, A_eq=A_eq, b_eq=b_eq,
+                       bounds=bounds, method="highs")
+        if not res.success:
+            return out
+        inj = np.clip(res.x[:n], 0.0, None)
+        wd = np.clip(res.x[n:], 0.0, None)
+        inv = s0 + np.cumsum(inj - wd)
+        valore = float(-res.fun)
+        if valore < 0 and valore > -1e-6:
+            valore = 0.0
+        e_inj = float(inj.sum())
+        e_wd = float(wd.sum())
+        pa = float((inj * P).sum() / e_inj) if e_inj > 0 else float("nan")
+        pv = float((wd * P).sum() / e_wd) if e_wd > 0 else float("nan")
+        pnl_g = wd * (P - cw) - inj * (P + ci)
+        df_g = pd.DataFrame({"iniezione_gwh": np.round(inj, 3),
+                             "prelievo_gwh": np.round(wd, 3),
+                             "giacenza_gwh": np.round(inv, 3),
+                             "prezzo_eur_mwh": np.round(P, 2),
+                             "pnl_eur": np.round(pnl_g, 2)},
+                            index=p.index)
+        mese = df_g.index.strftime("%Y-%m")
+        pnl_m = (df_g.assign(_m=mese).groupby("_m")
+                 .agg(iniezione_gwh=("iniezione_gwh", "sum"),
+                      prelievo_gwh=("prelievo_gwh", "sum"),
+                      pnl_eur=("pnl_eur", "sum")).reset_index()
+                 .rename(columns={"_m": "mese"}))
+        out.update({
+            "valido": True,
+            "n_giorni": int(n),
+            "valore_intrinseco_eur": valore,
+            "valore_per_gwh_eur": valore / cap,
+            "cicli_equivalenti": e_wd / cap,
+            "energia_iniettata_gwh": e_inj,
+            "energia_prelevata_gwh": e_wd,
+            "prezzo_medio_acquisto": pa,
+            "prezzo_medio_vendita": pv,
+            "spread_medio_catturato": (pv - pa) if np.isfinite(pa) and np.isfinite(pv) else float("nan"),
+            "giacenza_iniziale_gwh": float(s0),
+            "giacenza_finale_gwh": float(st_),
+            "pnl_mensile": pnl_m,
+            "serie_giornaliera": df_g,
+        })
+    except Exception:
+        return {"valido": False}
+    return out
+
+
 def ottimizza_ricarica_ev(prezzi_24, energia_kwh, potenza_kw, ora_arrivo=17,
                           ora_partenza=7, efficienza_pct=92.0, capacita_kwh=None,
                           soc_iniziale_pct=20.0):
@@ -12955,7 +13088,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -22256,6 +22389,97 @@ elif workspace == _('ws8'):
         else:
             st.warning("Dati insufficienti per lo spread: servono almeno 2 ore valide in entrambe le zone.")
         st.caption("Uso pratico: stima il ricavo 'intrinsic' di un'interconnessione (JAA/explicit auction) e il floor del prezzo forward della capacita', che si prezza come opzione best-of (tab rainbow). La correlazione bassa tra le zone aumenta il valore dell'opzionalita'. Limiti: arbitraggio perfetto senza costi di transito, nomina o perdite; niente vincoli di allocazione della capacita'; in demo la zona B e' sintetica.")
+
+    with tab113:
+        banner_demo("prezzo gas TTF sintetico deterministico (mock giornaliero: base + stagionalita' invernale)")
+        titolo_sg = edu("Stoccaggio gas", "Uno stoccaggio gas compra quando il gas costa poco (estate) e vende quando costa tanto (inverno): e' un ARBITRAGGIO TEMPORALE sullo spread stagionale. Il valore INTRINSECO calcolato qui e' il massimo ricavo ottenibile conoscendo gia' i prezzi futuri (perfect foresight), ottimizzato con programmazione lineare esatta: iniezioni ed erogazioni giornaliere rispettano capacita' (working gas) e tassi massimi. E' il FLOOR del valore reale: la flessibilita' di cambiare le nomine in corso d'opera (valore ESTRINSECO, da modelli stocastici) puo' solo aggiungere valore, mai toglierlo.")
+        st.markdown(f"**{titolo_sg}**: valutazione intrinseca di un sito di stoccaggio gas su curva TTF — inietta nei minimi, eroga nei massimi, con vincoli di capacita' e tassi.", unsafe_allow_html=True)
+
+        sg1, sg2, sg3 = st.columns(3)
+        with sg1:
+            cap_sg = st.number_input("Working gas (GWh)", value=500.0, min_value=1.0, step=50.0, key="sg_cap",
+                                    help="Capacita' utile di stoccaggio (cushion gas escluso).")
+        with sg2:
+            inj_sg = st.number_input("Tasso max iniezione (GWh/giorno)", value=8.0, min_value=0.1, step=1.0, key="sg_inj")
+        with sg3:
+            wd_sg = st.number_input("Tasso max erogazione (GWh/giorno)", value=12.0, min_value=0.1, step=1.0, key="sg_wd")
+        sg4, sg5, sg6 = st.columns(3)
+        with sg4:
+            ci_sg = st.number_input("Costo iniezione (€/MWh)", value=0.4, min_value=0.0, step=0.1, key="sg_ci")
+        with sg5:
+            cw_sg = st.number_input("Costo erogazione (€/MWh)", value=0.4, min_value=0.0, step=0.1, key="sg_cw")
+        with sg6:
+            inv0_sg = st.slider("Giacenza iniziale (% working gas)", 0.0, 100.0, 50.0, step=5.0, key="sg_inv0")
+        sg7, sg8 = st.columns(2)
+        with sg7:
+            inv1_sg = st.slider("Giacenza finale target (% working gas)", 0.0, 100.0, float(inv0_sg), step=5.0, key="sg_inv1",
+                               help="Di default uguale all'iniziale: il valore misura la sola opzionalita'. Se diversa, include il costo/ricavo forzato del riempimento netto.")
+        with sg8:
+            st.write("")
+            st.caption("Ottimizzazione LP esatta (perfect foresight) sui prezzi giornalieri.")
+
+        gas = generate_mock_gas(d0, d1).dropna()
+        ris_sg = calcola_stoccaggio_gas(gas, float(cap_sg), float(inj_sg), float(wd_sg),
+                                        float(ci_sg), float(cw_sg), float(inv0_sg), float(inv1_sg))
+        if ris_sg["valido"]:
+            k1, k2, k3 = st.columns(3)
+            render_kpi("Valore intrinseco periodo (€)", f"{ris_sg['valore_intrinseco_eur']:,.0f}", k1)
+            render_kpi("Valore per GWh working gas (€)", f"{ris_sg['valore_per_gwh_eur']:,.0f}", k2)
+            render_kpi("Cicli equivalenti", f"{ris_sg['cicli_equivalenti']:,.2f}", k3)
+            k4, k5, k6 = st.columns(3)
+            render_kpi("Energia iniettata / erogata (GWh)",
+                       f"{ris_sg['energia_iniettata_gwh']:,.0f} / {ris_sg['energia_prelevata_gwh']:,.0f}", k4)
+            pa_sg = ris_sg["prezzo_medio_acquisto"]
+            pv_sg = ris_sg["prezzo_medio_vendita"]
+            render_kpi("Prezzo medio acquisto (€/MWh)", f"{pa_sg:,.1f}" if np.isfinite(pa_sg) else "n/d", k5)
+            render_kpi("Prezzo medio vendita (€/MWh)", f"{pv_sg:,.1f}" if np.isfinite(pv_sg) else "n/d", k6)
+            st.caption(f"Giorni analizzati: {ris_sg['n_giorni']:,} — giacenza {ris_sg['giacenza_iniziale_gwh']:,.0f} → {ris_sg['giacenza_finale_gwh']:,.0f} GWh; spread medio catturato: {ris_sg['spread_medio_catturato']:,.1f} €/MWh.")
+            df_sg = ris_sg["serie_giornaliera"]
+            fig_sg_inv = go.Figure()
+            fig_sg_inv.add_trace(go.Scatter(x=df_sg.index, y=df_sg["giacenza_gwh"], mode="lines",
+                                            fill="tozeroy", fillcolor="rgba(245, 158, 11, 0.25)",
+                                            line=dict(color="#f59e0b", width=1.5), name="Giacenza"))
+            fig_sg_inv.add_hline(y=cap_sg, line_dash="dash", line_color="gray",
+                                 annotation_text="Working gas max", annotation_position="top left")
+            fig_sg_inv.update_layout(template="plotly_dark", height=300,
+                                     title="Giacenza ottimale nel tempo (riempi d'estate, svuota d'inverno)",
+                                     xaxis_title="Data", yaxis_title="Giacenza (GWh)")
+            st.plotly_chart(fig_sg_inv, use_container_width=True)
+            g1, g2 = st.columns(2)
+            with g1:
+                fig_sg_flussi = go.Figure()
+                fig_sg_flussi.add_trace(go.Bar(x=df_sg.index, y=df_sg["iniezione_gwh"],
+                                               marker_color="#3b82f6", name="Iniezione"))
+                fig_sg_flussi.add_trace(go.Bar(x=df_sg.index, y=-df_sg["prelievo_gwh"],
+                                               marker_color="#ef4444", name="Erogazione"))
+                fig_sg_flussi.update_layout(template="plotly_dark", height=300, barmode="overlay",
+                                            title="Flussi giornalieri ottimali (blu = inietti, rosso = eroghi)",
+                                            xaxis_title="Data", yaxis_title="GWh/giorno")
+                st.plotly_chart(fig_sg_flussi, use_container_width=True)
+            with g2:
+                pnlm = ris_sg["pnl_mensile"]
+                fig_sg_pnl = go.Figure(go.Bar(x=pnlm["mese"], y=pnlm["pnl_eur"],
+                                              marker_color=["#10B981" if v >= 0 else "#ef4444" for v in pnlm["pnl_eur"]],
+                                              hovertemplate="%{x}: %{y:,.0f} €<extra></extra>"))
+                fig_sg_pnl.update_layout(template="plotly_dark", height=300,
+                                         title="P&L intrinseco per mese",
+                                         xaxis_title="Mese", yaxis_title="P&L (€)")
+                st.plotly_chart(fig_sg_pnl, use_container_width=True)
+            st.dataframe(ris_sg["pnl_mensile"].style.format({"iniezione_gwh": "{:,.1f}", "prelievo_gwh": "{:,.1f}", "pnl_eur": "{:,.0f}"}),
+                         use_container_width=True, hide_index=True)
+            df_sg_exp = df_sg.reset_index()
+            df_sg_exp.columns = ["giorno"] + list(df_sg_exp.columns[1:])
+            st.download_button(
+                "⬇️ Esporta piano ottimale giornaliero (CSV)",
+                df_sg_exp.to_csv(index=False).encode("utf-8"),
+                file_name=f"stoccaggio_gas_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Per ogni giorno: iniezione, erogazione, giacenza, prezzo gas e P&L del piano ottimale.",
+                key="csv_sg",
+            )
+        else:
+            st.warning("Dati insufficienti per lo stoccaggio: servono almeno 2 giorni di prezzi gas e tassi/capacita' positivi.")
+        st.caption("Uso pratico: floor del valore di un sito di stoccaggio (asta di capacita', due diligence) e confronto tra siti con diversi tassi di iniezione/erogazione. Limiti: perfect foresight (prezzi noti in anticipo), costi variabili costanti, niente vincoli di pressione né cushion gas, prezzo gas sintetico in demo.")
 
 # Footer
 
