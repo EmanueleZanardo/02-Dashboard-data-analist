@@ -1907,6 +1907,93 @@ def calcola_valore_efficienza(prezzi, risparmio_kwh_anno, profilo,
     return out
 
 
+def calcola_black76(forward, strike, anni, vol_pct, tasso_pct):
+    """Prezzatura Black-76 di call/put europee sul prezzo forward dell'energia.
+
+    F = prezzo forward/sottostante (€/MWh), K = strike (€/MWh), T = scadenza
+    in anni, vol = volatilita' annua (%), tasso = risk-free annuo (%).
+    Formule: d1 = [ln(F/K) + 0.5*s^2*T] / (s*sqrt(T)); d2 = d1 - s*sqrt(T);
+    call = df * (F*N(d1) - K*N(d2)); put = df * (K*N(-d2) - F*N(-d1)),
+    con df = exp(-r*T). Delta call = df*N(d1), delta put = -df*N(-d1).
+    Breakeven a scadenza: call -> K + premio, put -> K - premio.
+    Casi limite: T=0 o vol=0 -> valore intrinseco (scontato se vol=0).
+    NaN-safe: input non validi (F/K<=0, T<0, vol<0, tasso<0, NaN, stringhe)
+    -> dict neutro con nan e senza eccezioni. Ipotesi del modello: prezzo
+    lognormale, vol e tasso costanti — la vol realizzata e' una stima di
+    partenza, non la vol implicita di mercato.
+    Ritorna dict con: call, put (premi €/MWh), delta_call, delta_put,
+    breakeven_call, breakeven_put, intrinseco_call, intrinseco_put, d1, d2."""
+    neutro = {"call": float("nan"), "put": float("nan"),
+              "delta_call": float("nan"), "delta_put": float("nan"),
+              "breakeven_call": float("nan"), "breakeven_put": float("nan"),
+              "intrinseco_call": float("nan"), "intrinseco_put": float("nan"),
+              "d1": float("nan"), "d2": float("nan")}
+    try:
+        F = float(forward); K = float(strike); T = float(anni)
+        sig = float(vol_pct) / 100.0; r = float(tasso_pct) / 100.0
+    except (TypeError, ValueError):
+        return neutro
+    if not all(np.isfinite(v) for v in (F, K, T, sig, r)):
+        return neutro
+    if F <= 0 or K <= 0 or T < 0 or sig < 0 or r < 0:
+        return neutro
+    df = float(np.exp(-r * T))
+    ic = max(F - K, 0.0)
+    ip = max(K - F, 0.0)
+    if T == 0.0 or sig == 0.0:
+        out = dict(neutro)
+        out.update({"call": float(ic * df), "put": float(ip * df),
+                    "delta_call": float(df if F > K else 0.0),
+                    "delta_put": float(-df if F < K else 0.0),
+                    "intrinseco_call": float(ic), "intrinseco_put": float(ip)})
+        out["breakeven_call"] = float(K + out["call"])
+        out["breakeven_put"] = float(K - out["put"])
+        return out
+    sqt = sig * float(np.sqrt(T))
+    d1 = (float(np.log(F / K)) + 0.5 * sig * sig * T) / sqt
+    d2 = d1 - sqt
+    call = df * (F * float(norm.cdf(d1)) - K * float(norm.cdf(d2)))
+    put = df * (K * float(norm.cdf(-d2)) - F * float(norm.cdf(-d1)))
+    dc = df * float(norm.cdf(d1))
+    dp = -df * float(norm.cdf(-d1))
+    out = dict(neutro)
+    out.update({"call": float(call), "put": float(put),
+                "delta_call": float(dc), "delta_put": float(dp),
+                "breakeven_call": float(K + call),
+                "breakeven_put": float(K - put),
+                "intrinseco_call": float(ic), "intrinseco_put": float(ip),
+                "d1": float(d1), "d2": float(d2)})
+    return out
+
+
+def vol_relativa_annua(prezzi):
+    """Volatilita' annua (%) stimata dai rendimenti orari della serie spot.
+
+    Usa i log-return sulle ore con prezzo positivo (i prezzi spot possono
+    essere 0 o negativi, dove il log e' indefinito); se le coppie positive
+    sono < 30, ripiega su std(differenze orarie)/media(|prezzi|).
+    Annualizzazione: x sqrt(8760). NaN-safe: serie vuota, costante o troppo
+    corta -> nan, mai eccezioni. Serve come vol di default per Black-76
+    (stima di partenza, NON vol implicita)."""
+    try:
+        p = pd.Series(prezzi).dropna().astype(float)
+    except (TypeError, ValueError):
+        return float("nan")
+    if len(p) < 31:
+        return float("nan")
+    pos = p[p > 0.0]
+    lr = np.log(pos / pos.shift(1)).replace([np.inf, -np.inf], np.nan).dropna()
+    if len(lr) >= 30:
+        sig = float(lr.std(ddof=1)) * float(np.sqrt(8760.0)) * 100.0
+        return float(sig) if np.isfinite(sig) and sig > 0 else float("nan")
+    d = p.diff().dropna()
+    mu = float(np.abs(p).mean())
+    if len(d) < 30 or not np.isfinite(mu) or mu <= 0:
+        return float("nan")
+    sig = float(d.std(ddof=1)) / mu * float(np.sqrt(8760.0)) * 100.0
+    return float(sig) if np.isfinite(sig) and sig > 0 else float("nan")
+
+
 def calcola_fuel_switching(prezzi, gas_eur_mwh, eff_gas_pct, coal_eur_mwh,
                            eff_coal_pct, co2_eur_t, ef_gas=0.4, ef_coal=0.9):
     """Fuel switching gas <-> carbone (tab 'Fuel switching').
@@ -10542,7 +10629,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -17586,6 +17673,111 @@ elif workspace == _('ws8'):
                 key="csv_eff",
             )
         st.caption("Uso pratico: confronta il 'prezzo del kWh risparmiato' con il prezzo che paghi in bolletta — se il primo e' maggiore, l'efficienza batte qualsiasi contratto. Prova a cambiare profilo: lo stesso investimento in LED (diurno) puo' ripagarsi prima della stessa spesa su un carico notturno, a parita' di kWh.")
+
+
+    with tab93:
+        banner_demo("Prezzatura di opzioni call/put europee sul prezzo dell'energia (modello Black-76) su prezzi reali o sintetici")
+        titolo_op = edu("Opzioni sul prezzo", "Un'opzione CALL sul prezzo dell'energia ti da' il DIRITTO (non l'obbligo) di comprare 1 MWh a un prezzo fissato (strike) alla scadenza: la compri se temi rialzi dei prezzi (copertura da acquisto). Una PUT e' il diritto di VENDERE allo strike: la compri se temi crolli (protezione dei ricavi di un impianto). Il PREMIO e' quanto paghi oggi per questo diritto, e cresce con la volatilita': piu' il mercato si muove, piu' vale l'assicurazione. Il modello Black-76 e' lo standard per le opzioni su forward energetici. Nota: la vol realizzata del periodo e' solo un punto di partenza — il mercato quota la vol IMPLICITA, spesso diversa.")
+        st.markdown(f"**{titolo_op}**: quanto vale assicurarsi contro i movimenti del prezzo con call/put europee?", unsafe_allow_html=True)
+
+        fwd_def = float(prezzi.dropna().mean()) if len(prezzi.dropna()) else float("nan")
+        k_def = float(round(fwd_def)) if np.isfinite(fwd_def) else 100.0
+        vol_def = vol_relativa_annua(prezzi)
+        vol_def = float(vol_def) if np.isfinite(vol_def) else 40.0
+
+        op1, op2, op3 = st.columns(3)
+        with op1:
+            fwd_op = st.number_input("Prezzo forward/sottostante (€/MWh)", min_value=0.1, value=fwd_def if np.isfinite(fwd_def) else 100.0,
+                                     step=1.0, key="op_fwd",
+                                     help="Prezzo di riferimento dell'energia: default = media del periodo selezionato.")
+        with op2:
+            strike_op = st.number_input("Strike (€/MWh)", min_value=0.1, value=k_def, step=1.0, key="op_k",
+                                        help="Prezzo di esercizio: sopra/sotto il forward definisce se l'opzione e' in/out-of-the-money.")
+        with op3:
+            mesi_op = st.number_input("Scadenza (mesi)", min_value=0, max_value=60, value=3, step=1, key="op_mesi",
+                                      help="Vita residua dell'opzione in mesi (0 = scadenza immediata: premio = valore intrinseco).")
+        op4, op5, op6 = st.columns(3)
+        with op4:
+            vol_op = st.number_input("Volatilità annua (%)", min_value=0.0, max_value=300.0, value=round(vol_def, 1),
+                                     step=1.0, key="op_vol",
+                                     help="Default = vol realizzata annualizzata della serie (log-return orari). Il premio cresce con la vol.")
+        with op5:
+            tasso_op = st.number_input("Tasso risk-free (%)", min_value=0.0, max_value=20.0, value=2.0, step=0.25, key="op_r",
+                                       help="Tasso di attualizzazione del premio e del payoff.")
+        with op6:
+            qta_op = st.number_input("Quantità (MWh)", min_value=0.0, value=1000.0, step=100.0, key="op_qta",
+                                     help="Volume coperto: i premi sono moltiplicati per questa quantita'.")
+
+        ris_op = calcola_black76(fwd_op, strike_op, mesi_op / 12.0, vol_op, tasso_op)
+        call_op, put_op = ris_op["call"], ris_op["put"]
+        ok_op = np.isfinite(call_op) and np.isfinite(put_op)
+
+        ok1, ok2, ok3, ok4 = st.columns(4)
+        render_kpi("Premio CALL (€/MWh)", f"{call_op:,.2f}" if ok_op else "n.d.", ok1)
+        render_kpi("Premio PUT (€/MWh)", f"{put_op:,.2f}" if ok_op else "n.d.", ok2)
+        if ok_op and qta_op > 0:
+            render_kpi(f"Costo copertura call ({qta_op:,.0f} MWh)", f"{call_op * qta_op:,.0f} €", ok3)
+            render_kpi(f"Costo protezione put ({qta_op:,.0f} MWh)", f"{put_op * qta_op:,.0f} €", ok4)
+        else:
+            render_kpi("Costo copertura call", "n.d.", ok3)
+            render_kpi("Costo protezione put", "n.d.", ok4)
+        if ok_op:
+            money = "in-the-money 🟢" if fwd_op > strike_op else ("out-of-the-money 🔴" if fwd_op < strike_op else "at-the-money ⚪")
+            st.caption(f"Call {money} (forward {fwd_op:,.1f} vs strike {strike_op:,.1f}): breakeven call **{ris_op['breakeven_call']:,.1f} €/MWh**, breakeven put **{ris_op['breakeven_put']:,.1f} €/MWh** — delta call {ris_op['delta_call']:+.2f}, delta put {ris_op['delta_put']:+.2f}. Vol realizzata del periodo: **{vol_def:.1f} % annua** (usata come default, NON e' la vol implicita di mercato).")
+
+        if ok_op:
+            s_min = max(0.5, min(strike_op, fwd_op) * 0.3)
+            s_max = max(strike_op, fwd_op) * 2.2
+            s_grid = np.linspace(s_min, s_max, 120)
+            pay_c = np.maximum(s_grid - strike_op, 0.0) - call_op
+            pay_p = np.maximum(strike_op - s_grid, 0.0) - put_op
+
+            fig_po = go.Figure()
+            fig_po.add_trace(go.Scatter(x=s_grid, y=pay_c, mode="lines", name="Call (netto del premio)",
+                                        line=dict(color="#3B82F6", width=2.5),
+                                        hovertemplate="Prezzo a scadenza: %{x:,.1f}<br>P&L: %{y:+,.2f} €/MWh<extra></extra>"))
+            fig_po.add_trace(go.Scatter(x=s_grid, y=pay_p, mode="lines", name="Put (netto del premio)",
+                                        line=dict(color="#F59E0B", width=2.5),
+                                        hovertemplate="Prezzo a scadenza: %{x:,.1f}<br>P&L: %{y:+,.2f} €/MWh<extra></extra>"))
+            fig_po.add_hline(y=0, line_dash="dot", line_color="#9ca3af")
+            fig_po.add_vline(x=ris_op["breakeven_call"], line_dash="dash", line_color="#3B82F6",
+                             annotation_text=f"BE call {ris_op['breakeven_call']:,.0f}", annotation_position="top right")
+            fig_po.add_vline(x=ris_op["breakeven_put"], line_dash="dash", line_color="#F59E0B",
+                             annotation_text=f"BE put {ris_op['breakeven_put']:,.0f}", annotation_position="top left")
+            fig_po.update_layout(template="plotly_dark", height=360,
+                                 title="Payoff a scadenza (al netto del premio pagato)",
+                                 xaxis_title="Prezzo spot a scadenza (€/MWh)", yaxis_title="P&L (€/MWh)")
+            st.plotly_chart(fig_po, use_container_width=True)
+
+            k_grid = np.linspace(max(1.0, strike_op * 0.6), strike_op * 1.6, 40)
+            c_grid = [calcola_black76(fwd_op, k, mesi_op / 12.0, vol_op, tasso_op)["call"] for k in k_grid]
+            p_grid = [calcola_black76(fwd_op, k, mesi_op / 12.0, vol_op, tasso_op)["put"] for k in k_grid]
+            fig_ks = go.Figure()
+            fig_ks.add_trace(go.Scatter(x=k_grid, y=c_grid, mode="lines", name="Premio call",
+                                        line=dict(color="#3B82F6"),
+                                        hovertemplate="Strike: %{x:,.1f}<br>Call: %{y:,.2f} €/MWh<extra></extra>"))
+            fig_ks.add_trace(go.Scatter(x=k_grid, y=p_grid, mode="lines", name="Premio put",
+                                        line=dict(color="#F59E0B"),
+                                        hovertemplate="Strike: %{x:,.1f}<br>Put: %{y:,.2f} €/MWh<extra></extra>"))
+            fig_ks.add_vline(x=fwd_op, line_dash="dot", line_color="#9ca3af",
+                             annotation_text=f"Forward {fwd_op:,.0f}", annotation_position="top right")
+            fig_ks.update_layout(template="plotly_dark", height=320,
+                                 title="Sensitività del premio allo strike",
+                                 xaxis_title="Strike (€/MWh)", yaxis_title="Premio (€/MWh)")
+            st.plotly_chart(fig_ks, use_container_width=True)
+
+            df_op = pd.DataFrame({"Strike (€/MWh)": np.round(k_grid, 1),
+                                  "Premio call (€/MWh)": np.round(c_grid, 2),
+                                  "Premio put (€/MWh)": np.round(p_grid, 2)})
+            st.download_button(
+                "⬇️ Esporta premi per strike (CSV)",
+                df_op.to_csv(index=False).encode("utf-8"),
+                file_name=f"opzioni_strike_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Premi call/put Black-76 per una griglia di strike, con i parametri impostati.",
+                key="csv_op",
+            )
+        st.caption("Uso pratico: per COPRIRE un acquisto futuro compra la call con strike = prezzo massimo che accetti di pagare; il breakeven ti dice fino a dove il mercato deve salire per ripagare il premio. Per PROTEGGERE i ricavi di un impianto compra la put con strike = prezzo minimo garantito. Confronta il premio con la vol implicita quotata dai broker: se il mercato quota vol piu' alta di quella realizzata, le opzioni sono 'care' (e viceversa).")
 
 
 # Footer
