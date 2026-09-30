@@ -10629,6 +10629,129 @@ def calcola_opzione_asiatica(forward, strike, anni, vol_pct, tasso_pct, tipo="ca
             "n_fixing": n, "n_sim": nsim}
 
 
+def calcola_strategia_opzionaria(tipo, forward, anni, vol_pct, tasso_pct,
+                                 k_call_pct=10.0, k_put_pct=10.0, n_punti=400):
+    """Payoff a scadenza di strategie opzionarie COMBINATE sul forward dell'energia.
+
+    Cinque strutture standard, tutte europee con premi Black-76 (vedi
+    calcola_black76) e strike espressi come offset % dal forward F:
+      straddle           : long call ATM + long put ATM  (scommessa sulla volatilita')
+      strangle           : long call Kc=F*(1+c%) + long put Kp=F*(1-p%) (volatilita', piu' economica)
+      butterfly          : long call Kp + short 2x call F + long call Kc (scommessa su prezzo stabile)
+      collar_consumatore : long call Kc + short put Kp (protezione dal rialzo per chi compra energia)
+      collar_produttore  : long put Kp + short call Kc (protezione dal ribasso per chi vende energia)
+    Il collar e' la copertura classica del procurement energy: la vendita
+    dell'opzione opposta finanzia (in tutto o in parte) l'acquisto della
+    protezione -> premio netto spesso vicino a zero ("zero-cost collar").
+
+    P&L a scadenza per MWh: somma dei payoff delle gambe (segno + per long,
+    - per short, moltiplicatore per la butterfly) MENO il premio netto pagato
+    (negativo = credito incassato). Payoff valutato su una griglia di prezzi
+    a scadenza che include sempre F e tutti gli strike; i breakeven sono i
+    punti dove il P&L totale cambia segno (interpolazione lineare).
+    NaN-safe: tipo sconosciuto o input non validi (F<=0, T<0, vol<0, tasso<0,
+    offset<0, Kp<=0, NaN, stringhe) -> dict con valido=False e nan, nessuna
+    eccezione. Ipotesi: opzioni europee, vol/tassi costanti, payoff valutato
+    solo a scadenza (niente mark-to-market intermedio, niente early exercise).
+    Ritorna dict con: valido, tipo, legs (lista dict con tipo/lato/strike/
+    moltiplicatore/premio/premio_segno/delta/delta_segno), premio_netto_mwh
+    (+ = costo, - = credito), delta_netto (per MWh), spot_x, payoff_tot,
+    payoff_legs (coppie etichetta/lista), breakeven (lista), max_profit,
+    max_loss (sulla griglia), forward."""
+    neutro = {"valido": False, "tipo": None, "legs": [],
+              "premio_netto_mwh": float("nan"), "delta_netto": float("nan"),
+              "spot_x": None, "payoff_tot": None, "payoff_legs": [],
+              "breakeven": [], "max_profit": float("nan"),
+              "max_loss": float("nan"), "forward": float("nan")}
+    TIPI = ("straddle", "strangle", "butterfly", "collar_consumatore",
+            "collar_produttore")
+    try:
+        F = float(forward); T = float(anni)
+        sig = float(vol_pct); r = float(tasso_pct)
+        kc_off = float(k_call_pct); kp_off = float(k_put_pct)
+        n = int(n_punti)
+    except (TypeError, ValueError):
+        return neutro
+    if tipo not in TIPI:
+        return neutro
+    if not all(np.isfinite(v) for v in (F, T, sig, r, kc_off, kp_off)):
+        return neutro
+    if F <= 0 or T < 0 or sig < 0 or r < 0 or kc_off < 0 or kp_off < 0:
+        return neutro
+    n = max(50, min(2000, n))
+
+    Kc = float(F * (1.0 + kc_off / 100.0))
+    Kp = float(F * (1.0 - kp_off / 100.0))
+    if not np.isfinite(Kc) or not np.isfinite(Kp) or Kp <= 0:
+        return neutro
+
+    if tipo == "straddle":
+        spec = [("call", "long", F, 1), ("put", "long", F, 1)]
+    elif tipo == "strangle":
+        spec = [("call", "long", Kc, 1), ("put", "long", Kp, 1)]
+    elif tipo == "butterfly":
+        spec = [("call", "long", Kp, 1), ("call", "short", F, 2), ("call", "long", Kc, 1)]
+    elif tipo == "collar_consumatore":
+        spec = [("call", "long", Kc, 1), ("put", "short", Kp, 1)]
+    else:  # collar_produttore
+        spec = [("put", "long", Kp, 1), ("call", "short", Kc, 1)]
+
+    legs = []
+    for tleg, lato, K, mult in spec:
+        pr = calcola_black76(F, K, anni, vol_pct, tasso_pct)
+        prem = float(pr[tleg])
+        delta = float(pr["delta_call"] if tleg == "call" else pr["delta_put"])
+        if not (np.isfinite(prem) and np.isfinite(delta)):
+            return neutro
+        segno = 1.0 if lato == "long" else -1.0
+        legs.append({"tipo": tleg, "lato": lato, "strike": float(K),
+                     "moltiplicatore": int(mult), "premio": prem,
+                     "premio_segno": float(segno * prem * mult),
+                     "delta": delta,
+                     "delta_segno": float(segno * delta * mult)})
+
+    premio_netto = float(sum(l["premio_segno"] for l in legs))
+    delta_netto = float(sum(l["delta_segno"] for l in legs))
+    strikes = sorted({l["strike"] for l in legs})
+    lo = max(0.01, min(strikes) * 0.3)
+    hi = max(strikes) * 1.8
+    x = np.linspace(lo, hi, n)
+    x = np.array(sorted(set(np.concatenate([x, np.array(strikes + [F])]))))
+
+    payoff_legs = []
+    for l in legs:
+        segno = 1.0 if l["lato"] == "long" else -1.0
+        if l["tipo"] == "call":
+            pay = np.maximum(x - l["strike"], 0.0)
+        else:
+            pay = np.maximum(l["strike"] - x, 0.0)
+        payoff_legs.append((f"{l['lato']} {l['tipo']} K={l['strike']:.1f}",
+                            segno * float(l["moltiplicatore"]) * pay))
+    y = sum(p[1] for p in payoff_legs) - premio_netto
+
+    be = []
+    for i in range(len(x) - 1):
+        if y[i] == 0.0:
+            be.append(float(x[i]))
+        elif y[i] * y[i + 1] < 0:
+            frac = float(y[i] / (y[i] - y[i + 1]))
+            be.append(float(x[i] + frac * (x[i + 1] - x[i])))
+    be_u = []
+    for b in be:
+        if not be_u or abs(b - be_u[-1]) > 1e-6:
+            be_u.append(b)
+    if len(be_u) > 6:
+        be_u = []  # payoff degenere (piatto a zero ovunque): nessun BE significativo
+
+    return {"valido": True, "tipo": tipo, "legs": legs,
+            "premio_netto_mwh": premio_netto, "delta_netto": delta_netto,
+            "spot_x": [float(v) for v in x],
+            "payoff_tot": [float(v) for v in y],
+            "payoff_legs": [(lab, [float(v) for v in arr]) for lab, arr in payoff_legs],
+            "breakeven": be_u, "max_profit": float(np.max(y)),
+            "max_loss": float(np.min(y)), "forward": float(F)}
+
+
 def render_kpi(title, value, col):
     col.markdown(f"<div class='metric-container'><div class='metric-label'>{title}</div><div class='metric-val'>{value}</div></div>", unsafe_allow_html=True)
 
@@ -11275,7 +11398,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -19154,6 +19277,127 @@ elif workspace == _('ws8'):
                 key="csv_as",
             )
         st.caption("Uso pratico: devi coprire il prezzo MEDIO del prossimo trimestre (es. un contratto indicizzato alla media mensile PUN)? Un'opzione asiatica costa meno della vanilla perche' la media smorza gli spike: il grafico mostra come il premio scende all'aumentare dei fixing. Limiti del modello: fixing equispaziati, vol e tassi costanti, prezzo lognormale senza salti — nei mercati energy con spike forti la formula sottostima; per book grandi calibrare la vol sulla media dei fixing, non sullo spot.")
+
+
+    with tab100:
+        banner_demo("Strategie opzionarie combinate: straddle, strangle, butterfly e collar con premi Black-76")
+        titolo_so = edu("Strategia opzionaria", "Una strategia opzionaria COMBINA piu' opzioni semplici (call/put) in un unico pacchetto con un payoff studiato a tavolino. Lo STRADDLE scommette sulla volatilita' (guadagna se il prezzo si muove molto, in qualsiasi direzione); il COLLAR protegge un acquisto dal rialzo (o una vendita dal ribasso) finanziando la protezione con la vendita dell'opzione opposta — spesso a costo zero. I premi delle singole gambe sono calcolati con Black-76 (tab93) e il payoff totale e' valutato a scadenza, al netto dei premi pagati o incassati.")
+        st.markdown(f"**{titolo_so}**: costruisci un pacchetto di opzioni e vedi payoff, breakeven e costo netto a scadenza.", unsafe_allow_html=True)
+
+        fwd_so_def = float(prezzi.dropna().mean()) if len(prezzi.dropna()) else float("nan")
+        vol_so_def = vol_relativa_annua(prezzi)
+        vol_so_def = float(vol_so_def) if np.isfinite(vol_so_def) else 40.0
+
+        _STRAT = {"Straddle — long call + long put ATM": "straddle",
+                  "Strangle — long call/put OTM": "strangle",
+                  "Butterfly call — scommessa su prezzo stabile": "butterfly",
+                  "Collar consumatore — long call + short put": "collar_consumatore",
+                  "Collar produttore — long put + short call": "collar_produttore"}
+
+        s1, s2, s3 = st.columns(3)
+        with s1:
+            lab_so = st.selectbox("Strategia", list(_STRAT.keys()), key="so_strat",
+                                  help="Straddle/strangle: scommessa sulla volatilita'. Butterfly: scommessa sulla stabilita' del prezzo. Collar: protezione con finanziamento incrociato.")
+        with s2:
+            fwd_so = st.number_input("Prezzo forward/sottostante (€/MWh)", min_value=0.1,
+                                     value=fwd_so_def if np.isfinite(fwd_so_def) else 100.0,
+                                     step=1.0, key="so_fwd",
+                                     help="Default = media del periodo selezionato.")
+        with s3:
+            mesi_so = st.number_input("Scadenza (mesi)", min_value=0, max_value=60, value=3, step=1, key="so_mesi",
+                                      help="Opzioni europee: il payoff e' valutato solo a scadenza.")
+        s4, s5, s6 = st.columns(3)
+        with s4:
+            vol_so = st.number_input("Volatilità annua (%)", min_value=0.0, max_value=300.0,
+                                     value=round(vol_so_def, 1), step=1.0, key="so_vol",
+                                     help="Default = vol realizzata annualizzata.")
+        with s5:
+            tasso_so = st.number_input("Tasso risk-free (%)", min_value=0.0, max_value=20.0, value=2.0,
+                                       step=0.25, key="so_r", help="Tasso di attualizzazione.")
+        with s6:
+            qta_so = st.number_input("Quantità (MWh)", min_value=0.0, value=1000.0, step=100.0, key="so_qta",
+                                     help="Volume della posizione: premio totale = premio netto × quantita'.")
+
+        tipo_so = _STRAT[lab_so]
+        if tipo_so == "butterfly":
+            o1 = st.columns(1)[0]
+            with o1:
+                amp_so = st.number_input("Ampiezza butterfly (±% dal forward)", min_value=0.0, max_value=50.0,
+                                         value=10.0, step=1.0, key="so_off_bf",
+                                         help="Strike laterali a F×(1±ampiezza%), strike centrale ATM. Max profit teorico = ampiezza in €/MWh − premio netto.")
+            kc_so, kp_so = amp_so, amp_so
+        elif tipo_so == "straddle":
+            st.caption("Straddle: entrambi gli strike sono ATM (F). Nessun offset da impostare.")
+            kc_so, kp_so = 0.0, 0.0
+        else:
+            o2, o3 = st.columns(2)
+            with o2:
+                kc_so = st.number_input("Strike call sopra il forward (%)", min_value=0.0, max_value=100.0,
+                                        value=10.0, step=1.0, key="so_off_c",
+                                        help="Strike call = F × (1 + %).")
+            with o3:
+                kp_so = st.number_input("Strike put sotto il forward (%)", min_value=0.0, max_value=99.0,
+                                        value=10.0, step=1.0, key="so_off_p",
+                                        help="Strike put = F × (1 − %).")
+
+        ris_so = calcola_strategia_opzionaria(tipo_so, fwd_so, mesi_so / 12.0, vol_so, tasso_so,
+                                              k_call_pct=kc_so, k_put_pct=kp_so)
+        ok_so = bool(ris_so["valido"])
+
+        if ok_so:
+            pn = ris_so["premio_netto_mwh"]
+            dn = ris_so["delta_netto"]
+            be_so = ris_so["breakeven"]
+            k1, k2, k3 = st.columns(3)
+            render_kpi("Premio netto (€/MWh)", f"{pn:+,.2f}", k1)
+            render_kpi("Premio posizione (tot €)", f"{pn * qta_so:+,.0f}", k2)
+            render_kpi("Delta netto (per MWh)", f"{dn:+.3f}", k3)
+            k4, k5, k6 = st.columns(3)
+            be_txt = ", ".join(f"{b:,.1f}" for b in be_so) if be_so else "—"
+            render_kpi("Breakeven a scadenza (€/MWh)", be_txt, k4)
+            render_kpi("Max profit (€/MWh)", f"{ris_so['max_profit']:+,.2f}", k5)
+            render_kpi("Max loss (€/MWh)", f"{ris_so['max_loss']:+,.2f}", k6)
+            verso = "long" if dn > 0 else ("short" if dn < 0 else "neutro")
+            st.caption(f"{'Credito incassato' if pn < 0 else 'Costo pagato'}: {pn:+,.2f} €/MWh "
+                       f"(totale {pn * qta_so:+,.0f} €). Delta netto {verso}: la strategia si comporta come "
+                       f"{abs(dn):.2f} MWh di forward per ogni MWh nozionale.")
+        else:
+            st.warning("Parametri non validi per la strategia opzionaria.")
+
+        if ok_so:
+            fig_so = go.Figure()
+            for lab_leg, arr_leg in ris_so["payoff_legs"]:
+                fig_so.add_trace(go.Scatter(x=ris_so["spot_x"], y=arr_leg, mode="lines",
+                                            name=lab_leg, line=dict(dash="dot", width=1.5),
+                                            hovertemplate="Prezzo: %{x:,.1f}<br>Payoff gamba: %{y:,.2f} €/MWh<extra></extra>"))
+            fig_so.add_trace(go.Scatter(x=ris_so["spot_x"], y=ris_so["payoff_tot"], mode="lines",
+                                        name="Totale (netto premi)", line=dict(color="#22c55e", width=3),
+                                        hovertemplate="Prezzo: %{x:,.1f}<br>P&L totale: %{y:,.2f} €/MWh<extra></extra>"))
+            fig_so.add_hline(y=0, line_dash="dash", line_color="#9ca3af")
+            for b in ris_so["breakeven"]:
+                fig_so.add_vline(x=b, line_dash="dash", line_color="#f59e0b",
+                                 annotation_text=f"BE {b:,.1f}", annotation_position="top")
+            fig_so.update_layout(template="plotly_dark", height=380,
+                                 title=f"Payoff a scadenza — {lab_so} (premi Black-76 inclusi)",
+                                 xaxis_title="Prezzo a scadenza (€/MWh)", yaxis_title="P&L (€/MWh)")
+            st.plotly_chart(fig_so, use_container_width=True)
+
+            df_so = pd.DataFrame([{"Lato": l["lato"], "Tipo": l["tipo"],
+                                   "Strike (€/MWh)": round(l["strike"], 2),
+                                   "Moltiplicatore": l["moltiplicatore"],
+                                   "Premio (€/MWh)": round(l["premio"], 3),
+                                   "Premio × lato (€/MWh)": round(l["premio_segno"], 3)}
+                                  for l in ris_so["legs"]])
+            st.dataframe(df_so, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta gambe della strategia (CSV)",
+                df_so.to_csv(index=False).encode("utf-8"),
+                file_name=f"strategia_opzionaria_{tipo_so}_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Dettaglio delle gambe della strategia con strike e premi Black-76.",
+                key="csv_so",
+            )
+        st.caption("Uso pratico: un produttore che teme il crollo dei prezzi compra il collar produttore (floor garantito, cap ceduto); un buyer industriale che teme i rialzi usa il collar consumatore, spesso a premio netto ~0. Straddle/strangle prima di eventi incerti (inverno, decisioni regolatorie): paghi il premio e guadagni se il mercato si muove forte in qualsiasi direzione. Limiti: opzioni EUROPEE (niente esercizio anticipato), vol e tassi costanti, payoff solo a scadenza — il valore intermedio (mark-to-market) segue le greche del tab98.")
 
 
 # Footer
