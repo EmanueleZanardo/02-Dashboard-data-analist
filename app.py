@@ -11208,6 +11208,101 @@ def calcola_composta(comp_tipo, sott_tipo, forward, k_composto, k_sottostante,
     return out
 
 
+def calcola_digitale(payoff, tipo, forward, strike, mesi, vol_pct, tasso_pct):
+    """Premio di un'opzione DIGITALE (binaria) sul forward energetico, Black-76 forma chiusa.
+
+    La digitale paga un importo FISSO se a scadenza la condizione e' vera,
+    zero altrimenti — niente gamma progressiva: o tutto o niente.
+    - cash-or-nothing call: 1 EUR/MWh se F_T > K, 0 altrimenti (put: se F_T < K)
+    - asset-or-nothing call: F_T se F_T > K, 0 altrimenti (put: F_T se F_T < K)
+    Nell'energia servono nei contratti di fornitura con trigger di prezzo
+    (es. bonus/malus forfettario se il prezzo supera una soglia), nelle
+    clausole cap con payout secco e per coprire eventi prezzo discreti.
+    Formule Black-76 (driftless sul forward):
+      cash call = df * N(d2) · cash put = df * N(-d2)
+      asset call = df * F * N(d1) · asset put = df * F * N(-d1)
+      d1 = (ln(F/K) + 0.5*sig^2*T) / (sig*sqrt(T)); d2 = d1 - sig*sqrt(T)
+    Ancore esatte: parita' call+put cash = df, call+put asset = df*F;
+    vol = 0 o T = 0 -> valore attualizzato del payout deterministico;
+    K -> 0: cash call -> df, asset call -> df*F. NaN-safe: input non validi
+    (tipo/payoff sconosciuti, F <= 0, K <= 0, mesi < 0, sig < 0, r < 0)
+    -> dict neutro con valido = False.
+    Ritorna dict con: premio, premio_vanilla (stessa call/put Black-76),
+    prob_itm (probabilita' risk-neutral di finire in the money = N(+-d2)),
+    delta (bump sul forward), intrinseco (valore del payout a F=K? no:
+    valore digitale a scadenza se esercitata OGGI: cash 1/0, asset F/0),
+    limite_sup (df per cash, df*F per asset), valido."""
+    from scipy.stats import norm as _norm
+
+    neutro = {"premio": float("nan"), "premio_vanilla": float("nan"),
+              "prob_itm": float("nan"), "delta": float("nan"),
+              "intrinseco": float("nan"), "limite_sup": float("nan"),
+              "valido": False}
+    try:
+        pf = str(payoff).strip().lower()
+        tp = str(tipo).strip().lower()
+        F = float(forward); K = float(strike); T = float(mesi) / 12.0
+        sig = float(vol_pct) / 100.0; r = float(tasso_pct) / 100.0
+    except (TypeError, ValueError):
+        return neutro
+    if not all(np.isfinite(v) for v in (F, K, T, sig, r)):
+        return neutro
+    if pf not in ("cash", "asset") or tp not in ("call", "put"):
+        return neutro
+    if F <= 0 or K <= 0 or T < 0 or sig < 0 or r < 0:
+        return neutro
+    is_call = (tp == "call")
+    df = float(np.exp(-r * T))
+    limite = df if pf == "cash" else df * F
+
+    def _premio(ff):
+        # premio digitale valutato al forward ff
+        if T <= 0.0 or sig <= 0.0:
+            itm = (ff > K) if is_call else (ff < K)
+            at = (ff == K)
+            unit = 0.5 if at else (1.0 if itm else 0.0)
+            return df * unit if pf == "cash" else df * ff * unit
+        sqt = sig * np.sqrt(T)
+        d1 = (np.log(ff / K) + 0.5 * sig * sig * T) / sqt
+        d2 = d1 - sqt
+        if pf == "cash":
+            return df * (_norm.cdf(d2) if is_call else _norm.cdf(-d2))
+        return df * ff * (_norm.cdf(d1) if is_call else _norm.cdf(-d1))
+
+    def _vanilla(ff):
+        # premio call/put vanilla Black-76 di confronto
+        if T <= 0.0 or sig <= 0.0:
+            intr = max(ff - K, 0.0) if is_call else max(K - ff, 0.0)
+            return df * intr
+        sqt = sig * np.sqrt(T)
+        d1 = (np.log(ff / K) + 0.5 * sig * sig * T) / sqt
+        d2 = d1 - sqt
+        if is_call:
+            return df * (ff * _norm.cdf(d1) - K * _norm.cdf(d2))
+        return df * (K * _norm.cdf(-d2) - ff * _norm.cdf(-d1))
+
+    def _prob(ff):
+        # prob. risk-neutral di finire ITM
+        if T <= 0.0 or sig <= 0.0:
+            return 0.5 if ff == K else (1.0 if (ff > K) == is_call else 0.0)
+        sqt = sig * np.sqrt(T)
+        d2 = (np.log(ff / K) + 0.5 * sig * sig * T) / sqt - sqt
+        return float(_norm.cdf(d2) if is_call else _norm.cdf(-d2))
+
+    out = dict(neutro)
+    out.update({"valido": True, "premio": float(_premio(F)),
+                "premio_vanilla": float(_vanilla(F)),
+                "prob_itm": _prob(F),
+                "limite_sup": float(limite)})
+    if pf == "cash":
+        out["intrinseco"] = 1.0 if (F > K) == is_call else 0.0
+    else:
+        out["intrinseco"] = float(F) if (F > K) == is_call else 0.0
+    h = 0.01
+    out["delta"] = float((_premio(F * (1 + h)) - _premio(F * (1 - h))) / (2 * F * h))
+    return out
+
+
 def render_kpi(title, value, col):
     col.markdown(f"<div class='metric-container'><div class='metric-label'>{title}</div><div class='metric-val'>{value}</div></div>", unsafe_allow_html=True)
 
@@ -11854,7 +11949,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -20282,6 +20377,121 @@ elif workspace == _('ws8'):
                 key="csv_cmp",
             )
         st.caption("Uso pratico: la call su call e' l'estensione condizionata dell'hedge — paghi K1 solo se a t1 il mercato giustifica la copertura, altrimenti lasci scadere e hai speso solo il premio iniziale; il risparmio vs la diretta e' il prezzo dell'opzionalita'. Limiti: pricing Monte Carlo (20.000 path, seed fisso = deterministico), dinamica Black-76 driftless senza smile, vol e tassi costanti, esercizio europeo a t1.")
+
+
+    with tab105:
+        banner_demo("Opzione digitale: payout binario con pricing Black-76 in forma chiusa")
+        titolo_dig = edu("Opzione digitale", "Un'opzione DIGITALE paga un importo FISSO se a scadenza una condizione e' vera, zero altrimenti — 'tutto o niente'. La CASH-OR-NOTHING paga 1 €/MWh se il forward a scadenza supera (call) o e' sotto (put) lo strike; la ASSET-OR-NOTHING paga il prezzo stesso (F_T). Nell'energia servono nei contratti di fornitura con trigger di prezzo: es. un bonus forfettario se il PUN supera 150 €/MWh, o una clausola cap che scatta solo oltre soglia. Costano meno di una vanilla equivalente perche' il payout e' limitato, ma la sensibilita' (delta) esplode vicino allo strike — a ridosso di scadenza il prezzo salta tra 0 e il payout pieno.")
+        st.markdown(f"**{titolo_dig}**: prezza cash-or-nothing e asset-or-nothing call/put sui forward energetici, con probabilita' risk-neutral di esercizio, confronto con la vanilla e payoff a scadenza.", unsafe_allow_html=True)
+
+        fwd_dig_def = float(prezzi.dropna().mean()) if len(prezzi.dropna()) else float("nan")
+        vol_dig_def = vol_relativa_annua(prezzi)
+        vol_dig_def = float(vol_dig_def) if np.isfinite(vol_dig_def) else 40.0
+
+        c1, c2 = st.columns(2)
+        with c1:
+            payoff_dig = st.selectbox("Payoff", ["Cash-or-nothing", "Asset-or-nothing"], key="dig_payoff",
+                                      help="Cash: paga 1 €/MWh se ITM. Asset: paga il prezzo F_T se ITM.")
+        with c2:
+            tipo_dig = st.selectbox("Tipo", ["Call", "Put"], key="dig_tipo",
+                                    help="Call: paga se F_T > K. Put: paga se F_T < K.")
+        d1_, d2_, d3_ = st.columns(3)
+        with d1_:
+            fwd_dig = st.number_input("Prezzo forward (€/MWh)", min_value=0.1,
+                                      value=fwd_dig_def if np.isfinite(fwd_dig_def) else 100.0,
+                                      step=1.0, key="dig_fwd",
+                                      help="Default = media del periodo selezionato.")
+        with d2_:
+            strike_dig = st.number_input("Strike K (€/MWh)", min_value=0.1,
+                                         value=fwd_dig_def if np.isfinite(fwd_dig_def) else 100.0,
+                                         step=1.0, key="dig_k", help="Soglia del trigger.")
+        with d3_:
+            mesi_dig = st.number_input("Scadenza (mesi)", min_value=1, max_value=60,
+                                       value=12, step=1, key="dig_mesi", help="Vita dell'opzione.")
+        e1, e2, e3 = st.columns(3)
+        with e1:
+            vol_dig = st.number_input("Volatilità annua (%)", min_value=0.0, max_value=300.0,
+                                      value=round(vol_dig_def, 1), step=1.0, key="dig_vol",
+                                      help="Default = vol realizzata annualizzata.")
+        with e2:
+            tasso_dig = st.number_input("Tasso risk-free (%)", min_value=0.0, max_value=20.0,
+                                        value=2.0, step=0.25, key="dig_r",
+                                        help="Tasso di attualizzazione.")
+        with e3:
+            qta_dig = st.number_input("Quantità (MWh)", min_value=0.0, value=1000.0,
+                                      step=100.0, key="dig_qta",
+                                      help="Premio totale = premio × quantità.")
+
+        ris_dig = calcola_digitale("cash" if payoff_dig == "Cash-or-nothing" else "asset",
+                                   tipo_dig.lower(), fwd_dig, strike_dig, int(mesi_dig),
+                                   vol_dig, tasso_dig)
+        if ris_dig["valido"]:
+            pc, pv = ris_dig["premio"], ris_dig["premio_vanilla"]
+            f1, f2, f3 = st.columns(3)
+            render_kpi("Premio digitale (€/MWh)", f"{pc:,.3f}", f1)
+            render_kpi(f"Vanilla {tipo_dig.lower()} (€/MWh)", f"{pv:,.3f}", f2)
+            rap = 100.0 * pc / pv if pv > 1e-12 else float("nan")
+            render_kpi("Digitale / Vanilla", f"{rap:.1f}%" if np.isfinite(rap) else "—", f3)
+            g1, g2 = st.columns(2)
+            render_kpi("Probabilità ITM (risk-neutral)", f"{100.0 * ris_dig['prob_itm']:.1f}%", g1)
+            render_kpi("Delta", f"{ris_dig['delta']:+.3f}", g2)
+            st.caption(f"Premio posizione: {pc * qta_dig:+,.0f} € totali · "
+                       f"Payout unitario a scadenza se ITM: {'1 €/MWh' if payoff_dig == 'Cash-or-nothing' else 'F_T (€/MWh)'} · "
+                       f"Limite superiore del premio: {ris_dig['limite_sup']:,.3f} €/MWh")
+
+            # curva: premio e prob ITM vs strike
+            k_grid = np.linspace(max(0.1, 0.5 * strike_dig), 2.0 * strike_dig, 41)
+            prem_dig, prob_dig, prem_van = [], [], []
+            for kg in k_grid:
+                rr_ = calcola_digitale("cash" if payoff_dig == "Cash-or-nothing" else "asset",
+                                       tipo_dig.lower(), fwd_dig, float(kg), int(mesi_dig),
+                                       vol_dig, tasso_dig)
+                prem_dig.append(rr_["premio"] if rr_["valido"] else float("nan"))
+                prob_dig.append(100.0 * rr_["prob_itm"] if rr_["valido"] else float("nan"))
+                prem_van.append(rr_["premio_vanilla"] if rr_["valido"] else float("nan"))
+            fig_dig = go.Figure()
+            fig_dig.add_scatter(x=k_grid, y=prem_dig, mode="lines", name="Digitale",
+                                line=dict(color="#f472b6", width=2.5))
+            fig_dig.add_scatter(x=k_grid, y=prem_van, mode="lines", name="Vanilla",
+                                line=dict(color="#4b5563", dash="dash"))
+            fig_dig.add_scatter(x=k_grid, y=prob_dig, mode="lines", name="Prob ITM (%)",
+                                line=dict(color="#22d3ee", dash="dot"), yaxis="y2")
+            fig_dig.update_layout(template="plotly_dark", height=400,
+                                   title=f"Premio digitale vs strike — {payoff_dig} {tipo_dig.lower()}",
+                                   xaxis_title="Strike K (€/MWh)", yaxis_title="Premio (€/MWh)",
+                                   yaxis2=dict(title="Prob ITM (%)", overlaying="y", side="right",
+                                               range=[0, 100]))
+            st.plotly_chart(fig_dig, use_container_width=True)
+
+            # payoff a scadenza
+            ft_grid = np.linspace(0.0, 2.5 * strike_dig, 201)
+            itm = (ft_grid > strike_dig) if tipo_dig == "Call" else (ft_grid < strike_dig)
+            pay = np.where(itm, (1.0 if payoff_dig == "Cash-or-nothing" else ft_grid), 0.0)
+            fig_pay = go.Figure()
+            fig_pay.add_scatter(x=ft_grid, y=pay, mode="lines", name="Payoff a scadenza",
+                                line=dict(color="#f472b6", width=2.5, shape="hv"))
+            fig_pay.add_vline(x=fwd_dig, line_dash="dash", line_color="#4b5563",
+                              annotation_text=f"Forward {fwd_dig:,.0f}", annotation_position="top")
+            fig_pay.update_layout(template="plotly_dark", height=320,
+                                   title="Payoff a scadenza (tutto o niente)",
+                                   xaxis_title="Prezzo a scadenza F_T (€/MWh)",
+                                   yaxis_title="Payoff (€/MWh)")
+            st.plotly_chart(fig_pay, use_container_width=True)
+
+            df_dig = pd.DataFrame({"Strike K (€/MWh)": [round(v, 2) for v in k_grid],
+                                   "Premio digitale (€/MWh)": [round(v, 4) for v in prem_dig],
+                                   "Prob ITM (%)": [round(v, 2) for v in prob_dig],
+                                   "Premio vanilla (€/MWh)": [round(v, 4) for v in prem_van]})
+            st.dataframe(df_dig, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta curva digitale (CSV)",
+                df_dig.to_csv(index=False).encode("utf-8"),
+                file_name=f"digitale_{payoff_dig.split('-')[0].lower()}_{tipo_dig.lower()}_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Premio digitale, prob ITM e vanilla al variare dello strike.",
+                key="csv_dig",
+            )
+        st.caption("Uso pratico: la cash call e' il 'biglietto' su un evento prezzo — es. scommetti sul PUN sopra 200 €/MWh pagando poco invece di una call vanilla; l'asset-or-nothing vale il prezzo stesso se scatta. Attenzione al rischio pin: vicino a scadenza e vicino allo strike il delta esplode e il premio salta tra 0 e il payout pieno. Limiti: Black-76 driftless in forma chiusa, vol e tassi costanti, niente smile, esercizio europeo.")
 
 
 # Footer
