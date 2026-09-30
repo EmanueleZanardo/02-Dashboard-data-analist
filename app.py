@@ -11102,6 +11102,112 @@ def calcola_lookback(tipo, strike_type, forward, strike, anni, vol_pct, tasso_pc
     return out
 
 
+def calcola_composta(comp_tipo, sott_tipo, forward, k_composto, k_sottostante,
+                     mesi_composto, mesi_sottostante, vol_pct, tasso_pct,
+                     n_paths=20000, seed=42):
+    """Premio di un'opzione COMPOSTA (opzione su opzione) sul forward energetico.
+
+    La composta scade a t1 e paga max(+- (V(F(t1), K2, T2-t1) - K1), 0), dove
+    V e' il valore Black-76 dell'opzione SOTTOSTANTE (call o put) di strike K2
+    e scadenza T2 >= t1. Nell'energia serve a comprare oggi il DIRITTO di
+    decidere in futuro se attivare una copertura: es. call su call = a t1
+    decidi se pagare K1 per ottenere una call con scadenza T2 (estensione
+    dell'hedge condizionata al prezzo di mercato a t1).
+    Pricing Monte Carlo con seed fisso e antitetiche: simulato F(t1) con
+    dinamica driftless Black-76, l'opzione sottostante e' prezzata in forma
+    chiusa vettoriale su ogni path, payoff scontato al tasso risk-free.
+    Ancore esatte: K1 = 0 -> la call composta coincide con la vanilla
+    sottostante; t1 = 0 -> max(+-(C0 - K1), 0); vol = 0 -> deterministico;
+    parita' composta put-call: put su call = K1*df - call su call.
+    F_star = prezzo forward critico a t1 (esercizio ottimale sopra/sotto),
+    cercato con brentq; nan se inesistente. NaN-safe: input non validi ->
+    dict neutro con valido = False.
+    Ritorna dict con: premio, premio_sottostante (vanilla a T2), prob_esercizio,
+    delta (via bump sul forward, stesso seed), f_star, intrinseco, valido."""
+    from scipy.stats import norm as _norm
+    from scipy.optimize import brentq as _brentq
+
+    neutro = {"premio": float("nan"), "premio_sottostante": float("nan"),
+              "prob_esercizio": float("nan"), "delta": float("nan"),
+              "f_star": float("nan"), "intrinseco": float("nan"),
+              "valido": False}
+    try:
+        ct = str(comp_tipo).strip().lower()
+        st_ = str(sott_tipo).strip().lower()
+        F = float(forward); K1 = float(k_composto); K2 = float(k_sottostante)
+        t1 = float(mesi_composto) / 12.0; T2 = float(mesi_sottostante) / 12.0
+        sig = float(vol_pct) / 100.0; r = float(tasso_pct) / 100.0
+        npt = int(n_paths); sd = int(seed)
+    except (TypeError, ValueError):
+        return neutro
+    if not all(np.isfinite(v) for v in (F, K1, K2, t1, T2, sig, r)):
+        return neutro
+    if ct not in ("call", "put") or st_ not in ("call", "put"):
+        return neutro
+    if F <= 0 or K1 < 0 or K2 <= 0 or t1 < 0 or T2 <= 0 or t1 > T2:
+        return neutro
+    if sig < 0 or r < 0 or npt < 100:
+        return neutro
+    is_call = (ct == "call")
+    sott_call = (st_ == "call")
+    df1 = float(np.exp(-r * t1))
+    Trem = T2 - t1
+
+    def _b76(Fv, Kv, Tv, cp):
+        # Black-76 vettoriale su forward Fv; cp True=call, False=put
+        Fv = np.asarray(Fv, dtype=float)
+        if Tv <= 0.0 or sig <= 0.0:
+            intr = np.maximum(Fv - Kv, 0.0) if cp else np.maximum(Kv - Fv, 0.0)
+            return np.exp(-r * Tv) * intr
+        sqt = sig * np.sqrt(Tv)
+        d1 = (np.log(Fv / Kv) + 0.5 * sig * sig * Tv) / sqt
+        d2 = d1 - sqt
+        dff = np.exp(-r * Tv)
+        if cp:
+            return dff * (Fv * _norm.cdf(d1) - Kv * _norm.cdf(d2))
+        return dff * (Kv * _norm.cdf(-d2) - Fv * _norm.cdf(-d1))
+
+    def _prezzo(ff, seed_loc):
+        V0 = float(_b76(ff, K2, T2, sott_call))
+        if t1 == 0.0 or sig == 0.0:
+            # deterministico: F(t1) = F
+            V1 = float(_b76(ff, K2, Trem, sott_call))
+            pay = max(V1 - K1, 0.0) if is_call else max(K1 - V1, 0.0)
+            return float(pay * df1), (1.0 if pay > 0 else 0.0), V0
+        rng = np.random.default_rng(seed_loc)
+        nh = npt // 2
+        zh = rng.standard_normal(nh)
+        z = np.concatenate([zh, -zh])  # antitetiche
+        F1 = ff * np.exp(-0.5 * sig * sig * t1 + sig * np.sqrt(t1) * z)
+        V1 = _b76(F1, K2, Trem, sott_call)
+        pay = np.maximum(V1 - K1, 0.0) if is_call else np.maximum(K1 - V1, 0.0)
+        return float(df1 * pay.mean()), float((pay > 0).mean()), V0
+
+    p0, pr0, V0 = _prezzo(F, sd)
+    out = dict(neutro)
+    out.update({"valido": True, "premio": p0, "prob_esercizio": pr0,
+                "premio_sottostante": V0,
+                "intrinseco": float(max(V0 - K1, 0.0) if is_call else max(K1 - V0, 0.0))})
+    h = 0.01
+    p_up, _, _ = _prezzo(F * (1 + h), sd)
+    p_dn, _, _ = _prezzo(F * (1 - h), sd)
+    out["delta"] = float((p_up - p_dn) / (2 * F * h))
+
+    # F_star: prezzo forward critico a t1 (esercizio ottimale)
+    if t1 > 0.0 and Trem >= 0.0:
+        def _V1(x):
+            return float(_b76(x, K2, Trem, sott_call)) - K1
+        try:
+            if is_call and sott_call and K1 == 0.0:
+                out["f_star"] = 0.0
+            else:
+                hi = F * np.exp(10 * sig * np.sqrt(max(t1, 1e-9)) + 5)
+                out["f_star"] = float(_brentq(_V1, 1e-8, hi, maxiter=200))
+        except Exception:
+            out["f_star"] = float("nan")
+    return out
+
+
 def render_kpi(title, value, col):
     col.markdown(f"<div class='metric-container'><div class='metric-label'>{title}</div><div class='metric-val'>{value}</div></div>", unsafe_allow_html=True)
 
@@ -11748,7 +11854,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -20066,6 +20172,116 @@ elif workspace == _('ws8'):
                 key="csv_lkb",
             )
         st.caption("Uso pratico: la call lookback a strike fisso e' la copertura ideale contro gli spike — paga il massimo toccato anche se a scadenza il prezzo e' rientrato; lo strike flottante costa meno del fisso ATM ma garantisce di comprare sempre al minimo (call) o vendere al massimo (put) del periodo. Limiti: pricing Monte Carlo (20.000 path, seed fisso = deterministico), fixing discreti equidistanti escluso t=0, vol e tassi costanti, formula Black-76 senza smile.")
+
+
+    with tab104:
+        banner_demo("Opzione composta: opzione su opzione con pricing Monte Carlo (Black-76)")
+        titolo_cmp = edu("Opzione composta", "Un'opzione COMPOSTA e' un'opzione SU un'altra opzione: alla scadenza t1 paghi (o ricevi) il diritto di esercitare, a tua scelta, l'opzione SOTTOSTANTE con scadenza T2. Esempio: una CALL SU CALL con scadenza a 6 mesi su una call a 12 mesi ti da' il diritto di comprare tra 6 mesi — pagando il premio K1 — una call che scade a 12 mesi. Nell'energia serve per comprare oggi l'OPZIONALITA' di coprirsi in futuro: paghi poco adesso, e decidi a t1 (quando vedi il prezzo forward) se attivare l'hedge. Vale sempre meno dell'opzione sottostante comprata direttamente, perche' l'esercizio a t1 e' condizionato.")
+        st.markdown(f"**{titolo_cmp}**: prezza le 4 combinazioni (call/put su call/put) sui forward energetici e calcola il prezzo forward critico a t1 per l'esercizio ottimale.", unsafe_allow_html=True)
+
+        fwd_cmp_def = float(prezzi.dropna().mean()) if len(prezzi.dropna()) else float("nan")
+        vol_cmp_def = vol_relativa_annua(prezzi)
+        vol_cmp_def = float(vol_cmp_def) if np.isfinite(vol_cmp_def) else 40.0
+
+        c1, c2 = st.columns(2)
+        with c1:
+            tipo_cmp = st.selectbox("Opzione composta", ["Call", "Put"], key="cmp_tipo",
+                                    help="Call: a t1 paghi K1 per ricevere l'opzione sottostante. Put: a t1 ricevi K1 contro la consegna dell'opzione sottostante.")
+        with c2:
+            sott_cmp = st.selectbox("Opzione sottostante", ["Call", "Put"], key="cmp_sott",
+                                    help="Tipo dell'opzione che ricevi/consegni esercitando la composta a t1.")
+        d1_, d2_, d3_ = st.columns(3)
+        with d1_:
+            fwd_cmp = st.number_input("Prezzo forward (€/MWh)", min_value=0.1,
+                                      value=fwd_cmp_def if np.isfinite(fwd_cmp_def) else 100.0,
+                                      step=1.0, key="cmp_fwd",
+                                      help="Default = media del periodo selezionato.")
+        with d2_:
+            k1_cmp = st.number_input("Strike composta K1 (€/MWh)", min_value=0.0,
+                                     value=3.0, step=0.5, key="cmp_k1",
+                                     help="Premio da pagare a t1 per ottenere l'opzione sottostante.")
+        with d3_:
+            k2_cmp = st.number_input("Strike sottostante K2 (€/MWh)", min_value=0.1,
+                                     value=fwd_cmp_def if np.isfinite(fwd_cmp_def) else 100.0,
+                                     step=1.0, key="cmp_k2",
+                                     help="Strike dell'opzione sottostante (scadenza T2).")
+        e1, e2, e3 = st.columns(3)
+        with e1:
+            mesi_sot_cmp = st.number_input("Scadenza sottostante T2 (mesi)", min_value=1, max_value=60,
+                                           value=12, step=1, key="cmp_t2",
+                                           help="Scadenza dell'opzione sottostante.")
+        with e2:
+            mesi_cmp = st.number_input("Scadenza composta t1 (mesi)", min_value=0,
+                                       max_value=int(mesi_sot_cmp), value=min(6, int(mesi_sot_cmp)),
+                                       step=1, key="cmp_t1",
+                                       help="Quando decidi se esercitare (<= T2).")
+        with e3:
+            vol_cmp = st.number_input("Volatilità annua (%)", min_value=0.0, max_value=300.0,
+                                      value=round(vol_cmp_def, 1), step=1.0, key="cmp_vol",
+                                      help="Default = vol realizzata annualizzata.")
+        e4, e5 = st.columns(2)
+        with e4:
+            tasso_cmp = st.number_input("Tasso risk-free (%)", min_value=0.0, max_value=20.0,
+                                        value=2.0, step=0.25, key="cmp_r",
+                                        help="Tasso di attualizzazione.")
+        with e5:
+            qta_cmp = st.number_input("Quantità (MWh)", min_value=0.0, value=1000.0,
+                                      step=100.0, key="cmp_qta",
+                                      help="Volume della posizione: premio totale = premio × quantita'.")
+
+        ris_cmp = calcola_composta(tipo_cmp.lower(), sott_cmp.lower(), fwd_cmp, k1_cmp,
+                                   k2_cmp, int(mesi_cmp), int(mesi_sot_cmp),
+                                   vol_cmp, tasso_cmp)
+        if ris_cmp["valido"]:
+            pc, ps = ris_cmp["premio"], ris_cmp["premio_sottostante"]
+            f1, f2, f3 = st.columns(3)
+            render_kpi(f"Premio {tipo_cmp.lower()} su {sott_cmp.lower()} (€/MWh)", f"{pc:,.3f}", f1)
+            render_kpi(f"Premio {sott_cmp.lower()} diretta (€/MWh)", f"{ps:,.3f}", f2)
+            render_kpi("Risparmio vs diretta", f"{ps - pc:+,.3f} €/MWh", f3)
+            g1, g2 = st.columns(2)
+            render_kpi("Probabilità di esercizio a t1", f"{100.0 * ris_cmp['prob_esercizio']:.1f}%", g1)
+            render_kpi("Delta", f"{ris_cmp['delta']:+.3f}", g2)
+            fstar = ris_cmp["f_star"]
+            verso = "sopra" if (tipo_cmp == "Call") == (sott_cmp == "Call") else "sotto"
+            st.caption(f"Forward critico a t1: {'—' if not np.isfinite(fstar) else f'{fstar:,.2f} €/MWh'} "
+                       f"(esercita se a t1 il forward e' {verso} questo livello) · "
+                       f"Intrinseco istantaneo: {ris_cmp['intrinseco']:,.2f} €/MWh · "
+                       f"Premio posizione: {pc * qta_cmp:+,.0f} € totali")
+
+            # curva: premio vs scadenza composta t1 (0..T2)
+            mesi_grid = list(range(0, int(mesi_sot_cmp) + 1, max(1, int(mesi_sot_cmp) // 12)))
+            if mesi_grid[-1] != int(mesi_sot_cmp):
+                mesi_grid.append(int(mesi_sot_cmp))
+            curve_cmp = []
+            for mg in mesi_grid:
+                rc_ = calcola_composta(tipo_cmp.lower(), sott_cmp.lower(), fwd_cmp, k1_cmp,
+                                       k2_cmp, mg, int(mesi_sot_cmp),
+                                       vol_cmp, tasso_cmp, n_paths=8000)
+                curve_cmp.append(rc_["premio"] if rc_["valido"] else float("nan"))
+            fig_cmp = go.Figure()
+            fig_cmp.add_scatter(x=mesi_grid, y=curve_cmp, mode="lines+markers",
+                                name=f"{tipo_cmp} su {sott_cmp}", line=dict(color="#a78bfa"))
+            fig_cmp.add_hline(y=ps, line_dash="dash", line_color="#4b5563",
+                              annotation_text=f"Diretta {ps:,.2f}", annotation_position="right")
+            fig_cmp.update_layout(template="plotly_dark", height=380,
+                                   title=f"Premio vs scadenza composta t1 — {tipo_cmp} su {sott_cmp}",
+                                   xaxis_title="Scadenza composta t1 (mesi)",
+                                   yaxis_title="Premio (€/MWh)")
+            st.plotly_chart(fig_cmp, use_container_width=True)
+
+            df_cmp = pd.DataFrame({"t1 (mesi)": mesi_grid,
+                                   "Premio composta (€/MWh)": [round(v, 4) for v in curve_cmp],
+                                   "Premio diretta (€/MWh)": round(ps, 4)})
+            st.dataframe(df_cmp, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta curva composta (CSV)",
+                df_cmp.to_csv(index=False).encode("utf-8"),
+                file_name=f"composta_{tipo_cmp.lower()}_{sott_cmp.lower()}_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Premio dell'opzione composta al variare della scadenza t1.",
+                key="csv_cmp",
+            )
+        st.caption("Uso pratico: la call su call e' l'estensione condizionata dell'hedge — paghi K1 solo se a t1 il mercato giustifica la copertura, altrimenti lasci scadere e hai speso solo il premio iniziale; il risparmio vs la diretta e' il prezzo dell'opzionalita'. Limiti: pricing Monte Carlo (20.000 path, seed fisso = deterministico), dinamica Black-76 driftless senza smile, vol e tassi costanti, esercizio europeo a t1.")
 
 
 # Footer
