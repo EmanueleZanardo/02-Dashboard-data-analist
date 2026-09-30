@@ -13,7 +13,8 @@ import pandas as pd
 
 APP = os.path.join(os.path.dirname(__file__), "..", "app.py")
 WANT = {"PROFILI_CARICO_TIPO", "profilo_carico_tipo", "shock_scenario",
-        "banner_demo", "generate_mock_hourly", "ottimizza_ricarica_ev"}
+        "banner_demo", "generate_mock_hourly", "ottimizza_ricarica_ev",
+        "generate_mock_zona", "calcola_spread_xb", "ZONE_XB"}
 
 tree = ast.parse(open(APP, encoding="utf-8").read())
 
@@ -134,6 +135,26 @@ check("ev energia negativa -> non valido", not ev(prezzi_ev, -5.0, 5.0)["valido"
 check("ev potenza zero -> non valido", not ev(prezzi_ev, 10.0, 0.0)["valido"])
 r5 = ev([100.0] * 24, 22.0, 11.0, 0, 0)
 check("ev prezzi piatti -> risparmio zero", r5["valido"] and abs(r5["risparmio_eur"]) < 1e-9)
+
+# --- calcola_spread_xb / generate_mock_zona ---
+xb = ns["calcola_spread_xb"]
+idx = pd.date_range("2026-01-01", periods=4, freq="h", tz="Europe/Zurich")
+r = xb(pd.Series([50.0, 60.0, 40.0, 70.0], index=idx),
+       pd.Series([60.0, 55.0, 40.0, 90.0], index=idx), 1.0)
+check("xb valido", r["valido"])
+check("xb valore arbitraggio = somma spread positivi",
+      abs(r["valore_totale_eur"] - 30.0) < 1e-9)
+check("xb spread medio", abs(r["spread_medio"] - 6.25) < 1e-9)
+check("xb serie vuota -> non valido", not xb(pd.Series(dtype=float), pd.Series(dtype=float))["valido"])
+check("xb capacita' zero -> non valido", not xb(
+    pd.Series([1.0, 2.0], index=idx[:2]), pd.Series([2.0, 3.0], index=idx[:2]), 0.0)["valido"])
+mz = ns["generate_mock_zona"]
+m1z = mz(__import__("datetime").date(2026, 3, 1), __import__("datetime").date(2026, 3, 7),
+         "🇮🇹 Italia Nord (IT-NORD)")
+m2z = mz(__import__("datetime").date(2026, 3, 1), __import__("datetime").date(2026, 3, 7),
+         "🇮🇹 Italia Nord (IT-NORD)")
+check("xb mock deterministico", m1z.equals(m2z) and len(m1z) == 168)
+check("xb zone registry 3 zone", len(ns["ZONE_XB"]) == 3)
 
 print(f"{checks} check / {failed} fail")
 sys.exit(1 if failed else 0)
