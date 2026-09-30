@@ -11387,6 +11387,129 @@ def calcola_chooser(forward, strike, mesi_scelta, mesi_scadenza, vol_pct, tasso_
     return out
 
 
+def calcola_forward_start(forward, alfa_pct, mesi_inizio, mesi_scadenza, vol_pct, tasso_pct):
+    """Premio di un'opzione FORWARD START europea sul forward energetico (forma chiusa).
+
+    La forward start scade a T2 ma la sua vita inizia a una data futura t1
+    (0 <= t1 <= T2): a t1 lo strike viene fissato in modo proporzionale al
+    prezzo di mercato, K = alfa * F(t1) (alfa = moneyness, tipicamente 100% =
+    ATM). Da t1 a T2 e' una vanilla europea Black-76 con strike fisso alfa *
+    F(t1). Nell'energia serve a comprare oggi un'assicurazione sul prezzo
+    FUTURO senza fissare lo strike a livelli correnti: es. un consumatore
+    che a gennaio vuole proteggere il Q4 ma non vuole ancorare lo strike
+    al forward di oggi, o un produttore che vuole una floor che parta
+    at-the-money solo dopo l'estate. Costa meno della vanilla con strike
+    fisso alfa * F(0) perche' rinuncia all'optionalita' sul periodo [0, t1]
+    (il premio decresce con t1).
+    Formula (forward driftless, vol costante, r = risk-free, tau = T2 - t1):
+      d1* = (-ln(alfa) + 0.5*sig^2*tau) / (sig*sqrt(tau)); d2* = d1* - sig*sqrt(tau)
+      call_fs = df(T2) * F * (N(d1*) - alfa*N(d2*))
+      put_fs  = df(T2) * F * (alfa*N(-d2*) - N(-d1*))
+    Derivazione: condizionando a F(t1), il payoff atteso e' il prezzo
+    Black-76 di una vanilla con forward F(t1) e strike alfa*F(t1), cioe'
+    F(t1)*(N(d1*) - alfa*N(d2*)); prendendo l'attesa su F(t1) (martingala,
+    E[F(t1)] = F, indipendenza degli incrementi) si ottiene la forma chiusa.
+    Ancore esatte: t1 = 0 -> vanilla Black-76 con strike alfa*F(0);
+    t1 = T2 -> premio 0 (nessuna vita residua); vol = 0 -> deterministico
+    df(T2)*F*max(1-alfa,0) per la call, df(T2)*F*max(alfa-1,0) per la put;
+    parita' call-put esatta: call_fs - put_fs = df(T2)*F*(1-alfa);
+    call_fs <= vanilla call con strike alfa*F (concavita' in F);
+    prob. risk-neutral di finire ITM: call -> N(-d2*), put -> N(d2*);
+    delta analitica: call -> df(T2)*(N(d1*) - alfa*N(d2*)) (coincide con
+    premio/F), put -> df(T2)*(alfa*N(-d2*) - N(-d1*)) (positiva: lo strike
+    scala con F, quindi la put forward start cresce con il forward).
+    NaN-safe: input non validi (F <= 0, alfa <= 0, t1 < 0, T2 <= 0,
+    t1 > T2, vol/tasso < 0, NaN, stringhe) -> dict neutro con valido = False.
+    Ritorna dict con: premio_call, premio_put, vanilla_call, vanilla_put
+    (vanilla Black-76 a T2 con strike alfa*F di confronto), diff_vs_vanilla
+    (vanilla - fs) per call e put, parita_diff (scostamento dalla parita'
+    esatta, ~0), prob_itm_call/put, delta_call/put, intrinseco_vol0_call/put,
+    strike_atteso (alfa*F), valido."""
+    from scipy.stats import norm as _norm
+
+    neutro = {"premio_call": float("nan"), "premio_put": float("nan"),
+              "vanilla_call": float("nan"), "vanilla_put": float("nan"),
+              "diff_vs_vanilla_call": float("nan"),
+              "diff_vs_vanilla_put": float("nan"),
+              "parita_diff": float("nan"),
+              "prob_itm_call": float("nan"), "prob_itm_put": float("nan"),
+              "delta_call": float("nan"), "delta_put": float("nan"),
+              "intrinseco_vol0_call": float("nan"),
+              "intrinseco_vol0_put": float("nan"),
+              "strike_atteso": float("nan"), "valido": False}
+    try:
+        F = float(forward); alfa = float(alfa_pct) / 100.0
+        t1 = float(mesi_inizio) / 12.0; T2 = float(mesi_scadenza) / 12.0
+        sig = float(vol_pct) / 100.0; r = float(tasso_pct) / 100.0
+    except (TypeError, ValueError):
+        return neutro
+    if not all(np.isfinite(v) for v in (F, alfa, t1, T2, sig, r)):
+        return neutro
+    if F <= 0 or alfa <= 0 or t1 < 0 or T2 <= 0 or t1 > T2:
+        return neutro
+    if sig < 0 or r < 0:
+        return neutro
+
+    df2 = float(np.exp(-r * T2))
+    tau = T2 - t1
+
+    def _b76(ff, kk, tt, cp):
+        # Black-76 scalare; cp True = call, False = put
+        dff = float(np.exp(-r * tt))
+        if tt <= 0.0 or sig <= 0.0:
+            intr = max(ff - kk, 0.0) if cp else max(kk - ff, 0.0)
+            return dff * intr
+        sqt = sig * np.sqrt(tt)
+        d1 = (np.log(ff / kk) + 0.5 * sig * sig * tt) / sqt
+        d2 = d1 - sqt
+        if cp:
+            return dff * (ff * _norm.cdf(d1) - kk * _norm.cdf(d2))
+        return dff * (kk * _norm.cdf(-d2) - ff * _norm.cdf(-d1))
+
+    K = alfa * F
+    van_c = _b76(F, K, T2, True)
+    van_p = _b76(F, K, T2, False)
+
+    if sig <= 0.0:
+        # deterministico: F(t1) = F, strike = alfa*F
+        pc = df2 * F * max(1.0 - alfa, 0.0)
+        pp = df2 * F * max(alfa - 1.0, 0.0)
+        prob_c = 1.0 if alfa < 1.0 else (0.5 if alfa == 1.0 else 0.0)
+        dc = df2 if alfa < 1.0 else 0.0
+        dp = df2 if alfa > 1.0 else 0.0
+    elif tau <= 0.0:
+        # t1 = T2 con vol > 0: opzione morta, nessun valore temporale
+        pc = pp = 0.0
+        prob_c = 1.0 if alfa < 1.0 else (0.5 if alfa == 1.0 else 0.0)
+        dc = df2 * (1.0 - alfa) if alfa < 1.0 else 0.0
+        dp = df2 * (alfa - 1.0) if alfa > 1.0 else 0.0
+    else:
+        sqtau = sig * np.sqrt(tau)
+        d1s = (-np.log(alfa) + 0.5 * sig * sig * tau) / sqtau
+        d2s = d1s - sqtau
+        nd1 = float(_norm.cdf(d1s)); nd2 = float(_norm.cdf(d2s))
+        nmd1 = 1.0 - nd1; nmd2 = 1.0 - nd2
+        pc = df2 * F * (nd1 - alfa * nd2)
+        pp = df2 * F * (alfa * nmd2 - nmd1)
+        prob_c = float(_norm.cdf(-d2s))
+        dc = df2 * (nd1 - alfa * nd2)
+        dp = df2 * (alfa * nmd2 - nmd1)
+    prob_p = 1.0 - prob_c
+
+    out = dict(neutro)
+    out.update({"valido": True, "premio_call": float(pc), "premio_put": float(pp),
+                "vanilla_call": float(van_c), "vanilla_put": float(van_p),
+                "diff_vs_vanilla_call": float(van_c - pc),
+                "diff_vs_vanilla_put": float(van_p - pp),
+                "parita_diff": float((pc - pp) - df2 * F * (1.0 - alfa)),
+                "prob_itm_call": float(prob_c), "prob_itm_put": float(prob_p),
+                "delta_call": float(dc), "delta_put": float(dp),
+                "intrinseco_vol0_call": float(df2 * F * max(1.0 - alfa, 0.0)),
+                "intrinseco_vol0_put": float(df2 * F * max(alfa - 1.0, 0.0)),
+                "strike_atteso": float(K)})
+    return out
+
+
 def render_kpi(title, value, col):
     col.markdown(f"<div class='metric-container'><div class='metric-label'>{title}</div><div class='metric-val'>{value}</div></div>", unsafe_allow_html=True)
 
@@ -12033,7 +12156,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -20701,6 +20824,133 @@ elif workspace == _('ws8'):
                     key="csv_cho",
                 )
             st.caption("Uso pratico: la chooser e' l'assicurazione sulla direzione prima di un evento noto — es. prima dell'asta di capacita' compri il diritto di scegliere tra protezione long (call) e short (put) una volta visto il prezzo. Risparmi rispetto allo straddle perche' eserciti una sola gamba, ma rinunci al payoff dell'altra se il mercato corre in quella direzione. Limiti: Rubinstein in forma chiusa su forward driftless, vol e tassi costanti, niente smile, scelta europea alla data t1.")
+
+    with tab107:
+        banner_demo("Opzione forward start: strike fissato al prezzo di mercato alla data di inizio, pricing in forma chiusa")
+        titolo_fws = edu("Opzione forward start", "Una FORWARD START scade a T2 ma inizia a una data futura t1: a t1 lo strike viene fissato come percentuale alfa del forward di mercato (alfa = 100% significa at-the-money). Comprate oggi protezione sul prezzo FUTURO senza ancorare lo strike ai livelli di oggi — es. un consumatore che a gennaio vuole coprire il Q4 ma teme che il forward corrente sia caro, o un produttore che vuole una floor che parta at-the-money dopo l'estate. Costa meno della vanilla con strike fisso perche' rinuncia all'optionalita' sul periodo prima di t1.")
+        st.markdown(f"**{titolo_fws}**: prezza la forward start europea sui forward energetici in forma chiusa — confronto con la vanilla a strike fisso, curva del premio al variare della data di inizio e della moneyness, delta e probabilita' di finire in-the-money.", unsafe_allow_html=True)
+
+        fwd_fws_def = float(prezzi.dropna().mean()) if len(prezzi.dropna()) else float("nan")
+        vol_fws_def = vol_relativa_annua(prezzi)
+        vol_fws_def = float(vol_fws_def) if np.isfinite(vol_fws_def) else 40.0
+
+        c1, c2 = st.columns(2)
+        with c1:
+            fwd_fws = st.number_input("Prezzo forward (€/MWh)", min_value=0.1,
+                                      value=fwd_fws_def if np.isfinite(fwd_fws_def) else 100.0,
+                                      step=1.0, key="fws_fwd",
+                                      help="Default = media del periodo selezionato.")
+        with c2:
+            alfa_fws = st.number_input("Moneyness strike alla data di inizio (%)", min_value=1.0,
+                                       max_value=300.0, value=100.0, step=1.0, key="fws_alfa",
+                                       help="100% = strike at-the-money al prezzo di mercato a t1. <100% = call piu' ITM / put piu' OTM.")
+        d1_, d2_, d3_ = st.columns(3)
+        with d1_:
+            mesi_inizio_fws = st.number_input("Data di inizio (mesi da oggi)", min_value=0, max_value=60,
+                                              value=6, step=1, key="fws_t1",
+                                              help="Quando lo strike viene fissato. 0 = parte subito (= vanilla).")
+        with d2_:
+            mesi_scad_fws = st.number_input("Scadenza (mesi da oggi)", min_value=1, max_value=60,
+                                            value=18, step=1, key="fws_t2",
+                                            help="Deve essere >= data di inizio.")
+        with d3_:
+            vol_fws = st.number_input("Volatilità annua (%)", min_value=0.0, max_value=300.0,
+                                      value=round(vol_fws_def, 1), step=1.0, key="fws_vol",
+                                      help="Default = vol realizzata annualizzata.")
+        e1, e2, e3 = st.columns(3)
+        with e1:
+            tasso_fws = st.number_input("Tasso risk-free (%)", min_value=0.0, max_value=20.0,
+                                        value=2.0, step=0.25, key="fws_r",
+                                        help="Tasso di attualizzazione.")
+        with e2:
+            tipo_fws = st.selectbox("Tipo opzione", ["Call (tetto/cap)", "Put (pavimento/floor)"],
+                                    key="fws_tipo",
+                                    help="Call = protezione contro i rialzi; Put = protezione contro i ribassi.")
+        with e3:
+            qta_fws = st.number_input("Quantità (MWh)", min_value=0.0, value=1000.0,
+                                      step=100.0, key="fws_qta",
+                                      help="Premio totale = premio × quantità.")
+
+        is_call_fws = tipo_fws.startswith("Call")
+        if int(mesi_inizio_fws) > int(mesi_scad_fws):
+            st.error("La data di inizio non può superare la scadenza.")
+        else:
+            ris_fws = calcola_forward_start(fwd_fws, alfa_fws, int(mesi_inizio_fws),
+                                            int(mesi_scad_fws), vol_fws, tasso_fws)
+            if ris_fws["valido"]:
+                pc_fws = ris_fws["premio_call"] if is_call_fws else ris_fws["premio_put"]
+                van_fws = ris_fws["vanilla_call"] if is_call_fws else ris_fws["vanilla_put"]
+                diff_fws = ris_fws["diff_vs_vanilla_call"] if is_call_fws else ris_fws["diff_vs_vanilla_put"]
+                prob_fws = ris_fws["prob_itm_call"] if is_call_fws else ris_fws["prob_itm_put"]
+                delta_fws = ris_fws["delta_call"] if is_call_fws else ris_fws["delta_put"]
+                f1, f2, f3 = st.columns(3)
+                render_kpi(f"Premio forward start {'call' if is_call_fws else 'put'} (€/MWh)", f"{pc_fws:,.3f}", f1)
+                render_kpi("Vanilla strike fisso (€/MWh)", f"{van_fws:,.3f}", f2)
+                render_kpi("Differenza vs vanilla", f"{diff_fws:,.3f} €/MWh", f3)
+                g1, g2 = st.columns(2)
+                render_kpi("Prob. ITM a scadenza", f"{100.0 * prob_fws:.1f}%", g1)
+                render_kpi("Delta", f"{delta_fws:+.3f}", g2)
+                st.caption(f"Strike atteso a t1: {ris_fws['strike_atteso']:,.2f} €/MWh ({alfa_fws:.0f}% del forward) · "
+                           f"premio posizione: {pc_fws * qta_fws:+,.0f} € totali · "
+                           f"parita' call-put verificata (scostamento {ris_fws['parita_diff']:.2e})")
+
+                # curva: premio vs data di inizio
+                t1_grid = np.linspace(0.0, float(mesi_scad_fws), 41)
+                prem_c_fws, prem_p_fws = [], []
+                for tg in t1_grid:
+                    rr_ = calcola_forward_start(fwd_fws, alfa_fws, float(tg),
+                                                int(mesi_scad_fws), vol_fws, tasso_fws)
+                    prem_c_fws.append(rr_["premio_call"] if rr_["valido"] else float("nan"))
+                    prem_p_fws.append(rr_["premio_put"] if rr_["valido"] else float("nan"))
+                fig_fws = go.Figure()
+                fig_fws.add_scatter(x=t1_grid, y=prem_c_fws, mode="lines", name="Call forward start",
+                                    line=dict(color="#22d3ee", width=2.5))
+                fig_fws.add_scatter(x=t1_grid, y=prem_p_fws, mode="lines", name="Put forward start",
+                                    line=dict(color="#f472b6", width=2.5))
+                fig_fws.add_hline(y=ris_fws["vanilla_call"], line_dash="dash", line_color="#22d3ee",
+                                  annotation_text="Vanilla call", annotation_position="top left")
+                fig_fws.add_hline(y=ris_fws["vanilla_put"], line_dash="dash", line_color="#f472b6",
+                                  annotation_text="Vanilla put", annotation_position="bottom left")
+                fig_fws.update_layout(template="plotly_dark", height=400,
+                                       title="Premio forward start vs data di inizio",
+                                       xaxis_title="Data di inizio (mesi da oggi)",
+                                       yaxis_title="Premio (€/MWh)")
+                st.plotly_chart(fig_fws, use_container_width=True)
+
+                # curva: premio vs moneyness alfa
+                alfa_grid = np.linspace(70.0, 130.0, 61)
+                prem_a_c, prem_a_p = [], []
+                for ag in alfa_grid:
+                    rr_ = calcola_forward_start(fwd_fws, float(ag), int(mesi_inizio_fws),
+                                                int(mesi_scad_fws), vol_fws, tasso_fws)
+                    prem_a_c.append(rr_["premio_call"] if rr_["valido"] else float("nan"))
+                    prem_a_p.append(rr_["premio_put"] if rr_["valido"] else float("nan"))
+                fig_fa = go.Figure()
+                fig_fa.add_scatter(x=alfa_grid, y=prem_a_c, mode="lines", name="Call",
+                                   line=dict(color="#22d3ee", width=2.5))
+                fig_fa.add_scatter(x=alfa_grid, y=prem_a_p, mode="lines", name="Put",
+                                   line=dict(color="#f472b6", width=2.5))
+                fig_fa.add_vline(x=100.0, line_dash="dot", line_color="#4b5563",
+                                 annotation_text="ATM", annotation_position="top")
+                fig_fa.update_layout(template="plotly_dark", height=340,
+                                      title="Premio forward start vs moneyness dello strike a t1",
+                                      xaxis_title="Strike a t1 (% del forward di mercato)",
+                                      yaxis_title="Premio (€/MWh)")
+                st.plotly_chart(fig_fa, use_container_width=True)
+
+                df_fws = pd.DataFrame({"Data di inizio (mesi)": [round(v, 2) for v in t1_grid],
+                                       "Premio call (€/MWh)": [round(v, 4) for v in prem_c_fws],
+                                       "Premio put (€/MWh)": [round(v, 4) for v in prem_p_fws]})
+                st.dataframe(df_fws, use_container_width=True, hide_index=True)
+                st.download_button(
+                    "⬇️ Esporta curva forward start (CSV)",
+                    df_fws.to_csv(index=False).encode("utf-8"),
+                    file_name=f"forwardstart_{int(mesi_inizio_fws)}m_{int(mesi_scad_fws)}m_{alfa_fws:.0f}pct_{d0}_{d1}.csv",
+                    mime="text/csv",
+                    help="Premi call/put forward start al variare della data di inizio.",
+                    key="csv_fws",
+                )
+            st.caption("Uso pratico: la forward start e' l'assicurazione sul prezzo futuro senza fissare lo strike oggi — es. un consumatore che copre il prossimo inverno: se a t1 il forward e' sceso, lo strike scende con lui (e viceversa). Il costo e' minore della vanilla a strike fisso perche' non paghi l'optionalita' prima di t1, ma se il mercato corre prima di t1 lo strike ti segue al rialzo. Limiti: forward driftless lognormale, vol e tassi costanti, niente smile, fissazione europea a t1.")
 
 # Footer
 
