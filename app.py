@@ -11013,6 +11013,95 @@ def calcola_barriera(tipo, struttura, direzione, barriera, forward, strike,
     return out
 
 
+def calcola_lookback(tipo, strike_type, forward, strike, anni, vol_pct, tasso_pct,
+                     n_fixing=30, n_paths=20000, seed=42):
+    """Premio di un'opzione LOOKBACK sul forward dell'energia (Monte Carlo Black-76).
+
+    Strike FISSO: la call paga max(max_fix - K, 0), la put paga max(K - min_fix, 0).
+    Strike FLOTTANTE: la call paga max(S_T - min_fix, 0), la put paga
+    max(max_fix - S_T, 0) — lo strike e' il minimo/massimo realizzato.
+    Pricing Monte Carlo con seed fisso (deterministico, coerente con i grafici
+    seedati della dashboard) e variabili antitetiche; dinamica risk-neutral
+    driftless sul forward, sconto al tasso risk-free. Le date di fixing sono
+    t = T*i/n per i = 1..n (esclude t = 0): con n_fixing = 1 lo strike fisso
+    coincide ESATTAMENTE con la vanilla Black-76 e lo strike flottante vale 0
+    (ancora di coerenza usata nei test).
+    Casi limite: T = 0 o vol = 0 -> deterministico (intrinseco scontato per lo
+    strike fisso, 0 per lo strike flottante). NaN-safe: input non validi ->
+    dict neutro con valido = False, nessuna eccezione.
+    Ritorna dict con: premio, premio_vanilla (strike fisso; nan se flottante),
+    extra_vs_vanilla, prob_esercizio, delta (via bump sul forward, stesso seed),
+    intrinseco, valido."""
+
+
+    neutro = {"premio": float("nan"), "premio_vanilla": float("nan"),
+              "extra_vs_vanilla": float("nan"), "prob_esercizio": float("nan"),
+              "delta": float("nan"), "intrinseco": float("nan"),
+              "valido": False}
+    try:
+        tp = str(tipo).strip().lower()
+        st_ = str(strike_type).strip().lower()
+        F = float(forward); K = float(strike); T = float(anni)
+        sig = float(vol_pct) / 100.0; r = float(tasso_pct) / 100.0
+        nfx = int(n_fixing); npt = int(n_paths); sd = int(seed)
+    except (TypeError, ValueError):
+        return neutro
+    if not all(np.isfinite(v) for v in (F, K, T, sig, r)):
+        return neutro
+    if tp not in ("call", "put") or st_ not in ("fisso", "flottante"):
+        return neutro
+    if F <= 0 or K <= 0 or T < 0 or sig < 0 or r < 0:
+        return neutro
+    if nfx < 1 or npt < 100:
+        return neutro
+    is_call = (tp == "call")
+    fisso = (st_ == "fisso")
+    df = float(np.exp(-r * T))
+    van = calcola_black76(F, K, T, sig * 100.0, r * 100.0)
+    vanilla = float(van["call"] if is_call else van["put"])
+    out = dict(neutro)
+    out.update({"valido": True, "premio_vanilla": vanilla})
+    if fisso:
+        intr = max(F - K, 0.0) if is_call else max(K - F, 0.0)
+    else:
+        intr = 0.0
+    out["intrinseco"] = float(intr)
+
+    def _prezzo(ff):
+        if T == 0.0 or sig == 0.0:
+            if fisso:
+                pay = max(ff - K, 0.0) if is_call else max(K - ff, 0.0)
+            else:
+                pay = 0.0
+            return float(pay * df), (1.0 if pay > 0 else 0.0)
+        rng = np.random.default_rng(sd)
+        nh = npt // 2
+        zh = rng.standard_normal((nh, nfx))
+        z = np.vstack([zh, -zh])  # antitetiche: (2*nh, nfx)
+        dt = T / nfx
+        drift = -0.5 * sig * sig * dt
+        vola = sig * float(np.sqrt(dt))
+        s = np.exp(np.log(ff) + np.cumsum(drift + vola * z, axis=1))
+        s_min = s.min(axis=1)
+        s_max = s.max(axis=1)
+        s_t = s[:, -1]
+        if fisso:
+            pay = np.maximum(s_max - K, 0.0) if is_call else np.maximum(K - s_min, 0.0)
+        else:
+            pay = np.maximum(s_t - s_min, 0.0) if is_call else np.maximum(s_max - s_t, 0.0)
+        return float(df * pay.mean()), float((pay > 0).mean())
+
+    p0, pr0 = _prezzo(F)
+    out["premio"] = p0
+    out["prob_esercizio"] = pr0
+    out["extra_vs_vanilla"] = float(p0 - vanilla) if fisso else float("nan")
+    h = 0.01
+    p_up, _ = _prezzo(F * (1 + h))
+    p_dn, _ = _prezzo(F * (1 - h))
+    out["delta"] = float((p_up - p_dn) / (2 * F * h))
+    return out
+
+
 def render_kpi(title, value, col):
     col.markdown(f"<div class='metric-container'><div class='metric-label'>{title}</div><div class='metric-val'>{value}</div></div>", unsafe_allow_html=True)
 
@@ -11659,7 +11748,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -19872,6 +19961,111 @@ elif workspace == _('ws8'):
                 key="csv_barr",
             )
         st.caption("Uso pratico: una put down-and-out ATM costa sensibilmente meno della vanilla e copre dal crollo prezzi finche' il mercato non scende sotto la barriera — ideale per produttori che vogliono una floor economica; la knock-in e' la gamba speculativa sugli scenari estremi. Limiti: monitoraggio CONTINUO della barriera (nella realta' e' spesso giornaliero: il prezzo vero e' un po' piu' alto per le knock-out), nessun rebate al knock, vol e tassi costanti, formula Black-76 senza smile.")
+
+
+    with tab103:
+        banner_demo("Opzione lookback: payoff sul massimo/minimo realizzato con pricing Monte Carlo (Black-76)")
+        titolo_lkb = edu("Opzione lookback", "Un'opzione LOOKBACK paga sul MASSIMO (call) o sul MINIMO (put) del prezzo osservato durante la vita dell'opzione, non solo sul prezzo a scadenza. Nell'energia serve a catturare i picchi: una call lookback a strike fisso paga la differenza tra il massimo raggiunto e lo strike, quindi monetizza anche uno spike breve che a scadenza sarebbe gia' rientrato. Costa piu' della vanilla equivalente proprio perche' il massimo e' sempre maggiore o uguale al prezzo finale. Lo strike puo' essere fisso (K scelto da te) o flottante (pari al minimo/massimo realizzato: paghi solo la corsa dal minimo al prezzo finale).")
+        st.markdown(f"**{titolo_lkb}**: prezza lookback a strike fisso o flottante sui forward energetici e quantifica il premio extra rispetto alla vanilla.", unsafe_allow_html=True)
+
+        fwd_lkb_def = float(prezzi.dropna().mean()) if len(prezzi.dropna()) else float("nan")
+        vol_lkb_def = vol_relativa_annua(prezzi)
+        vol_lkb_def = float(vol_lkb_def) if np.isfinite(vol_lkb_def) else 40.0
+
+        l1, l2 = st.columns(2)
+        with l1:
+            tipo_lkb = st.selectbox("Tipo di opzione", ["Call", "Put"], key="lkb_tipo",
+                                    help="Call: paga sul massimo realizzato. Put: paga sul minimo realizzato.")
+        with l2:
+            strk_lkb = st.selectbox("Strike", ["Fisso", "Flottante"], key="lkb_strk",
+                                    help="Fisso: strike K scelto da te (confronto diretto con la vanilla). Flottante: strike pari al minimo (call) o massimo (put) realizzato.")
+        l3, l4, l5 = st.columns(3)
+        with l3:
+            fwd_lkb = st.number_input("Prezzo forward (€/MWh)", min_value=0.1,
+                                      value=fwd_lkb_def if np.isfinite(fwd_lkb_def) else 100.0,
+                                      step=1.0, key="lkb_fwd",
+                                      help="Default = media del periodo selezionato.")
+        with l4:
+            k_lkb = st.number_input("Strike K (€/MWh)", min_value=0.1,
+                                    value=fwd_lkb_def if np.isfinite(fwd_lkb_def) else 100.0,
+                                    step=1.0, key="lkb_k",
+                                    disabled=(strk_lkb == "Flottante"),
+                                    help="Solo per strike fisso: con strike flottante e' ignorato.")
+        with l5:
+            mesi_lkb = st.number_input("Scadenza (mesi)", min_value=1, max_value=60, value=12,
+                                       step=1, key="lkb_mesi",
+                                       help="Orizzonte dell'opzione.")
+        l6, l7, l8 = st.columns(3)
+        with l6:
+            vol_lkb = st.number_input("Volatilità annua (%)", min_value=0.0, max_value=300.0,
+                                      value=round(vol_lkb_def, 1), step=1.0, key="lkb_vol",
+                                      help="Default = vol realizzata annualizzata.")
+        with l7:
+            tasso_lkb = st.number_input("Tasso risk-free (%)", min_value=0.0, max_value=20.0,
+                                        value=2.0, step=0.25, key="lkb_r",
+                                        help="Tasso di attualizzazione.")
+        with l8:
+            nfx_lkb = st.number_input("Fixing (n. osservazioni)", min_value=1, max_value=252,
+                                      value=30, step=1, key="lkb_nfx",
+                                      help="Date di osservazione del massimo/minimo (1 = solo a scadenza, 252 = giornaliere). Piu' fixing = premio piu' alto per lo strike fisso.")
+        qta_lkb = st.number_input("Quantità (MWh)", min_value=0.0, value=1000.0,
+                                  step=100.0, key="lkb_qta",
+                                  help="Volume della posizione: premio totale = premio × quantita'.")
+
+        ris_lkb = calcola_lookback(tipo_lkb.lower(), strk_lkb.lower(), fwd_lkb, k_lkb,
+                                   mesi_lkb / 12.0, vol_lkb, tasso_lkb,
+                                   n_fixing=int(nfx_lkb))
+        if ris_lkb["valido"]:
+            pl, pv = ris_lkb["premio"], ris_lkb["premio_vanilla"]
+            c1, c2, c3 = st.columns(3)
+            render_kpi(f"Premio lookback {strk_lkb.lower()} (€/MWh)", f"{pl:,.3f}", c1)
+            if strk_lkb == "Fisso":
+                render_kpi("Premio Vanilla (€/MWh)", f"{pv:,.3f}", c2)
+                render_kpi("Extra vs vanilla", f"{ris_lkb['extra_vs_vanilla']:+,.3f} €/MWh", c3)
+            else:
+                render_kpi("Premio Vanilla (€/MWh)", "—", c2)
+                render_kpi("Extra vs vanilla", "—", c3)
+            c4, c5 = st.columns(2)
+            render_kpi("Probabilità di esercizio", f"{100.0 * ris_lkb['prob_esercizio']:.1f}%", c4)
+            render_kpi("Delta", f"{ris_lkb['delta']:+.3f}", c5)
+            st.caption(f"Intrinseco: {ris_lkb['intrinseco']:,.2f} €/MWh · "
+                       f"Fixing: {int(nfx_lkb)} · "
+                       f"Premio posizione: {pl * qta_lkb:+,.0f} € totali")
+
+            # curva: premio vs numero di fixing (convergenza discreto -> continuo)
+            nfx_grid = [1, 2, 5, 10, 21, 63, 126, 252]
+            curve_lkb = []
+            for nf in nfx_grid:
+                rc = calcola_lookback(tipo_lkb.lower(), strk_lkb.lower(), fwd_lkb, k_lkb,
+                                      mesi_lkb / 12.0, vol_lkb, tasso_lkb,
+                                      n_fixing=nf, n_paths=8000)
+                curve_lkb.append(rc["premio"] if rc["valido"] else float("nan"))
+            fig_lkb = go.Figure()
+            fig_lkb.add_scatter(x=nfx_grid, y=curve_lkb, mode="lines+markers",
+                                name=f"Lookback {strk_lkb.lower()}", line=dict(color="#38bdf8"))
+            if strk_lkb == "Fisso":
+                fig_lkb.add_hline(y=pv, line_dash="dash", line_color="#4b5563",
+                                  annotation_text=f"Vanilla {pv:,.2f}", annotation_position="right")
+            fig_lkb.update_layout(template="plotly_dark", height=380,
+                                   title=f"Premio vs n. fixing — {tipo_lkb} {strk_lkb.lower()}",
+                                   xaxis_title="Numero di fixing", yaxis_title="Premio (€/MWh)",
+                                   xaxis_type="log")
+            st.plotly_chart(fig_lkb, use_container_width=True)
+
+            df_lkb = pd.DataFrame({"Fixing": nfx_grid,
+                                   "Premio lookback (€/MWh)": [round(v, 4) for v in curve_lkb]})
+            if strk_lkb == "Fisso":
+                df_lkb["Premio vanilla (€/MWh)"] = round(pv, 4)
+            st.dataframe(df_lkb, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta curva lookback (CSV)",
+                df_lkb.to_csv(index=False).encode("utf-8"),
+                file_name=f"lookback_{tipo_lkb.lower()}_{strk_lkb.lower()}_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Premio lookback al variare del numero di fixing.",
+                key="csv_lkb",
+            )
+        st.caption("Uso pratico: la call lookback a strike fisso e' la copertura ideale contro gli spike — paga il massimo toccato anche se a scadenza il prezzo e' rientrato; lo strike flottante costa meno del fisso ATM ma garantisce di comprare sempre al minimo (call) o vendere al massimo (put) del periodo. Limiti: pricing Monte Carlo (20.000 path, seed fisso = deterministico), fixing discreti equidistanti escluso t=0, vol e tassi costanti, formula Black-76 senza smile.")
 
 
 # Footer
