@@ -14,7 +14,8 @@ import pandas as pd
 APP = os.path.join(os.path.dirname(__file__), "..", "app.py")
 WANT = {"PROFILI_CARICO_TIPO", "profilo_carico_tipo", "shock_scenario",
         "banner_demo", "generate_mock_hourly", "ottimizza_ricarica_ev",
-        "generate_mock_zona", "calcola_spread_xb", "ZONE_XB"}
+        "generate_mock_zona", "calcola_spread_xb", "ZONE_XB",
+        "generate_mock_gas", "calcola_stoccaggio_gas"}
 
 tree = ast.parse(open(APP, encoding="utf-8").read())
 
@@ -155,6 +156,38 @@ m2z = mz(__import__("datetime").date(2026, 3, 1), __import__("datetime").date(20
          "🇮🇹 Italia Nord (IT-NORD)")
 check("xb mock deterministico", m1z.equals(m2z) and len(m1z) == 168)
 check("xb zone registry 3 zone", len(ns["ZONE_XB"]) == 3)
+
+# --- calcola_stoccaggio_gas / generate_mock_gas ---
+stocc = ns["calcola_stoccaggio_gas"]
+mgas = ns["generate_mock_gas"]
+
+
+def _sg(prezzi):
+    idx = pd.date_range("2026-01-01", periods=len(prezzi), freq="D", tz="Europe/Zurich")
+    return pd.Series(prezzi, index=idx, dtype=float)
+
+
+r = stocc(_sg([10.0, 50.0, 10.0, 50.0]), 10.0, 10.0, 10.0,
+          costo_inj_eur_mwh=0.0, costo_wd_eur_mwh=0.0,
+          inv_iniziale_pct=0.0, inv_finale_pct=0.0)
+check("sg valido", r["valido"])
+check("sg valore 800", abs(r["valore_intrinseco_eur"] - 800.0) < 1e-6)
+check("sg 2 cicli", abs(r["cicli_equivalenti"] - 2.0) < 1e-9)
+r = stocc(_sg([50.0, 10.0]), 10.0, 10.0, 10.0,
+          costo_inj_eur_mwh=0.0, costo_wd_eur_mwh=0.0,
+          inv_iniziale_pct=0.0, inv_finale_pct=0.0)
+check("sg discesa senza stock -> 0", r["valido"] and abs(r["valore_intrinseco_eur"]) < 1e-6)
+r = stocc(_sg([50.0, 10.0]), 10.0, 10.0, 10.0,
+          costo_inj_eur_mwh=0.0, costo_wd_eur_mwh=0.0,
+          inv_iniziale_pct=100.0, inv_finale_pct=0.0)
+check("sg stock pieno -> 500", r["valido"] and abs(r["valore_intrinseco_eur"] - 500.0) < 1e-6)
+check("sg cap zero -> invalido", not stocc(_sg([10.0, 50.0]), 0.0, 5.0, 5.0)["valido"])
+check("sg 1 giorno -> invalido", not stocc(_sg([10.0]), 10.0, 5.0, 5.0)["valido"])
+gm1 = mgas(__import__("datetime").date(2026, 1, 1), __import__("datetime").date(2026, 12, 31))
+gm2 = mgas(__import__("datetime").date(2026, 1, 1), __import__("datetime").date(2026, 12, 31))
+check("sg mock deterministico", gm1.equals(gm2) and len(gm1) == 365)
+check("sg mock inverno > estate",
+      gm1[gm1.index.month == 1].mean() > gm1[gm1.index.month == 7].mean() + 5.0)
 
 print(f"{checks} check / {failed} fail")
 sys.exit(1 if failed else 0)
