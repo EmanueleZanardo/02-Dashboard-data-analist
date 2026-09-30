@@ -2945,6 +2945,180 @@ def calcola_tolling(prezzi, capacita_mw, heat_rate, prezzo_gas_mwh_th,
             "df_gas": df_gas, "df_hr": df_hr}
 
 
+def ottimizza_dispatch(spark, costo_avvio=0.0, costo_fisso_orario=0.0,
+                       min_up=1, min_down=1):
+    """Dispatch orario ottimale di una centrale termoelettrica con costi di
+    avviamento e tempi minimi di marcia/fermo (unit commitment semplificato),
+    via programmazione dinamica (tab 'Dispatch ottimale').
+
+    La centrale produce 1 MW quando e' ON: margine orario = spark_h -
+    costo_fisso_orario (€/MWh). Ogni avviamento costa `costo_avvio` (€/MW).
+    Dopo un avviamento la centrale deve restare ON almeno `min_up` ore
+    consecutive; dopo uno spegnimento deve restare OFF almeno `min_down` ore
+    consecutive. All'inizio dell'orizzonte la centrale si considera spenta da
+    prima (puo' avviarsi subito, anche all'ora 0); il tratto OFF finale, fuori
+    orizzonte, e' libero.
+
+    spark: Serie/array di spark spread orari (€/MWh per MW di capacita').
+    I NaN vengono scartati; 'index' e' l'indice pulito corrispondente.
+
+    Stati DP all'ora h: ON da k ore (k = 1..min_up, con min_up = 'almeno
+    min_up'), OFF da k ore (k = 1..min_down, con min_down = 'almeno min_down').
+    Complessita' O(n * (min_up + min_down)); backtracking per lo schedule.
+
+    Ritorna dict con 'valore' (€/MW netti sul periodo), 'valore_frictionless'
+    (€/MW = somma dei max(0, spark): limite senza vincoli tecnici),
+    'costo_vincoli' (€/MW = frictionless - valore, sempre >= 0), 'ore_on',
+    'avviamenti', 'fattore_utilizzo' (%), 'margine_medio_on' (€/MWh sulle ore
+    ON, NaN se mai ON), 'schedule' (np.array bool, True = ON), 'spark'
+    (np.array pulito), 'index' (pd.Index pulito), 'n_ore'.
+
+    Con costo_avvio = 0, costo_fisso_orario = 0, min_up = min_down = 1 il
+    risultato coincide con la regola greedy del tab Tolling
+    (somma dei max(0, spark)); in quel caso (ogni pattern e' ammissibile) il
+    valore ottimizzato e' >= della stima di calcola_tolling, che conta gli
+    avviamenti della regola greedy senza evitarli.
+
+    NaN-safe: serie vuota/tutta-NaN o parametri non validi (costo_avvio < 0,
+    costo_fisso_orario < 0, min_up < 1, min_down < 1 o non interi) -> dict
+    neutro con valore 0 e schedule vuoto.
+    """
+    neutro = {"valore": 0.0, "valore_frictionless": 0.0, "costo_vincoli": 0.0,
+              "ore_on": 0, "avviamenti": 0, "fattore_utilizzo": 0.0,
+              "margine_medio_on": float("nan"),
+              "schedule": np.array([], dtype=bool),
+              "spark": np.array([], dtype=float),
+              "index": pd.Index([]), "n_ore": 0}
+    try:
+        serie = pd.Series(spark).dropna()
+        s = np.asarray(serie, dtype=float)
+        ca = float(costo_avvio)
+        cf = float(costo_fisso_orario)
+        mu = int(min_up)
+        md = int(min_down)
+    except (TypeError, ValueError):
+        return dict(neutro)
+    if (s.size == 0 or ca < 0 or cf < 0 or mu < 1 or md < 1
+            or float(mu) != float(min_up) or float(md) != float(min_down)):
+        return dict(neutro)
+    n = s.size
+    mu = min(mu, n, 720)
+    md = min(md, n, 720)
+    NEG = -1e18
+    # on[h, k-1]: ON da k ore (k=mu -> almeno mu); off[h, k-1]: OFF da k ore
+    on = np.full((n, mu), NEG)
+    off = np.full((n, md), NEG)
+    # parent: on1: -1 iniziale | -2 prosecuzione (mu==1) | j>=0 indice off di partenza
+    par_on1 = np.full(n, -9, dtype=np.int64)
+    par_onmu = np.zeros(n, dtype=np.int64)     # 0 da on[mu-1], 1 da on[mu]
+    # parent: off1: -1 iniziale | -2 prosecuzione (md==1) | -3 spegnimento
+    par_off1 = np.full(n, -9, dtype=np.int64)
+    par_offmd = np.zeros(n, dtype=np.int64)    # 0 da off[md-1], 1 da off[md]
+    for h in range(n):
+        sh = s[h] - cf
+        if h == 0:
+            on[h, 0] = sh - ca          # avviamento immediato consentito
+            par_on1[h] = -1
+            off[h, md - 1] = 0.0        # spenta da prima dell'orizzonte
+            par_off1[h] = -1
+            continue
+        on_p, off_p = on[h - 1], off[h - 1]
+        # ON k=1: avviamento solo dopo almeno md ore OFF (o prosecuzione se mu==1)
+        if off_p[md - 1] > NEG / 2:
+            best = off_p[md - 1] + sh - ca
+            pj = md - 1
+        else:
+            best, pj = NEG, md - 1
+        if mu == 1 and on_p[0] + sh > best:
+            best = on_p[0] + sh
+            pj = -2
+        on[h, 0] = best
+        par_on1[h] = pj
+        # ON 1<k<mu: prosecuzione obbligata
+        for k in range(2, mu):
+            if on_p[k - 2] > NEG / 2:
+                on[h, k - 1] = on_p[k - 2] + sh
+        # ON k=mu (capped): prosecuzione dal migliore dei due
+        if mu > 1:
+            a, b = on_p[mu - 2], on_p[mu - 1]
+            if a >= b:
+                on[h, mu - 1] = a + sh
+                par_onmu[h] = 0
+            else:
+                on[h, mu - 1] = b + sh
+                par_onmu[h] = 1
+        # OFF k=1: spegnimento (solo dopo almeno mu ore ON) o prosecuzione
+        if md == 1:
+            cand = []
+            if on_p[mu - 1] > NEG / 2:
+                cand.append((on_p[mu - 1], -3))
+            if off_p[0] > NEG / 2:
+                cand.append((off_p[0], -2))
+            if cand:
+                off[h, 0], par_off1[h] = max(cand, key=lambda t: t[0])
+        elif on_p[mu - 1] > NEG / 2:
+            off[h, 0] = on_p[mu - 1]
+            par_off1[h] = -3
+        # OFF 1<k<md: prosecuzione obbligata
+        for k in range(2, md):
+            if off_p[k - 2] > NEG / 2:
+                off[h, k - 1] = off_p[k - 2]
+        # OFF k=md (capped): prosecuzione dal migliore dei due
+        if md > 1:
+            a, b = off_p[md - 2], off_p[md - 1]
+            if a >= b:
+                off[h, md - 1] = a
+                par_offmd[h] = 0
+            else:
+                off[h, md - 1] = b
+                par_offmd[h] = 1
+    # miglior stato finale + backtracking
+    fin_on = int(np.argmax(on[n - 1]))
+    fin_off = int(np.argmax(off[n - 1]))
+    if on[n - 1, fin_on] >= off[n - 1, fin_off]:
+        stato, k = "on", fin_on + 1
+    else:
+        stato, k = "off", fin_off + 1
+    sched = np.zeros(n, dtype=bool)
+    for h in range(n - 1, -1, -1):
+        sched[h] = (stato == "on")
+        if h == 0:
+            break
+        if stato == "on":
+            if k == 1:
+                p = par_on1[h]
+                if p == -2:
+                    stato, k = "on", 1
+                else:
+                    stato, k = "off", int(p) + 1
+            elif k < mu:
+                stato, k = "on", k - 1
+            else:
+                stato, k = ("on", mu - 1) if par_onmu[h] == 0 else ("on", mu)
+        else:
+            if k == 1:
+                p = par_off1[h]
+                if p == -2:
+                    stato, k = "off", 1
+                else:
+                    stato, k = "on", mu
+            elif k < md:
+                stato, k = "off", k - 1
+            else:
+                stato, k = ("off", md - 1) if par_offmd[h] == 0 else ("off", md)
+    ore_on = int(sched.sum())
+    avv = int(sched[0]) + int(np.sum(sched[1:] & ~sched[:-1]))
+    valore = float(np.sum(np.where(sched, s - cf, 0.0)) - avv * ca)
+    frictionless = float(np.sum(np.maximum(s, 0.0)))
+    return {"valore": valore, "valore_frictionless": frictionless,
+            "costo_vincoli": frictionless - valore,
+            "ore_on": ore_on, "avviamenti": avv,
+            "fattore_utilizzo": ore_on / n * 100.0,
+            "margine_medio_on": (float(np.mean(s[sched]) - cf)
+                                 if ore_on else float("nan")),
+            "schedule": sched, "spark": s, "index": serie.index, "n_ore": n}
+
+
 PROFILI_CARICO_TIPO = {
     "Industriale 3 turni": [0.85] * 24,
     "Uffici (lun-ven 8-19)": [0.06, 0.05, 0.05, 0.05, 0.05, 0.06, 0.15, 0.35, 0.70, 0.95,
@@ -10704,7 +10878,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -17957,7 +18131,134 @@ elif workspace == _('ws8'):
                 help="Premio Margrabe per una griglia di correlazioni, con i parametri impostati.",
                 key="csv_margrabe",
             )
-        st.caption("Uso pratico: il proprietario di una CCGT compra questa opzione per garantirsi un margine minimo senza impegnare la centrale; un trader la vende se crede che power e gas restino correlati. Confronta il premio con il margine del tolling agreement (tab Tolling): l'opzione sullo spark spread e' il tolling 'puro' senza costi di avviamento ne' vincoli tecnici.")
+    with tab95:
+        banner_demo("Dispatch orario ottimale di una centrale termoelettrica con costi di avviamento e tempi minimi di marcia/fermo")
+        titolo_dc = edu("Dispatch ottimale (unit commitment)", "Nella REALTA' una centrale non si accende e spegne gratis ogni ora: ogni AVVIAMENTO costa (combustibile + usura) e dopo l'avviamento la centrale deve restare accesa almeno MIN_UP ore, dopo lo spegnimento deve restare spenta almeno MIN_DOWN ore. La regola greedy del tab Tolling (acceso se spark > 0) in questo caso NON e' ottimale: lo schedule migliore si trova con la PROGRAMMAZIONE DINAMICA, che valuta tutti gli schedule ammissibili. Il COSTO DEI VINCOLI e' quanto perdi rispetto all'ideale senza vincoli tecnici: e' il prezzo della rigidita' della macchina.")
+        st.markdown(titolo_dc, unsafe_allow_html=True)
+
+        dc1, dc2, dc3, dc4 = st.columns(4)
+        with dc1:
+            dc_cap = st.number_input("Capacita' (MW)", min_value=0.0, value=100.0, step=10.0, key="dc_cap",
+                                     help="Potenza elettrica nominale della centrale.")
+        with dc2:
+            dc_gas = st.number_input("Prezzo gas (€/MWh th)", min_value=0.0, value=35.0, step=1.0, key="dc_gas",
+                                     help="Prezzo del gas (TTF).")
+        with dc3:
+            dc_hr = st.number_input("Heat rate (MWh th / MWh e)", min_value=0.1, value=2.0, step=0.1, key="dc_hr",
+                                    help="Consumo di gas per MWh elettrico: 2.0 = efficienza ~50% (CCGT).")
+        with dc4:
+            dc_vom = st.number_input("VOM (€/MWh)", min_value=0.0, value=3.0, step=0.5, key="dc_vom",
+                                     help="Costi variabili di O&M per MWh prodotto.")
+        dc5, dc6, dc7 = st.columns(3)
+        with dc5:
+            dc_co2 = st.number_input("Costo CO2 (€/MWh)", min_value=0.0, value=15.0, step=1.0, key="dc_co2",
+                                     help="Costo delle quote CO2 per MWh elettrico prodotto.")
+        with dc6:
+            dc_ca = st.number_input("Costo avviamento (€/MW)", min_value=0.0, value=50.0, step=5.0, key="dc_ca",
+                                    help="Costo di un avviamento per MW (combustibile + usura). Tipico CCGT: 30-80 €/MW.")
+        with dc7:
+            dc_cf = st.number_input("Costo fisso orario (€/MW/h)", min_value=0.0, value=2.0, step=0.5, key="dc_cf",
+                                    help="Costo no-load: tenere la centrale accesa un'ora senza margine.")
+        dcs1, dcs2 = st.columns(2)
+        with dcs1:
+            dc_mu = st.slider("Min up (ore ON minime dopo avviamento)", min_value=1, max_value=48, value=4, step=1, key="dc_mu",
+                              help="Dopo un avviamento la centrale deve restare accesa almeno queste ore.")
+        with dcs2:
+            dc_md = st.slider("Min down (ore OFF minime dopo spegnimento)", min_value=1, max_value=48, value=2, step=1, key="dc_md",
+                              help="Dopo uno spegnimento la centrale deve restare spenta almeno queste ore.")
+
+        spark_dc = (prezzi - dc_hr * dc_gas - dc_vom - dc_co2).dropna()
+        res_dc = ottimizza_dispatch(spark_dc, dc_ca, dc_cf, int(dc_mu), int(dc_md))
+        if res_dc["n_ore"] == 0:
+            st.warning("Nessun dato di prezzo valido nel periodo selezionato.")
+        else:
+            val_tot = res_dc["valore"] * dc_cap
+            fric_tot = res_dc["valore_frictionless"] * dc_cap
+            vinc_tot = res_dc["costo_vincoli"] * dc_cap
+            kdc1, kdc2, kdc3, kdc4 = st.columns(4)
+            render_kpi("Valore netto ottimale (€)", f"{val_tot:,.0f}", kdc1)
+            render_kpi("Costo dei vincoli (€)", f"{vinc_tot:,.0f}", kdc2)
+            render_kpi("Avviamenti", f"{res_dc['avviamenti']:,}", kdc3)
+            render_kpi("Fattore di utilizzo (%)", f"{res_dc['fattore_utilizzo']:,.1f}", kdc4)
+            kdc5, kdc6, kdc7, kdc8 = st.columns(4)
+            render_kpi("Valore frictionless (€)", f"{fric_tot:,.0f}", kdc5)
+            render_kpi("Ore ON", f"{res_dc['ore_on']:,}", kdc6)
+            _mmo = res_dc["margine_medio_on"]
+            render_kpi("Margine medio ON (€/MWh)", f"{_mmo:,.2f}" if not np.isnan(_mmo) else "—", kdc7)
+            render_kpi("Spark medio (€/MWh)", f"{float(np.mean(res_dc['spark'])):,.2f}", kdc8)
+            st.caption(f"💡 Lettura: la centrale resta accesa il **{res_dc['fattore_utilizzo']:,.1f}%** delle ore "
+                       f"con **{res_dc['avviamenti']:,}** avviamenti; i vincoli tecnici (avviamenti + tempi minimi) "
+                       f"costano **{vinc_tot:,.0f} €** rispetto all'ideale senza vincoli.")
+
+            idx_dc = res_dc["index"]
+            sv_dc = res_dc["spark"]
+            on_dc = res_dc["schedule"]
+            fig_dc1 = go.Figure()
+            fig_dc1.add_trace(go.Scatter(x=idx_dc, y=np.where(on_dc, sv_dc, np.nan), mode="lines",
+                                         name="Spark (ON)", line=dict(color="#22c55e", width=1.5),
+                                         hovertemplate="%{x}<br>Spark: %{y:,.1f} €/MWh — ON<extra></extra>"))
+            fig_dc1.add_trace(go.Scatter(x=idx_dc, y=np.where(~on_dc, sv_dc, np.nan), mode="lines",
+                                         name="Spark (OFF)", line=dict(color="#6b7280", width=1),
+                                         hovertemplate="%{x}<br>Spark: %{y:,.1f} €/MWh — OFF<extra></extra>"))
+            fig_dc1.add_hline(y=dc_cf, line_dash="dash", line_color="#f59e0b",
+                              annotation_text="costo fisso orario", annotation_position="top right")
+            fig_dc1.update_layout(template="plotly_dark", height=340,
+                                  title="Spark spread orario e schedule ottimale (verde = centrale ON)",
+                                  xaxis_title="Data", yaxis_title="€/MWh")
+            st.plotly_chart(fig_dc1, use_container_width=True)
+
+            marg_ora_dc = np.where(on_dc, sv_dc - dc_cf, 0.0)
+            avv_dc = (on_dc & ~np.concatenate([[False], on_dc[:-1]])).astype(float)
+            cum_opt_dc = (np.cumsum(marg_ora_dc) - np.cumsum(avv_dc) * dc_ca) * dc_cap
+            cum_fric_dc = np.cumsum(np.maximum(sv_dc, 0.0)) * dc_cap
+            fig_dc2 = go.Figure()
+            fig_dc2.add_trace(go.Scatter(x=idx_dc, y=cum_opt_dc, mode="lines", name="Ottimale",
+                                         line=dict(color="#22c55e", width=2.5),
+                                         hovertemplate="%{x}<br>Ottimale: €%{y:,.0f}<extra></extra>"))
+            fig_dc2.add_trace(go.Scatter(x=idx_dc, y=cum_fric_dc, mode="lines", name="Frictionless",
+                                         line=dict(color="#6b7280", width=1.5, dash="dash"),
+                                         hovertemplate="%{x}<br>Frictionless: €%{y:,.0f}<extra></extra>"))
+            fig_dc2.update_layout(template="plotly_dark", height=320,
+                                  title="Valore cumulato: schedule ottimale vs ideale senza vincoli (€)",
+                                  xaxis_title="Data", yaxis_title="€")
+            st.plotly_chart(fig_dc2, use_container_width=True)
+
+            tmp_dc = pd.DataFrame({"Margine (€/MW)": marg_ora_dc, "ON": on_dc.astype(int),
+                                   "Avv": avv_dc.astype(int)}, index=idx_dc)
+            mens_dc = tmp_dc.resample("ME").sum()
+            df_dc_mesi = pd.DataFrame({
+                "Mese": mens_dc.index.strftime("%Y-%m"),
+                "Ore ON": mens_dc["ON"].astype(int).to_numpy(),
+                "Avviamenti": mens_dc["Avv"].astype(int).to_numpy(),
+                "Valore (€)": np.round((mens_dc["Margine (€/MW)"] - mens_dc["Avv"] * dc_ca) * dc_cap, 0).astype(int).to_numpy(),
+            })
+            st.markdown("**Dettaglio mensile**")
+            st.dataframe(df_dc_mesi, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta dispatch mensile (CSV)",
+                df_dc_mesi.to_csv(index=False).encode("utf-8"),
+                file_name=f"dispatch_mensile_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Dettaglio mensile dello schedule ottimale: ore ON, avviamenti, valore netto.",
+                key="csv_dc_mesi",
+            )
+            df_dc_sched = pd.DataFrame({
+                "Data": idx_dc,
+                "Spark (€/MWh)": np.round(sv_dc, 2),
+                "Stato": np.where(on_dc, "ON", "OFF"),
+                "Margine orario (€/MW)": np.round(marg_ora_dc, 2),
+            })
+            st.markdown("**Prime 24 ore dello schedule**")
+            st.dataframe(df_dc_sched.head(24), use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta schedule orario (CSV)",
+                df_dc_sched.to_csv(index=False).encode("utf-8"),
+                file_name=f"dispatch_schedule_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Schedule orario ottimale: spark, stato ON/OFF e margine orario per MW.",
+                key="csv_dc_sched",
+            )
+        st.caption("Uso pratico: il trader asset-backed usa questo schedule per decidere quando nominare la centrale sul mercato del giorno prima; il confronto col tab Tolling mostra quanto vale la flessibilita' 'vera' (con vincoli) rispetto al limite teorico. Aumenta il costo di avviamento per vedere come gli avviamenti crollano e il costo dei vincoli sale.")
 
 
 # Footer
