@@ -10867,6 +10867,152 @@ def calcola_bermudiana(tipo, forward, strike, anni, vol_pct, tasso_pct,
     return out
 
 
+def _ko_rr_barriera(tipo, direzione, F, K, H, T, sig, r):
+    """Termine knock-out di Reiner-Rubinstein (1991) in forma Black-76.
+
+    Sostituzione S=F (forward), b=0 (costo di carry nullo): il forward e'
+    una martingala risk-neutral, quindi le formule RR diventano il pricing
+    Black-76 con barriera a monitoraggio continuo. Componenti A/B/C/D
+    standard con rebate=0; la tabella dei casi segue Reiner-Rubinstein/Haug.
+    Casi degeneri: put down con H>K e call up con H<K valgono esattamente 0
+    (la barriera scatterebbe prima che l'opzione possa mai andare ITM)."""
+    phi = 1.0 if tipo == "call" else -1.0
+    eta = 1.0 if direzione == "down" else -1.0
+    b = 0.0
+    mu = (b - 0.5 * sig * sig) / (sig * sig)
+    sT = sig * np.sqrt(T)
+    df = np.exp(-r * T)
+    x1 = np.log(F / K) / sT + (1 + mu) * sT
+    x2 = np.log(F / H) / sT + (1 + mu) * sT
+    y1 = np.log(H * H / (F * K)) / sT + (1 + mu) * sT
+    y2 = np.log(H / F) / sT + (1 + mu) * sT
+    sterm = F * np.exp((b - r) * T)
+    n = norm.cdf
+    A = phi * sterm * n(phi * x1) - phi * K * df * n(phi * x1 - phi * sT)
+    B = phi * sterm * n(phi * x2) - phi * K * df * n(phi * x2 - phi * sT)
+    C = (phi * sterm * (H / F) ** (2 * (mu + 1)) * n(eta * y1)
+         - phi * K * df * (H / F) ** (2 * mu) * n(eta * y1 - eta * sT))
+    D = (phi * sterm * (H / F) ** (2 * (mu + 1)) * n(eta * y2)
+         - phi * K * df * (H / F) ** (2 * mu) * n(eta * y2 - eta * sT))
+    if direzione == "down":  # H < F
+        if tipo == "call":
+            return A - C if K >= H else B - D
+        return A - B + C - D if K >= H else 0.0
+    # up: H > F
+    if tipo == "call":
+        return A - B + C - D if K <= H else 0.0
+    return A - C if K <= H else B - D
+
+
+def _prob_knock_barriera(direzione, F, H, T, sig):
+    """Probabilita' risk-neutral di first-passage alla barriera (formula chiusa).
+
+    Il log-forward ha drift risk-neutral nu=-sig^2/2 (martingala). Formula di
+    riflessione: P(hit)=N((-|d|+/-nu*T)/(sig*sqrt(T)))+exp(2*nu*d/sig^2)*
+    N((-|d|-/+nu*T)/(sig*sqrt(T))) con d=ln(H/F) con segno."""
+    if sig <= 0 or T <= 0:
+        if direzione == "down":
+            return 1.0 if F <= H else 0.0
+        return 1.0 if F >= H else 0.0
+    sT = sig * np.sqrt(T)
+    nu = -0.5 * sig * sig
+    d = float(np.log(H / F))
+    n = norm.cdf
+    if direzione == "down":  # d < 0
+        return float(n((d - nu * T) / sT)
+                     + np.exp(2 * nu * d / (sig * sig)) * n((d + nu * T) / sT))
+    return float(n((-d + nu * T) / sT)
+                 + np.exp(2 * nu * d / (sig * sig)) * n((-d - nu * T) / sT))
+
+
+def calcola_barriera(tipo, struttura, direzione, barriera, forward, strike,
+                     anni, vol_pct, tasso_pct):
+    """Premio di un'opzione con BARRIERA sul forward dell'energia (Reiner-Rubinstein).
+
+    Knock-out: l'opzione si spegne se il forward tocca la barriera H prima di
+    T; knock-in: si accende solo al tocco. Pricing analitico a monitoraggio
+    continuo in forma Black-76 (forward come martingala risk-neutral, b=0);
+    knock-in = vanilla - knock-out per parita' in/out. Ritorna anche la
+    probabilita' risk-neutral di knock (first-passage) e il delta via bump.
+    Casi limite: T=0 o vol=0 -> knock deterministico (intrinseco scontato se
+    non knockato); barriera dal lato sbagliato del forward -> knock immediato
+    (KO=0, KI=vanilla). Casi degeneri: put down con H>K e call up con H<K
+    valgono 0. NaN-safe: input non validi -> dict neutro con nan.
+    Ritorna dict con: premio_ko, premio_ki, premio_vanilla, sconto_ko_pct,
+    prob_knock, delta (della struttura scelta), intrinseco, valido, regime
+    ('regolare'/'reverse'), lato_barriera_ok."""
+    neutro = {"premio_ko": float("nan"), "premio_ki": float("nan"),
+              "premio_vanilla": float("nan"), "sconto_ko_pct": float("nan"),
+              "prob_knock": float("nan"), "delta": float("nan"),
+              "intrinseco": float("nan"), "valido": False,
+              "regime": "", "lato_barriera_ok": False}
+    try:
+        tp = str(tipo).strip().lower()
+        st_ = str(struttura).strip().lower()
+        dr = str(direzione).strip().lower()
+        H = float(barriera); F = float(forward); K = float(strike)
+        T = float(anni); sig = float(vol_pct) / 100.0; r = float(tasso_pct) / 100.0
+    except (TypeError, ValueError):
+        return neutro
+    if not all(np.isfinite(v) for v in (H, F, K, T, sig, r)):
+        return neutro
+    if tp not in ("call", "put") or st_ not in ("knock-out", "knock-in") \
+            or dr not in ("down", "up"):
+        return neutro
+    if H <= 0 or F <= 0 or K <= 0 or T < 0 or sig < 0 or r < 0:
+        return neutro
+    is_call = (tp == "call")
+    if is_call:
+        regolare = (dr == "down" and H <= K) or (dr == "up" and H >= K)
+    else:
+        regolare = (dr == "down" and H >= K) or (dr == "up" and H <= K)
+    out = dict(neutro)
+    out.update({"valido": True, "regime": "regolare" if regolare else "reverse"})
+    intr = max(F - K, 0.0) if is_call else max(K - F, 0.0)
+    out["intrinseco"] = float(intr)
+    van = calcola_black76(F, K, T, sig * 100.0, r * 100.0)
+    vanilla = float(van["call"] if is_call else van["put"])
+    out["premio_vanilla"] = vanilla
+    lato_ok = (dr == "down" and H < F) or (dr == "up" and H > F)
+    out["lato_barriera_ok"] = bool(lato_ok)
+    if not lato_ok:
+        # barriera dal lato sbagliato: knock immediato
+        out.update({"premio_ko": 0.0, "premio_ki": vanilla, "prob_knock": 1.0,
+                    "sconto_ko_pct": 100.0 if vanilla > 0 else 0.0, "delta": 0.0})
+        return out
+    if T == 0.0 or sig == 0.0:
+        knocked = (F <= H) if dr == "down" else (F >= H)
+        df = float(np.exp(-r * T))
+        ko = 0.0 if knocked else intr * df
+        ki = intr * df if knocked else 0.0
+        out.update({"premio_ko": float(ko), "premio_ki": float(ki),
+                    "prob_knock": 1.0 if knocked else 0.0, "delta": 0.0})
+        out["sconto_ko_pct"] = float(100.0 * (1.0 - ko / vanilla)) if vanilla > 0 else 0.0
+        return out
+    ko = _ko_rr_barriera(tp, dr, F, K, H, T, sig, r)
+    ko = float(min(max(ko, 0.0), vanilla))  # tolleranza numerica
+    ki = float(max(vanilla - ko, 0.0))
+    out["premio_ko"] = ko
+    out["premio_ki"] = ki
+    out["sconto_ko_pct"] = float(100.0 * (1.0 - ko / vanilla)) if vanilla > 0 else 0.0
+    out["prob_knock"] = float(min(max(_prob_knock_barriera(dr, F, H, T, sig), 0.0), 1.0))
+
+    def _premio_f(fx):
+        if not ((dr == "down" and H < fx) or (dr == "up" and H > fx)):
+            kk = 0.0
+        else:
+            vv0 = calcola_black76(fx, K, T, sig * 100.0, r * 100.0)
+            vv0 = float(vv0["call"] if is_call else vv0["put"])
+            kk = min(max(_ko_rr_barriera(tp, dr, fx, K, H, T, sig, r), 0.0), vv0)
+        vv = calcola_black76(fx, K, T, sig * 100.0, r * 100.0)
+        vv = float(vv["call"] if is_call else vv["put"])
+        return kk if st_ == "knock-out" else max(vv - kk, 0.0)
+
+    h = 0.01
+    out["delta"] = float((_premio_f(F * (1 + h)) - _premio_f(F * (1 - h))) / (2 * F * h))
+    return out
+
+
 def render_kpi(title, value, col):
     col.markdown(f"<div class='metric-container'><div class='metric-label'>{title}</div><div class='metric-val'>{value}</div></div>", unsafe_allow_html=True)
 
@@ -11513,7 +11659,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -19611,6 +19757,121 @@ elif workspace == _('ws8'):
                 key="csv_berm",
             )
         st.caption("Uso pratico: una put Bermudiana mensile su un trimestre di consegna protegge un produttore dal crollo prezzi con la flessibilita' di esercitare ogni mese; l'early premium dice quanto paghi in piu' rispetto all'europea. La call ha premio extra solo se deep ITM con tassi alti (valore temporale del cash incassato subito). Limiti: liquidazione cash all'esercizio, albero binomiale CRR (vol e tassi costanti, niente smile), esercizio solo alle date indicate — l'americana vera (esercizio continuo) vale di piu'.")
+
+
+    with tab102:
+        banner_demo("Opzione barriera: knock-out / knock-in con pricing analitico Reiner-Rubinstein (Black-76)")
+        titolo_barr = edu("Opzione barriera", "Un'opzione con BARRIERA si attiva (knock-in) o si spegne (knock-out) se il prezzo tocca un livello prefissato prima della scadenza. Nell'energia sono lo strumento standard per coperture strutturate a basso costo: una knock-out costa meno della vanilla equivalente perche' rinunci al payoff negli scenari estremi. Attenzione ai casi degeneri: una put down con barriera sopra lo strike (o una call up con barriera sotto lo strike) vale zero, perche' la barriera scatterebbe prima che l'opzione possa mai andare in-the-money.")
+        st.markdown(f"**{titolo_barr}**: prezza knock-out e knock-in su forward energetici e quantifica lo sconto rispetto alla vanilla.", unsafe_allow_html=True)
+
+        fwd_barr_def = float(prezzi.dropna().mean()) if len(prezzi.dropna()) else float("nan")
+        vol_barr_def = vol_relativa_annua(prezzi)
+        vol_barr_def = float(vol_barr_def) if np.isfinite(vol_barr_def) else 40.0
+
+        b1, b2, b3 = st.columns(3)
+        with b1:
+            tipo_barr = st.selectbox("Tipo di opzione", ["Call", "Put"], key="barr_tipo",
+                                     help="Call: protezione/rialzo sui prezzi alti. Put: protezione contro il crollo dei prezzi.")
+        with b2:
+            strutt_barr = st.selectbox("Struttura", ["Knock-out", "Knock-in"], key="barr_strutt",
+                                       help="Knock-out: si spegne al tocco della barriera (costa meno della vanilla). Knock-in: si accende solo al tocco (scommessa sugli scenari estremi). Vale sempre KO + KI = vanilla.")
+        with b3:
+            dir_barr = st.selectbox("Direzione barriera", ["Down", "Up"], key="barr_dir",
+                                    help="Down: barriera sotto il forward (knock al ribasso). Up: barriera sopra il forward (knock al rialzo).")
+        dir_key = "down" if dir_barr == "Down" else "up"
+        h_def = (fwd_barr_def * (0.85 if dir_key == "down" else 1.15)) \
+            if np.isfinite(fwd_barr_def) else (85.0 if dir_key == "down" else 115.0)
+        b4, b5, b6 = st.columns(3)
+        with b4:
+            h_barr = st.number_input("Livello barriera (€/MWh)", min_value=0.1,
+                                     value=round(float(h_def), 1), step=1.0,
+                                     key=f"barr_H_{dir_key}",
+                                     help="Down: deve stare sotto il forward; Up: sopra il forward. Dal lato sbagliato c'e' knock immediato.")
+        with b5:
+            fwd_barr = st.number_input("Prezzo forward (€/MWh)", min_value=0.1,
+                                       value=fwd_barr_def if np.isfinite(fwd_barr_def) else 100.0,
+                                       step=1.0, key="barr_fwd",
+                                       help="Default = media del periodo selezionato.")
+        with b6:
+            k_barr = st.number_input("Strike (€/MWh)", min_value=0.1,
+                                     value=fwd_barr_def if np.isfinite(fwd_barr_def) else 100.0,
+                                     step=1.0, key="barr_k",
+                                     help="Default = ATM (uguale al forward).")
+        b7, b8, b9 = st.columns(3)
+        with b7:
+            mesi_barr = st.number_input("Scadenza (mesi)", min_value=1, max_value=60, value=12,
+                                        step=1, key="barr_mesi",
+                                        help="Orizzonte dell'opzione.")
+        with b8:
+            vol_barr = st.number_input("Volatilità annua (%)", min_value=0.0, max_value=300.0,
+                                       value=round(vol_barr_def, 1), step=1.0, key="barr_vol",
+                                       help="Default = vol realizzata annualizzata.")
+        with b9:
+            tasso_barr = st.number_input("Tasso risk-free (%)", min_value=0.0, max_value=20.0,
+                                         value=2.0, step=0.25, key="barr_r",
+                                         help="Tasso di attualizzazione.")
+        qta_barr = st.number_input("Quantità (MWh)", min_value=0.0, value=1000.0,
+                                   step=100.0, key="barr_qta",
+                                   help="Volume della posizione: premio totale = premio × quantita'.")
+
+        ris_barr = calcola_barriera(tipo_barr.lower(), strutt_barr.lower(), dir_barr.lower(),
+                                    h_barr, fwd_barr, k_barr, mesi_barr / 12.0,
+                                    vol_barr, tasso_barr)
+        ok_barr = bool(ris_barr["valido"])
+        if ok_barr and not ris_barr["lato_barriera_ok"]:
+            st.warning("Barriera dal lato sbagliato del forward: knock immediato — la knock-out vale 0 e la knock-in vale come la vanilla.")
+        if ok_barr:
+            pko, pki, pv = ris_barr["premio_ko"], ris_barr["premio_ki"], ris_barr["premio_vanilla"]
+            premio_sel = pko if strutt_barr == "Knock-out" else pki
+            c1, c2, c3 = st.columns(3)
+            render_kpi("Premio Knock-out (€/MWh)", f"{pko:,.3f}", c1)
+            render_kpi("Premio Knock-in (€/MWh)", f"{pki:,.3f}", c2)
+            render_kpi("Premio Vanilla (€/MWh)", f"{pv:,.3f}", c3)
+            c4, c5, c6 = st.columns(3)
+            render_kpi("Sconto KO vs vanilla", f"{ris_barr['sconto_ko_pct']:.1f}%", c4)
+            render_kpi("Probabilità knock", f"{100.0 * ris_barr['prob_knock']:.1f}%", c5)
+            render_kpi(f"Delta ({strutt_barr})", f"{ris_barr['delta']:+.3f}", c6)
+            st.caption(f"Intrinseco: {ris_barr['intrinseco']:,.2f} €/MWh · "
+                       f"Regime barriera: {ris_barr['regime']} · "
+                       f"Premio posizione ({strutt_barr.lower()}): {premio_sel * qta_barr:+,.0f} € totali")
+
+            # curva: premi vs livello barriera
+            h_lo = 0.5 * fwd_barr if dir_key == "down" else 1.01 * fwd_barr
+            h_hi = 0.99 * fwd_barr if dir_key == "down" else 1.5 * fwd_barr
+            hs_barr = [float(x) for x in np.linspace(h_lo, h_hi, 13)]
+            curve_ko, curve_ki = [], []
+            for hh in hs_barr:
+                rc = calcola_barriera(tipo_barr.lower(), strutt_barr.lower(), dir_key,
+                                      hh, fwd_barr, k_barr, mesi_barr / 12.0,
+                                      vol_barr, tasso_barr)
+                curve_ko.append(rc["premio_ko"] if rc["valido"] else float("nan"))
+                curve_ki.append(rc["premio_ki"] if rc["valido"] else float("nan"))
+            fig_barr = go.Figure()
+            fig_barr.add_scatter(x=hs_barr, y=curve_ko, mode="lines+markers",
+                                 name="Knock-out", line=dict(color="#38bdf8"))
+            fig_barr.add_scatter(x=hs_barr, y=curve_ki, mode="lines+markers",
+                                 name="Knock-in", line=dict(color="#f59e0b"))
+            fig_barr.add_hline(y=pv, line_dash="dash", line_color="#4b5563",
+                               annotation_text=f"Vanilla {pv:,.2f}", annotation_position="right")
+            fig_barr.update_layout(template="plotly_dark", height=380,
+                                   title=f"Premi vs livello barriera — {tipo_barr} {dir_barr} K={k_barr:,.0f} €/MWh",
+                                   xaxis_title="Livello barriera (€/MWh)",
+                                   yaxis_title="Premio (€/MWh)")
+            st.plotly_chart(fig_barr, use_container_width=True)
+
+            df_barr = pd.DataFrame({"Barriera (€/MWh)": [round(v, 2) for v in hs_barr],
+                                    "Premio KO (€/MWh)": [round(v, 4) for v in curve_ko],
+                                    "Premio KI (€/MWh)": [round(v, 4) for v in curve_ki]})
+            st.dataframe(df_barr, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta curva barriera (CSV)",
+                df_barr.to_csv(index=False).encode("utf-8"),
+                file_name=f"barriera_{tipo_barr.lower()}_{dir_key}_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Premi knock-out e knock-in al variare del livello di barriera.",
+                key="csv_barr",
+            )
+        st.caption("Uso pratico: una put down-and-out ATM costa sensibilmente meno della vanilla e copre dal crollo prezzi finche' il mercato non scende sotto la barriera — ideale per produttori che vogliono una floor economica; la knock-in e' la gamba speculativa sugli scenari estremi. Limiti: monitoraggio CONTINUO della barriera (nella realta' e' spesso giornaliero: il prezzo vero e' un po' piu' alto per le knock-out), nessun rebate al knock, vol e tassi costanti, formula Black-76 senza smile.")
 
 
 # Footer
