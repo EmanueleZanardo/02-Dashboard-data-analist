@@ -1,13 +1,14 @@
 # STATUS.md — 02-Dashboard-data-analist (Singularity Quant ETRM)
 
-**Ultimo aggiornamento: 01/10/2026 05:55 CEST**
+**Ultimo aggiornamento: 01/10/2026 06:55 CEST**
 
 ## Stato
 - Dashboard Streamlit "Singularity Quant ETRM", live su https://czpox8o8x6arnxw96txnvt.streamlit.app/.
-- Ultimo commit: 2621515 (STATUS.md tab120, 01/10 05:55 CEST).
-- Test: 47/47 verdi (tests/test_helpers.py) + 38/38 check tab120; regressione: 19/19.
+- Ultimo commit: (QA 01/10 06:40 - STATUS.md tab121).
+- Test: 47/47 verdi (tests/test_helpers.py) + 43/43 check tab121; regressione: 19/19.
 
 ## Ultimi eventi verificati (01/10/2026)
+- Nuova tab121 "🎰 Ventaglio di prezzo": fan chart Monte Carlo del prezzo giornaliero (GBM calibrato sui log-rendimenti storici, drift opzionale, seed fisso riproducibile, shift positivo per serie con prezzi negativi) — helper calcola_ventaglio_prezzo testato (43 check, 0 fail); bande P10-P90/P25-P75 + mediana P50 su orizzonte 7-365 giorni e 100-20000 scenari, KPI prezzo partenza/vol annua/P50 all'orizzonte/banda P10-P90/P(soglia superata)/ampiezza ventaglio, tabella + export CSV. Nessun bug residuo, nessun segreto hardcoded.
 - Nuova tab120 "📈 Frontiera di fissazione": frontiera efficiente dell'hedge ratio (0-100%) — helper calcola_frontiera_fissazione testato (38 check, 0 fail, dopo fix di un bug reale: c_fix_w scalare usato come array nel broadcast numpy); costo atteso vs volatilità su blocchi settimanali consecutivi, annualizzazione, premio di rischio implicito €/MWh e €/anno, P(sporco batte fixing), marker "la tua posizione" sulla frontiera, tabella + export CSV. Nessun bug residuo, nessun segreto hardcoded.
 - Nuova tab119 "📉 Margin call simulator": rischio di liquidità delle coperture forward — helper calcola_margin_call testato (48 check, 0 fail: 2 in sviluppo con fix del test, aritmetica nozionale 48000 e tolleranza arrotondamenti); walk-forward giornaliero su nozionale = MW×24h×fix×giorni, margine iniziale/manutenzione, chiamate che riportano l'equity al livello iniziale, costo di finanziamento del capitale immobilizzato; KPI MtM/call max/chiamate totali/giorni in call/margine max/costo finanziamento, grafico equity vs livelli margine, barre margin call, tabella + export CSV. Nessun bug, nessun segreto hardcoded.
 - Nuova tab118 "🎯 Fixing advisor": segnale statistico per la decisione fissare-ora vs aspettare — helper calcola_fixing_advisor testato (37 check, 0 fail, dopo fix del ramo storia-piatta); punteggio 0-100 da percentile + trend normalizzato + volatilità + stagionalità, KPI, grafico prezzo vs media storica/recente, percentile rolling con soglie 40/60, stagionalità mensile + export CSV. Nessun bug, nessun segreto hardcoded.
