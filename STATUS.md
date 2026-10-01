@@ -1,13 +1,14 @@
 # STATUS.md — 02-Dashboard-data-analist (Singularity Quant ETRM)
 
-**Ultimo aggiornamento: 01/10/2026 ~02:00 CEST**
+**Ultimo aggiornamento: 01/10/2026 02:40 CEST**
 
 ## Stato
 - Dashboard Streamlit "Singularity Quant ETRM", live su https://czpox8o8x6arnxw96txnvt.streamlit.app/.
-- Ultimo commit: b96f2680 (test tab116, 01/10 01:51 CEST).
-- Test: 47/47 verdi (tests/test_helpers.py) + 30/30 check tab115 + 45/45 check tab116; regressione: 19/19.
+- Ultimo commit: (tab117, ciclo QA 01/10 02:40 — SHA dopo push).
+- Test: 47/47 verdi (tests/test_helpers.py) + 30/30 check tab115 + 45/45 check tab116 + 37/37 check tab117; regressione: 19/19.
 
 ## Ultimi eventi verificati (01/10/2026)
+- Nuova tab117 "🗓️ Calendario del costo": costo giornaliero di fornitura (prezzo spot × MW della fascia) in calendario — helper calcola_calendario_costo testato (37 check, 0 fail); KPI costo totale/medio giornaliero/σ giornaliera/giorno più caro/più economico/quota top-10% giorni, heatmap settimanale del costo, costo medio per giorno della settimana, tabella giornaliera + aggregazione mensile + export CSV. Nessun bug, nessun segreto hardcoded.
 - QA 01:40 CEST: nessuna modifica al repo remoto da b96f2680; app.py compilava, nessun segreto hardcoded (chiavi solo via st.secrets).
 - Nuova tab116 "📤 Il mio carico": caricamento CSV del profilo di carico reale dell'utente (auto-riconoscimento colonne, conversioni kW/kWh, ricampionamento sub-orario, normalizzazione tz) oppure profilo demo uffici; helper parse_csv_carico + calcola_analisi_carico_reale testati (45 check, 0 fail); KPI energia/picco/fattore di carico/costo a spot/prezzo medio/correlazione, curva di durata del carico, profilo orario, tabella + export CSV. Push in 4 commit (2e8e57d, b712344, e847ac1, b96f268), HEAD remoto verificato b96f268.
 - Nuova tab115 "🧾 Comparatore tariffe": confronto di 6 strutture tariffarie (spot indicizzata, flat, F1/F2/F3, peak/off-peak, spot+spread, spot con cap) sullo stesso profilo di prelievo; helper calcola_confronto_tariffe testato (30 check, 0 fail); KPI migliore/risparmio vs peggiore, barre orizzontali, tabella + export CSV. Nessun bug, nessun segreto hardcoded.
