@@ -16691,6 +16691,127 @@ def calcola_beta_gas_power(prezzi_orari, prezzi_gas, profilo="base", finestra=90
             "df_scatter": df_sc, "df_scenari": df_scen}
 
 
+def calcola_volatilita_termine(prezzi_orari, bucket="mese", min_giorni=10, min_bucket=2):
+    """Struttura a termine della volatilita' realizzata dello spot (€/MWh).
+
+    prezzi_orari: Series oraria in €/MWh. Gli spot possono essere 0 o negativi,
+    quindi si lavora sulle VARIAZIONI GIORNALIERE del prezzo medio (€/MWh),
+    non sui log-return (stessa convenzione del tab Volatilita').
+    Metodo: media per giorno solare -> variazioni giornaliere -> per ogni bucket
+    di consegna (mese di calendario o trimestre) vol annua = std(ddof=1) delle
+    variazioni x sqrt(252). Slope = regressione OLS in forma chiusa della vol
+    sui bucket in ordine cronologico (€/MWh per bucket): slope < 0 =
+    backwardation della vol (stress concentrato a breve termine), slope > 0 =
+    contango (incertezza che cresce a termine).
+    A cosa serve: input n.1 per prezzare le opzioni (tab structuring) e per
+    scegliere le scadenze delle coperture — mesi ad alta vol storica hanno
+    premi attesi piu' alti.
+    NaN-safe: serie vuota / indice non-datetime / variazioni insufficienti ->
+    errore pulito; bucket con < min_giorni giorni saltato (n_esclusi);
+    prezzi costanti -> vol 0, valido.
+    Ritorna dict con errore/valido/bucket/tabella/front/media/slope/
+    slope_rel/bucket_max/bucket_min/rapporto/verdetto/serie_variazioni.
+    """
+    cols = ["Bucket", "Giorni", "Prezzo medio (€/MWh)", "Vol annua (€/MWh)",
+            "Vol annua (% prezzo)"]
+    vuoto = pd.DataFrame({c: [] for c in cols})
+
+    def _err(msg):
+        return {"errore": msg, "valido": False, "bucket": str(bucket),
+                "tabella": vuoto, "n_bucket": 0, "n_esclusi": 0,
+                "giorni_totali": 0, "front": None, "media": None,
+                "slope": None, "slope_rel": None, "bucket_max": None,
+                "bucket_min": None, "rapporto": None, "verdetto": msg,
+                "serie_variazioni": pd.Series(dtype=float)}
+
+    if not isinstance(prezzi_orari, pd.Series):
+        return _err("Input non valido: serve una Series pandas.")
+    if not isinstance(prezzi_orari.index, pd.DatetimeIndex):
+        return _err("Indice non temporale: serve una serie oraria con DatetimeIndex.")
+    try:
+        min_giorni = int(min_giorni)
+        min_bucket = int(min_bucket)
+    except (TypeError, ValueError):
+        return _err("Parametri non numerici: controlla gli input.")
+    if min_giorni < 2:
+        return _err("min_giorni deve essere almeno 2.")
+    if min_bucket < 2:
+        return _err("min_bucket deve essere almeno 2.")
+    freq = {"mese": "M", "month": "M", "trimestre": "Q",
+            "quarter": "Q"}.get(str(bucket).strip().lower())
+    if freq is None:
+        return _err("bucket non valido: usa 'mese' o 'trimestre'.")
+
+    p = pd.to_numeric(prezzi_orari, errors="coerce").dropna()
+    if len(p) < 48:
+        return _err("Serie troppo corta: servono almeno 48 ore di prezzi.")
+    idxn = p.index.tz_localize(None) if p.index.tz is not None else p.index
+    giornaliera = p.groupby(idxn.date).mean()
+    if len(giornaliera) < 3:
+        return _err("Servono almeno 3 giorni di prezzi per le variazioni.")
+    var = giornaliera.diff().dropna()
+    per_g = pd.DatetimeIndex(pd.to_datetime(giornaliera.index)).to_period(freq)
+    per_v = pd.DatetimeIndex(pd.to_datetime(var.index)).to_period(freq)
+
+    righe, esclusi = [], 0
+    for per in sorted(set(per_v)):
+        mg = per_g == per
+        mv = per_v == per
+        gg = int(mg.sum())
+        chg = var.iloc[mv].dropna()
+        if gg < min_giorni or len(chg) < 2:
+            esclusi += 1
+            continue
+        v = float(chg.std(ddof=1)) * (252.0 ** 0.5)
+        pm = float(giornaliera.iloc[mg].mean())
+        vpct = (v / abs(pm) * 100.0) if pm != 0 else float("nan")
+        righe.append({"Bucket": str(per), "Giorni": gg,
+                      "Prezzo medio (€/MWh)": round(pm, 2),
+                      "Vol annua (€/MWh)": round(v, 2),
+                      "Vol annua (% prezzo)": (round(vpct, 1) if vpct == vpct else None),
+                      "_vol": v})
+
+    if not righe:
+        return _err(f"Nessun bucket con almeno {min_giorni} giorni: "
+                    "serie troppo corta o parametro troppo alto.")
+
+    vols = np.array([r["_vol"] for r in righe])
+    media = float(vols.mean())
+    slope = None
+    if len(vols) >= min_bucket:
+        x = np.arange(len(vols), dtype=float)
+        vx = float(np.var(x))
+        slope = float(np.cov(x, vols, ddof=0)[0, 1] / vx) if vx > 0 else 0.0
+    slope_rel = (slope / media) if (slope is not None and media > 0) else None
+    imax, imin = int(vols.argmax()), int(vols.argmin())
+    rapporto = float(vols[imax] / vols[imin]) if vols[imin] > 0 else None
+
+    if len(righe) < min_bucket:
+        valido = False
+        verdetto = (f"⚪ Struttura non stimabile: {len(righe)} bucket validi, "
+                    f"ne servono almeno {min_bucket} per la pendenza.")
+    else:
+        valido = True
+        thr = 0.05 * media
+        if slope < -thr:
+            verdetto = ("🔴 Backwardation della vol: lo stress e' concentrato a "
+                        "breve termine — opzioni e coperture corte piu' care.")
+        elif slope > thr:
+            verdetto = ("🟢 Contango della vol: l'incertezza cresce a termine — "
+                        "occhio alle scadenze lunghe.")
+        else:
+            verdetto = "🟡 Struttura piatta: la vol e' simile su tutti i bucket."
+
+    tabella = pd.DataFrame([{k: r[k] for k in cols} for r in righe], columns=cols)
+    return {"errore": None, "valido": valido, "bucket": str(bucket),
+            "tabella": tabella, "n_bucket": len(righe), "n_esclusi": esclusi,
+            "giorni_totali": int(len(giornaliera)), "front": float(vols[0]),
+            "media": media, "slope": slope, "slope_rel": slope_rel,
+            "bucket_max": righe[imax]["Bucket"], "bucket_min": righe[imin]["Bucket"],
+            "rapporto": rapporto, "verdetto": verdetto,
+            "serie_variazioni": var}
+
+
 # ==========================================
 # WORKSPACE 1: SIMULATORE STRATEGICO
 # ==========================================
@@ -17334,7 +17455,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -29246,6 +29367,84 @@ elif workspace == _('ws8'):
                     help="Una riga per finestra: fine finestra, beta, R².",
                     key="csv_beta_gas_power",
                 )
+
+    with tab141:
+        titolo_vt = edu("Volatilità a termine", "La STRUTTURA A TERMINE DELLA VOLATILITÀ dice quanto il prezzo spot si muove (in €/MWh annualizzati) in ogni mese/trimestre di consegna: si calcola dalle variazioni giornaliere del prezzo medio (std × √252 — la convenzione standard, perché con prezzi a 0 o negativi i log-return non funzionano). A cosa serve: (1) è l'input n.1 per prezzare le opzioni delle tab di structuring — vol alta nel mese di consegna = opzioni più care; (2) la PENDENZA dice dove sta lo stress: in BACKWARDATION la vol è alta a breve e cala a termine (rischio imminente), in CONTANGO cresce a termine; (3) aiuta a scegliere le scadenze delle coperture.")
+        st.markdown(f"<h1>🌊 {titolo_vt}</h1>", unsafe_allow_html=True)
+        st.caption("Volatilità realizzata annualizzata per bucket di consegna: dove sta lo stress e quanto costano le opzioni.")
+
+        cv1, cv2 = st.columns(2)
+        with cv1:
+            bkt_vt = st.radio("Bucket di consegna", ["Mese", "Trimestre"], horizontal=True,
+                              key="vt141_bucket",
+                              help="Raggruppamento dei giorni per il calcolo della vol di ogni bucket.")
+        with cv2:
+            ming_vt = st.number_input("Giorni minimi per bucket valido", 2, 60, 10, 1,
+                                      key="vt141_ming",
+                                      help="I bucket con meno giorni vengono saltati (conteggiati come esclusi).")
+        vt = calcola_volatilita_termine(prezzi, bucket="mese" if bkt_vt == "Mese" else "trimestre",
+                                        min_giorni=int(ming_vt))
+        if vt["errore"]:
+            st.error(vt["errore"])
+        else:
+            if vt["valido"]:
+                st.success(f"✅ {vt['verdetto']}")
+            else:
+                st.warning(vt["verdetto"])
+            m1, m2, m3, m4 = st.columns(4)
+            with m1:
+                st.metric("Vol front (primo bucket)", f"{vt['front']:.1f} €/MWh")
+            with m2:
+                st.metric("Vol media bucket", f"{vt['media']:.1f} €/MWh")
+            with m3:
+                st.metric("Pendenza struttura",
+                          "n.d." if vt["slope"] is None else f"{vt['slope']:+.2f} €/MWh per {bkt_vt.lower()}")
+            with m4:
+                st.metric("Rapporto max/min", "n.d." if vt["rapporto"] is None else f"{vt['rapporto']:.2f}×")
+            n1, n2, n3, n4 = st.columns(4)
+            with n1:
+                st.metric("Bucket max vol", vt["bucket_max"])
+            with n2:
+                st.metric("Bucket min vol", vt["bucket_min"])
+            with n3:
+                st.metric("Bucket validi", vt["n_bucket"])
+            with n4:
+                st.metric("Bucket esclusi", vt["n_esclusi"])
+
+            df_vt = vt["tabella"]
+            fig_vt = go.Figure()
+            fig_vt.add_trace(go.Bar(x=df_vt["Bucket"], y=df_vt["Vol annua (€/MWh)"],
+                                    name="Vol annua", marker_color="#38bdf8",
+                                    hovertemplate="%{x}: %{y:.1f} €/MWh<extra></extra>"))
+            fig_vt.add_hline(y=vt["media"], line_dash="dash", line_color="#f59e0b",
+                             annotation_text=f"Media {vt['media']:.1f}")
+            fig_vt.update_layout(template="plotly_dark", height=360,
+                                 title="Volatilità realizzata annualizzata per bucket",
+                                 xaxis_title="", yaxis_title="€/MWh")
+            st.plotly_chart(fig_vt, use_container_width=True)
+
+            st.markdown("**Variazioni giornaliere del prezzo medio (base del calcolo)**")
+            sv = vt["serie_variazioni"]
+            fig_vtv = go.Figure()
+            fig_vtv.add_trace(go.Scatter(x=sv.index, y=sv.to_numpy(), mode="lines",
+                                         name="Δ giornaliera",
+                                         line=dict(color="#a78bfa", width=1),
+                                         hovertemplate="%{x|%Y-%m-%d}: %{y:+.2f} €/MWh<extra></extra>"))
+            fig_vtv.add_hline(y=0, line_color="#4b5563", line_width=1)
+            fig_vtv.update_layout(template="plotly_dark", height=260, xaxis_title="",
+                                  yaxis_title="Δ €/MWh")
+            st.plotly_chart(fig_vtv, use_container_width=True)
+
+            st.dataframe(df_vt, use_container_width=True, hide_index=True)
+            d0v, d1v = prezzi.index.min().date(), prezzi.index.max().date()
+            st.download_button(
+                "⬇️ Esporta struttura vol (CSV)",
+                df_vt.to_csv(index=False, sep=";").encode("utf-8"),
+                file_name=f"volatilita_termine_{bkt_vt.lower()}_{d0v}_{d1v}.csv",
+                mime="text/csv",
+                key="csv_vol_termine",
+                help="Una riga per bucket: giorni, prezzo medio, vol annua in €/MWh e in % del prezzo.",
+            )
 
 # Footer
 
