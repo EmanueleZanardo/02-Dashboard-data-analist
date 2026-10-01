@@ -681,6 +681,144 @@ def calcola_calendario_costo(prezzi, mw_f1, mw_f2, mw_f3):
     return out
 
 
+def calcola_fixing_advisor(prezzi, giorni_finestra=30):
+    """Advisor statistico per la decisione di fixing: fissare il prezzo ora o aspettare?
+
+    Domanda operativa: "il prezzo di OGGI e' conveniente rispetto alla storia,
+    o conviene aspettare?" — la funzione calcola, sui prezzi orari del periodo
+    selezionato, quattro indicatori indipendenti e li combina in un punteggio
+    0-100 (piu' alto = piu' conveniente fissare ora):
+
+      1. Percentile: media dei prezzi degli ultimi W giorni rispetto alla
+         distribuzione delle medie mobili di W giorni sulla storia.
+         Percentile basso = prezzo recente tra i piu' bassi mai visti -> FISSA.
+      2. Trend: pendenza (regressione lineare) delle medie giornaliere recenti,
+         normalizzata sulla volatilita' recente. Trend rialzista -> FISSA,
+         ribassista -> ASPETTA.
+      3. Volatilita': rapporto tra std delle medie giornaliere recenti e std
+         storica. Volatilita' alta -> il fixing elimina rischio -> FISSA.
+      4. Stagionalita': premio medio del mese corrente rispetto alla media
+         complessiva sulla storia. Mese storicamente caro -> FISSA prima.
+
+    Punteggio: 50 + (50-percentile)*0.5 + clip(trend_norm,-2,2)*10
+               + vol_bonus (+/-10) + stag_bonus (+/-10), clamp 0-100.
+    Segnale: >=60 "FISSA" (hedge ora), 40-59 "NEUTRO", <40 "ASPETTA".
+
+    NaN-safe: prezzi NaN scartati; indice non datetime / meno di 2*W giorni
+    di medie giornaliere -> dict vuoto con 'errore' None e score/segnali a None.
+    Serie perfettamente piatta -> percentile 50, trend 0, vol_ratio 1 (neutro).
+
+    Ritorna dict con 'errore' (None), 'df_giorni' (Data, Prezzo medio (€/MWh),
+    Percentile rolling (%)), 'score', 'segnale', 'percentile_recente',
+    'prezzo_medio_recente', 'prezzo_medio_storico', 'trend_norm',
+    'vol_ratio', 'premio_stagionale_pct', 'df_mesi' (Mese, Prezzo medio storico,
+    N giorni)."""
+
+    cols_g = ["Data", "Prezzo medio (€/MWh)", "Percentile rolling (%)"]
+    vuoto = {"errore": None,
+             "df_giorni": pd.DataFrame(columns=cols_g),
+             "score": None, "segnale": None, "percentile_recente": None,
+             "prezzo_medio_recente": None, "prezzo_medio_storico": None,
+             "trend_norm": None, "vol_ratio": None,
+             "premio_stagionale_pct": None,
+             "df_mesi": pd.DataFrame(columns=["Mese", "Prezzo medio (€/MWh)",
+                                              "N giorni"])}
+    try:
+        W = int(giorni_finestra)
+    except (TypeError, ValueError):
+        W = 30
+    W = max(7, min(90, W))
+    out = dict(vuoto)
+    try:
+        p = prezzi.astype(float)
+        p = p[~p.index.duplicated(keep="first")].sort_index()
+        if not isinstance(p.index, pd.DatetimeIndex):
+            return out
+    except Exception:
+        return out
+    p = p.dropna()
+    if len(p) == 0:
+        return out
+    giornalieri = p.resample("D").mean().dropna()
+    if len(giornalieri) < 2 * W:
+        return out
+    storia = giornalieri.iloc[:-W]
+    recenti = giornalieri.iloc[-W:]
+    prezzo_medio_recente = float(recenti.mean())
+    prezzo_medio_storico = float(storia.mean())
+    roll = storia.rolling(W, min_periods=W).mean().dropna()
+    if len(roll) == 0:
+        return out
+    std_stor = float(storia.std())
+    if std_stor <= 0:
+        # Storia piatta: confronto diretto con la media storica
+        if prezzo_medio_recente < prezzo_medio_storico:
+            percentile = 0.0
+        elif prezzo_medio_recente > prezzo_medio_storico:
+            percentile = 100.0
+        else:
+            percentile = 50.0
+    else:
+        percentile = float((roll <= prezzo_medio_recente).mean() * 100.0)
+    x = np.arange(W, dtype=float)
+    std_rec = float(recenti.std())
+    if std_rec <= 0:
+        trend_norm = 0.0
+    else:
+        slope = float(np.polyfit(x, recenti.values.astype(float), 1)[0])
+        trend_norm = float(slope * W / std_rec)
+    vol_ratio = (std_rec / std_stor) if std_stor > 0 else (10.0 if std_rec > 0 else 1.0)
+    mese_corr = int(giornalieri.index[-1].month)
+    mm = giornalieri.groupby(giornalieri.index.month).mean()
+    premio = None
+    if prezzo_medio_storico > 0 and mese_corr in mm.index:
+        premio = float((mm.loc[mese_corr] - prezzo_medio_storico)
+                       / prezzo_medio_storico * 100.0)
+    score = 50.0 + (50.0 - percentile) * 0.5
+    score += float(np.clip(trend_norm, -2.0, 2.0)) * 10.0
+    if vol_ratio > 1.25:
+        score += 10.0
+    elif vol_ratio < 0.8:
+        score -= 10.0
+    if premio is not None:
+        if premio > 10.0:
+            score += 10.0
+        elif premio < -10.0:
+            score -= 10.0
+    score = float(min(100.0, max(0.0, score)))
+    if score >= 60.0:
+        segnale = "FISSA"
+    elif score >= 40.0:
+        segnale = "NEUTRO"
+    else:
+        segnale = "ASPETTA"
+    righe_g = [{"Data": d,
+                "Prezzo medio (€/MWh)": round(float(v), 2),
+                "Percentile rolling (%)": round(float((roll.loc[:d] <= v).mean() * 100.0)
+                                               if len(roll.loc[:d]) else 50.0, 1)}
+               for d, v in zip(giornalieri.index, giornalieri.values)]
+    out["df_giorni"] = pd.DataFrame(righe_g, columns=cols_g)
+    mesi_ord = ["Gen", "Feb", "Mar", "Apr", "Mag", "Giu",
+                "Lug", "Ago", "Set", "Ott", "Nov", "Dic"]
+    righe_m = [{"Mese": mesi_ord[m - 1],
+                "Prezzo medio (€/MWh)": round(float(mm.loc[m]), 2),
+                "N giorni": int((giornalieri.index.month == m).sum())}
+               for m in sorted(mm.index)]
+    out["df_mesi"] = pd.DataFrame(righe_m, columns=["Mese",
+                                                    "Prezzo medio (€/MWh)",
+                                                    "N giorni"])
+    out.update({"score": round(score, 1), "segnale": segnale,
+                "percentile_recente": round(percentile, 1),
+                "prezzo_medio_recente": round(prezzo_medio_recente, 2),
+                "prezzo_medio_storico": round(prezzo_medio_storico, 2),
+                "trend_norm": round(trend_norm, 2),
+                "vol_ratio": round(vol_ratio, 2),
+                "premio_stagionale_pct": (round(premio, 1)
+                                          if premio is not None else None)})
+    return out
+
+
+
 def calcola_efficienza_profilo(prezzi, mw_f1, mw_f2, mw_f3):
     """Efficienza (smartness) del profilo di carico rispetto ai prezzi spot.
 
@@ -13571,7 +13709,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -23276,6 +23414,86 @@ elif workspace == _('ws8'):
                 key="csv_cc",
             )
         st.caption("Uso pratico: i giorni rossi in calendario sono i candidati per coperture a termine o demand response; una σ giornaliera alta con quota top-10% elevata = il costo dipende da pochi giorni di spike (leva per cap/finestre d'acquisto). Limiti: profilo piatto per fascia (per il tuo carico reale usa il tab 'Il mio carico'), solo componente energia a spot.")
+
+    with tab118:
+        titolo_fx = edu("Fixing advisor", "Devi fissare un prezzo a termine e non sai se conviene farlo ORA o aspettare? Questo tab combina quattro segnali statistici sui prezzi del periodo selezionato: (1) percentile del prezzo recente rispetto alla storia (sotto il 40° percentile = storicamente economico), (2) trend delle ultime settimane (rialzo = fissa presto), (3) volatilità recente vs storica (alta = il fixing elimina rischio), (4) stagionalità (il mese corrente è storicamente caro = fissa prima). Il punteggio 0-100 dice 'quanto conviene fissare ora', non è una previsione di prezzo.")
+        st.markdown(f"<h1>🎯 {titolo_fx}</h1>", unsafe_allow_html=True)
+        fx_w = st.slider("Finestra 'recente' (giorni)", min_value=7, max_value=90, value=30, step=1, key="fx_w",
+                         help="Giorni finali del periodo valutati come 'prezzo di oggi'; la storia è tutto il resto.")
+        ris_fx = calcola_fixing_advisor(prezzi, fx_w)
+        if ris_fx["score"] is None:
+            st.warning(f"Servono almeno {2 * fx_w} giorni di prezzi per l'advisor: allarga il periodo in sidebar.")
+        else:
+            if ris_fx["segnale"] == "FISSA":
+                st.success(f"🟢 FISSA — punteggio {ris_fx['score']}/100: il livello recente è favorevole rispetto alla storia. Bloccare il prezzo ora elimina il rischio rialzo.")
+            elif ris_fx["segnale"] == "NEUTRO":
+                st.warning(f"🟡 NEUTRO — punteggio {ris_fx['score']}/100: nessun segnale forte. Fissa per tranches o aspetta un segnale più chiaro.")
+            else:
+                st.error(f"🔴 ASPETTA — punteggio {ris_fx['score']}/100: il prezzo recente è storicamente alto o in calo. Fissare ora cristallizza un livello sfavorevole.")
+            k1, k2, k3 = st.columns(3)
+            render_kpi("Punteggio fixing", f"{ris_fx['score']:.0f} / 100", k1)
+            render_kpi("Percentile prezzo recente", f"{ris_fx['percentile_recente']:.0f}° pct", k2)
+            tr_txt = f"{ris_fx['trend_norm']:+.2f} σ" if ris_fx["trend_norm"] is not None else "n/d"
+            render_kpi("Trend finestra recente", tr_txt, k3)
+            k4, k5, k6 = st.columns(3)
+            render_kpi("Prezzo medio recente", f"€ {ris_fx['prezzo_medio_recente']:,.2f}/MWh", k4)
+            render_kpi("Prezzo medio storico", f"€ {ris_fx['prezzo_medio_storico']:,.2f}/MWh", k5)
+            vr_txt = f"{ris_fx['vol_ratio']:.2f}×" if ris_fx["vol_ratio"] is not None else "n/d"
+            render_kpi("Volatilità recente / storica", vr_txt, k6)
+            ps = ris_fx["premio_stagionale_pct"]
+            st.caption(f"Stagionalità: il mese corrente è storicamente al **{ps:+.1f}%** rispetto alla media del periodo. "
+                       f"Trend normalizzato: {tr_txt} (σ della finestra recente) — positivo = prezzi in salita. "
+                       f"Punteggio = 50 + (50−percentile)×0,5 + trend×10 + bonus volatilità/stagionalità (±10)."
+                       if ps is not None else "")
+            df_fx = ris_fx["df_giorni"]
+            fig_fx = go.Figure()
+            fig_fx.add_trace(go.Scatter(x=df_fx["Data"], y=df_fx["Prezzo medio (€/MWh)"], mode="lines",
+                                        line=dict(color="#3b82f6"),
+                                        hovertemplate="%{x|%d %b %Y}<br>€ %{y:.2f}/MWh<extra></extra>",
+                                        name="Prezzo medio giornaliero"))
+            fig_fx.add_hline(y=ris_fx["prezzo_medio_storico"], line_dash="dash", line_color="#f59e0b",
+                             annotation_text=f"Media storica € {ris_fx['prezzo_medio_storico']:,.2f}")
+            fig_fx.add_hline(y=ris_fx["prezzo_medio_recente"], line_dash="dot", line_color="#22c55e",
+                             annotation_text=f"Media recente € {ris_fx['prezzo_medio_recente']:,.2f}")
+            fig_fx.update_layout(template="plotly_dark", height=340,
+                                 title="Prezzo medio giornaliero: storia vs finestra recente",
+                                 xaxis_title="", yaxis_title="€/MWh")
+            st.plotly_chart(fig_fx, use_container_width=True)
+            fig_pc = go.Figure(go.Scatter(x=df_fx["Data"], y=df_fx["Percentile rolling (%)"], mode="lines",
+                                          line=dict(color="#a855f7"),
+                                          hovertemplate="%{x|%d %b %Y}<br>Percentile: %{y:.0f}<extra></extra>",
+                                          name="Percentile rolling", fill="tozeroy"))
+            fig_pc.add_hline(y=40, line_dash="dash", line_color="#22c55e",
+                             annotation_text="soglia 'economico' (40° pct)")
+            fig_pc.add_hline(y=60, line_dash="dash", line_color="#ef4444",
+                             annotation_text="soglia 'caro' (60° pct)")
+            fig_pc.update_layout(template="plotly_dark", height=280,
+                                 title="Percentile rolling del prezzo (100 = più caro della storia)",
+                                 xaxis_title="", yaxis_title="Percentile")
+            st.plotly_chart(fig_pc, use_container_width=True)
+            st.markdown("**Stagionalità storica per mese**")
+            df_mfx = ris_fx["df_mesi"]
+            fig_sm = go.Figure(go.Bar(x=df_mfx["Mese"], y=df_mfx["Prezzo medio (€/MWh)"],
+                                      marker_color="#f59e0b",
+                                      hovertemplate="%{x}: € %{y:.2f}/MWh<extra></extra>",
+                                      name="Prezzo medio storico"))
+            fig_sm.update_layout(template="plotly_dark", height=260,
+                                 title="Prezzo medio storico per mese (€/MWh)",
+                                 xaxis_title="", yaxis_title="€/MWh")
+            st.plotly_chart(fig_sm, use_container_width=True)
+            st.markdown("**Dettaglio giornaliero**")
+            st.dataframe(df_fx.head(500), use_container_width=True, hide_index=True)
+            if len(df_fx) > 500:
+                st.caption(f"Tabella troncata alle prime 500 righe su {len(df_fx):,} — l'export CSV contiene tutto.")
+            st.download_button(
+                "⬇️ Esporta fixing advisor (CSV)",
+                df_fx.to_csv(index=False).encode("utf-8"),
+                file_name=f"fixing_advisor_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Data, prezzo medio giornaliero e percentile rolling per ogni giorno del periodo.",
+                key="csv_fx",
+            )
+        st.caption("Uso pratico: FISSA quando il percentile è basso e il trend sale — blocchi un livello storicamente buono; ASPETTA quando il prezzo è al top storico e il trend scende. Limiti: segnale statistico sul passato, non previsione; con periodi brevi la storia è corta e il punteggio è meno affidabile; non include forward/costi di copertura.")
 
 
 # Footer
