@@ -2482,6 +2482,186 @@ def calcola_drawdown_mtm(serie_pnl, soglia_eur=0.0):
         return _err(f"Errore interno: {e}")
 
 
+def calcola_test_efficacia_hedge(prezzi, tipo_hedge="media_mobile",
+                                 n_fissaggio=30, finestra_gg=30,
+                                 r2_min=0.8, banda=(0.8, 1.25)):
+    """Test retrospettivo di efficacia della copertura (metodo della regressione).
+
+    Domanda operativa: "il mio strumento di copertura traccia davvero
+    l'esposizione, o devo ribilanciare?" — la copertura qui e' un prezzo
+    di fixing (media mobile nota il giorno prima, oppure indice del mese
+    precedente) applicato all'esposizione spot. Su finestre rolling di
+    `finestra_gg` giorni si stimano con OLS le variazioni giornaliere
+    dello spot su quelle del prezzo di fixing:
+      Δspot_t = α + β · ΔP_hedge_t + ε_t
+      - β (slope) = rapporto di copertura effettivo della finestra;
+      - R² = quota di varianza dello spot spiegata dal fixing;
+      - finestra EFFICACE se |β| nella banda [0.80, 1.25] (criterio del
+        test retrospettivo IAS 39 / IFRS 9) e R² >= r2_min.
+
+    Differenza dalle altre tab: 'Hedge ratio' (tab54) calcola il ratio
+    OTTIMALE statico di minima varianza su tutto il campione ("quanto
+    coprire"); 'MtM hedging' valuta contratti gia' stipulati; qui si
+    MONITORA nel tempo una copertura esistente, finestra per finestra,
+    per decidere se resta efficace o va ribilanciata.
+
+    Proprieta' testabile: il flag 'Efficace' coincide sempre con la
+    definizione (|β| in banda e R² >= soglia); n_finestre = n_Δ -
+    finestra + 1; la basis e' sempre spot - prezzo_hedge elemento per
+    elemento; con prezzi costanti la varianza di ΔP_hedge e' nulla ->
+    'valido' False con errore (regressione impossibile); beta_corrente
+    coincide con l'OLS manuale sull'ultima finestra.
+
+    NaN-safe: serie vuota / non numerica / con inf, parametri non validi,
+    fixing non calcolabile -> 'errore' valorizzato, mai eccezioni.
+
+    Ritorna dict con 'errore', 'valido', 'spot' (Series giornaliera
+    allineata), 'prezzo_hedge', 'basis' (spot - prezzo_hedge), 'finestre'
+    (DataFrame: Fine finestra, Beta, R², Efficace), 'beta_corrente',
+    'r2_corrente' (ultima finestra), 'beta_medio', 'r2_medio',
+    'n_finestre', 'n_efficaci', 'pct_efficaci', 'basis_media' (€/MWh),
+    'tracking_error' (std della basis, €/MWh), 'alpha_ultima',
+    'beta_ultima', 'd_hedge_ultima' e 'd_spot_ultima' (coppie Δ
+    dell'ultima finestra, per lo scatter)."""
+
+    colonne = ["Fine finestra", "Beta", "R²", "Efficace"]
+    vuoto = {"errore": None, "valido": False,
+             "spot": pd.Series(dtype=float),
+             "prezzo_hedge": pd.Series(dtype=float),
+             "basis": pd.Series(dtype=float),
+             "finestre": pd.DataFrame(columns=colonne),
+             "beta_corrente": None, "r2_corrente": None,
+             "beta_medio": None, "r2_medio": None,
+             "n_finestre": 0, "n_efficaci": 0, "pct_efficaci": 0.0,
+             "basis_media": None, "tracking_error": None,
+             "alpha_ultima": None, "beta_ultima": None,
+             "d_hedge_ultima": np.array([]),
+             "d_spot_ultima": np.array([])}
+
+    def _err(msg):
+        v = dict(vuoto)
+        v["spot"] = pd.Series(dtype=float)
+        v["prezzo_hedge"] = pd.Series(dtype=float)
+        v["basis"] = pd.Series(dtype=float)
+        v["finestre"] = pd.DataFrame(columns=list(colonne))
+        v["errore"] = msg
+        return v
+
+    try:
+        tipo = str(tipo_hedge)
+        if tipo not in ("media_mobile", "indice_mese_precedente"):
+            return _err("Tipo di hedge non valido.")
+        n_fix = int(n_fissaggio)
+        if n_fix < 2:
+            return _err("Giorni della media mobile >= 2.")
+        fin = int(finestra_gg)
+        if fin < 10:
+            return _err("Finestra del test >= 10 giorni.")
+        soglia_r2 = float(r2_min)
+        if not np.isfinite(soglia_r2) or not (0.0 <= soglia_r2 < 1.0):
+            return _err("R² minimo in [0, 1).")
+        try:
+            b0, b1 = float(banda[0]), float(banda[1])
+        except (TypeError, IndexError, ValueError):
+            return _err("Banda di efficacia non valida.")
+        if not (np.isfinite(b0) and np.isfinite(b1)) or not (0 < b0 <= b1):
+            return _err("Banda di efficacia non valida (0 < min <= max).")
+
+        prezzi = pd.Series(prezzi).dropna()
+        prezzi = prezzi[pd.to_numeric(prezzi, errors="coerce").notna()]
+        prezzi = pd.to_numeric(prezzi, errors="coerce").dropna()
+        if len(prezzi) == 0:
+            return _err("Serie prezzi vuota.")
+        if not bool(np.isfinite(prezzi.to_numpy(dtype=float)).all()):
+            return _err("Serie prezzi con valori non finiti.")
+        idx = pd.to_datetime(prezzi.index, errors="coerce")
+        prezzi = prezzi.copy()
+        prezzi.index = idx
+        prezzi = prezzi[prezzi.index.notna()]
+        if len(prezzi) == 0:
+            return _err("Serie prezzi senza date valide.")
+        spot = prezzi.resample("D").mean().dropna()
+        min_giorni = (n_fix + fin + 1) if tipo == "media_mobile" \
+            else (fin + 32)
+        if len(spot) < min_giorni:
+            return _err(f"Servono almeno {min_giorni} giorni di prezzi.")
+
+        if tipo == "media_mobile":
+            fh = spot.rolling(n_fix, min_periods=n_fix).mean().shift(1)
+        else:
+            per = spot.index.to_period("M")
+            mensili = spot.groupby(per).mean()
+            fh = pd.Series((per - 1).map(mensili), index=spot.index)
+
+        allineato = pd.DataFrame({"spot": spot, "fh": fh}).dropna()
+        if len(allineato) < fin + 1:
+            return _err("Dati insufficienti dopo l'allineamento col fixing.")
+        ds = allineato["spot"].diff().dropna()
+        dh = allineato["fh"].diff().dropna()
+        comune = ds.index.intersection(dh.index)
+        ds = ds.loc[comune]
+        dh = dh.loc[comune]
+        if len(comune) < fin:
+            return _err("Dati insufficienti per la finestra del test.")
+
+        righe = []
+        xs = dh.to_numpy(dtype=float)
+        ys = ds.to_numpy(dtype=float)
+        date_fine = list(dh.index)
+        for i in range(len(xs) - fin + 1):
+            x = xs[i:i + fin]
+            y = ys[i:i + fin]
+            vx = float(np.var(x))
+            vy = float(np.var(y))
+            if not (np.isfinite(vx) and np.isfinite(vy)) \
+                    or vx <= 0 or vy <= 0:
+                continue
+            beta = float(np.cov(x, y, ddof=0)[0, 1] / vx)
+            if not np.isfinite(beta):
+                continue
+            cc = np.corrcoef(x, y)[0, 1]
+            if not np.isfinite(cc):
+                continue
+            r2 = float(cc ** 2)
+            alpha = float(y.mean() - beta * x.mean())
+            efficace = bool(abs(beta) >= b0 and abs(beta) <= b1
+                            and r2 >= soglia_r2)
+            righe.append({"fine": date_fine[i + fin - 1], "beta": beta,
+                          "r2": r2, "alpha": alpha, "efficace": efficace,
+                          "x": x, "y": y})
+        if not righe:
+            return _err("Varianza nulla del fixing: regressione impossibile.")
+        df = pd.DataFrame([{
+            "Fine finestra": r["fine"].strftime("%Y-%m-%d")
+            if hasattr(r["fine"], "strftime") else str(r["fine"]),
+            "Beta": round(r["beta"], 4),
+            "R²": round(r["r2"], 4),
+            "Efficace": "sì" if r["efficace"] else "no"}
+            for r in righe])
+        ultima = righe[-1]
+        betas = np.array([r["beta"] for r in righe])
+        r2arr = np.array([r["r2"] for r in righe])
+        n_eff = int(sum(1 for r in righe if r["efficace"]))
+        basis = allineato["spot"] - allineato["fh"]
+        return {"errore": None, "valido": True,
+                "spot": allineato["spot"], "prezzo_hedge": allineato["fh"],
+                "basis": basis, "finestre": df,
+                "beta_corrente": float(ultima["beta"]),
+                "r2_corrente": float(ultima["r2"]),
+                "beta_medio": float(betas.mean()),
+                "r2_medio": float(r2arr.mean()),
+                "n_finestre": len(righe), "n_efficaci": n_eff,
+                "pct_efficaci": 100.0 * n_eff / len(righe),
+                "basis_media": float(basis.mean()),
+                "tracking_error": float(basis.std()),
+                "alpha_ultima": float(ultima["alpha"]),
+                "beta_ultima": float(ultima["beta"]),
+                "d_hedge_ultima": ultima["x"],
+                "d_spot_ultima": ultima["y"]}
+    except Exception as e:  # pragma: no cover - guardia totale
+        return _err(f"Errore interno: {e}")
+
+
 def calcola_attribuzione_pnl(prezzo_0, prezzo_1, volume_0, volume_1,
                              ruolo="acquisto", coperture=None,
                              usa_cambio=False, fx_0=1.0, fx_1=1.0,
@@ -15702,7 +15882,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -26588,6 +26768,147 @@ elif workspace == _('ws8'):
                     help="Top episodi di drawdown della posizione aperta.",
                     key="csv_dd",
                 )
+
+    with tab131:
+        titolo_te = edu("Test di efficacia dell'hedge (copertura esistente)", "Il TEST DI EFFICACIA verifica nel tempo se la tua copertura funziona davvero, con il metodo della regressione usato nei test retrospettivi contabili (IAS 39 / IFRS 9): su finestre rolling si stimano le variazioni giornaliere dello spot su quelle del tuo prezzo di fixing. La SLOPE β e' il rapporto di copertura effettivo della finestra; l'R² dice quanto il fixing spiega lo spot. Finestra EFFICACE se |β| resta nella banda 80-125% e R² sopra la soglia: se β esce dalla banda o l'R² crolla, la copertura non traccia piu' l'esposizione ed e' ora di ribilanciare. Differenza dalla tab 'Hedge ratio': li' calcoli QUANTO coprire (ratio ottimale statico), qui verifichi SE la copertura esistente continua a funzionare.")
+        st.markdown(f"<h1>🧪 {titolo_te}</h1>", unsafe_allow_html=True)
+        st.caption("Regressione rolling Δspot su Δfixing — β = rapporto di copertura effettivo, R² = qualità del tracking, banda 80-125% = criterio di efficacia.")
+        tipo_te = st.radio(
+            "Strumento di copertura (prezzo di fixing)",
+            ["Media mobile (nota il giorno prima)",
+             "Indice mese precedente"],
+            horizontal=True, key="te_tipo")
+        tipo_tev = ("media_mobile" if tipo_te.startswith("Media")
+                    else "indice_mese_precedente")
+        te1, te2, te3, te4 = st.columns(4)
+        nfix_te = te1.number_input("Giorni della media mobile", min_value=2,
+                                   max_value=180, value=30, step=1,
+                                   key="te_nfix",
+                                   help="Ignorato con l'indice del mese precedente.")
+        fin_te = te2.number_input("Finestra del test (giorni)", min_value=10,
+                                  max_value=180, value=30, step=5,
+                                  key="te_fin")
+        mw_te = te3.number_input("MW esposti", min_value=0.1, value=2.0,
+                                 step=0.5, format="%.1f", key="te_mw")
+        r2_te = te4.slider("R² minimo per l'efficacia", min_value=0.50,
+                           max_value=0.95, value=0.80, step=0.05, key="te_r2")
+        ris_te = calcola_test_efficacia_hedge(
+            prezzi, tipo_hedge=tipo_tev, n_fissaggio=int(nfix_te),
+            finestra_gg=int(fin_te), r2_min=float(r2_te))
+        if ris_te["errore"]:
+            st.error(ris_te["errore"])
+        elif not ris_te["valido"]:
+            st.warning("Parametri non validi per il test di efficacia.")
+        else:
+            k1, k2, k3, k4, k5, k6 = st.columns(6)
+            render_kpi("β corrente (ultima finestra)",
+                       f"{ris_te['beta_corrente']:.3f}", k1)
+            render_kpi("R² corrente", f"{ris_te['r2_corrente']:.3f}", k2)
+            render_kpi("Finestre efficaci",
+                       f"{ris_te['pct_efficaci']:.0f}%", k3)
+            render_kpi("β medio", f"{ris_te['beta_medio']:.3f}", k4)
+            render_kpi("Basis media (€/MWh)",
+                       f"{ris_te['basis_media']:+.1f}", k5)
+            render_kpi("Tracking error (€/MWh)",
+                       f"{ris_te['tracking_error']:.1f}", k6)
+            if ris_te["pct_efficaci"] >= 100.0:
+                st.success("✅ Copertura efficace su tutte le finestre: il fixing traccia bene l'esposizione.")
+            elif ris_te["pct_efficaci"] >= 50.0:
+                st.warning("⚠️ Copertura parzialmente efficace: alcune finestre escono dalla banda 80-125% o hanno R² basso — monitora da vicino.")
+            else:
+                st.error("🚨 Copertura inefficace sulla maggioranza delle finestre: valuta il ribilanciamento dello strumento di fixing.")
+            st.markdown("**Spot vs prezzo di fixing**")
+            fig_te = go.Figure()
+            fig_te.add_trace(go.Scatter(
+                x=ris_te["spot"].index, y=ris_te["spot"].values,
+                mode="lines", name="Spot (€/MWh)",
+                line=dict(color="#38bdf8", width=2),
+                hovertemplate="Data: %{x}<br>Spot: € %{y:,.1f}/MWh<extra></extra>"))
+            fig_te.add_trace(go.Scatter(
+                x=ris_te["prezzo_hedge"].index,
+                y=ris_te["prezzo_hedge"].values,
+                mode="lines", name="Fixing (€/MWh)",
+                line=dict(color="#fbbf24", width=2),
+                hovertemplate="Data: %{x}<br>Fixing: € %{y:,.1f}/MWh<extra></extra>"))
+            fig_te.update_layout(template="plotly_dark", height=320,
+                                 title="Spot giornaliero vs prezzo di fixing",
+                                 xaxis_title="Data", yaxis_title="€/MWh")
+            st.plotly_chart(fig_te, use_container_width=True)
+            st.markdown("**β rolling con banda di efficacia 80-125%**")
+            fig_tb = go.Figure()
+            fig_tb.add_trace(go.Scatter(
+                x=ris_te["finestre"]["Fine finestra"],
+                y=ris_te["finestre"]["Beta"],
+                mode="lines+markers", name="β rolling",
+                line=dict(color="#a78bfa", width=2),
+                hovertemplate="Fine: %{x}<br>β: %{y:.3f}<extra></extra>"))
+            fig_tb.add_hline(y=1.25, line_dash="dash", line_color="#4ade80")
+            fig_tb.add_hline(y=0.80, line_dash="dash", line_color="#4ade80")
+            fig_tb.add_hline(y=1.0, line_dash="dot", line_color="#9ca3af")
+            fig_tb.update_layout(template="plotly_dark", height=300,
+                                 title="Rapporto di copertura effettivo (finestre rolling)",
+                                 xaxis_title="Fine finestra",
+                                 yaxis_title="β")
+            st.plotly_chart(fig_tb, use_container_width=True)
+            st.markdown("**R² rolling con soglia minima**")
+            fig_tr = go.Figure()
+            fig_tr.add_trace(go.Scatter(
+                x=ris_te["finestre"]["Fine finestra"],
+                y=ris_te["finestre"]["R²"],
+                mode="lines+markers", name="R² rolling",
+                line=dict(color="#34d399", width=2),
+                hovertemplate="Fine: %{x}<br>R²: %{y:.3f}<extra></extra>"))
+            fig_tr.add_hline(y=float(r2_te), line_dash="dash",
+                             line_color="#f87171")
+            fig_tr.update_layout(template="plotly_dark", height=260,
+                                 title="Qualità del tracking (R² delle finestre)",
+                                 xaxis_title="Fine finestra", yaxis_title="R²")
+            st.plotly_chart(fig_tr, use_container_width=True)
+            st.markdown("**Scatter ultima finestra: Δspot vs Δfixing**")
+            xh_te = ris_te["d_hedge_ultima"]
+            ys_te = ris_te["d_spot_ultima"]
+            xl_te = np.linspace(float(xh_te.min()), float(xh_te.max()), 50)
+            yl_te = ris_te["alpha_ultima"] + ris_te["beta_ultima"] * xl_te
+            fig_ts = go.Figure()
+            fig_ts.add_trace(go.Scatter(
+                x=xh_te, y=ys_te, mode="markers", name="Giorni finestra",
+                marker=dict(color="#38bdf8", size=6, opacity=0.7),
+                hovertemplate="Δfixing: %{x:.2f}<br>Δspot: %{y:.2f}<extra></extra>"))
+            fig_ts.add_trace(go.Scatter(
+                x=xl_te, y=yl_te, mode="lines", name="Retta OLS",
+                line=dict(color="#f87171", width=2),
+                hovertemplate="Δfixing: %{x:.2f}<br>Δspot stimato: %{y:.2f}<extra></extra>"))
+            fig_ts.update_layout(template="plotly_dark", height=300,
+                                 title=(f"Ultima finestra "
+                                        f"(β={ris_te['beta_ultima']:.3f}, "
+                                        f"R²={ris_te['r2_corrente']:.3f})"),
+                                 xaxis_title="Δ fixing (€/MWh)",
+                                 yaxis_title="Δ spot (€/MWh)")
+            st.plotly_chart(fig_ts, use_container_width=True)
+            st.markdown("**Basis giornaliera (spot − fixing) in EUR**")
+            basis_eur_te = ris_te["basis"] * float(mw_te) * 24.0
+            fig_tu = go.Figure(go.Scatter(
+                x=basis_eur_te.index, y=basis_eur_te.values,
+                mode="lines", name="Basis (€/giorno)",
+                line=dict(color="#fbbf24", width=1.5),
+                fill="tozeroy", fillcolor="rgba(251,191,36,0.25)",
+                hovertemplate="Data: %{x}<br>Basis: € %{y:,.0f}<extra></extra>"))
+            fig_tu.add_hline(y=0, line_dash="dot", line_color="#9ca3af")
+            fig_tu.update_layout(template="plotly_dark", height=260,
+                                 title="Basis giornaliera valorizzata sui MW esposti",
+                                 xaxis_title="Data", yaxis_title="EUR/giorno")
+            st.plotly_chart(fig_tu, use_container_width=True)
+            st.markdown("**Finestre del test**")
+            st.dataframe(ris_te["finestre"], use_container_width=True,
+                         hide_index=True)
+            st.download_button(
+                "⬇️ Esporta finestre del test (CSV)",
+                ris_te["finestre"].to_csv(index=False).encode("utf-8"),
+                file_name=f"test_efficacia_hedge_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="β, R² ed esito del test per ogni finestra rolling.",
+                key="csv_te",
+            )
 
 # Footer
 
