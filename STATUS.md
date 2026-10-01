@@ -1,13 +1,14 @@
 # STATUS.md — 02-Dashboard-data-analist (Singularity Quant ETRM)
 
-**Ultimo aggiornamento: 01/10/2026 20:10 CEST**
+**Ultimo aggiornamento: 01/10/2026 21:45 CEST**
 
 ## Stato
 - Dashboard Streamlit "Singularity Quant ETRM", live su https://czpox8o8x6arnxw96txnvt.streamlit.app/.
-- Ultimo commit: 17f34a4 (QA 01/10 18:40 - README 135->136 tab).
-- Test: 891 check totali, 0 fail (suite completa run_all.py); pytest 123 passed.
+- Ultimo commit: TBD (QA 01/10 21:39 - tab138 Riconciliazione fattura).
+- Test: suite run_all.py in corso; test tab138: 41 check, 0 fail. Nessun segreto hardcoded.
 
 ## Ultimi eventi verificati (01/10/2026)
+- Nuova tab138 "📝 Riconciliazione fattura" (completamento lavoro ciclo 20:40, rimasto non committato): audit voce-per-voce della fattura del fornitore vs ricostruzione dallo spot — helper calcola_riconciliazione_fattura (stesso motore del tab 🧾 Stima bolletta: spot x profilo F1/F2/F3 + perdite, dispacciamento, PCV, oneri, accisa, IVA; voci energia/perdite/dispacciamento/PCV/oneri/accisa/imponibile/IVA/totale; voce ANOMALA solo se supera ENTRAMBE le soglie — scostamento € > tolleranza assoluta E scostamento % > tolleranza relativa; NaN-safe, serie vuota/profilo zero/fattura vuota -> errore pulito), testato con 41 check, 0 fail; UI con 9 number_input (value=None: voce vuota = saltata), parametri di ricostruzione + doppia tolleranza, KPI verdetto/voci anomale/scostamento totale/energia analizzata, barre scostamento per voce (rosso = anomala), dettaglio per voce + export CSV. README 137->138 tab.
 - Nuova tab137 "🎯 Radar prezzo obiettivo": radar del prezzo target per il timing di acquisto/vendita — helper calcola_radar_target (prezzi orari → medie giornaliere; tocco = prezzo <= target in acquisto, >= in vendita; hit rate storico su lookback 30-730 gg, giorni dall'ultimo tocco, probabilità di tocco entro l'orizzonte via Monte Carlo GBM martingala calibrato sui log-rendimenti giornalieri con shift per prezzi negativi e seed fisso riproducibile; semaforo 🟢 raggiunto / 🟡 vicino / 🔴 lontano), testato con 50 check, 0 fail; KPI stato radar/gap € e %/hit rate/probabilità di tocco/ultimo tocco, grafico prezzo giornaliero con tocchi del target, ventaglio MC P10-P90 con linea target, hit rate mensile, tabella mensile + export CSV. Nessun bug residuo, nessun segreto hardcoded. Fix collaterale: reso robusto il check "tab136 in st.tabs" nel test tab136 (parsing della riga di registry invece di match su stringa esatta).
 - Bugfix calcola_mtm (tab "MtM hedging"): con serie prezzi vuota o indice non-datetime sollevava AttributeError — ora ritorna DataFrame/serie vuoti con le colonne giuste, senza crash; aggiunti 3 test di regressione in tests/test_statistiche.py (50 passed).
 - Nuova tab136 "🎄 Effetto festività": sconto dei giorni festivi vs feriali (sconto medio €/MWh e %, profilo orario 0-23, tabella festività ordinate per sconto, KPI risparmio sul profilo F1/F2/F3, export CSV) — helper calcola_effetto_festivita con calendari CH-TI/CH/IT (feste mobili da algoritmo di Pasqua, niente tabelle hardcoded), classificazione festivo/weekend/feriale, copertura oraria minima 70%, tz-aware safe, NaN-safe; testato con 47 check, 0 fail (inclusi test su Pasqua 2026, IT vs CH-TI, copertura parziale, sconto negativo). Nessun bug residuo, nessun segreto hardcoded. Push 3 commit (b796a25, 80bbec2, 17f34a4), remoto verificato 17f34a4.
