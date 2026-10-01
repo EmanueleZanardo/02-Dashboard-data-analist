@@ -1,13 +1,15 @@
 # STATUS.md — 02-Dashboard-data-analist (Singularity Quant ETRM)
 
-**Ultimo aggiornamento: 01/10/2026 18:40 CEST**
+**Ultimo aggiornamento: 01/10/2026 20:10 CEST**
 
 ## Stato
 - Dashboard Streamlit "Singularity Quant ETRM", live su https://czpox8o8x6arnxw96txnvt.streamlit.app/.
 - Ultimo commit: 17f34a4 (QA 01/10 18:40 - README 135->136 tab).
-- Test: 837 check totali, 0 fail (790 regressione + 47 tab136); pytest 119 passed, 1 xfailed.
+- Test: 891 check totali, 0 fail (suite completa run_all.py); pytest 123 passed.
 
 ## Ultimi eventi verificati (01/10/2026)
+- Nuova tab137 "🎯 Radar prezzo obiettivo": radar del prezzo target per il timing di acquisto/vendita — helper calcola_radar_target (prezzi orari → medie giornaliere; tocco = prezzo <= target in acquisto, >= in vendita; hit rate storico su lookback 30-730 gg, giorni dall'ultimo tocco, probabilità di tocco entro l'orizzonte via Monte Carlo GBM martingala calibrato sui log-rendimenti giornalieri con shift per prezzi negativi e seed fisso riproducibile; semaforo 🟢 raggiunto / 🟡 vicino / 🔴 lontano), testato con 50 check, 0 fail; KPI stato radar/gap € e %/hit rate/probabilità di tocco/ultimo tocco, grafico prezzo giornaliero con tocchi del target, ventaglio MC P10-P90 con linea target, hit rate mensile, tabella mensile + export CSV. Nessun bug residuo, nessun segreto hardcoded. Fix collaterale: reso robusto il check "tab136 in st.tabs" nel test tab136 (parsing della riga di registry invece di match su stringa esatta).
+- Bugfix calcola_mtm (tab "MtM hedging"): con serie prezzi vuota o indice non-datetime sollevava AttributeError — ora ritorna DataFrame/serie vuoti con le colonne giuste, senza crash; aggiunti 3 test di regressione in tests/test_statistiche.py (50 passed).
 - Nuova tab136 "🎄 Effetto festività": sconto dei giorni festivi vs feriali (sconto medio €/MWh e %, profilo orario 0-23, tabella festività ordinate per sconto, KPI risparmio sul profilo F1/F2/F3, export CSV) — helper calcola_effetto_festivita con calendari CH-TI/CH/IT (feste mobili da algoritmo di Pasqua, niente tabelle hardcoded), classificazione festivo/weekend/feriale, copertura oraria minima 70%, tz-aware safe, NaN-safe; testato con 47 check, 0 fail (inclusi test su Pasqua 2026, IT vs CH-TI, copertura parziale, sconto negativo). Nessun bug residuo, nessun segreto hardcoded. Push 3 commit (b796a25, 80bbec2, 17f34a4), remoto verificato 17f34a4.
 - Nuova tab135 "📏 Premio di rischio": premio di rischio ex-post del forward (F_proxy − spot realizzato, mese per mese; F_proxy = media spot nei mesi di formazione precedenti; Base e Peak) — helper calcola_premio_rischio (finestra lookback 1/2/3/6 mesi, copertura oraria minima 70%, mesi incompleti saltati onestamente, NaN-safe), testato con 37 check, 0 fail (3 fix delle aspettative del test su arrotondamenti/medie pesate, nessun fix del codice); KPI premio medio €/MWh e %, % mesi con premio positivo, premio ultimo mese, bias massimo assoluto, verdetto automatico (chi ha pagato il rischio), barre premio mensili con segno, linee forward-proxy vs realizzato, scatter con bisettrice, tabella + export CSV. Nessun bug residuo, nessun segreto hardcoded.
 - (01/10/2026, altro agente) Nuove tab132 "🕐 Volatilità intraday", tab133 "🔀 Regimi di prezzo", tab134 "📑 Report di periodo".
