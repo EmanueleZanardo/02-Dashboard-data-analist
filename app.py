@@ -2757,6 +2757,13 @@ def calcola_premio_rischio(prezzi, lookback_mesi=3, copertura_min=0.7):
         p = p[~p.index.duplicated(keep="first")].sort_index()
     except Exception:
         return dict(vuoto)
+    # Indice sempre naive: i Timestamp di confronto nel loop sono naive
+    # (stesso pattern degli altri helper calcola_*).
+    try:
+        if isinstance(p.index, pd.DatetimeIndex) and p.index.tz is not None:
+            p.index = p.index.tz_localize(None)
+    except Exception:
+        return dict(vuoto)
     if len(p) == 0:
         return dict(vuoto)
     try:
