@@ -375,6 +375,25 @@ class TestMtm:
         assert len(df) == 0
         assert (cumul == 0.0).all()
 
+    def test_serie_vuota_niente_crash(self):
+        # regressione: serie vuota (RangeIndex) sollevava AttributeError su idx.tz
+        df, cumul = calcola_mtm(pd.Series(dtype=float), [self._contratto()])
+        assert list(df.columns) == ["Nome", "Lato", "Prezzo fisso (€/MWh)",
+                                    "Volume (MW)", "Ore delivery",
+                                    "Prezzo medio realizzato (€/MWh)", "MtM (€)"]
+        assert df.empty
+        assert len(cumul) == 0
+
+    def test_indice_non_datetime_niente_crash(self):
+        # serie con valori ma indice RangeIndex -> ritorno pulito, niente AttributeError
+        s = pd.Series([100.0] * 48)
+        df, cumul = calcola_mtm(s, [self._contratto()])
+        assert df.empty and len(cumul) == 0
+
+    def test_lista_prezzi_senza_indice(self):
+        df, cumul = calcola_mtm([100.0] * 48, [self._contratto()])
+        assert df.empty and len(cumul) == 0
+
 
 # ------------------------------------------------------- pnl_posizione_aperta
 class TestPnlPosizioneAperta:
