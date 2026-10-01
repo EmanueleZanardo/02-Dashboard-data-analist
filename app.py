@@ -16546,6 +16546,151 @@ def calcola_qualita_dati(prezzi, soglia_z=4.0, run_piatta_ore=6):
     return out
 
 
+def calcola_beta_gas_power(prezzi_orari, prezzi_gas, profilo="base", finestra=90, min_giorni=30):
+    """Beta cross-commodity dello spot elettrico sul gas TTF (OLS giornaliera).
+
+    Domanda operativa: "quando il TTF si muove di 1 €/MWh, di quanto si muove
+    mediamente lo spot elettrico?" — la beta e' l'hedge ratio gas-to-power per
+    coprire l'esposizione elettrica con future sul gas.
+
+    - prezzi_orari: Series oraria dei prezzi elettrici (€/MWh, indice datetime;
+      tz-aware reso naive come negli altri tab);
+    - prezzi_gas: Series GIORNALIERA del prezzo gas (€/MWh termico, indice
+      datetime);
+    - profilo: "base" (media 0-23 di tutti i giorni) o "peak" (media ore 8-20
+      dei soli giorni lun-ven);
+    - finestra: ampiezza (giorni) della beta rolling; min_giorni: osservazioni
+      minime per stimare la regressione.
+
+    Regressione OLS in forma chiusa: power_giorno = alpha + beta * gas_giorno
+    (nessuna dipendenza esterna). Ritorna dict con 'errore', 'valido', 'beta',
+    'alpha', 'r2', 'correlazione', 'n_giorni', 'std_residui', 'gas_medio',
+    'power_medio', 'df_rolling' (Fine finestra, Beta, R²), 'df_scatter'
+    (Giorno, Gas (€/MWh), Power (€/MWh)), 'df_scenari' (Variazione gas,
+    Gas (€/MWh), Δ prezzo (€/MWh), Prezzo atteso (€/MWh)).
+
+    NaN-safe: serie vuote, indici non-datetime, gas costante (varianza nulla),
+    giorni comuni < min_giorni -> errore pulito, mai eccezioni.
+    """
+    col_roll = ["Fine finestra", "Beta", "R²"]
+    col_sc = ["Giorno", "Gas (€/MWh)", "Power (€/MWh)"]
+    col_scen = ["Variazione gas", "Gas (€/MWh)", "Δ prezzo (€/MWh)",
+                "Prezzo atteso (€/MWh)"]
+    vuoto = {"errore": None, "valido": False, "beta": None, "alpha": None,
+             "r2": None, "correlazione": None, "n_giorni": 0,
+             "std_residui": None, "gas_medio": None, "power_medio": None,
+             "df_rolling": pd.DataFrame(columns=col_roll),
+             "df_scatter": pd.DataFrame(columns=col_sc),
+             "df_scenari": pd.DataFrame(columns=col_scen)}
+
+    def _err(msg):
+        out = dict(vuoto)
+        out["df_rolling"] = pd.DataFrame(columns=col_roll)
+        out["df_scatter"] = pd.DataFrame(columns=col_sc)
+        out["df_scenari"] = pd.DataFrame(columns=col_scen)
+        out["errore"] = msg
+        return out
+
+    try:
+        finestra = int(finestra)
+        min_giorni = int(min_giorni)
+    except (TypeError, ValueError):
+        return _err("Parametri non validi: finestra e min_giorni devono essere interi.")
+    if min_giorni < 10 or finestra < min_giorni:
+        return _err("Parametri non validi: servono min_giorni >= 10 e finestra >= min_giorni.")
+    if profilo not in ("base", "peak"):
+        return _err("Profilo non valido: 'base' o 'peak'.")
+
+    if prezzi_orari is None or len(prezzi_orari) == 0:
+        return _err("Serie prezzi elettrici vuota.")
+    if prezzi_gas is None or len(prezzi_gas) == 0:
+        return _err("Serie prezzi gas vuota.")
+    try:
+        p = pd.Series(prezzi_orari)
+        g = pd.Series(prezzi_gas)
+    except Exception:
+        return _err("Input non interpretabili come serie.")
+    if not isinstance(p.index, pd.DatetimeIndex) or not isinstance(g.index, pd.DatetimeIndex):
+        return _err("Gli indici di entrambe le serie devono essere di tipo data/ora.")
+    pv = pd.to_numeric(p.values, errors="coerce")
+    gv = pd.to_numeric(g.values, errors="coerce")
+    if np.isnan(pv).all():
+        return _err("Nessun valore numerico nella serie elettrica.")
+    if np.isnan(gv).all():
+        return _err("Nessun valore numerico nella serie gas.")
+    idx_p = p.index.tz_localize(None) if p.index.tz is not None else p.index
+    idx_g = g.index.tz_localize(None) if g.index.tz is not None else g.index
+    s_p = pd.Series(pv, index=idx_p).dropna()
+    s_g = pd.Series(gv, index=idx_g).dropna()
+    if s_p.empty or s_g.empty:
+        return _err("Serie vuote dopo la pulizia dei NaN.")
+
+    ore = s_p.index.hour
+    giorni = s_p.index.normalize()
+    if profilo == "base":
+        power_d = s_p.groupby(giorni).mean()
+    else:
+        dow = s_p.index.dayofweek
+        mask_peak = (ore >= 8) & (ore < 20) & (dow < 5)
+        if not bool(mask_peak.any()):
+            return _err("Nessuna ora peak (lun-ven 8-20) nella serie elettrica.")
+        power_d = s_p[mask_peak].groupby(giorni[mask_peak]).mean()
+    gas_d = s_g.groupby(s_g.index.normalize()).mean()
+    df = pd.DataFrame({"gas": gas_d, "power": power_d}).dropna()
+    if len(df) < min_giorni:
+        return _err(f"Dati insufficienti: {len(df)} giorni comuni, servono almeno {min_giorni}.")
+    if float(df["gas"].var()) <= 0:
+        return _err("Prezzo gas costante sul periodo: regressione impossibile.")
+
+    x = df["gas"].to_numpy()
+    y = df["power"].to_numpy()
+
+    def _ols(xx, yy):
+        if len(xx) < 2 or float(np.var(xx)) <= 0:
+            return None
+        b = float(np.cov(xx, yy, ddof=0)[0, 1] / np.var(xx))
+        a = float(np.mean(yy) - b * np.mean(xx))
+        corr = float(np.corrcoef(xx, yy)[0, 1])
+        return b, a, corr, corr * corr
+
+    full = _ols(x, y)
+    if full is None:
+        return _err("Regressione impossibile sui dati disponibili.")
+    beta, alpha, corr, r2 = full
+    std_res = float(np.std(y - (alpha + beta * x)))
+    gas_ref = float(x.mean())
+    power_ref = float(y.mean())
+
+    righe = []
+    for i in range(min_giorni, len(df) + 1):
+        sub = df.iloc[max(0, i - finestra):i]
+        r = _ols(sub["gas"].to_numpy(), sub["power"].to_numpy())
+        righe.append({"Fine finestra": df.index[i - 1].date(),
+                      "Beta": round(r[0], 3) if r else None,
+                      "R²": round(r[3], 3) if r else None})
+    df_roll = pd.DataFrame(righe, columns=col_roll)
+
+    df_sc = pd.DataFrame({"Giorno": df.index.date,
+                          "Gas (€/MWh)": np.round(x, 2),
+                          "Power (€/MWh)": np.round(y, 2)})
+
+    scen = []
+    for pct in (-30, -20, -10, 10, 20, 30):
+        gas_sc = gas_ref * (1 + pct / 100.0)
+        d_prezzo = beta * (gas_sc - gas_ref)
+        scen.append({"Variazione gas": f"{pct:+d} %",
+                     "Gas (€/MWh)": round(gas_sc, 2),
+                     "Δ prezzo (€/MWh)": round(d_prezzo, 2),
+                     "Prezzo atteso (€/MWh)": round(power_ref + d_prezzo, 2)})
+    df_scen = pd.DataFrame(scen, columns=col_scen)
+
+    return {"errore": None, "valido": True, "beta": beta, "alpha": alpha,
+            "r2": r2, "correlazione": corr, "n_giorni": len(df),
+            "std_residui": std_res, "gas_medio": gas_ref,
+            "power_medio": power_ref, "df_rolling": df_roll,
+            "df_scatter": df_sc, "df_scenari": df_scen}
+
+
 # ==========================================
 # WORKSPACE 1: SIMULATORE STRATEGICO
 # ==========================================
@@ -17189,7 +17334,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -28977,6 +29122,130 @@ elif workspace == _('ws8'):
                 help="Una riga per problema: tipo, inizio, fine, ore, dettaglio.",
                 key="csv_qualita_dati",
             )
+
+    with tab140:
+        titolo_bg = edu("Beta gas-power", "Il BETA GAS-POWER misura quanto si muove mediamente lo spot elettrico quando il TTF si muove di 1 €/MWh termico: power_giorno = alpha + beta x gas_giorno (regressione OLS giornaliera). Beta 2.5 = se il gas sale di 10 €/MWh, lo spot elettrico sale mediamente di 25 €/MWh. A cosa serve: (1) e' l'HEDGE RATIO gas-to-power — con beta 2.5, per coprire 1 MW elettrico servono ~2.5 MW di future TTF; (2) l'R-quadro dice quanta varianza del prezzo elettrico e' spiegata dal gas (R² basso = il prezzo e' guidato da altro: idro, nucleare, import); (3) la beta rolling mostra se la relazione e' stabile o cambia con le stagioni — se oscilla molto, l'hedge col gas va ricalibrato spesso.")
+        st.markdown(f"<h1>🔗 {titolo_bg}</h1>", unsafe_allow_html=True)
+        st.caption("Regressione giornaliera dello spot elettrico sul TTF: beta, R² e hedge ratio gas-to-power.")
+
+        sorg_gas = st.radio("Serie gas TTF", ["🧪 Sintetica (mock TTF)", "📤 Carica CSV reale"],
+                            horizontal=True, key="bg140_sorg",
+                            help="Il mock e' la serie sintetica TTF della dashboard (stagionalita' + spike, seed fisso). Carica un CSV per usare i TTF reali.")
+        s_gas = None
+        if sorg_gas.startswith("📤"):
+            up = st.file_uploader("CSV prezzi gas TTF (€/MWh termico)", type=["csv"], key="bg140_up",
+                                  help="Colonne riconosciute: data/giorno/date + prezzo/price/ttf. Separatore , ; o tab. La risoluzione superiore al giorno viene mediata.")
+            st.download_button("⬇️ Scarica template", "data,prezzo\n2026-01-01,38.5\n2026-01-02,39.1\n".encode("utf-8"),
+                               file_name="template_gas_ttf.csv", mime="text/csv", key="bg140_tmpl",
+                               help="Esempio di formato atteso: una riga per giorno con data e prezzo.")
+            if up is not None:
+                try:
+                    dfu = pd.read_csv(up, sep=None, engine="python")
+                    cols = {str(c).strip().lower(): c for c in dfu.columns}
+                    c_date = next((cols[k] for k in ("data", "date", "giorno", "day", "timestamp", "datetime") if k in cols),
+                                  dfu.columns[0])
+                    c_prez = next((cols[k] for k in ("prezzo", "price", "ttf", "eur_mwh", "value", "valore") if k in cols),
+                                  dfu.columns[1] if len(dfu.columns) > 1 else dfu.columns[0])
+                    dt = pd.to_datetime(dfu[c_date], errors="coerce")
+                    pv2 = pd.to_numeric(dfu[c_prez], errors="coerce")
+                    ok = dt.notna() & pv2.notna()
+                    if int(ok.sum()) < 10:
+                        st.error("CSV gas non valido: servono almeno 10 righe con data e prezzo numerico.")
+                    else:
+                        s_gas = pd.Series(pv2[ok].to_numpy(), index=pd.DatetimeIndex(dt[ok]), name="TTF (€/MWh)")
+                        s_gas.index = s_gas.index.tz_localize(None)
+                        st.success(f"✅ {len(s_gas)} quotazioni gas caricate ({s_gas.index.min().date()} → {s_gas.index.max().date()}).")
+                except Exception as e:
+                    st.error(f"CSV gas non leggibile: {e}")
+        else:
+            banner_demo("serie gas TTF sintetica (Mock): stagionalita' + spike con seed fisso — ENTSO-E non pubblica prezzi gas")
+            s_gas = generate_mock_gas(d0, d1)
+
+        bc1, bc2, bc3 = st.columns(3)
+        with bc1:
+            bg_prof = st.selectbox("Profilo elettrico", ["base", "peak"], key="bg140_prof",
+                                   help="base = media 0-23 di tutti i giorni; peak = media ore 8-20 dei soli lun-ven.")
+        with bc2:
+            bg_fin = st.number_input("Finestra rolling (giorni)", min_value=10, value=90, step=10, key="bg140_fin",
+                                     help="Ampiezza della finestra mobile per la beta rolling.")
+        with bc3:
+            bg_min = st.number_input("Giorni minimi per la regressione", min_value=10, value=30, step=5, key="bg140_min",
+                                     help="Osservazioni minime per stimare la regressione (anche per finestra).")
+
+        if s_gas is None:
+            st.info("ℹ️ Seleziona o carica la serie gas per calcolare la beta.")
+        else:
+            bg = calcola_beta_gas_power(prezzi, s_gas, profilo=bg_prof, finestra=bg_fin, min_giorni=bg_min)
+            if bg["errore"]:
+                st.info(f"ℹ️ {bg['errore']}")
+            else:
+                k1, k2, k3, k4 = st.columns(4)
+                render_kpi(edu("Beta gas-power", "Pendenza della regressione: di quanti €/MWh si muove lo spot per +1 €/MWh di TTF. E' l'hedge ratio gas-to-power."),
+                           f"{bg['beta']:.2f}", k1)
+                render_kpi(edu("R²", "Quota di varianza dello spot spiegata dal TTF (0-1). Alto = il gas guida il prezzo; basso = guidano altri driver."),
+                           f"{bg['r2']:.3f}", k2)
+                render_kpi(edu("Correlazione", "Correlazione lineare giornaliera tra TTF e spot elettrico."),
+                           f"{bg['correlazione']:.3f}", k3)
+                render_kpi(edu("Giorni analizzati", "Giorni con dato sia elettrico che gas usati nella regressione."),
+                           f"{bg['n_giorni']}", k4)
+                k5, k6, k7, k8 = st.columns(4)
+                render_kpi(edu("Alpha (€/MWh)", "Intercetta: componente del prezzo elettrico indipendente dal gas (altri driver marginali)."),
+                           f"{bg['alpha']:.2f}", k5)
+                render_kpi(edu("Std residui (€/MWh)", "Deviazione standard degli scarti dalla retta: rischio residuo non spiegato dal gas."),
+                           f"{bg['std_residui']:.2f}", k6)
+                render_kpi(edu("Gas medio (€/MWh)", "TTF medio sul periodo analizzato (riferimento degli scenari)."),
+                           f"{bg['gas_medio']:.2f}", k7)
+                render_kpi(edu("Power medio (€/MWh)", "Spot medio sul periodo analizzato (riferimento degli scenari)."),
+                           f"{bg['power_medio']:.2f}", k8)
+
+                if bg["r2"] >= 0.7:
+                    st.success(f"✅ Relazione forte: il TTF spiega il {bg['r2'] * 100:.0f}% della varianza dello spot {bg_prof}. Hedge ratio: {bg['beta']:.2f} MW di gas per 1 MW elettrico.")
+                elif bg["r2"] >= 0.4:
+                    st.warning(f"⚠️ Relazione moderata: il TTF spiega solo il {bg['r2'] * 100:.0f}% della varianza — coprire col gas lascia rischio residuo (std residui {bg['std_residui']:.1f} €/MWh).")
+                else:
+                    st.error(f"🛑 Relazione debole: il TTF spiega solo il {bg['r2'] * 100:.0f}% della varianza — lo spot e' guidato da altro (idro, nucleare, import). Il gas non e' un buon hedge qui.")
+
+                df_bgr = bg["df_rolling"]
+                fig_bg = go.Figure()
+                fig_bg.add_trace(go.Scatter(x=df_bgr["Fine finestra"], y=df_bgr["Beta"], mode="lines",
+                                            name="Beta rolling", line=dict(color="#38bdf8"),
+                                            hovertemplate="%{x}: beta %{y:.2f}<extra></extra>"))
+                fig_bg.add_hline(y=1.0, line_dash="dash", line_color="#9ca3af", annotation_text="beta = 1")
+                fig_bg.update_layout(template="plotly_dark", height=340, title="Beta rolling gas-power",
+                                     xaxis_title="", yaxis_title="Beta")
+                st.plotly_chart(fig_bg, use_container_width=True)
+
+                df_bgs = bg["df_scatter"]
+                xg = df_bgs["Gas (€/MWh)"].to_numpy()
+                yg = df_bgs["Power (€/MWh)"].to_numpy()
+                xs = np.linspace(float(xg.min()), float(xg.max()), 50)
+                fig_bgs = go.Figure()
+                fig_bgs.add_trace(go.Scatter(x=xg, y=yg, mode="markers", name="Giorni",
+                                             marker=dict(color="#a78bfa", size=5, opacity=0.7),
+                                             hovertemplate="Gas %{x:.1f} → Power %{y:.1f}<extra></extra>"))
+                fig_bgs.add_trace(go.Scatter(x=xs, y=bg["alpha"] + bg["beta"] * xs, mode="lines",
+                                             name=f"OLS (beta {bg['beta']:.2f})",
+                                             line=dict(color="#f59e0b", width=2)))
+                fig_bgs.update_layout(template="plotly_dark", height=380, title="Scatter TTF vs spot + retta OLS",
+                                      xaxis_title="Gas TTF (€/MWh termico)",
+                                      yaxis_title=f"Power spot {bg_prof} (€/MWh)")
+                st.plotly_chart(fig_bgs, use_container_width=True)
+
+                st.markdown("**Scenari: cosa succede allo spot se il TTF si muove**")
+                st.caption(f"Riferimento: gas medio {bg['gas_medio']:.2f} €/MWh, power medio {bg['power_medio']:.2f} €/MWh sul periodo.")
+                st.dataframe(bg["df_scenari"], use_container_width=True, hide_index=True)
+
+                with st.expander("Tabella beta rolling"):
+                    st.dataframe(df_bgr, use_container_width=True, hide_index=True)
+
+                st.download_button(
+                    "⬇️ Esporta beta rolling (CSV)",
+                    df_bgr.to_csv(index=False, sep=";").encode("utf-8"),
+                    file_name=f"beta_gas_power_{d0}_{d1}.csv",
+                    mime="text/csv",
+                    help="Una riga per finestra: fine finestra, beta, R².",
+                    key="csv_beta_gas_power",
+                )
 
 # Footer
 
