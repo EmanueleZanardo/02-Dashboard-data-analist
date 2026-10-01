@@ -2258,6 +2258,158 @@ def calcola_lcos(capex_eur, opex_annuo_eur=0.0, capacita_kwh=1000.0,
             "sens_ricarica": sens_ricarica, "df": df}
 
 
+def calcola_attribuzione_pnl(prezzo_0, prezzo_1, volume_0, volume_1,
+                             ruolo="acquisto", coperture=None,
+                             usa_cambio=False, fx_0=1.0, fx_1=1.0,
+                             budget_prezzo=None, budget_volume=None):
+    """Attribuzione del P&L (P&L explain) tra due date.
+
+    Domanda operativa: "perche' il mio risultato e' cambiato?" — scompone la
+    variazione del valore della posizione fisica in tre effetti additivi:
+      - effetto prezzo    = (P1 - P0) * Q0   (mercato che si muove)
+      - effetto volume    = (Q1 - Q0) * P0   (consumi/produzione diversi)
+      - effetto incrociato = (P1 - P0) * (Q1 - Q0)  (i due insieme)
+    Poi aggiunge:
+      - effetto coperture: per ogni forward (prezzo fisso F, volume V, lato
+        'acquisto'/'vendita'): contributo = segno_lato * V * (P1 - F),
+        con segno +1 acquisto (long) / -1 vendita (short);
+      - effetto cambio (opzionale): valore_eur_fine * (fx_1 - fx_0).
+    ruolo: 'acquisto' (fornitore: il P&L e' un costo, s=-1) o 'vendita'
+    (produttore: il P&L e' un ricavo, s=+1).
+
+    budget opzionale (prezzo, volume): scostamento = V1 - V_budget, scomposto
+    in scostamento prezzo = (P1 - Pb) * Q1 e scostamento volume =
+    (Q1 - Qb) * Pb (residuo = interazione).
+
+    Proprieta' testabile (identita' contabile): effetto_prezzo +
+    effetto_volume + effetto_incrociato = V1 - V0 esattamente, quindi
+    'residuo' ~ 0 per costruzione; raddoppiare il delta prezzo raddoppia
+    l'effetto prezzo; una copertura long con P1 > fisso contribuisce
+    positivo; effetto_cambio = valore_eur_fine * (fx_1 - fx_0).
+
+    NaN-safe: input non numerici o fuori limite -> 'errore' valorizzato,
+    mai eccezioni.
+
+    Ritorna dict con 'errore', 'valido', 'valore_0', 'valore_1',
+    'delta_fisico', 'effetto_prezzo', 'effetto_volume', 'effetto_incrociato',
+    'residuo', 'coperture' (lista dict nome/fisso/volume/lato/contributo),
+    'effetto_coperture', 'delta_totale', 'effetto_cambio', 'valore_1_chf',
+    'delta_totale_chf', 'scostamento_budget', 'scost_budget_prezzo',
+    'scost_budget_volume', 'df' (tabella waterfall in EUR)."""
+
+    vuoto = {"errore": None, "valido": False, "valore_0": 0.0, "valore_1": 0.0,
+             "delta_fisico": 0.0, "effetto_prezzo": 0.0, "effetto_volume": 0.0,
+             "effetto_incrociato": 0.0, "residuo": 0.0, "coperture": [],
+             "effetto_coperture": 0.0, "delta_totale": 0.0,
+             "effetto_cambio": 0.0, "valore_1_chf": 0.0,
+             "delta_totale_chf": 0.0, "scostamento_budget": None,
+             "scost_budget_prezzo": None, "scost_budget_volume": None,
+             "df": pd.DataFrame(columns=["Componente", "EUR"])}
+
+    def _err(msg):
+        v = dict(vuoto)
+        v["df"] = pd.DataFrame(columns=list(vuoto["df"].columns))
+        v["errore"] = msg
+        return v
+
+    try:
+        p0 = float(prezzo_0)
+        p1 = float(prezzo_1)
+        q0 = float(volume_0)
+        q1 = float(volume_1)
+        if not all(np.isfinite(x) for x in (p0, p1, q0, q1)):
+            return _err("Prezzi/volumi non numerici.")
+        if q0 < 0 or q1 < 0:
+            return _err("Volumi negativi non ammessi.")
+        if abs(p0) > 1e6 or abs(p1) > 1e6 or q0 > 1e12 or q1 > 1e12:
+            return _err("Prezzi/volumi fuori scala (|P|<=1e6, Q<=1e12).")
+        s = {"acquisto": -1.0, "vendita": 1.0}.get(str(ruolo))
+        if s is None:
+            return _err("Ruolo non valido (acquisto/vendita).")
+
+        v0 = s * p0 * q0
+        v1 = s * p1 * q1
+        eff_prezzo = s * (p1 - p0) * q0
+        eff_volume = s * (q1 - q0) * p0
+        eff_incro = s * (p1 - p0) * (q1 - q0)
+        delta_fisico = v1 - v0
+        residuo = delta_fisico - (eff_prezzo + eff_volume + eff_incro)
+
+        cop_list = []
+        eff_cop = 0.0
+        for i, c in enumerate(coperture or []):
+            try:
+                nome = str(c.get("nome", "Copertura %d" % (i + 1)))
+                f = float(c["fisso"])
+                v = float(c["volume"])
+                lato = str(c.get("lato", "acquisto")).lower()
+            except (TypeError, ValueError, AttributeError):
+                return _err("Copertura %d: parametri non validi." % (i + 1))
+            if not np.isfinite(f) or not np.isfinite(v) or v < 0:
+                return _err("Copertura %d: fisso/volume non validi." % (i + 1))
+            segno = {"acquisto": 1.0, "vendita": -1.0}.get(lato)
+            if segno is None:
+                return _err("Copertura %d: lato non valido." % (i + 1))
+            contrib = segno * v * (p1 - f)
+            eff_cop += contrib
+            cop_list.append({"nome": nome, "fisso": f, "volume": v,
+                             "lato": lato, "contributo": contrib})
+
+        delta_totale = delta_fisico + eff_cop
+
+        eff_fx = 0.0
+        v1_chf = 0.0
+        delta_chf = delta_totale
+        if usa_cambio:
+            try:
+                f0 = float(fx_0)
+                f1 = float(fx_1)
+            except (TypeError, ValueError):
+                return _err("Tassi di cambio non validi.")
+            if not (np.isfinite(f0) and np.isfinite(f1)) or f0 <= 0 or f1 <= 0:
+                return _err("Tassi di cambio non validi (devono essere > 0).")
+            val_eur_fine = v1 + eff_cop
+            eff_fx = val_eur_fine * (f1 - f0)
+            v1_chf = val_eur_fine * f1
+            delta_chf = v1_chf - v0 * f0
+
+        scost = scost_p = scost_v = None
+        if budget_prezzo is not None and budget_volume is not None:
+            try:
+                pb = float(budget_prezzo)
+                qb = float(budget_volume)
+            except (TypeError, ValueError):
+                return _err("Budget non valido.")
+            if not (np.isfinite(pb) and np.isfinite(qb)) or qb < 0:
+                return _err("Budget non valido.")
+            vb = s * pb * qb
+            scost = v1 - vb
+            scost_p = s * (p1 - pb) * q1
+            scost_v = s * (q1 - qb) * pb
+
+        df = pd.DataFrame([
+            {"Componente": "Valore inizio", "EUR": v0},
+            {"Componente": "Effetto prezzo", "EUR": eff_prezzo},
+            {"Componente": "Effetto volume", "EUR": eff_volume},
+            {"Componente": "Effetto incrociato", "EUR": eff_incro},
+            {"Componente": "Valore fisico fine", "EUR": v1},
+            {"Componente": "Effetto coperture", "EUR": eff_cop},
+            {"Componente": "P&L totale", "EUR": delta_totale},
+        ])
+
+        return {"errore": None, "valido": True, "valore_0": v0,
+                "valore_1": v1, "delta_fisico": delta_fisico,
+                "effetto_prezzo": eff_prezzo, "effetto_volume": eff_volume,
+                "effetto_incrociato": eff_incro, "residuo": residuo,
+                "coperture": cop_list, "effetto_coperture": eff_cop,
+                "delta_totale": delta_totale, "effetto_cambio": eff_fx,
+                "valore_1_chf": v1_chf, "delta_totale_chf": delta_chf,
+                "scostamento_budget": scost, "scost_budget_prezzo": scost_p,
+                "scost_budget_volume": scost_v, "df": df}
+    except (TypeError, ValueError):
+        return _err("Input non numerici.")
+
+
 def calcola_rischio_quanto(prezzi, mw_base=2.0, rho=0.3, vol_vol=0.15,
                            n_giorni=90, n_scenari=2000, budget=None, seed=42):
     """Rischio quanto Monte Carlo: correlazione prezzo spot <-> volume prelevato.
@@ -15326,7 +15478,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -25968,6 +26120,152 @@ elif workspace == _('ws8'):
                 mime="text/csv",
                 help="Dettaglio annuale del calcolo LCOS.",
                 key="csv_lcos",
+            )
+
+    with tab129:
+        titolo_ap = edu("Attribuzione P&L", "Il P&L EXPLAIN e' il rito quotidiano dei trading desk: scomporre la variazione del risultato in effetti additivi — PREZZO (il mercato si e' mosso), VOLUME (hai consumato/prodotto di piu' o di meno), INCROCIATO (i due insieme). L'identita' e' esatta: prezzo + volume + incrociato = variazione del valore fisico, senza residui. Poi si sommano le COPERTURE (forward long/short: quanto hanno protetto o penalizzato) e, se vuoi, l'EFFETTO CAMBIO (EUR/CHF). Il grafico a cascata (waterfall) mostra da dove viene ogni euro del risultato: se il prezzo spiega tutto, il rischio e' di mercato; se domina il volume, il problema e' operativo.")
+        st.markdown(f"<h1>📊 {titolo_ap}</h1>", unsafe_allow_html=True)
+        st.caption("Valori dimostrativi: inserisci i dati della tua posizione.")
+        ruolo_ap = st.radio(
+            "Ruolo", ["Acquisto (fornitore: il P&L e' un costo)",
+                      "Vendita (produttore: il P&L e' un ricavo)"],
+            horizontal=True, key="ap_ruolo")
+        ruolo_v = "acquisto" if ruolo_ap.startswith("Acquisto") else "vendita"
+        c1, c2, c3, c4 = st.columns(4)
+        p0_ap = c1.number_input("Prezzo iniziale (€/MWh)", value=95.0,
+                               step=1.0, format="%.1f", key="ap_p0")
+        p1_ap = c2.number_input("Prezzo finale (€/MWh)", value=110.0,
+                               step=1.0, format="%.1f", key="ap_p1")
+        q0_ap = c3.number_input("Volume iniziale (MWh)", min_value=0.0,
+                               value=10000.0, step=100.0, format="%.0f",
+                               key="ap_q0")
+        q1_ap = c4.number_input("Volume finale (MWh)", min_value=0.0,
+                               value=9500.0, step=100.0, format="%.0f",
+                               key="ap_q1")
+        st.markdown("**Coperture forward**")
+        n_cop = st.slider("Numero di coperture", min_value=0, max_value=4,
+                          value=1, key="ap_ncop")
+        coperture_ap = []
+        for i in range(n_cop):
+            cc1, cc2, cc3, cc4 = st.columns([3, 2, 2, 2])
+            nome_c = cc1.text_input("Nome", value=f"Forward {i + 1}",
+                                   key=f"ap_cop_nome_{i}")
+            fisso_c = cc2.number_input("Prezzo fisso (€/MWh)", value=100.0,
+                                      step=1.0, format="%.1f",
+                                      key=f"ap_cop_fisso_{i}")
+            vol_c = cc3.number_input("Volume (MWh)", min_value=0.0,
+                                    value=5000.0, step=100.0, format="%.0f",
+                                    key=f"ap_cop_vol_{i}")
+            lato_c = cc4.selectbox("Lato", ["acquisto", "vendita"],
+                                  key=f"ap_cop_lato_{i}")
+            coperture_ap.append({"nome": nome_c, "fisso": fisso_c,
+                                 "volume": vol_c, "lato": lato_c})
+        cfx1, cfx2, cfx3 = st.columns(3)
+        usa_fx = cfx1.checkbox("Converti in CHF (effetto cambio)",
+                               value=False, key="ap_fx_on")
+        fx0_ap = cfx2.number_input("EUR/CHF iniziale", min_value=0.01,
+                                  value=0.95, step=0.01, format="%.3f",
+                                  key="ap_fx0", disabled=not usa_fx)
+        fx1_ap = cfx3.number_input("EUR/CHF finale", min_value=0.01,
+                                  value=0.97, step=0.01, format="%.3f",
+                                  key="ap_fx1", disabled=not usa_fx)
+        cbd1, cbd2, cbd3 = st.columns(3)
+        usa_bd = cbd1.checkbox("Confronta con budget", value=False,
+                               key="ap_bd_on")
+        pb_ap = cbd2.number_input("Prezzo di budget (€/MWh)", min_value=0.0,
+                                 value=98.0, step=1.0, format="%.1f",
+                                 key="ap_pb", disabled=not usa_bd)
+        qb_ap = cbd3.number_input("Volume di budget (MWh)", min_value=0.0,
+                                 value=10000.0, step=100.0, format="%.0f",
+                                 key="ap_qb", disabled=not usa_bd)
+        ris_ap = calcola_attribuzione_pnl(
+            p0_ap, p1_ap, q0_ap, q1_ap, ruolo=ruolo_v,
+            coperture=coperture_ap, usa_cambio=usa_fx, fx_0=fx0_ap,
+            fx_1=fx1_ap,
+            budget_prezzo=pb_ap if usa_bd else None,
+            budget_volume=qb_ap if usa_bd else None)
+        if ris_ap["errore"]:
+            st.error(ris_ap["errore"])
+        elif not ris_ap["valido"]:
+            st.warning("Parametri non validi per l'attribuzione del P&L.")
+        else:
+            k1, k2, k3, k4, k5, k6 = st.columns(6)
+            render_kpi("Δ P&L totale", f"€ {ris_ap['delta_totale']:+,.0f}", k1)
+            render_kpi("Effetto prezzo", f"€ {ris_ap['effetto_prezzo']:+,.0f}",
+                       k2)
+            render_kpi("Effetto volume", f"€ {ris_ap['effetto_volume']:+,.0f}",
+                       k3)
+            render_kpi("Effetto incrociato",
+                       f"€ {ris_ap['effetto_incrociato']:+,.0f}", k4)
+            render_kpi("Effetto coperture",
+                       f"€ {ris_ap['effetto_coperture']:+,.0f}", k5)
+            if usa_fx:
+                render_kpi("Effetto cambio",
+                           f"CHF {ris_ap['effetto_cambio']:+,.0f}", k6)
+            else:
+                render_kpi("Residuo (check)",
+                           f"€ {ris_ap['residuo']:+,.2f}", k6)
+            st.markdown("**Waterfall: da dove viene il risultato**")
+            fig_ap = go.Figure(go.Waterfall(
+                x=["Valore inizio", "Effetto prezzo", "Effetto volume",
+                   "Effetto incrociato", "Coperture", "Δ P&L"],
+                measure=["absolute", "relative", "relative", "relative",
+                         "relative", "total"],
+                y=[ris_ap["valore_0"], ris_ap["effetto_prezzo"],
+                   ris_ap["effetto_volume"], ris_ap["effetto_incrociato"],
+                   ris_ap["effetto_coperture"], 0.0],
+                text=[f"€ {v:+,.0f}" for v in
+                      [ris_ap["valore_0"], ris_ap["effetto_prezzo"],
+                       ris_ap["effetto_volume"], ris_ap["effetto_incrociato"],
+                       ris_ap["effetto_coperture"], ris_ap["delta_totale"]]],
+                textposition="outside",
+                connector={"line": {"color": "#64748b"}},
+                increasing={"marker": {"color": "#4ade80"}},
+                decreasing={"marker": {"color": "#f87171"}},
+                totals={"marker": {"color": "#38bdf8"}},
+                hovertemplate="%{x}<br>€ %{y:+,.0f}<extra></extra>"))
+            fig_ap.update_layout(template="plotly_dark", height=380,
+                                 title="Attribuzione del P&L (EUR)",
+                                 yaxis_title="EUR")
+            st.plotly_chart(fig_ap, use_container_width=True)
+            if ris_ap["coperture"]:
+                st.markdown("**Dettaglio coperture**")
+                st.dataframe(pd.DataFrame([
+                    {"Copertura": c["nome"],
+                     "Lato": c["lato"],
+                     "Prezzo fisso (€/MWh)": f"€ {c['fisso']:,.1f}",
+                     "Volume (MWh)": f"{c['volume']:,.0f}",
+                     "Contributo (€)": f"€ {c['contributo']:+,.0f}"}
+                    for c in ris_ap["coperture"]]),
+                    use_container_width=True, hide_index=True)
+            if usa_fx:
+                st.markdown("**Effetto cambio**")
+                t1, t2 = st.columns(2)
+                render_kpi("Effetto cambio",
+                           f"CHF {ris_ap['effetto_cambio']:+,.0f}", t1)
+                render_kpi("Δ P&L in CHF",
+                           f"CHF {ris_ap['delta_totale_chf']:+,.0f}", t2)
+            if usa_bd and ris_ap["scostamento_budget"] is not None:
+                st.markdown("**Scostamento vs budget**")
+                b1, b2, b3 = st.columns(3)
+                render_kpi("Scostamento totale",
+                           f"€ {ris_ap['scostamento_budget']:+,.0f}", b1)
+                render_kpi("di cui prezzo",
+                           f"€ {ris_ap['scost_budget_prezzo']:+,.0f}", b2)
+                render_kpi("di cui volume",
+                           f"€ {ris_ap['scost_budget_volume']:+,.0f}", b3)
+            st.markdown("**Tabella waterfall**")
+            st.dataframe(ris_ap["df"].assign(
+                **{"EUR": ris_ap["df"]["EUR"].map(
+                    lambda v: f"€ {v:+,.0f}")}),
+                use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta attribuzione P&L (CSV)",
+                ris_ap["df"].to_csv(index=False).encode("utf-8"),
+                file_name=f"attribuzione_pnl_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Tabella waterfall dell'attribuzione del P&L.",
+                key="csv_ap",
             )
 
 # Footer
