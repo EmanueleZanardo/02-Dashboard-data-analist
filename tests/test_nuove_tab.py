@@ -229,10 +229,6 @@ class TestPremioRischio:
         assert a["df"].equals(b["df"])
         assert a["premio_medio_base"] == b["premio_medio_base"]
 
-    @pytest.mark.xfail(reason="BUG tab135: TypeError con indice tz-aware "
-                              "(pd.Timestamp naive vs index aware) — "
-                              "da correggere in app.py con tz_localize(None)",
-                       strict=True)
     def test_tz_aware_non_sollevato(self):
         # i dati mock dell'app sono tz-aware (Europe/Zurich): la tab non
         # deve sollevare eccezioni (docstring: "mai eccezioni")
