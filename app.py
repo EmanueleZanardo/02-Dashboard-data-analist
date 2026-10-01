@@ -2832,6 +2832,294 @@ def calcola_premio_rischio(prezzi, lookback_mesi=3, copertura_min=0.7):
     return out
 
 
+def calcola_effetto_festivita(prezzi, paese="CH-TI", copertura_min=0.7,
+                              mw_fasce=None):
+    """Effetto delle festivita' sul prezzo spot: lo sconto dei giorni festivi.
+
+    Le festivita' comandate (nazionali + cantonali) riducono la domanda
+    elettrica: uffici e fabbriche chiudono e lo spot scende, spesso ai livelli
+    del weekend. La funzione classifica ogni giorno del periodo in
+    FESTIVO / WEEKEND / FERIALE e misura lo SCONTO FESTIVO:
+
+      SCONTO = prezzo medio feriale - prezzo medio festivo   (EUR/MWh e %)
+
+    sia in aggregato sia ora per ora (profilo 0-23: lo sconto e'
+    tipicamente massimo nelle ore di punta diurne).
+
+    Calendario (anni coperti automaticamente dallo storico):
+      - "CH-TI": feste nazionali CH (Capodanno, Venerdi' Santo, Lunedi'
+        dell'Angelo, Ascensione, Lunedi' di Pentecoste, Festa nazionale
+        1 agosto, Natale, S. Stefano) + feste cantonali ticinesi (Epifania,
+        S. Giuseppe 19/3, Corpus Domini, Ognissanti, Immacolata);
+      - "CH": solo le feste nazionali svizzere;
+      - "IT": feste nazionali italiane (incluse Liberazione, Festa del
+        Lavoro, Festa della Repubblica, Ferragosto).
+    Le feste mobili sono calcolate con l'algoritmo gregoriano di Pasqua
+    (niente tabelle hardcoded: funziona per qualsiasi anno).
+
+    Se mw_fasce = {"F1":.., "F2":.., "F3":..} e' fornito, calcola anche
+    l'impatto sul profilo di consumo: costo reale delle ore festive
+    (prezzo spot x MW di fascia) contro il costo delle stesse ore a
+    prezzo feriale medio (stessa ora del giorno) -> risparmio in EUR.
+
+    Lettura operativa:
+      - sconto positivo persistente: le festivita' sono i giorni piu'
+        economici per i FERMI DI MANUTENZIONE e il profilo risparmia
+        rispetto a un feriale tipo;
+      - la festività piu' scontata e l'ora con sconto massimo dicono
+        DOVE concentrare fermi e flessibilita'.
+    Diverso dal tab "Weekend" (sabato/domenica) e da "Giorni tipo"
+    (profili medi per giorno della settimana): qui solo le festivita'
+    comandate, con nome, data e sconto misurato una per una.
+
+    NaN-safe: serie vuota, indice non datetime, paese/copertura non validi
+    o nessuna festivita' nel periodo -> 'ok' False con 'motivo'; giorni con
+    copertura oraria < copertura_min saltati onestamente (contati in
+    'n_giorni_saltati'); indice tz-aware reso naive; mai eccezioni.
+
+    Ritorna dict con 'ok', 'motivo', 'paese', 'n_festivita',
+    'n_giorni_feriali', 'n_giorni_weekend', 'n_giorni_saltati',
+    'prezzo_medio_feriale/festivo/weekend', 'sconto_medio_eur/pct',
+    'df_festivita' (Data, Festivita', Ore, Prezzo medio, Sconto vs feriale
+    EUR/% — ordinate per sconto decrescente), 'df_orario' (24 righe:
+    Ora, Feriale, Festivo, Sconto EUR/%), 'ora_sconto_max',
+    'sconto_max_orario', 'festa_piu_scontata', 'data_festa_piu_scontata'
+    e, se mw_fasce e' valido, 'costo_festivo_profilo',
+    'costo_riferimento_profilo', 'energia_festiva_mwh',
+    'risparmio_profilo_eur/pct'.
+    """
+    from datetime import date, timedelta
+
+    E = "\u20ac/MWh"
+    cols_f = ["Data", "Festivit\u00e0", "Ore",
+              "Prezzo medio (" + E + ")",
+              "Sconto vs feriale (" + E + ")", "Sconto vs feriale (%)"]
+    cols_o = ["Ora", "Feriale (" + E + ")", "Festivo (" + E + ")",
+              "Sconto (" + E + ")", "Sconto (%)"]
+    vuoto = {"ok": False, "motivo": "", "paese": paese,
+             "n_festivita": 0, "n_giorni_feriali": 0, "n_giorni_weekend": 0,
+             "n_giorni_saltati": 0,
+             "prezzo_medio_feriale": None, "prezzo_medio_festivo": None,
+             "prezzo_medio_weekend": None,
+             "sconto_medio_eur": None, "sconto_medio_pct": None,
+             "df_festivita": pd.DataFrame(columns=cols_f),
+             "df_orario": pd.DataFrame(columns=cols_o),
+             "ora_sconto_max": None, "sconto_max_orario": None,
+             "festa_piu_scontata": None, "data_festa_piu_scontata": None,
+             "risparmio_profilo_eur": None, "risparmio_profilo_pct": None,
+             "costo_festivo_profilo": None, "costo_riferimento_profilo": None,
+             "energia_festiva_mwh": None}
+
+    def _no(motivo):
+        out = dict(vuoto)
+        out["df_festivita"] = vuoto["df_festivita"].copy()
+        out["df_orario"] = vuoto["df_orario"].copy()
+        out["motivo"] = motivo
+        return out
+
+    def _pasqua(a):
+        # Domenica di Pasqua dell'anno a (algoritmo gregoriano anonimo).
+        x, b, c = a % 19, a // 100, a % 100
+        d, e = b // 4, b % 4
+        f = (b + 8) // 25
+        g = (b - f + 1) // 3
+        h = (19 * x + b - d - g + 15) % 30
+        i, k = c // 4, c % 4
+        ll = (32 + 2 * e + 2 * i - h - k) % 7
+        m = (x + 11 * h + 22 * ll) // 451
+        mese = (h + ll - 7 * m + 114) // 31
+        giorno = ((h + ll - 7 * m + 114) % 31) + 1
+        return date(a, mese, giorno)
+
+    def _festivita_anno(a):
+        pq = _pasqua(a)
+        cal = {date(a, 1, 1): "Capodanno",
+               pq - timedelta(days=2): "Venerd\u00ec Santo",
+               pq + timedelta(days=1): "Luned\u00ec dell'Angelo",
+               pq + timedelta(days=39): "Ascensione",
+               pq + timedelta(days=50): "Luned\u00ec di Pentecoste",
+               date(a, 12, 25): "Natale",
+               date(a, 12, 26): "S. Stefano"}
+        if paese == "CH-TI":
+            cal[date(a, 8, 1)] = "Festa nazionale"
+            cal[date(a, 1, 6)] = "Epifania"
+            cal[date(a, 3, 19)] = "S. Giuseppe (TI)"
+            cal[pq + timedelta(days=60)] = "Corpus Domini (TI)"
+            cal[date(a, 11, 1)] = "Ognissanti"
+            cal[date(a, 12, 8)] = "Immacolata"
+        elif paese == "CH":
+            cal[date(a, 8, 1)] = "Festa nazionale"
+        else:  # IT
+            cal[date(a, 1, 6)] = "Epifania"
+            cal[date(a, 4, 25)] = "Liberazione"
+            cal[date(a, 5, 1)] = "Festa del Lavoro"
+            cal[date(a, 6, 2)] = "Festa della Repubblica"
+            cal[date(a, 8, 15)] = "Ferragosto"
+            cal[date(a, 11, 1)] = "Ognissanti"
+            cal[date(a, 12, 8)] = "Immacolata"
+        return cal
+
+    def _fascia(ts):
+        # Replica locale di fascia_oraria (AEEGSI F1/F2/F3): la versione
+        # originale vive a livello modulo, ma qui serve una copia
+        # self-contained per l'estrazione via AST nei test.
+        wd, h = ts.weekday(), ts.hour
+        if wd == 6:
+            return "F3"
+        if wd == 5:
+            return "F2" if 7 <= h < 23 else "F3"
+        if 8 <= h < 19:
+            return "F1"
+        if (7 <= h < 8) or (19 <= h < 23):
+            return "F2"
+        return "F3"
+
+    if paese not in ("CH-TI", "CH", "IT"):
+        return _no("paese non valido: usare CH-TI, CH o IT")
+    try:
+        cop = float(copertura_min)
+        if not (0 < cop <= 1):
+            return _no("copertura_min non valida: serve 0 < c <= 1")
+    except Exception:
+        return _no("copertura_min non valida: serve 0 < c <= 1")
+    try:
+        p = prezzi.astype(float)
+        idx = pd.DatetimeIndex(p.index)
+        if idx.tz is not None:
+            idx = idx.tz_localize(None)
+        p.index = idx
+        p = p[~p.index.duplicated(keep="first")].sort_index().dropna()
+    except Exception:
+        return _no("serie prezzi non valida (serve DatetimeIndex)")
+    if len(p) == 0:
+        return _no("serie prezzi vuota")
+    try:
+        anni = sorted({d.year for d in p.index.date})
+    except Exception:
+        return _no("indice non datetime")
+    fest = {}
+    for a in anni:
+        fest.update(_festivita_anno(a))
+
+    soglia_ore = cop * 24.0
+    righe, s_fer, s_fes, s_we = [], [], [], []
+    saltati = n_fer = n_we = 0
+    for giorno, s in p.groupby(p.index.floor("D")):
+        if len(s) < soglia_ore:
+            saltati += 1
+            continue
+        g = giorno.date()
+        if g in fest:
+            s_fes.append(s)
+            righe.append({"data": g, "nome": fest[g], "ore": len(s),
+                          "pm": float(s.mean())})
+        elif giorno.weekday() >= 5:
+            n_we += 1
+            s_we.append(s)
+        else:
+            n_fer += 1
+            s_fer.append(s)
+    if not righe:
+        return _no("nessuna festivita' nel periodo con copertura sufficiente")
+    sf_fer = pd.concat(s_fer) if s_fer else pd.Series(dtype=float)
+    sf_fes = pd.concat(s_fes)
+    sf_we = pd.concat(s_we) if s_we else pd.Series(dtype=float)
+    pm_fer = float(sf_fer.mean()) if len(sf_fer) else float("nan")
+    pm_fes = float(sf_fes.mean())
+    pm_we = float(sf_we.mean()) if len(sf_we) else float("nan")
+
+    def _sconto(pm):
+        d = pm_fer - pm
+        pct = (d / pm_fer * 100.0) if pm_fer else float("nan")
+        return d, pct
+
+    righe_f = []
+    for r in righe:
+        d, pct = _sconto(r["pm"])
+        righe_f.append({"Data": r["data"],
+                        "Festivit\u00e0": r["nome"],
+                        "Ore": r["ore"],
+                        "Prezzo medio (" + E + ")": round(r["pm"], 2),
+                        "Sconto vs feriale (" + E + ")": round(d, 2),
+                        "Sconto vs feriale (%)": round(pct, 1)})
+    df_f = (pd.DataFrame(righe_f, columns=cols_f)
+            .sort_values("Sconto vs feriale (" + E + ")",
+                         ascending=False, kind="mergesort")
+            .reset_index(drop=True))
+
+    righe_o = []
+    for h in range(24):
+        mf = float(sf_fer[sf_fer.index.hour == h].mean()) if len(sf_fer) \
+            else float("nan")
+        mh = float(sf_fes[sf_fes.index.hour == h].mean())
+        if np.isnan(mf) or np.isnan(mh):
+            sc, scp = float("nan"), float("nan")
+        else:
+            sc = mf - mh
+            scp = sc / mf * 100.0 if mf else float("nan")
+        righe_o.append({"Ora": h,
+                        "Feriale (" + E + ")": round(mf, 2),
+                        "Festivo (" + E + ")": round(mh, 2),
+                        "Sconto (" + E + ")": round(sc, 2),
+                        "Sconto (%)": round(scp, 1)})
+    df_o = pd.DataFrame(righe_o, columns=cols_o)
+
+    d_med, pct_med = _sconto(pm_fes)
+    sc_serie = df_o["Sconto (" + E + ")"]
+    if sc_serie.notna().any():
+        i_max = sc_serie.idxmax()
+        ora_max = int(df_o.loc[i_max, "Ora"])
+        sc_max = round(float(sc_serie.loc[i_max]), 2)
+    else:
+        ora_max, sc_max = None, None
+    i_f = df_f["Sconto vs feriale (" + E + ")"].idxmax()
+
+    out = dict(vuoto)
+    out.update({
+        "ok": True, "motivo": "",
+        "n_festivita": len(righe_f), "n_giorni_feriali": n_fer,
+        "n_giorni_weekend": n_we, "n_giorni_saltati": saltati,
+        "prezzo_medio_feriale": round(pm_fer, 2),
+        "prezzo_medio_festivo": round(pm_fes, 2),
+        "prezzo_medio_weekend": round(pm_we, 2),
+        "sconto_medio_eur": round(d_med, 2),
+        "sconto_medio_pct": round(pct_med, 1),
+        "df_festivita": df_f, "df_orario": df_o,
+        "ora_sconto_max": ora_max, "sconto_max_orario": sc_max,
+        "festa_piu_scontata": str(df_f.loc[i_f, "Festivit\u00e0"]),
+        "data_festa_piu_scontata": str(df_f.loc[i_f, "Data"]),
+    })
+
+    if mw_fasce is not None:
+        mw = None
+        try:
+            mw = {k: float(mw_fasce[k]) for k in ("F1", "F2", "F3")}
+            if any(v < 0 for v in mw.values()) or sum(mw.values()) <= 0:
+                mw = None
+        except Exception:
+            mw = None
+        if mw is not None:
+            med_fer_ora = (sf_fer.groupby(sf_fer.index.hour).mean()
+                           if len(sf_fer) else None)
+            costo_f = costo_r = energia = 0.0
+            for ts, px in sf_fes.items():
+                q = mw[_fascia(ts)]
+                energia += q
+                costo_f += px * q
+                if med_fer_ora is not None and ts.hour in med_fer_ora.index:
+                    costo_r += float(med_fer_ora.loc[ts.hour]) * q
+                else:
+                    costo_r += pm_fer * q
+            risp = costo_r - costo_f
+            out["costo_festivo_profilo"] = round(costo_f, 0)
+            out["costo_riferimento_profilo"] = round(costo_r, 0)
+            out["energia_festiva_mwh"] = round(energia, 1)
+            out["risparmio_profilo_eur"] = round(risp, 0)
+            out["risparmio_profilo_pct"] = (round(risp / costo_r * 100, 1)
+                                            if costo_r else None)
+    return out
+
+
 def calcola_drawdown_mtm(serie_pnl, soglia_eur=0.0):
     """Analisi drawdown della curva P&L cumulata di una posizione aperta.
 
@@ -16380,7 +16668,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -27764,6 +28052,78 @@ elif workspace == _('ws8'):
                 mime="text/csv",
                 help="Mese per mese: forward proxy, spot realizzato e premio (Base e Peak).",
                 key="csv_premio_rischio",
+            )
+
+    with tab136:
+        titolo_ef = edu("Effetto festività", "Le FESTIVITÀ comandate (nazionali e cantonali) spostano la domanda elettrica: uffici e fabbriche chiudono, il carico crolla e lo spot scende — spesso ai livelli del weekend, a volte sotto. Questo tab misura lo SCONTO FESTIVO: confronta il prezzo medio orario dei giorni festivi con quello dei giorni feriali dello stesso periodo, ora per ora. A cosa serve: (1) pianificare i FERMI DI MANUTENZIONE nelle festività più economiche; (2) quantificare quanto il tuo profilo di consumo RISPARMIA nei giorni festivi rispetto a un feriale tipo; (3) non fissare a termine volumi che tanto costerebbero meno sullo spot. Il calendario copre Svizzera nazionale, Ticino (Epifania, S. Giuseppe, Corpus Domini, Ognissanti, Immacolata) e Italia; le feste mobili sono calcolate dall'algoritmo di Pasqua, senza tabelle hardcoded. Diverso dal tab 📅 Weekend (sabato/domenica) e da 🗓️ Giorni tipo (profili medi per weekday): qui solo le festività comandate, una per una, con nome, data e sconto misurato.")
+        st.markdown(f"<h1>🎄 {titolo_ef}</h1>", unsafe_allow_html=True)
+        st.caption("Sconto dei giorni festivi vs giorni feriali: quanto si risparmia, in quali ore, e con quale impatto sul tuo profilo.")
+
+        c_ef1, c_ef2, c_ef3, c_ef4 = st.columns(4)
+        with c_ef1:
+            paese_ef = st.selectbox("Calendario festività",
+                                    options=["CH-TI", "CH", "IT"], index=0,
+                                    help="CH-TI = Svizzera + feste cantonali ticinesi; CH = solo feste nazionali svizzere; IT = feste nazionali italiane.",
+                                    key="paese_eff_fest")
+        with c_ef2:
+            ef_mw_f1 = st.number_input("Profilo: MW in F1", min_value=0.0, value=1.0,
+                                      step=0.5, key="ef_mw_f1",
+                                      help="Potenza prelevata nelle ore di punta (lun-ven 8-19).")
+        with c_ef3:
+            ef_mw_f2 = st.number_input("Profilo: MW in F2", min_value=0.0, value=0.7,
+                                      step=0.5, key="ef_mw_f2",
+                                      help="Potenza nelle ore intermedie.")
+        with c_ef4:
+            ef_mw_f3 = st.number_input("Profilo: MW in F3", min_value=0.0, value=0.4,
+                                      step=0.5, key="ef_mw_f3",
+                                      help="Potenza nelle ore fuori punta (notti, weekend, festivi).")
+
+        ef = calcola_effetto_festivita(
+            prezzi, paese=paese_ef,
+            mw_fasce={"F1": ef_mw_f1, "F2": ef_mw_f2, "F3": ef_mw_f3})
+        if not ef["ok"]:
+            st.warning(f"Dati insufficienti per l'effetto festività ({ef['motivo']}). Servono prezzi orari e almeno una festività nel periodo.")
+        else:
+            k1, k2, k3, k4 = st.columns(4)
+            render_kpi("Festività nel periodo", str(ef["n_festivita"]), k1)
+            render_kpi(edu("Prezzo medio festivo", "Media oraria dello spot nei giorni festivi del periodo. Il confronto è con la media dei giorni feriali (lun-ven non festivi)."),
+                       f"{ef['prezzo_medio_festivo']:,.2f} €/MWh<br><small>feriale {ef['prezzo_medio_feriale']:,.2f} · weekend {ef['prezzo_medio_weekend']:,.2f}</small>", k2)
+            render_kpi(edu("Sconto medio festivo", "Quanto costa di meno (o di più) un'ora festiva rispetto a un'ora feriale media: prezzo medio feriale meno prezzo medio festivo, in €/MWh e in %."),
+                       f"{ef['sconto_medio_eur']:+,.2f} €/MWh<br><small>{ef['sconto_medio_pct']:+,.1f}% vs feriale</small>", k3)
+            if ef["risparmio_profilo_eur"] is None:
+                render_kpi("Risparmio profilo", "—", k4)
+            else:
+                render_kpi(edu("Risparmio profilo", "Quanto il tuo profilo F1/F2/F3 risparmia nelle ore festive rispetto a pagare le stesse ore al prezzo feriale medio della stessa ora del giorno. È il valore economico delle festività per il tuo carico."),
+                           f"{ef['risparmio_profilo_eur']:+,.0f} €<br><small>{ef['risparmio_profilo_pct']:+,.1f}% su {ef['energia_festiva_mwh']:,.0f} MWh festivi</small>", k4)
+
+            df_ef_o = ef["df_orario"]
+            colori_ef = ["#22c55e" if v >= 0 else "#ef4444"
+                         for v in df_ef_o["Sconto (€/MWh)"].fillna(0)]
+            fig_ef = go.Figure()
+            fig_ef.add_trace(go.Bar(
+                x=df_ef_o["Ora"], y=df_ef_o["Sconto (€/MWh)"],
+                marker_color=colori_ef, name="Sconto orario",
+                hovertemplate="Ora %{x}: sconto %{y:,.2f} €/MWh<br>Festivo: %{customdata[0]:,.2f} · Feriale: %{customdata[1]:,.2f}<extra></extra>",
+                customdata=df_ef_o[["Festivo (€/MWh)", "Feriale (€/MWh)"]].values))
+            fig_ef.update_layout(template="plotly_dark", height=380,
+                                 title="Sconto festivo per ora del giorno (vs giorno feriale medio)",
+                                 xaxis_title="Ora del giorno", yaxis_title="Sconto (€/MWh)",
+                                 xaxis=dict(dtick=1))
+            st.plotly_chart(fig_ef, use_container_width=True)
+            if ef["ora_sconto_max"] is not None:
+                st.info(f"💡 Sconto massimo alle **ore {ef['ora_sconto_max']:02d}:00** ({ef['sconto_max_orario']:+,.2f} €/MWh). "
+                        f"Festività più economica del periodo: **{ef['festa_piu_scontata']}** ({ef['data_festa_piu_scontata']}) — "
+                        f"la finestra ideale per un fermo di manutenzione.")
+
+            st.markdown("**Festività nel periodo (ordinate per sconto)**")
+            st.dataframe(ef["df_festivita"], use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta effetto festività (CSV)",
+                ef["df_festivita"].to_csv(index=False).encode("utf-8"),
+                file_name=f"effetto_festivita_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Una riga per festività: data, nome, ore, prezzo medio e sconto vs feriale.",
+                key="csv_eff_fest",
             )
 
 # Footer
