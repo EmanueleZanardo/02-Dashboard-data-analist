@@ -16354,6 +16354,198 @@ def calcola_americana(forward, strike, mesi, vol_pct, tasso_pct, n_step=200):
 def render_kpi(title, value, col):
     col.markdown(f"<div class='metric-container'><div class='metric-label'>{title}</div><div class='metric-val'>{value}</div></div>", unsafe_allow_html=True)
 
+def calcola_qualita_dati(prezzi, soglia_z=4.0, run_piatta_ore=6):
+    """Audit di qualita' dei dati della serie oraria dei prezzi.
+
+    Domanda operativa: "posso fidarmi dei numeri che vedo negli altri
+    tab?" — controlla l'integrita' della serie oraria prima di qualsiasi
+    analisi: ore mancanti rispetto alla griglia oraria attesa, timestamp
+    duplicati (es. ora ambigua del cambio DST), valori NaN, sequenze di
+    valori identici ("dato congelato"), outlier statistici e prezzi
+    negativi.
+
+    - soglia_z: soglia di z-score robusto (mediana/MAD) oltre la quale un
+      valore e' outlier;
+    - run_piatta_ore: lunghezza minima (ore) di una sequenza di valori
+      identici per segnalarla come episodio "congelato" sospetto;
+    - score 0-100: 100 meno penalita' pesate per gravita' (ore mancanti
+      fino a -30, duplicati -10, NaN fino a -15, episodi congelati fino
+      a -15, outlier fino a -10); verdetto 🟢 >= 90, 🟡 70-89, 🔴 < 70.
+
+    NaN-safe: serie vuota, indice non-datetime o valori non numerici ->
+    errore pulito; indice tz-aware reso naive (convenzione degli altri
+    tab); indice non ordinato -> ordinato e segnalato. I prezzi negativi
+    sono solo informativi (legittimi sullo spot europeo).
+
+    Ritorna dict con 'errore', 'valido', 'score', 'verdetto', 'n_attese',
+    'n_effettive', 'copertura_pct', 'n_mancanti', 'n_duplicati', 'n_nan',
+    'non_ordinato', 'n_episodi_piatti', 'n_outlier', 'n_negativi',
+    'df_problemi' (Tipo, Inizio, Fine, Ore, Dettaglio), 'df_mensile'
+    (Mese, Attese, Effettive, Copertura %), 'df_outlier' (Timestamp,
+    Prezzo, z-score).
+    """
+    colonne_prob = ["Tipo", "Inizio", "Fine", "Ore", "Dettaglio"]
+    col_mese = ["Mese", "Attese", "Effettive", "Copertura %"]
+    col_out = ["Timestamp", "Prezzo (\u20ac/MWh)", "z-score"]
+    vuoto = {"errore": None, "valido": False, "score": None,
+             "verdetto": None, "n_attese": 0, "n_effettive": 0,
+             "copertura_pct": None, "n_mancanti": 0, "n_duplicati": 0,
+             "n_nan": 0, "non_ordinato": False, "n_episodi_piatti": 0,
+             "n_outlier": 0, "n_negativi": 0,
+             "df_problemi": pd.DataFrame(columns=colonne_prob),
+             "df_mensile": pd.DataFrame(columns=col_mese),
+             "df_outlier": pd.DataFrame(columns=col_out)}
+
+    def _err(msg):
+        out = dict(vuoto)
+        out["df_problemi"] = pd.DataFrame(columns=colonne_prob)
+        out["df_mensile"] = pd.DataFrame(columns=col_mese)
+        out["df_outlier"] = pd.DataFrame(columns=col_out)
+        out["errore"] = msg
+        return out
+
+    try:
+        soglia_z = float(soglia_z)
+        run_piatta_ore = int(run_piatta_ore)
+    except (TypeError, ValueError):
+        return _err("Parametri non validi: soglia_z e run_piatta_ore "
+                    "devono essere numerici.")
+    if soglia_z <= 0 or run_piatta_ore < 2:
+        return _err("Parametri non validi: soglia_z > 0 e "
+                    "run_piatta_ore >= 2.")
+
+    if prezzi is None or len(prezzi) == 0:
+        return _err("Serie prezzi vuota: niente da analizzare.")
+    try:
+        p = pd.Series(prezzi)
+    except Exception:
+        return _err("Input non interpretabile come serie di prezzi.")
+    if not isinstance(p.index, pd.DatetimeIndex):
+        return _err("L'indice della serie deve essere di tipo data/ora.")
+    vals = pd.to_numeric(p.values, errors="coerce")
+    if np.isnan(vals).all():
+        return _err("Nessun valore numerico nella serie prezzi.")
+    idx = p.index.tz_localize(None) if p.index.tz is not None else p.index
+    s = pd.Series(vals, index=idx)
+
+    non_ordinato = not s.index.is_monotonic_increasing
+    if non_ordinato:
+        s = s.sort_index()
+
+    n_nan = int(s.isna().sum())
+    ts_dup = sorted(set(s.index[s.index.duplicated(keep=False)]))
+    n_duplicati = len(ts_dup)
+
+    atteso = pd.date_range(s.index.min(), s.index.max(), freq="h")
+    presenti = set(s.index)
+    mancanti = [t for t in atteso if t not in presenti]
+    n_mancanti = len(mancanti)
+
+    problemi = []
+    if mancanti:
+        ini = prec = mancanti[0]
+        coda = mancanti[1:] + [None]
+        for t in coda:
+            if t is None or t != prec + pd.Timedelta(hours=1):
+                n_ore = int((prec - ini).total_seconds() // 3600) + 1
+                problemi.append(("Ore mancanti", ini, prec, n_ore,
+                                 f"{n_ore} ore consecutive senza dato"))
+                if t is None:
+                    break
+                ini = t
+            prec = t
+    for t in ts_dup:
+        problemi.append(("Timestamp duplicato", t, t, 1,
+                         "stesso timestamp piu' volte (es. ora ambigua "
+                         "del cambio DST)"))
+
+    sv = s.dropna()
+    n_episodi_piatti = 0
+    if len(sv) >= run_piatta_ore:
+        grp = (sv != sv.shift()).cumsum()
+        for _, g in sv.groupby(grp):
+            if len(g) >= run_piatta_ore:
+                n_episodi_piatti += 1
+                problemi.append(("Valore congelato", g.index[0],
+                                 g.index[-1], len(g),
+                                 f"{g.iloc[0]:,.2f} \u20ac/MWh invariato "
+                                 f"per {len(g)} ore"))
+
+    n_outlier = 0
+    df_out = pd.DataFrame(columns=col_out)
+    svu = sv[~sv.index.duplicated(keep="first")]
+    if len(svu) >= 4:
+        med = float(svu.median())
+        mad = float((svu - med).abs().median())
+        if mad > 0:
+            z = (svu - med).abs() / (1.4826 * mad)
+            zo = z[z > soglia_z].sort_values(ascending=False)
+            n_outlier = len(zo)
+            if n_outlier:
+                df_out = pd.DataFrame({
+                    "Timestamp": list(zo.index),
+                    "Prezzo (\u20ac/MWh)": [float(svu.loc[t])
+                                            for t in zo.index],
+                    "z-score": [round(float(v), 2) for v in zo.values],
+                }).head(50)
+
+    n_negativi = int((sv < 0).sum())
+
+    validi = set(sv.index) & set(atteso)
+    n_attese = len(atteso)
+    n_effettive = len(validi)
+    copertura_pct = round(100.0 * n_effettive / n_attese, 2) \
+        if n_attese else None
+
+    righe_mese = []
+    if n_attese:
+        att_m = pd.Series(1, index=atteso).resample("MS").sum()
+        eff_m = pd.Series(1,
+                          index=pd.DatetimeIndex(sorted(validi))).resample(
+                              "MS").sum() if validi else pd.Series(
+                                  dtype=float)
+        for mese in att_m.index:
+            a = int(att_m.loc[mese])
+            e = int(eff_m.loc[mese]) if mese in eff_m.index else 0
+            righe_mese.append({"Mese": mese.strftime("%Y-%m"),
+                               "Attese": a, "Effettive": e,
+                               "Copertura %": round(100.0 * e / a, 2)
+                               if a else None})
+    df_mensile = pd.DataFrame(righe_mese, columns=col_mese)
+
+    pct_manc = 100.0 * n_mancanti / n_attese if n_attese else 0.0
+    pct_nan = 100.0 * n_nan / len(s) if len(s) else 0.0
+    penalita = (min(30.0, 2.0 * pct_manc)
+                + (10.0 if n_duplicati else 0.0)
+                + min(15.0, pct_nan)
+                + min(15.0, 3.0 * n_episodi_piatti)
+                + min(10.0, float(n_outlier)))
+    score = round(max(0.0, 100.0 - penalita), 1)
+    if score >= 90:
+        verdetto = "\U0001f7e2 ottima"
+    elif score >= 70:
+        verdetto = "\U0001f7e1 accettabile"
+    else:
+        verdetto = "\U0001f534 critica"
+
+    df_problemi = pd.DataFrame(problemi, columns=colonne_prob)
+    if not df_problemi.empty:
+        df_problemi = df_problemi.sort_values("Inizio").reset_index(
+            drop=True)
+
+    out = dict(vuoto)
+    out.update({"valido": True, "score": score, "verdetto": verdetto,
+                "n_attese": n_attese, "n_effettive": n_effettive,
+                "copertura_pct": copertura_pct, "n_mancanti": n_mancanti,
+                "n_duplicati": n_duplicati, "n_nan": n_nan,
+                "non_ordinato": bool(non_ordinato),
+                "n_episodi_piatti": n_episodi_piatti,
+                "n_outlier": n_outlier, "n_negativi": n_negativi,
+                "df_problemi": df_problemi, "df_mensile": df_mensile,
+                "df_outlier": df_out})
+    return out
+
+
 # ==========================================
 # WORKSPACE 1: SIMULATORE STRATEGICO
 # ==========================================
@@ -16997,7 +17189,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -28699,6 +28891,91 @@ elif workspace == _('ws8'):
                 mime="text/csv",
                 help="Una riga per voce: atteso, fatturato, scostamento in € e %, esito.",
                 key="csv_riconciliazione_fattura",
+            )
+
+    with tab139:
+        titolo_qd = edu("Qualità dati", "L'AUDIT DI QUALITA' DEI DATI risponde alla domanda \"posso fidarmi dei numeri che vedo negli altri tab?\": prima di qualsiasi analisi, controlla l'INTEGRITA' della serie oraria dei prezzi — ore mancanti rispetto alla griglia oraria attesa, timestamp duplicati (es. l'ora ambigua del cambio DST), valori NaN, sequenze di valori identici (\"dato congelato\", tipico di un feed bloccato) e outlier statistici (z-score robusto su mediana/MAD, che non si fa ingannare dai picchi veri). Lo score 0-100 riassume tutto: 🟢 >= 90 ottima, 🟡 70-89 accettabile, 🔴 < 70 critica. A cosa serve: (1) capire se un KPI strano nasce dal mercato o da un buco nei dati; (2) decidere se un periodo va escluso dalle analisi prima di fissare o fare budget; (3) documentare la qualità del dataset allegata ai report. Diverso dal tab 🚨 Anomalie di prezzo (picchi di mercato veri): qui si giudica il DATO, non il mercato — i prezzi negativi, ad esempio, sono solo informativi perché legittimi sullo spot europeo.")
+        st.markdown(f"<h1>🔍 {titolo_qd}</h1>", unsafe_allow_html=True)
+        st.caption("Audit dell'integrità della serie oraria: ore mancanti, duplicati, NaN, valori congelati, outlier.")
+
+        q0, q1 = st.columns(2)
+        with q0:
+            qd_z = st.number_input("Soglia outlier (z-score robusto)", min_value=1.0, value=4.0, step=0.5,
+                                   key="qd139_z",
+                                   help="Oltre questa soglia di z-score (mediana/MAD) un valore e' outlier.")
+        with q1:
+            qd_run = st.number_input("Ore minime per 'valore congelato'", min_value=2, value=6, step=1,
+                                     key="qd139_run",
+                                     help="Sequenze di valori identici lunghe almeno N ore = episodio sospetto.")
+        qd = calcola_qualita_dati(prezzi, soglia_z=qd_z, run_piatta_ore=qd_run)
+        if qd["errore"]:
+            st.info(f"ℹ️ {qd['errore']}")
+        else:
+            k1, k2, k3 = st.columns(3)
+            emoji_qd = qd["verdetto"].split()[0]
+            render_kpi(edu("Score qualità", "100 meno penalità pesate per gravità: ore mancanti fino a -30, duplicati -10, NaN fino a -15, valori congelati fino a -15, outlier fino a -10."),
+                       f"{emoji_qd} {qd['score']}<br><small>{qd['verdetto'].split(' ', 1)[1]}</small>", k1)
+            render_kpi(edu("Copertura oraria", "Ore con dato valido diviso ore attese sulla griglia oraria continua."),
+                       f"{qd['copertura_pct']:.2f} %<br><small>{qd['n_effettive']:,} su {qd['n_attese']:,} ore</small>", k2)
+            render_kpi(edu("Ore mancanti", "Buchi nella griglia oraria: ore attese senza alcun dato."),
+                       f"{qd['n_mancanti']:,}<br><small>ore senza dato</small>", k3)
+            k4, k5, k6 = st.columns(3)
+            render_kpi(edu("Timestamp duplicati", "Stessi timestamp presenti più volte (es. ora ambigua del cambio DST)."),
+                       f"{qd['n_duplicati']}", k4)
+            render_kpi(edu("Valori congelati", f"Episodi con lo stesso prezzo invariato per almeno {qd_run} ore: possibile feed bloccato."),
+                       f"{qd['n_episodi_piatti']}", k5)
+            render_kpi(edu("Outlier", f"Valori oltre {qd_z:.1f} di z-score robusto (mediana/MAD)."),
+                       f"{qd['n_outlier']}", k6)
+            if qd["n_nan"]:
+                st.warning(f"⚠️ {qd['n_nan']:,} valori NaN nella serie.")
+            if qd["non_ordinato"]:
+                st.warning("⚠️ L'indice non era ordinato: è stato riordinato per l'analisi.")
+            if qd["n_negativi"]:
+                st.info(f"ℹ️ {qd['n_negativi']:,} prezzi negativi rilevati — informativi: sono legittimi sullo spot europeo.")
+
+            df_qd_prob = qd["df_problemi"]
+            if not df_qd_prob.empty:
+                conteggi_qd = df_qd_prob["Tipo"].value_counts()
+                fig_qd = go.Figure()
+                fig_qd.add_trace(go.Bar(x=conteggi_qd.index, y=conteggi_qd.values,
+                                        marker_color="#f59e0b", name="Problemi",
+                                        hovertemplate="%{x}: %{y}<extra></extra>"))
+                fig_qd.update_layout(template="plotly_dark", height=320,
+                                     title="Problemi rilevati per tipo",
+                                     xaxis_title="", yaxis_title="n°")
+                st.plotly_chart(fig_qd, use_container_width=True)
+
+                st.markdown("**Dettaglio problemi**")
+                st.dataframe(df_qd_prob, use_container_width=True, hide_index=True)
+            else:
+                st.success("✅ Nessun problema di integrità rilevato sulla serie.")
+
+            df_qd_m = qd["df_mensile"]
+            if not df_qd_m.empty:
+                fig_qdm = go.Figure()
+                fig_qdm.add_trace(go.Scatter(x=df_qd_m["Mese"], y=df_qd_m["Copertura %"],
+                                             mode="lines+markers", name="Copertura %",
+                                             line=dict(color="#22c55e"),
+                                             hovertemplate="%{x}: %{y:.2f} %<extra></extra>"))
+                fig_qdm.update_layout(template="plotly_dark", height=320,
+                                      title="Copertura oraria mensile",
+                                      xaxis_title="", yaxis_title="%")
+                st.plotly_chart(fig_qdm, use_container_width=True)
+                st.markdown("**Copertura per mese**")
+                st.dataframe(df_qd_m, use_container_width=True, hide_index=True)
+
+            df_qd_out = qd["df_outlier"]
+            if not df_qd_out.empty:
+                st.markdown("**Top outlier**")
+                st.dataframe(df_qd_out, use_container_width=True, hide_index=True)
+
+            st.download_button(
+                "⬇️ Esporta audit qualità dati (CSV)",
+                df_qd_prob.to_csv(index=False, sep=";").encode("utf-8"),
+                file_name=f"qualita_dati_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Una riga per problema: tipo, inizio, fine, ore, dettaglio.",
+                key="csv_qualita_dati",
             )
 
 # Footer
