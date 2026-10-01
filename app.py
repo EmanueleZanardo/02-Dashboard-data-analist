@@ -2334,6 +2334,362 @@ def calcola_pnl_posizione_aperta(prezzi, mw, prezzo_riferimento, ruolo="acquisto
         return _err(f"Errore interno: {e}")
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def calcola_volatilita_intraday(prezzi):
+    """Volatilita' intraday range-based dello spot orario (€/MWh).
+
+    prezzi: Series oraria in €/MWh (indice tz-aware o naive).
+    Diverso dal tab 'Volatilita'' (calcola_volatilita, deviazione standard
+    delle variazioni orarie): qui si guarda l'AMPIEZZA intraday, ossia
+    quanto il prezzo si muove tra minimo e massimo dentro ogni giorno
+    solare, con lo stimatore di Parkinson, lo standard quant per la
+    volatilita' high-low:
+      sigma_P(d) = sqrt( ln(H_d / L_d)^2 / (4 * ln 2) )
+    dove H_d, L_d sono max/min del giorno d. Lo stimatore usa solo gli
+    estremi (non i close) ed e' piu' efficiente della close-to-close quando
+    i prezzi hanno escursioni intraday ampie.
+    Parkinson e' indefinito se H_d o L_d non sono > 0 (prezzi nulli o
+    negativi, possibili sullo spot): quei giorni vengono esclusi dal
+    calcolo, e il conteggio dei giorni validi e' riportato.
+
+    Ritorna dict con:
+      'giornaliera' (DataFrame: Giorno, Prezzo medio, Max, Min, Range,
+        Range %, Parkinson, Max mov. orario),
+      'profilo_ampiezza_oraria' (Series 0-23: |variazione oraria| media),
+      'top_movimenti_orari' (DataFrame: Data e Ora, Variazione oraria,
+        |Variazione|, top 10 per ampiezza),
+      'parkinson' (float | None), 'cc_vol' (float | None),
+      'rapporto' (float | None), 'giorni_validi_park' (int),
+      'range_medio', 'range_max', 'giorno_range_max'.
+    NaN-safe: serie vuota / < 48 ore / non numerica -> strutture vuote e
+    None, mai eccezioni."""
+    cols_g = ["Giorno", "Prezzo medio (€/MWh)", "Max (€/MWh)", "Min (€/MWh)",
+              "Range (€/MWh)", "Range %", "Parkinson (€/MWh)",
+              "Max mov. orario (€/MWh)"]
+    cols_t = ["Data e Ora", "Variazione oraria (€/MWh)", "|Variazione| (€/MWh)"]
+    vuoto = {
+        "giornaliera": pd.DataFrame({c: [] for c in cols_g}),
+        "profilo_ampiezza_oraria": pd.Series(dtype=float),
+        "top_movimenti_orari": pd.DataFrame({c: [] for c in cols_t}),
+        "parkinson": None, "cc_vol": None, "rapporto": None,
+        "giorni_validi_park": 0, "range_medio": None,
+        "range_max": None, "giorno_range_max": None,
+    }
+    try:
+        p = pd.to_numeric(pd.Series(prezzi), errors="coerce").dropna()
+    except Exception:
+        return vuoto
+    if len(p) < 48:
+        return vuoto
+    idxn = p.index.tz_localize(None) if p.index.tz is not None else p.index
+    diff = p.diff()
+    idxd = diff.index.tz_localize(None) if diff.index.tz is not None else diff.index
+    diff_abs = diff.abs()
+    righe, park2 = [], []
+    for giorno, grp in p.groupby(idxn.date):
+        if len(grp) < 20:  # giorni parziali ai bordi: range sottostimato
+            continue
+        v = grp.to_numpy(dtype=float)
+        h, l = float(v.max()), float(v.min())
+        rng = h - l
+        medio = float(v.mean())
+        park = None
+        if h > 0 and l > 0 and h > l:
+            park = float(np.sqrt((np.log(h / l) ** 2) / (4.0 * np.log(2.0))))
+            park2.append(park ** 2)
+        dloc = diff_abs.loc[idxd.date == giorno]
+        max_move = float(dloc.max()) if len(dloc) else 0.0
+        righe.append({
+            "Giorno": str(giorno),
+            "Prezzo medio (€/MWh)": round(medio, 2),
+            "Max (€/MWh)": round(h, 2),
+            "Min (€/MWh)": round(l, 2),
+            "Range (€/MWh)": round(rng, 2),
+            "Range %": round(rng / abs(medio) * 100.0, 1) if medio != 0 else None,
+            "Parkinson (€/MWh)": round(park, 2) if park is not None else None,
+            "Max mov. orario (€/MWh)": round(max_move, 2),
+        })
+    df_g = pd.DataFrame(righe, columns=cols_g)
+    if df_g.empty:
+        return vuoto
+    parkinson = float(np.sqrt(np.mean(park2))) if park2 else None
+    medi = df_g["Prezzo medio (€/MWh)"].to_numpy(dtype=float)
+    cc_vol = float(np.std(np.diff(medi), ddof=1)) if len(medi) >= 3 else None
+    rapporto = (parkinson / cc_vol) if (parkinson and cc_vol and cc_vol > 0) else None
+    prof = diff_abs.groupby(idxd.hour).mean().reindex(range(24)).round(2)
+    top = diff_abs.dropna().sort_values(ascending=False).head(10)
+    df_top = pd.DataFrame({
+        "Data e Ora": [pd.Timestamp(t).tz_localize(None)
+                       if pd.Timestamp(t).tz is not None else pd.Timestamp(t)
+                       for t in top.index],
+        "Variazione oraria (€/MWh)": [round(float(diff.loc[t]), 2) for t in top.index],
+        "|Variazione| (€/MWh)": [round(float(v), 2) for v in top.values],
+    }, columns=cols_t)
+    i_rmax = int(df_g["Range (€/MWh)"].idxmax())
+    return {
+        "giornaliera": df_g,
+        "profilo_ampiezza_oraria": prof,
+        "top_movimenti_orari": df_top,
+        "parkinson": round(parkinson, 2) if parkinson is not None else None,
+        "cc_vol": round(cc_vol, 2) if cc_vol is not None else None,
+        "rapporto": round(rapporto, 2) if rapporto is not None else None,
+        "giorni_validi_park": len(park2),
+        "range_medio": round(float(df_g["Range (€/MWh)"].mean()), 2),
+        "range_max": round(float(df_g["Range (€/MWh)"].max()), 2),
+        "giorno_range_max": df_g.loc[i_rmax, "Giorno"],
+    }
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def calcola_regimi_prezzo(prezzi):
+    """Regimi di prezzo giornalieri con matrice di transizione empirica.
+
+    prezzi: Series oraria in €/MWh. Ogni giorno solare viene classificato
+    in un regime in base al prezzo medio giornaliero, usando i terzili
+    della distribuzione osservata nel periodo (deterministico, niente
+    clustering stocastico):
+      - 'Basso': media giornaliera nel terzo inferiore;
+      - 'Medio': nel terzo centrale;
+      - 'Alto': nel terzo superiore.
+    Dalla sequenza dei regimi si stimano la matrice di transizione
+    empirica (quante volte si passa da un regime all'altro), la
+    distribuzione stazionaria (power iteration deterministica) e la
+    permanenza media in ciascun regime. Domanda operativa: 'se oggi il
+    mercato e' in regime Alto, con che probabilita' ci resta domani e
+    quanto dura in media un'ondata di prezzi alti?' — utile per decidere
+    timing di fixing e coperture.
+
+    Ritorna dict con 'ok' (bool), 'giornaliera' (DataFrame: Giorno,
+    Prezzo medio (€/MWh), Regime), 'matrice_conteggi' e 'matrice_prob'
+    (DataFrame 3x3), 'stazionaria' (Series), 'tabella_regimi'
+    (DataFrame: Regime, Giorni, Quota %, Prezzo medio, Std,
+    Permanenza media (gg)), 'regime_corrente', 'giorni_regime_corrente',
+    'prob_resta_corrente'.
+    NaN-safe: < 9 giorni validi o terzili non calcolabili -> 'ok' False,
+    mai eccezioni."""
+    cols_g = ["Giorno", "Prezzo medio (€/MWh)", "Regime"]
+    cols_t = ["Regime", "Giorni", "Quota %", "Prezzo medio (€/MWh)",
+              "Std (€/MWh)", "Permanenza media (gg)"]
+    regimi = ["Basso", "Medio", "Alto"]
+    vuoto = {"ok": False,
+             "giornaliera": pd.DataFrame({c: [] for c in cols_g}),
+             "matrice_conteggi": pd.DataFrame(0, index=regimi, columns=regimi),
+             "matrice_prob": pd.DataFrame(0.0, index=regimi, columns=regimi),
+             "stazionaria": pd.Series(dtype=float),
+             "tabella_regimi": pd.DataFrame({c: [] for c in cols_t}),
+             "regime_corrente": None, "giorni_regime_corrente": 0,
+             "prob_resta_corrente": None}
+    try:
+        p = pd.to_numeric(pd.Series(prezzi), errors="coerce").dropna()
+    except Exception:
+        return vuoto
+    if len(p) < 24:
+        return vuoto
+    idxn = p.index.tz_localize(None) if p.index.tz is not None else p.index
+    medi = p.groupby(idxn.date).mean().dropna()
+    if len(medi) < 9:
+        return vuoto
+    try:
+        lab = pd.qcut(medi, q=3, labels=regimi, duplicates="drop")
+    except Exception:
+        return vuoto
+    if len(lab.cat.categories) < 3:
+        return vuoto
+    seq = list(lab.astype(str))
+    giorni = [str(g) for g in medi.index]
+    # matrice di transizione (osservazioni consecutive)
+    cont = pd.DataFrame(0, index=regimi, columns=regimi)
+    for a, b in zip(seq[:-1], seq[1:]):
+        cont.loc[a, b] += 1
+    tot_righe = cont.sum(axis=1)
+    prob = cont.div(tot_righe, axis=0).fillna(0.0).round(3)
+    # distribuzione stazionaria: power iteration deterministica
+    pi = np.full(3, 1.0 / 3.0)
+    Pm = prob.to_numpy(dtype=float)
+    for _ in range(1000):
+        nuovo = pi @ Pm
+        if np.max(np.abs(nuovo - pi)) < 1e-12:
+            pi = nuovo
+            break
+        pi = nuovo
+    staz = pd.Series(np.round(pi / pi.sum(), 3), index=regimi)
+    # permanenza media per regime (lunghezza media delle sequenze)
+    perm = {}
+    for r in regimi:
+        run, runs = 0, []
+        for s in seq:
+            if s == r:
+                run += 1
+            elif run:
+                runs.append(run)
+                run = 0
+        if run:
+            runs.append(run)
+        perm[r] = round(float(np.mean(runs)), 1) if runs else 0.0
+    righe_t = []
+    for r in regimi:
+        vals = medi[lab.astype(str) == r]
+        righe_t.append({
+            "Regime": r,
+            "Giorni": int((lab.astype(str) == r).sum()),
+            "Quota %": round(100.0 * (lab.astype(str) == r).mean(), 1),
+            "Prezzo medio (€/MWh)": round(float(vals.mean()), 2),
+            "Std (€/MWh)": round(float(vals.std(ddof=1)), 2) if len(vals) > 1 else 0.0,
+            "Permanenza media (gg)": perm[r],
+        })
+    # regime corrente e durata dell'onda in corso
+    corrente = seq[-1]
+    n_corr = 1
+    for s in reversed(seq[:-1]):
+        if s == corrente:
+            n_corr += 1
+        else:
+            break
+    df_g = pd.DataFrame({"Giorno": giorni,
+                         "Prezzo medio (€/MWh)": [round(float(v), 2) for v in medi.values],
+                         "Regime": seq}, columns=cols_g)
+    out = dict(vuoto)
+    out.update({
+        "ok": True,
+        "giornaliera": df_g,
+        "matrice_conteggi": cont,
+        "matrice_prob": prob,
+        "stazionaria": staz,
+        "tabella_regimi": pd.DataFrame(righe_t, columns=cols_t),
+        "regime_corrente": corrente,
+        "giorni_regime_corrente": n_corr,
+        "prob_resta_corrente": float(prob.loc[corrente, corrente]),
+    })
+    return out
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def calcola_riepilogo_periodo(prezzi):
+    """Riepilogo statistico del periodo per il report consolidato.
+
+    prezzi: Series oraria in €/MWh. Aggrega in un unico passaggio le
+    statistiche che il tab 'Report di periodo' mostra e esporta:
+      - 'kpi': dict (ore, giorni, medio, mediano, std, min, max, p5, p95,
+        quota_negativi %, baseload_1MW, picco_data);
+      - 'mensile': DataFrame per mese (Mese, Ore, Prezzo medio, Min, Max, Std);
+      - 'fasce': DataFrame per fascia F1/F2/F3 (Fascia, Ore, Prezzo medio,
+        Min, Max) usando fascia_oraria();
+      - 'giorni': DataFrame per giorno (Giorno, Prezzo medio, Min, Max,
+        Range) ordinato per data;
+      - 'settimanale': DataFrame per giorno della settimana
+        (Giorno settimana, Ore, Prezzo medio) in ordine Lun-Dom.
+    NaN-safe: serie vuota / non numerica -> 'ok' False, mai eccezioni."""
+    cols_m = ["Mese", "Ore", "Prezzo medio (€/MWh)", "Min (€/MWh)",
+              "Max (€/MWh)", "Std (€/MWh)"]
+    cols_f = ["Fascia", "Ore", "Prezzo medio (€/MWh)", "Min (€/MWh)",
+              "Max (€/MWh)"]
+    cols_g = ["Giorno", "Prezzo medio (€/MWh)", "Min (€/MWh)",
+              "Max (€/MWh)", "Range (€/MWh)"]
+    cols_s = ["Giorno settimana", "Ore", "Prezzo medio (€/MWh)"]
+    vuoto = {"ok": False, "kpi": {},
+             "mensile": pd.DataFrame({c: [] for c in cols_m}),
+             "fasce": pd.DataFrame({c: [] for c in cols_f}),
+             "giorni": pd.DataFrame({c: [] for c in cols_g}),
+             "settimanale": pd.DataFrame({c: [] for c in cols_s})}
+    try:
+        p = pd.to_numeric(pd.Series(prezzi), errors="coerce").dropna()
+    except Exception:
+        return vuoto
+    if len(p) == 0:
+        return vuoto
+    v = p.to_numpy(dtype=float)
+    idxn = p.index.tz_localize(None) if p.index.tz is not None else p.index
+    kpi = {
+        "ore": int(len(p)),
+        "giorni": int(len(set(idxn.date))),
+        "medio": round(float(v.mean()), 2),
+        "mediano": round(float(np.median(v)), 2),
+        "std": round(float(v.std(ddof=1)), 2) if len(v) > 1 else 0.0,
+        "min": round(float(v.min()), 2),
+        "max": round(float(v.max()), 2),
+        "p5": round(float(np.quantile(v, 0.05)), 2),
+        "p95": round(float(np.quantile(v, 0.95)), 2),
+        "quota_negativi": round(100.0 * float((v < 0).mean()), 1),
+        "baseload_1MW": round(float(v.sum()), 0),
+        "picco_data": str(p.idxmax()),
+    }
+    mesi = idxn.to_period("M")
+    righe_m = []
+    for m in sorted(set(mesi)):
+        sel = p[mesi == m]
+        righe_m.append({
+            "Mese": str(m),
+            "Ore": int(len(sel)),
+            "Prezzo medio (€/MWh)": round(float(sel.mean()), 2),
+            "Min (€/MWh)": round(float(sel.min()), 2),
+            "Max (€/MWh)": round(float(sel.max()), 2),
+            "Std (€/MWh)": round(float(sel.std(ddof=1)), 2) if len(sel) > 1 else 0.0,
+        })
+    fasce = idxn.map(fascia_oraria)
+    righe_f = [{"Fascia": f,
+                "Ore": int((fasce == f).sum()),
+                "Prezzo medio (€/MWh)": round(float(p[fasce == f].mean()), 2),
+                "Min (€/MWh)": round(float(p[fasce == f].min()), 2),
+                "Max (€/MWh)": round(float(p[fasce == f].max()), 2)}
+               for f in ["F1", "F2", "F3"] if (fasce == f).sum() > 0]
+    gg = p.groupby(idxn.date)
+    righe_g = [{"Giorno": str(g),
+                "Prezzo medio (€/MWh)": round(float(grp.mean()), 2),
+                "Min (€/MWh)": round(float(grp.min()), 2),
+                "Max (€/MWh)": round(float(grp.max()), 2),
+                "Range (€/MWh)": round(float(grp.max() - grp.min()), 2)}
+               for g, grp in gg]
+    nomi_wd = ["Lun", "Mar", "Mer", "Gio", "Ven", "Sab", "Dom"]
+    wd = idxn.weekday
+    righe_s = [{"Giorno settimana": nomi_wd[w],
+                "Ore": int((wd == w).sum()),
+                "Prezzo medio (€/MWh)": round(float(p[wd == w].mean()), 2)}
+               for w in range(7) if (wd == w).sum() > 0]
+    out = dict(vuoto)
+    out.update({"ok": True, "kpi": kpi,
+                "mensile": pd.DataFrame(righe_m, columns=cols_m),
+                "fasce": pd.DataFrame(righe_f, columns=cols_f),
+                "giorni": pd.DataFrame(righe_g, columns=cols_g),
+                "settimanale": pd.DataFrame(righe_s, columns=cols_s)})
+    return out
+
+
+def genera_csv_report(riep, d0, d1):
+    """CSV consolidato del report di periodo (separatore ';').
+
+    riep: dict da calcola_riepilogo_periodo(); d0/d1: date del periodo.
+    Sezioni separate da righe '# SEZIONE;NOME': KPI, MENSILE, FASCE,
+    SETTIMANALE, GIORNI. Puro: niente Streamlit, solo stringhe."""
+    sep = ";"
+    righe = [f"# Report di periodo Singularity Quant ETRM{sep}dal{sep}{d0}{sep}al{sep}{d1}",
+             "#"]
+    righe.append("# SEZIONE;KPI")
+    righe.append(f"metrica{sep}valore")
+    k = riep["kpi"]
+    for chiave, val in [("Ore analizzate", k["ore"]),
+                        ("Giorni di calendario", k["giorni"]),
+                        ("Prezzo medio (€/MWh)", k["medio"]),
+                        ("Prezzo mediano (€/MWh)", k["mediano"]),
+                        ("Deviazione std (€/MWh)", k["std"]),
+                        ("Minimo (€/MWh)", k["min"]),
+                        ("Massimo (€/MWh)", k["max"]),
+                        ("P5 (€/MWh)", k["p5"]),
+                        ("P95 (€/MWh)", k["p95"]),
+                        ("Quota ore negative (%)", k["quota_negativi"]),
+                        ("Valore baseload 1 MW (€)", k["baseload_1MW"]),
+                        ("Data/ora del picco", k["picco_data"])]:
+        righe.append(f"{chiave}{sep}{val}")
+    for nome, df in [("MENSILE", riep["mensile"]), ("FASCE", riep["fasce"]),
+                     ("SETTIMANALE", riep["settimanale"]),
+                     ("GIORNI", riep["giorni"])]:
+        righe.append("#")
+        righe.append(f"# SEZIONE;{nome}")
+        righe.append(sep.join(df.columns))
+        for _, r in df.iterrows():
+            righe.append(sep.join("" if pd.isna(x) else str(x) for x in r))
+    return "\n".join(righe) + "\n"
+
+
 def calcola_drawdown_mtm(serie_pnl, soglia_eur=0.0):
     """Analisi drawdown della curva P&L cumulata di una posizione aperta.
 
@@ -15734,7 +16090,7 @@ elif workspace == _('ws7'):
 # ==========================================
 elif workspace == _('ws8'):
     st.markdown(f"<h1>{_('ws8')}</h1>", unsafe_allow_html=True)
-    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread, shaping curva, spread weekend, price capture, volatilità realizzata, confronto anno-su-anno, analisi prezzi negativi, spread intra-day, picchi di prezzo, profilo settimanale tipo, curva di durata, concentrazione del costo di fornitura, simulazione demand shifting, finestre di acquisto ottimali, stagionalità mensile, monitoraggio del budget energetico annuale, analisi di sensitività del costo al profilo di prelievo, Value-at-Risk Monte Carlo del costo di fornitura, classifica dei giorni di calendario più costosi per il profilo di prelievo, fasce tariffarie orarie ottimali derivate dal profilo di prezzo osservato, autocorrelazione del prezzo spot (persistenza e stagionalità), stress test deterministico del costo di fornitura sotto shock di prezzo, previsione naive-stagionale del prezzo del giorno successivo con backtest di accuratezza, decomposizione stagionale del prezzo (trend + pattern giornaliero/settimanale + residuo) con export CSV, margine di contribuzione per impianto con scomposizione mensile e analisi di concentrazione del margine, classificazione dei giorni in giorni tipo di prezzo (clustering deterministico dei profili giornalieri), confronto di sei strutture tariffarie sullo stesso profilo di prelievo (comparatore tariffe) con export CSV, caricamento e analisi del proprio profilo di carico reale da CSV (curva di durata, fattore di carico, costo a spot, correlazione col prezzo) con export CSV, calendario settimanale del costo giornaliero di fornitura (giorni piu' cari ed economici, costo medio per giorno della settimana, aggregazione mensile) con export CSV.")
+    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread, shaping curva, spread weekend, price capture, volatilità realizzata, confronto anno-su-anno, analisi prezzi negativi, spread intra-day, picchi di prezzo, profilo settimanale tipo, curva di durata, concentrazione del costo di fornitura, simulazione demand shifting, finestre di acquisto ottimali, stagionalità mensile, monitoraggio del budget energetico annuale, analisi di sensitività del costo al profilo di prelievo, Value-at-Risk Monte Carlo del costo di fornitura, classifica dei giorni di calendario più costosi per il profilo di prelievo, fasce tariffarie orarie ottimali derivate dal profilo di prezzo osservato, autocorrelazione del prezzo spot (persistenza e stagionalità), stress test deterministico del costo di fornitura sotto shock di prezzo, previsione naive-stagionale del prezzo del giorno successivo con backtest di accuratezza, decomposizione stagionale del prezzo (trend + pattern giornaliero/settimanale + residuo) con export CSV, margine di contribuzione per impianto con scomposizione mensile e analisi di concentrazione del margine, classificazione dei giorni in giorni tipo di prezzo (clustering deterministico dei profili giornalieri), confronto di sei strutture tariffarie sullo stesso profilo di prelievo (comparatore tariffe) con export CSV, caricamento e analisi del proprio profilo di carico reale da CSV (curva di durata, fattore di carico, costo a spot, correlazione col prezzo) con export CSV, calendario settimanale del costo giornaliero di fornitura (giorni piu' cari ed economici, costo medio per giorno della settimana, aggregazione mensile) con export CSV, test retrospettivo di efficacia della copertura esistente (regressione rolling), analisi della volatilita' intraday range-based con stimatore di Parkinson, classificazione dei giorni in regimi di prezzo (Basso/Medio/Alto) con matrice di transizione, report riepilogativo di periodo con export CSV consolidato.")
 
     # ---------- Controlli: sorgente, periodo, impianti ----------
     st.subheader("⚙️ Sorgente dati & Timeframe")
@@ -15882,7 +16238,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -26908,6 +27264,252 @@ elif workspace == _('ws8'):
                 mime="text/csv",
                 help="β, R² ed esito del test per ogni finestra rolling.",
                 key="csv_te",
+            )
+
+    with tab132:
+        titolo_vi = edu("Volatilità intraday (High-Low)", "La VOLATILITÀ INTRADAY range-based misura l'AMPIEZZA dei movimenti DENTRO ogni giorno (massimo meno minimo), non la velocità ora-per-ora. Lo stimatore di PARKINSON usa solo gli estremi giornalieri (H/L) ed è lo standard quant per la volatilità high-low: è più efficiente della close-to-close quando i prezzi fanno ampie escursioni in giornata. Il RAPPORTO Parkinson / close-to-close dice come si muove il mercato: sotto ~0.8 i picchi rientrano in giornata (mean-reversion intraday, attenzione a inseguire i massimi); sopra ~1.2 le escursioni tendono a persistere (trend intraday). Diverso dal tab 📉 Volatilità (deviazione standard delle variazioni orarie, la 'velocità' dei movimenti): qui conta l'ampiezza dell'escursione giornaliera, utile per dimensionare stop intraday e finestre di arbitraggio.")
+        st.markdown(f"<h1>🕐 {titolo_vi}</h1>", unsafe_allow_html=True)
+        st.caption("Stimatore di Parkinson dai massimi/minimi giornalieri vs volatilità close-to-close: ampiezza dell'escursione intraday e persistenza dei movimenti.")
+
+        vi = calcola_volatilita_intraday(prezzi)
+        if vi["range_medio"] is None:
+            st.warning("Dati insufficienti per la volatilità intraday (servono almeno 48 ore valide con giorni quasi completi).")
+        else:
+            v1, v2, v3 = st.columns(3)
+            render_kpi(edu("Parkinson (€/MWh)", "Stimatore di Parkinson: radice della media dei quadrati degli stimatori giornalieri ln(H/L)²/(4·ln2). Volatilità high-low del periodo in €/MWh."),
+                       f"{vi['parkinson']:,.2f}" if vi["parkinson"] is not None else "n/d", v1)
+            render_kpi(edu("Vol close-to-close (€/MWh)", "Deviazione standard delle variazioni del prezzo medio da un giorno all'altro: la volatilità 'classica' sui close giornalieri."),
+                       f"{vi['cc_vol']:,.2f}" if vi["cc_vol"] is not None else "n/d", v2)
+            rap = vi["rapporto"]
+            if rap is None:
+                rap_txt = "n/d"
+            elif rap < 0.8:
+                rap_txt = f"{rap:.2f} (rientro in giornata)"
+            elif rap > 1.2:
+                rap_txt = f"{rap:.2f} (escursioni persistenti)"
+            else:
+                rap_txt = f"{rap:.2f} (in linea)"
+            render_kpi(edu("Rapporto Parkinson/CC", "Sotto ~0.8: i picchi rientrano in giornata (mean-reversion intraday). Sopra ~1.2: le escursioni tendono a persistere. Tra 0.8 e 1.2: comportamento in linea con un random walk."),
+                       rap_txt, v3)
+            v4, v5, v6 = st.columns(3)
+            render_kpi("Range medio giornaliero (€/MWh)", f"{vi['range_medio']:,.2f}", v4)
+            render_kpi(f"Range max — {vi['giorno_range_max']} (€/MWh)", f"{vi['range_max']:,.2f}", v5)
+            top1 = vi["top_movimenti_orari"].iloc[0] if not vi["top_movimenti_orari"].empty else None
+            render_kpi("Max movimento orario singolo (€/MWh)",
+                       f"{top1['|Variazione| (€/MWh)']:,.2f}" if top1 is not None else "n/d", v6)
+            if vi["parkinson"] is None:
+                st.caption(f"⚠️ Stimatore di Parkinson non calcolabile: nessun giorno con H/L entrambi > 0 (prezzi nulli o negativi nel periodo). Range e movimenti orari restano validi.")
+            else:
+                st.caption(f"📊 Parkinson calcolato su {vi['giorni_validi_park']} giorni con H/L > 0 su {len(vi['giornaliera'])} giorni totali.")
+
+            st.markdown("**Range giornaliero vs stimatore di Parkinson**")
+            df_vi = vi["giornaliera"]
+            park_num = pd.to_numeric(df_vi["Parkinson (€/MWh)"], errors="coerce")
+            fig_rng = go.Figure()
+            fig_rng.add_trace(go.Bar(
+                x=df_vi["Giorno"], y=df_vi["Range (€/MWh)"], name="Range H-L",
+                marker_color="#8b5cf6",
+                hovertemplate="Giorno: %{x}<br>Range: %{y:,.2f} €/MWh<extra></extra>"))
+            fig_rng.add_trace(go.Scatter(
+                x=df_vi["Giorno"], y=park_num, name="Parkinson",
+                mode="lines", line=dict(color="#eab308", width=2), yaxis="y2",
+                hovertemplate="Giorno: %{x}<br>Parkinson: %{y:,.2f} €/MWh<extra></extra>"))
+            fig_rng.update_layout(template="plotly_dark", height=380,
+                                  title="Escursione giornaliera (High-Low) e volatilità di Parkinson",
+                                  xaxis_title="Giorno", yaxis_title="Range (€/MWh)",
+                                  yaxis2=dict(title="Parkinson (€/MWh)", overlaying="y", side="right"))
+            st.plotly_chart(fig_rng, use_container_width=True)
+
+            st.markdown("**Ampiezza media del movimento orario per ora del giorno** (|Δ| medio)")
+            prof_vi = vi["profilo_ampiezza_oraria"]
+            fig_amp = go.Figure()
+            fig_amp.add_trace(go.Bar(
+                x=[f"{h:02d}:00" for h in range(24)], y=prof_vi.values,
+                name="|Δ| medio", marker_color="#3b82f6",
+                hovertemplate="Ora: %{x}<br>|Δ| medio: %{y:,.2f} €/MWh<extra></extra>"))
+            fig_amp.update_layout(template="plotly_dark", height=340,
+                                  title="A che ora il prezzo fa i salti più ampi",
+                                  xaxis_title="Ora del giorno", yaxis_title="|Δ| medio (€/MWh)")
+            st.plotly_chart(fig_amp, use_container_width=True)
+
+            st.markdown("**Top 10 movimenti orari singoli**")
+            st.dataframe(vi["top_movimenti_orari"], use_container_width=True, hide_index=True)
+
+            st.markdown("**Dettaglio giornaliero**")
+            st.dataframe(df_vi, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta volatilità intraday (CSV)",
+                df_vi.to_csv(index=False).encode("utf-8"),
+                file_name=f"volatilita_intraday_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Tabella giornaliera: prezzo medio, max/min, range, stimatore di Parkinson, max movimento orario.",
+                key="csv_vol_intraday",
+            )
+
+    with tab133:
+        titolo_rg = edu("Regimi di prezzo", "I REGIMI DI PREZZO dividono i giorni in tre stati di mercato — Basso, Medio, Alto — in base ai terzili del prezzo medio giornaliero osservato nel periodo (classificazione deterministica, niente clustering stocastico). La MATRICE DI TRANSIZIONE empirica dice con che probabilità il mercato passa da un regime all'altro da un giorno al successivo: la diagonale misura la PERSISTENZA (quanto durano le ondate di prezzi alti o bassi). La distribuzione STAZIONARIA è la quota di giorni che, nel lungo periodo, cade in ciascun regime. Domanda operativa: 'siamo in regime Alto da 5 giorni — con che probabilità ci restiamo domani e quanto dura in media un'ondata del genere?' Utile per il timing dei fixing e per calibrare scenari di prezzo coerenti con la storia recente.")
+        st.markdown(f"<h1>🔀 {titolo_rg}</h1>", unsafe_allow_html=True)
+        st.caption("Classificazione deterministica dei giorni in terzili (Basso/Medio/Alto) con matrice di transizione empirica e permanenza media.")
+
+        rg = calcola_regimi_prezzo(prezzi)
+        if not rg["ok"]:
+            st.warning("Dati insufficienti per i regimi di prezzo (servono almeno 9 giorni con prezzo medio valido e terzili distinti).")
+        else:
+            r1, r2, r3 = st.columns(3)
+            render_kpi(edu("Regime corrente", "Terzile del prezzo medio dell'ultimo giorno del periodo: Basso, Medio o Alto."),
+                       rg["regime_corrente"], r1)
+            render_kpi(edu("Giorni nel regime corrente", "Durata dell'onda di mercato in corso: da quanti giorni consecutivi siamo in questo regime."),
+                       f"{rg['giorni_regime_corrente']} gg", r2)
+            render_kpi(edu("P(resta nel regime domani)", "Probabilità empirica che domani il mercato resti nello stesso regime (diagonale della matrice di transizione)."),
+                       f"{rg['prob_resta_corrente'] * 100:.1f} %", r3)
+            r4, r5, r6 = st.columns(3)
+            tab_r = rg["tabella_regimi"]
+            perm_corr = float(tab_r.loc[tab_r["Regime"] == rg["regime_corrente"], "Permanenza media (gg)"].iloc[0])
+            render_kpi(edu("Permanenza media (regime corrente)", "Durata media storica di un'onda in questo regime: confronto con la durata dell'onda in corso."),
+                       f"{perm_corr:.1f} gg", r4)
+            staz_corr = float(rg["stazionaria"].loc[rg["regime_corrente"]])
+            render_kpi(edu("Quota stazionaria (regime corrente)", "Nel lungo periodo, che quota di giorni cade in questo regime secondo la matrice di transizione."),
+                       f"{staz_corr * 100:.1f} %", r5)
+            n_gg = len(rg["giornaliera"])
+            render_kpi("Giorni classificati", f"{n_gg}", r6)
+            if rg["giorni_regime_corrente"] > perm_corr:
+                st.caption(f"⚠️ L'onda '{rg['regime_corrente']}' in corso ({rg['giorni_regime_corrente']} gg) ha già superato la permanenza media storica ({perm_corr:.1f} gg): statisticamente matura per una transizione.")
+            else:
+                st.caption(f"📊 L'onda '{rg['regime_corrente']}' in corso ({rg['giorni_regime_corrente']} gg) è sotto la permanenza media storica ({perm_corr:.1f} gg).")
+
+            st.markdown("**Prezzo medio giornaliero per regime**")
+            df_rg = rg["giornaliera"]
+            fig_rg = px.bar(df_rg, x="Giorno", y="Prezzo medio (€/MWh)", color="Regime",
+                            color_discrete_map={"Basso": "#3b82f6", "Medio": "#eab308", "Alto": "#ef4444"},
+                            category_orders={"Regime": ["Basso", "Medio", "Alto"]},
+                            hover_data={"Giorno": True, "Prezzo medio (€/MWh)": ":.2f"})
+            fig_rg.update_layout(template="plotly_dark", height=380,
+                                 title="Giorni classificati per regime di prezzo",
+                                 xaxis_title="Giorno", yaxis_title="Prezzo medio (€/MWh)")
+            st.plotly_chart(fig_rg, use_container_width=True)
+
+            c_tm1, c_tm2 = st.columns(2)
+            with c_tm1:
+                st.markdown("**Matrice di transizione (probabilità)**")
+                fig_tm = px.imshow(rg["matrice_prob"], text_auto=".0%",
+                                   color_continuous_scale="Blues", aspect="auto",
+                                   labels=dict(x="A domani", y="Da oggi", color="P"))
+                fig_tm.update_layout(template="plotly_dark", height=380,
+                                     title="Da regime odierno → a regime di domani",
+                                     xaxis=dict(tickmode="array",
+                                                tickvals=[0, 1, 2],
+                                                ticktext=["Basso", "Medio", "Alto"]),
+                                     yaxis=dict(tickmode="array",
+                                                tickvals=[0, 1, 2],
+                                                ticktext=["Basso", "Medio", "Alto"]))
+                st.plotly_chart(fig_tm, use_container_width=True)
+            with c_tm2:
+                st.markdown("**Statistiche per regime**")
+                st.dataframe(tab_r, use_container_width=True, hide_index=True)
+                st.markdown("**Distribuzione stazionaria**")
+                st.dataframe(rg["stazionaria"].reset_index().rename(
+                    columns={"index": "Regime", 0: "Quota lungo periodo"}),
+                    use_container_width=True, hide_index=True)
+
+            st.markdown("**Classificazione giornaliera**")
+            st.dataframe(df_rg, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta regimi di prezzo (CSV)",
+                df_rg.to_csv(index=False).encode("utf-8"),
+                file_name=f"regimi_prezzo_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Giorno per giorno: prezzo medio e regime (Basso/Medio/Alto).",
+                key="csv_regimi",
+            )
+
+    with tab134:
+        titolo_rp = edu("Report di periodo", "Il REPORT DI PERIODO raccoglie in un'unica vista le statistiche essenziali del periodo selezionato — KPI, dettaglio mensile, fasce F1/F2/F3, profilo settimanale e tabella giornaliera — e le esporta in UN SOLO file CSV con sezioni separate (KPI, MENSILE, FASCE, SETTIMANALE, GIORNI), pronto da allegare a email o da archiviare. Diverso dai singoli export CSV dei vari tab: qui hai il quadro completo in un download unico.")
+        st.markdown(f"<h1>📑 {titolo_rp}</h1>", unsafe_allow_html=True)
+        st.caption(f"Quadro riepilogativo {d0} → {d1}: un solo download CSV con tutte le sezioni.")
+
+        rp = calcola_riepilogo_periodo(prezzi)
+        if not rp["ok"]:
+            st.warning("Nessun dato valido per il report nel periodo selezionato.")
+        else:
+            k = rp["kpi"]
+            p1, p2, p3, p4, p5 = st.columns(5)
+            render_kpi("Ore analizzate", f"{k['ore']:,}", p1)
+            render_kpi("Giorni di calendario", f"{k['giorni']}", p2)
+            render_kpi("Prezzo medio (€/MWh)", f"{k['medio']:,.2f}", p3)
+            render_kpi("Prezzo mediano (€/MWh)", f"{k['mediano']:,.2f}", p4)
+            render_kpi("Deviazione std (€/MWh)", f"{k['std']:,.2f}", p5)
+            q1, q2, q3, q4 = st.columns(4)
+            render_kpi("Minimo (€/MWh)", f"{k['min']:,.2f}", q1)
+            render_kpi("Massimo (€/MWh)", f"{k['max']:,.2f}", q2)
+            render_kpi("Fascia P5–P95 (€/MWh)", f"{k['p5']:,.0f} – {k['p95']:,.0f}", q3)
+            render_kpi("Valore baseload 1 MW (€)", f"{k['baseload_1MW']:,.0f}", q4)
+            st.caption(f"Picco del periodo: {k['max']:,.2f} €/MWh il {k['picco_data']} | "
+                       f"Ore a prezzo negativo: {k['quota_negativi']:.1f} %")
+
+            st.markdown("**Prezzo medio mensile** (con min/max)")
+            df_rm = rp["mensile"]
+            fig_rm = go.Figure()
+            fig_rm.add_trace(go.Bar(x=df_rm["Mese"], y=df_rm["Prezzo medio (€/MWh)"],
+                                    name="Prezzo medio", marker_color="#3b82f6",
+                                    hovertemplate="Mese: %{x}<br>Medio: %{y:,.2f} €/MWh<extra></extra>"))
+            fig_rm.add_trace(go.Scatter(x=df_rm["Mese"], y=df_rm["Max (€/MWh)"],
+                                        name="Max", mode="lines+markers",
+                                        line=dict(color="#ef4444", width=2),
+                                        hovertemplate="Mese: %{x}<br>Max: %{y:,.2f} €/MWh<extra></extra>"))
+            fig_rm.add_trace(go.Scatter(x=df_rm["Mese"], y=df_rm["Min (€/MWh)"],
+                                        name="Min", mode="lines+markers",
+                                        line=dict(color="#10b981", width=2),
+                                        hovertemplate="Mese: %{x}<br>Min: %{y:,.2f} €/MWh<extra></extra>"))
+            fig_rm.update_layout(template="plotly_dark", height=360,
+                                 title="Prezzo medio, minimo e massimo per mese",
+                                 xaxis_title="Mese", yaxis_title="€/MWh")
+            st.plotly_chart(fig_rm, use_container_width=True)
+
+            c_rp1, c_rp2 = st.columns(2)
+            with c_rp1:
+                st.markdown("**Prezzo medio per fascia F1/F2/F3**")
+                df_rf = rp["fasce"]
+                fig_rf = px.bar(df_rf, x="Fascia", y="Prezzo medio (€/MWh)",
+                                color="Fascia",
+                                color_discrete_map={"F1": "#ef4444", "F2": "#eab308", "F3": "#3b82f6"},
+                                text_auto=".1f")
+                fig_rf.update_layout(template="plotly_dark", height=340, showlegend=False,
+                                     xaxis_title="Fascia", yaxis_title="€/MWh")
+                st.plotly_chart(fig_rf, use_container_width=True)
+            with c_rp2:
+                st.markdown("**Prezzo medio per giorno della settimana**")
+                df_rs = rp["settimanale"]
+                fig_rs = px.bar(df_rs, x="Giorno settimana", y="Prezzo medio (€/MWh)",
+                                color_discrete_sequence=["#8b5cf6"], text_auto=".1f",
+                                category_orders={"Giorno settimana": ["Lun", "Mar", "Mer", "Gio", "Ven", "Sab", "Dom"]})
+                fig_rs.update_layout(template="plotly_dark", height=340, showlegend=False,
+                                     xaxis_title="", yaxis_title="€/MWh")
+                st.plotly_chart(fig_rs, use_container_width=True)
+
+            st.markdown("**Dettaglio mensile**")
+            st.dataframe(df_rm, use_container_width=True, hide_index=True)
+            st.markdown("**Dettaglio fasce**")
+            st.dataframe(df_rf, use_container_width=True, hide_index=True)
+
+            df_rg2 = rp["giorni"]
+            c_top, c_bot = st.columns(2)
+            with c_top:
+                st.markdown("**Top 5 giorni più cari** (prezzo medio)")
+                st.dataframe(df_rg2.sort_values("Prezzo medio (€/MWh)", ascending=False).head(5),
+                             use_container_width=True, hide_index=True)
+            with c_bot:
+                st.markdown("**Top 5 giorni più economici** (prezzo medio)")
+                st.dataframe(df_rg2.sort_values("Prezzo medio (€/MWh)").head(5),
+                             use_container_width=True, hide_index=True)
+
+            csv_report = genera_csv_report(rp, d0, d1)
+            st.download_button(
+                "⬇️ Esporta report completo (CSV)",
+                csv_report.encode("utf-8"),
+                file_name=f"report_periodo_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Un solo file con tutte le sezioni: KPI, MENSILE, FASCE, SETTIMANALE, GIORNI (separatore ';').",
+                key="csv_report",
             )
 
 # Footer
