@@ -2258,6 +2258,230 @@ def calcola_lcos(capex_eur, opex_annuo_eur=0.0, capacita_kwh=1000.0,
             "sens_ricarica": sens_ricarica, "df": df}
 
 
+def calcola_pnl_posizione_aperta(prezzi, mw, prezzo_riferimento, ruolo="acquisto"):
+    """P&L giornaliero e cumulato di una posizione aperta sullo spot.
+
+    Domanda operativa: "quanto sto perdendo/guadagnando perche' non sono
+    coperto?" — confronta il prezzo spot giornaliero con un prezzo di
+    riferimento (budget, fixing medio, prezzo del contratto):
+      - ruolo 'acquisto' (fornitore non coperto, esposto al rialzo):
+        pnl_g = (P_ref - p_g) * MW * 24h. Positivo = spot sotto il
+        riferimento (risparmio), negativo = spot sopra (extra-costo).
+      - ruolo 'vendita' (produttore non coperto, esposto al ribasso):
+        pnl_g = (p_g - P_ref) * MW * 24h. Positivo = spot sopra il
+        riferimento, negativo = spot sotto.
+
+    Proprieta' testabile: con prezzi costanti uguali al riferimento il P&L
+    e' zero ovunque; raddoppiare MW raddoppia il P&L; il ruolo 'vendita'
+    e' lo specchio del ruolo 'acquisto' a parita' di input.
+
+    NaN-safe: prezzi non numerici/vuoti, MW <= 0, riferimento non finito ->
+    'errore' valorizzato, mai eccezioni.
+
+    Ritorna dict con 'errore', 'valido', 'serie_pnl' (Series cumulata, indice
+    giornaliero), 'serie_giornaliera', 'prezzo_medio_spot',
+    'n_giorni', 'pnl_totale'."""
+
+    vuoto = {"errore": None, "valido": False,
+             "serie_pnl": pd.Series(dtype=float),
+             "serie_giornaliera": pd.Series(dtype=float),
+             "prezzo_medio_spot": 0.0, "n_giorni": 0, "pnl_totale": 0.0}
+
+    def _err(msg):
+        v = dict(vuoto)
+        v["serie_pnl"] = pd.Series(dtype=float)
+        v["serie_giornaliera"] = pd.Series(dtype=float)
+        v["errore"] = msg
+        return v
+
+    try:
+        mw = float(mw)
+        p_ref = float(prezzo_riferimento)
+        if not np.isfinite(mw) or not np.isfinite(p_ref):
+            return _err("MW o prezzo di riferimento non numerici.")
+        if mw <= 0:
+            return _err("I MW aperti devono essere positivi.")
+        segno = {"acquisto": 1.0, "vendita": -1.0}.get(str(ruolo))
+        if segno is None:
+            return _err("Ruolo non valido (acquisto/vendita).")
+        prezzi = pd.Series(prezzi).dropna()
+        prezzi = prezzi[pd.to_numeric(prezzi, errors="coerce").notna()]
+        prezzi = pd.to_numeric(prezzi, errors="coerce").dropna()
+        if len(prezzi) == 0:
+            return _err("Serie prezzi vuota.")
+        if not bool(np.isfinite(prezzi.to_numpy(dtype=float)).all()):
+            return _err("Serie prezzi con valori non finiti.")
+        idx = pd.to_datetime(prezzi.index, errors="coerce")
+        prezzi = prezzi.copy()
+        prezzi.index = idx
+        prezzi = prezzi[prezzi.index.notna()]
+        if len(prezzi) == 0:
+            return _err("Serie prezzi senza date valide.")
+        giornaliero = prezzi.resample("D").mean().dropna()
+        if len(giornaliero) < 2:
+            return _err("Servono almeno 2 giorni di prezzi.")
+        pnl_g = segno * (p_ref - giornaliero.to_numpy(dtype=float)) \
+            * mw * 24.0
+        serie_g = pd.Series(pnl_g, index=giornaliero.index)
+        serie_cum = serie_g.cumsum()
+        return {"errore": None, "valido": True,
+                "serie_pnl": serie_cum,
+                "serie_giornaliera": serie_g,
+                "prezzo_medio_spot": float(giornaliero.mean()),
+                "n_giorni": int(len(giornaliero)),
+                "pnl_totale": float(serie_cum.iloc[-1])}
+    except Exception as e:  # pragma: no cover - guardia totale
+        return _err(f"Errore interno: {e}")
+
+
+def calcola_drawdown_mtm(serie_pnl, soglia_eur=0.0):
+    """Analisi drawdown della curva P&L cumulata di una posizione aperta.
+
+    Domanda operativa: "qual e' stata la perdita massima da un picco a un
+    minimo, e quanto ho impiegato a recuperarla?" — il drawdown e' lo
+    strumento standard per misurare il rischio di coda di una posizione:
+      - running max: il miglior P&L raggiunto fino a quel giorno;
+      - drawdown(t) = P&L(t) - running_max(t), sempre <= 0;
+      - episodio di drawdown: dal picco al primo giorno in cui la curva
+        torna al livello del picco (recupero), oppure aperto se non
+        recuperato.
+
+    Proprieta' testabile: con curva sempre crescente il drawdown massimo e'
+    0 e non ci sono episodi; con curva decrescente il drawdown massimo e'
+    ultimo_valore - primo_valore; il drawdown massimo coincide sempre con
+    la profondita' dell'episodio piu' profondo (coerenza interna).
+
+    NaN-safe: serie vuota / non numerica / con inf -> 'errore' valorizzato,
+    mai eccezioni.
+
+    Ritorna dict con 'errore', 'valido', 'running_max' (Series),
+    'drawdown' (Series <= 0), 'max_drawdown' (<= 0), 'picco_data',
+    'picco_valore', 'minimo_data', 'minimo_valore', 'recupero_data' (o
+    None), 'durata_max_giorni', 'recupero_giorni' (o None),
+    'drawdown_attuale', 'episodi' (lista dict), 'n_episodi_soglia',
+    'df_episodi' (top episodi, profondita' >= soglia)."""
+
+    vuoto = {"errore": None, "valido": False,
+             "running_max": pd.Series(dtype=float),
+             "drawdown": pd.Series(dtype=float),
+             "max_drawdown": 0.0, "picco_data": None, "picco_valore": 0.0,
+             "minimo_data": None, "minimo_valore": 0.0,
+             "recupero_data": None, "durata_max_giorni": 0,
+             "recupero_giorni": None, "drawdown_attuale": 0.0,
+             "episodi": [], "n_episodi_soglia": 0,
+             "df_episodi": pd.DataFrame(columns=[
+                 "Picco", "Minimo", "Profondita (EUR)",
+                 "Durata (gg)", "Recuperato"])}
+
+    def _err(msg):
+        v = dict(vuoto)
+        v["running_max"] = pd.Series(dtype=float)
+        v["drawdown"] = pd.Series(dtype=float)
+        v["df_episodi"] = pd.DataFrame(columns=list(vuoto["df_episodi"].columns))
+        v["errore"] = msg
+        return v
+
+    try:
+        soglia = float(soglia_eur)
+        if not np.isfinite(soglia) or soglia < 0:
+            return _err("Soglia non valida (>= 0).")
+        curva = pd.to_numeric(pd.Series(serie_pnl), errors="coerce").dropna()
+        if len(curva) == 0:
+            return _err("Serie P&L vuota.")
+        valori = curva.to_numpy(dtype=float)
+        if not bool(np.isfinite(valori).all()):
+            return _err("Serie P&L con valori non finiti.")
+        if len(valori) < 2:
+            return _err("Servono almeno 2 punti.")
+        idx = pd.to_datetime(curva.index, errors="coerce")
+        curva = pd.Series(valori, index=idx)
+
+        run_max = curva.cummax()
+        dd = curva - run_max
+        max_dd = float(dd.min())
+        i_min = int(dd.reset_index(drop=True).idxmin())
+        minimo_data = dd.index[i_min]
+        picco_valore = float(run_max.iloc[i_min])
+        # picco: ultimo indice prima del minimo in cui la curva tocca il max
+        mask_picco = (curva.iloc[:i_min + 1] >= picco_valore - 1e-12)
+        picco_data = curva.index[:i_min + 1][mask_picco][-1]
+        minimo_valore = float(curva.iloc[i_min])
+        # recupero: primo giorno dopo il minimo con curva >= valore picco
+        dopo = curva.iloc[i_min + 1:]
+        rec = dopo[dopo >= picco_valore - 1e-12]
+        recupero_data = rec.index[0] if len(rec) > 0 else None
+        durata_max = (minimo_data - picco_data).days
+        recupero_giorni = ((recupero_data - picco_data).days
+                           if recupero_data is not None else None)
+
+        # --- episodi di drawdown ---
+        episodi = []
+        in_ep = False
+        ep_picco_data = None
+        ep_picco_val = 0.0
+        ep_min_val = 0.0
+        ep_min_data = None
+        for i in range(len(curva)):
+            d = float(dd.iloc[i])
+            if d < -1e-12 and not in_ep:
+                in_ep = True
+                ep_picco_data = run_max.index[i]
+                ep_picco_val = float(run_max.iloc[i])
+                ep_min_val = float(curva.iloc[i])
+                ep_min_data = curva.index[i]
+            elif in_ep:
+                if float(curva.iloc[i]) < ep_min_val:
+                    ep_min_val = float(curva.iloc[i])
+                    ep_min_data = curva.index[i]
+                if d >= -1e-12:  # recupero al picco
+                    episodi.append({
+                        "picco_data": ep_picco_data,
+                        "picco_valore": ep_picco_val,
+                        "minimo_data": ep_min_data,
+                        "minimo_valore": ep_min_val,
+                        "profondita": ep_picco_val - ep_min_val,
+                        "durata_giorni": int((curva.index[i] -
+                                              ep_picco_data).days),
+                        "recuperato": True,
+                        "recupero_giorni": int((curva.index[i] -
+                                                ep_picco_data).days)})
+                    in_ep = False
+        if in_ep:  # episodio aperto a fine periodo
+            episodi.append({
+                "picco_data": ep_picco_data,
+                "picco_valore": ep_picco_val,
+                "minimo_data": ep_min_data,
+                "minimo_valore": ep_min_val,
+                "profondita": ep_picco_val - ep_min_val,
+                "durata_giorni": int((curva.index[-1] - ep_picco_data).days),
+                "recuperato": False,
+                "recupero_giorni": None})
+        episodi.sort(key=lambda e: e["profondita"], reverse=True)
+        sopra = [e for e in episodi if e["profondita"] >= soglia]
+        df_ep = pd.DataFrame([{
+            "Picco": e["picco_data"].strftime("%Y-%m-%d")
+            if hasattr(e["picco_data"], "strftime") else str(e["picco_data"]),
+            "Minimo": e["minimo_data"].strftime("%Y-%m-%d")
+            if hasattr(e["minimo_data"], "strftime") else str(e["minimo_data"]),
+            "Recuperato": ("sì" if e["recuperato"] else "no"),
+            "Profondita (EUR)": f"€ {e['profondita']:,.0f}",
+            "Durata (gg)": e["durata_giorni"]}
+            for e in sopra[:10]])
+        return {"errore": None, "valido": True,
+                "running_max": run_max, "drawdown": dd,
+                "max_drawdown": max_dd, "picco_data": picco_data,
+                "picco_valore": picco_valore, "minimo_data": minimo_data,
+                "minimo_valore": minimo_valore,
+                "recupero_data": recupero_data,
+                "durata_max_giorni": int(durata_max),
+                "recupero_giorni": recupero_giorni,
+                "drawdown_attuale": float(dd.iloc[-1]),
+                "episodi": episodi, "n_episodi_soglia": len(sopra),
+                "df_episodi": df_ep}
+    except Exception as e:  # pragma: no cover - guardia totale
+        return _err(f"Errore interno: {e}")
+
+
 def calcola_attribuzione_pnl(prezzo_0, prezzo_1, volume_0, volume_1,
                              ruolo="acquisto", coperture=None,
                              usa_cambio=False, fx_0=1.0, fx_1=1.0,
@@ -15478,7 +15702,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -26267,6 +26491,103 @@ elif workspace == _('ws8'):
                 help="Tabella waterfall dell'attribuzione del P&L.",
                 key="csv_ap",
             )
+
+    with tab130:
+        titolo_dd = edu("Drawdown del MtM (posizione aperta)", "Il DRAWDOWN e' la misura principe del rischio di coda di una posizione: dal miglior risultato raggiunto (picco) al peggior risultato successivo (minimo), quanto hai perso e quanti giorni ci sono voluti per recuperare. Qui la curva P&L e' quella della tua posizione APERTA sullo spot — i MW non coperti — contro un prezzo di riferimento (il tuo budget, il fixing medio, il prezzo del contratto che non hai chiuso). Se il drawdown massimo e' piu' grande della tua tolleranza, la copertura e' insufficiente: e' il numero da portare al tavolo quando decidi l'hedge ratio.")
+        st.markdown(f"<h1>📉 {titolo_dd}</h1>", unsafe_allow_html=True)
+        st.caption("Posizione aperta sullo spot: P&L giornaliero contro il prezzo di riferimento, poi analisi drawdown della curva cumulata.")
+        ruolo_dd = st.radio(
+            "Ruolo", ["Acquisto (fornitore non coperto: perdi se lo spot sale)",
+                      "Vendita (produttore non coperto: perdi se lo spot scende)"],
+            horizontal=True, key="dd_ruolo")
+        ruolo_ddv = "acquisto" if ruolo_dd.startswith("Acquisto") else "vendita"
+        dd1, dd2, dd3 = st.columns(3)
+        mw_dd = dd1.number_input("MW aperti (non coperti)", min_value=0.1,
+                                 value=2.0, step=0.5, format="%.1f",
+                                 key="dd_mw")
+        p_ref_dd = dd2.number_input(
+            "Prezzo di riferimento (€/MWh)",
+            value=round(float(prezzi.mean()), 1),
+            step=1.0, format="%.1f", key="dd_pref",
+            help="Budget, fixing medio o prezzo del contratto non chiuso.")
+        soglia_dd = dd3.number_input("Soglia episodi (€)", min_value=0.0,
+                                     value=10000.0, step=1000.0,
+                                     format="%.0f", key="dd_soglia")
+        pnl_dd = calcola_pnl_posizione_aperta(prezzi, mw_dd, p_ref_dd,
+                                              ruolo=ruolo_ddv)
+        if pnl_dd["errore"]:
+            st.error(pnl_dd["errore"])
+        elif not pnl_dd["valido"]:
+            st.warning("Parametri non validi per il P&L della posizione.")
+        else:
+            ris_dd = calcola_drawdown_mtm(pnl_dd["serie_pnl"],
+                                          soglia_eur=soglia_dd)
+            if ris_dd["errore"]:
+                st.error(ris_dd["errore"])
+            elif not ris_dd["valido"]:
+                st.warning("Parametri non validi per il drawdown.")
+            else:
+                k1, k2, k3, k4, k5, k6 = st.columns(6)
+                render_kpi("Drawdown max",
+                           f"€ {ris_dd['max_drawdown']:+,.0f}", k1)
+                render_kpi("P&L totale",
+                           f"€ {pnl_dd['pnl_totale']:+,.0f}", k2)
+                render_kpi("Durata max drawdown",
+                           f"{ris_dd['durata_max_giorni']} gg", k3)
+                rec_dd = (f"{ris_dd['recupero_giorni']} gg"
+                          if ris_dd["recupero_giorni"] is not None
+                          else "non recuperato")
+                render_kpi("Recupero max drawdown", rec_dd, k4)
+                render_kpi("Drawdown attuale",
+                           f"€ {ris_dd['drawdown_attuale']:+,.0f}", k5)
+                render_kpi(f"Episodi ≥ € {soglia_dd:,.0f}",
+                           f"{ris_dd['n_episodi_soglia']}", k6)
+                st.markdown("**Curva P&L cumulata e running max**")
+                fig_dd = go.Figure()
+                fig_dd.add_trace(go.Scatter(
+                    x=pnl_dd["serie_pnl"].index,
+                    y=pnl_dd["serie_pnl"].values,
+                    mode="lines", name="P&L cumulato (€)",
+                    line=dict(color="#38bdf8", width=2),
+                    hovertemplate="Data: %{x}<br>P&L: € %{y:,.0f}<extra></extra>"))
+                fig_dd.add_trace(go.Scatter(
+                    x=ris_dd["running_max"].index,
+                    y=ris_dd["running_max"].values,
+                    mode="lines", name="Running max",
+                    line=dict(color="#4ade80", width=1, dash="dash"),
+                    hovertemplate="Data: %{x}<br>Max: € %{y:,.0f}<extra></extra>"))
+                fig_dd.add_hline(y=0, line_dash="dot", line_color="#9ca3af")
+                fig_dd.update_layout(template="plotly_dark", height=360,
+                                     title="P&L cumulato posizione aperta vs running max",
+                                     xaxis_title="Data", yaxis_title="EUR")
+                st.plotly_chart(fig_dd, use_container_width=True)
+                st.markdown("**Underwater: profondità del drawdown**")
+                fig_uw = go.Figure(go.Scatter(
+                    x=ris_dd["drawdown"].index,
+                    y=ris_dd["drawdown"].values,
+                    mode="lines", name="Drawdown (€)",
+                    line=dict(color="#f87171", width=1.5),
+                    fill="tozeroy",
+                    fillcolor="rgba(248,113,113,0.25)",
+                    hovertemplate="Data: %{x}<br>Drawdown: € %{y:,.0f}<extra></extra>"))
+                fig_uw.update_layout(template="plotly_dark", height=280,
+                                     title="Drawdown (P&L − running max)",
+                                     xaxis_title="Data", yaxis_title="EUR")
+                st.plotly_chart(fig_uw, use_container_width=True)
+                if ris_dd["df_episodi"].empty:
+                    st.info("Nessun episodio di drawdown sopra la soglia.")
+                else:
+                    st.markdown("**Peggiori episodi di drawdown**")
+                    st.dataframe(ris_dd["df_episodi"],
+                                 use_container_width=True, hide_index=True)
+                st.download_button(
+                    "⬇️ Esporta episodi drawdown (CSV)",
+                    ris_dd["df_episodi"].to_csv(index=False).encode("utf-8"),
+                    file_name=f"drawdown_mtm_{d0}_{d1}.csv",
+                    mime="text/csv",
+                    help="Top episodi di drawdown della posizione aperta.",
+                    key="csv_dd",
+                )
 
 # Footer
 
