@@ -144,7 +144,9 @@ check("sconto negativo -20", r_neg["sconto_medio_eur"] == -20.0, r_neg["sconto_m
 
 # --- tab presente in app.py ---
 _src = open(APP, encoding="utf-8").read()
-check("tab136 in st.tabs", "tab136 = st.tabs(" in _src or "tab135, tab136 = st.tabs(" in _src)
+_riga_tabs = next((l for l in _src.splitlines() if "= st.tabs([" in l), "")
+check("tab136 in st.tabs",
+      "tab136" in _riga_tabs.split("= st.tabs([")[0], _riga_tabs[:60])
 check("label Effetto festivit\u00e0", "\U0001F384 Effetto festivit\u00e0" in _src)
 
 print(f"checks: {checks}, fails: {len(fails)}")
