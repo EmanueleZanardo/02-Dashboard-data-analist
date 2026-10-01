@@ -4,7 +4,7 @@
 
 ## Stato
 - Dashboard Streamlit "Singularity Quant ETRM", live su https://czpox8o8x6arnxw96txnvt.streamlit.app/.
-- Ultimo commit: (tab117, ciclo QA 01/10 02:40 — SHA dopo push).
+- Ultimo commit: 32b7a56 (STATUS tab117, 01/10 02:56 CEST).
 - Test: 47/47 verdi (tests/test_helpers.py) + 30/30 check tab115 + 45/45 check tab116 + 37/37 check tab117; regressione: 19/19.
 
 ## Ultimi eventi verificati (01/10/2026)
