@@ -1,13 +1,14 @@
 # STATUS.md — 02-Dashboard-data-analist (Singularity Quant ETRM)
 
-**Ultimo aggiornamento: 01/10/2026 17:40 CEST**
+**Ultimo aggiornamento: 01/10/2026 18:40 CEST**
 
 ## Stato
 - Dashboard Streamlit "Singularity Quant ETRM", live su https://czpox8o8x6arnxw96txnvt.streamlit.app/.
-- Ultimo commit: (QA 01/10 17:40 - STATUS.md tab135).
-- Test: 47/47 verdi (tests/test_helpers.py) + 37/37 check tab135; regressione: 19/19.
+- Ultimo commit: 17f34a4 (QA 01/10 18:40 - README 135->136 tab).
+- Test: 837 check totali, 0 fail (790 regressione + 47 tab136); pytest 119 passed, 1 xfailed.
 
 ## Ultimi eventi verificati (01/10/2026)
+- Nuova tab136 "🎄 Effetto festività": sconto dei giorni festivi vs feriali (sconto medio €/MWh e %, profilo orario 0-23, tabella festività ordinate per sconto, KPI risparmio sul profilo F1/F2/F3, export CSV) — helper calcola_effetto_festivita con calendari CH-TI/CH/IT (feste mobili da algoritmo di Pasqua, niente tabelle hardcoded), classificazione festivo/weekend/feriale, copertura oraria minima 70%, tz-aware safe, NaN-safe; testato con 47 check, 0 fail (inclusi test su Pasqua 2026, IT vs CH-TI, copertura parziale, sconto negativo). Nessun bug residuo, nessun segreto hardcoded. Push 3 commit (b796a25, 80bbec2, 17f34a4), remoto verificato 17f34a4.
 - Nuova tab135 "📏 Premio di rischio": premio di rischio ex-post del forward (F_proxy − spot realizzato, mese per mese; F_proxy = media spot nei mesi di formazione precedenti; Base e Peak) — helper calcola_premio_rischio (finestra lookback 1/2/3/6 mesi, copertura oraria minima 70%, mesi incompleti saltati onestamente, NaN-safe), testato con 37 check, 0 fail (3 fix delle aspettative del test su arrotondamenti/medie pesate, nessun fix del codice); KPI premio medio €/MWh e %, % mesi con premio positivo, premio ultimo mese, bias massimo assoluto, verdetto automatico (chi ha pagato il rischio), barre premio mensili con segno, linee forward-proxy vs realizzato, scatter con bisettrice, tabella + export CSV. Nessun bug residuo, nessun segreto hardcoded.
 - (01/10/2026, altro agente) Nuove tab132 "🕐 Volatilità intraday", tab133 "🔀 Regimi di prezzo", tab134 "📑 Report di periodo".
 - Nuova tab131 "🧪 Test efficacia hedge": monitoraggio retrospettivo di una copertura esistente con il metodo della regressione (test IAS 39 / IFRS 9) — helper calcola_test_efficacia_hedge (fixing a media mobile nota il giorno prima oppure indice del mese precedente; regressione OLS rolling Δspot su Δfixing: β = rapporto di copertura effettivo, R² = qualità del tracking; finestra efficace se |β| in [0.80, 1.25] e R² ≥ soglia; basis = spot − fixing; finestre intra-mese a fixing costante saltate onestamente per varianza nulla), testato con 32 check, 0 fail (2 fix del test: tolleranza sul β medio per l'arrotondamento a 4 decimali in tabella, e conteggio finestre per l'indice mensile; nessun fix del codice); KPI β corrente/R² corrente/% finestre efficaci/β medio/basis media/tracking error, verdetto automatico, grafici spot-vs-fixing, β rolling con banda 80-125%, R² rolling con soglia, scatter ultima finestra con retta OLS, basis giornaliera in EUR, tabella finestre + export CSV. Nessun bug residuo, nessun segreto hardcoded.
