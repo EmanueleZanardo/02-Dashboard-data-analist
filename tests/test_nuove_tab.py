@@ -13,11 +13,12 @@ from appfuncs import load
 
 _F = load("fascia_oraria", "calcola_volatilita_intraday",
           "calcola_regimi_prezzo", "calcola_riepilogo_periodo",
-          "genera_csv_report")
+          "genera_csv_report", "calcola_premio_rischio")
 calcola_volatilita_intraday = _F["calcola_volatilita_intraday"]
 calcola_regimi_prezzo = _F["calcola_regimi_prezzo"]
 calcola_riepilogo_periodo = _F["calcola_riepilogo_periodo"]
 genera_csv_report = _F["genera_csv_report"]
+calcola_premio_rischio = _F["calcola_premio_rischio"]
 
 TZ = "Europe/Zurich"
 
@@ -187,3 +188,55 @@ class TestRiepilogoPeriodo:
             assert sezione in csv
         assert "336" in csv  # ore analizzate
         assert "2026-09-28" in csv and "2026-10-11" in csv
+
+
+# ------------------------------------------------------------ premio di rischio
+class TestPremioRischio:
+    def _sei_mesi(self, prezzi, tz=None):
+        idx = pd.date_range("2026-04-01", "2026-09-30 23:00", freq="h", tz=tz)
+        assert len(idx) == len(prezzi)
+        return pd.Series(prezzi, index=idx)
+
+    def test_piatta_premio_zero(self):
+        s = self._sei_mesi(np.full(183 * 24, 100.0))
+        r = calcola_premio_rischio(s)
+        assert r["ok"] is True
+        assert r["n_mesi"] == 3  # lug, ago, set (servono 3 mesi di formazione)
+        assert r["premio_medio_base"] == pytest.approx(0.0)
+        assert r["premio_medio_peak"] == pytest.approx(0.0)
+        assert r["quota_mesi_positivi"] == pytest.approx(0.0)
+        assert list(r["df"]["Mese consegna"]) == ["2026-07", "2026-08", "2026-09"]
+        assert (r["df"]["Premio Base (€/MWh)"] == 0.0).all()
+
+    def test_trend_crescente_premio_negativo(self):
+        # spot in salita: il proxy (media passata) sta sotto il realizzato
+        n = 183 * 24
+        s = self._sei_mesi(80.0 + 60.0 * np.arange(n) / n)
+        r = calcola_premio_rischio(s)
+        assert r["ok"] is True
+        assert r["premio_medio_base"] < 0
+        assert r["mese_ultimo"] == "2026-09"
+
+    def test_serie_vuota(self):
+        r = calcola_premio_rischio(pd.Series([], dtype=float))
+        assert r["ok"] is False
+        assert r["n_mesi"] == 0
+
+    def test_deterministico(self):
+        s = self._sei_mesi(np.full(183 * 24, 100.0))
+        a = calcola_premio_rischio(s)
+        b = calcola_premio_rischio(s)
+        assert a["df"].equals(b["df"])
+        assert a["premio_medio_base"] == b["premio_medio_base"]
+
+    @pytest.mark.xfail(reason="BUG tab135: TypeError con indice tz-aware "
+                              "(pd.Timestamp naive vs index aware) — "
+                              "da correggere in app.py con tz_localize(None)",
+                       strict=True)
+    def test_tz_aware_non_sollevato(self):
+        # i dati mock dell'app sono tz-aware (Europe/Zurich): la tab non
+        # deve sollevare eccezioni (docstring: "mai eccezioni")
+        s = self._sei_mesi(np.full(183 * 24, 100.0), tz=TZ)
+        r = calcola_premio_rischio(s)
+        assert r["ok"] is True
+        assert r["n_mesi"] == 3
