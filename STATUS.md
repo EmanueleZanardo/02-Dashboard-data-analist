@@ -1,13 +1,14 @@
 # STATUS.md — 02-Dashboard-data-analist (Singularity Quant ETRM)
 
-**Ultimo aggiornamento: 01/10/2026 03:47 CEST**
+**Ultimo aggiornamento: 01/10/2026 04:50 CEST**
 
 ## Stato
 - Dashboard Streamlit "Singularity Quant ETRM", live su https://czpox8o8x6arnxw96txnvt.streamlit.app/.
-- Ultimo commit: 47870f0 (test tab118, 01/10 03:47 CEST).
-- Test: 47/47 verdi (tests/test_helpers.py) + 37/37 check tab118; regressione: 19/19.
+- Ultimo commit: cf523c1 (README tab119, 01/10 04:52 CEST).
+- Test: 47/47 verdi (tests/test_helpers.py) + 48/48 check tab119; regressione: 19/19.
 
 ## Ultimi eventi verificati (01/10/2026)
+- Nuova tab119 "📉 Margin call simulator": rischio di liquidità delle coperture forward — helper calcola_margin_call testato (48 check, 0 fail: 2 in sviluppo con fix del test, aritmetica nozionale 48000 e tolleranza arrotondamenti); walk-forward giornaliero su nozionale = MW×24h×fix×giorni, margine iniziale/manutenzione, chiamate che riportano l'equity al livello iniziale, costo di finanziamento del capitale immobilizzato; KPI MtM/call max/chiamate totali/giorni in call/margine max/costo finanziamento, grafico equity vs livelli margine, barre margin call, tabella + export CSV. Nessun bug, nessun segreto hardcoded.
 - Nuova tab118 "🎯 Fixing advisor": segnale statistico per la decisione fissare-ora vs aspettare — helper calcola_fixing_advisor testato (37 check, 0 fail, dopo fix del ramo storia-piatta); punteggio 0-100 da percentile + trend normalizzato + volatilità + stagionalità, KPI, grafico prezzo vs media storica/recente, percentile rolling con soglie 40/60, stagionalità mensile + export CSV. Nessun bug, nessun segreto hardcoded.
 - Nuova tab117 "🗓️ Calendario del costo": costo giornaliero di fornitura (prezzo spot × MW della fascia) in calendario — helper calcola_calendario_costo testato (37 check, 0 fail); KPI costo totale/medio giornaliero/σ giornaliera/giorno più caro/più economico/quota top-10% giorni, heatmap settimanale del costo, costo medio per giorno della settimana, tabella giornaliera + aggregazione mensile + export CSV. Nessun bug, nessun segreto hardcoded.
 - QA 01:40 CEST: nessuna modifica al repo remoto da b96f2680; app.py compilava, nessun segreto hardcoded (chiavi solo via st.secrets).
