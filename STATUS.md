@@ -1,13 +1,14 @@
 # STATUS.md — 02-Dashboard-data-analist (Singularity Quant ETRM)
 
-**Ultimo aggiornamento: 01/10/2026 14:40 CEST**
+**Ultimo aggiornamento: 01/10/2026 15:40 CEST**
 
 ## Stato
 - Dashboard Streamlit "Singularity Quant ETRM", live su https://czpox8o8x6arnxw96txnvt.streamlit.app/.
-- Ultimo commit: (QA 01/10 14:40 - STATUS.md tab129).
-- Test: 47/47 verdi (tests/test_helpers.py) + 46/46 check tab128 + 40/40 check tab129; regressione: 19/19.
+- Ultimo commit: (QA 01/10 15:40 - STATUS.md tab130).
+- Test: 47/47 verdi (tests/test_helpers.py) + 40/40 check tab129 + 36/36 check tab130; regressione: 19/19.
 
 ## Ultimi eventi verificati (01/10/2026)
+- Nuova tab130 "📉 Drawdown MtM": rischio di coda della posizione aperta sullo spot — helper calcola_pnl_posizione_aperta (P&L giornaliero = ±(P_ref − spot) × MW × 24h, ruolo acquisto/vendita) + calcola_drawdown_mtm (running max, drawdown, episodi picco→recupero, soglia minima, NaN-safe), testato con 36 check, 0 fail (2 fix del test su aspettative di recupero errate, nessun fix del codice); KPI drawdown max/P&L totale/durata/recupero/drawdown attuale/n° episodi sopra soglia, curva P&L vs running max, grafico underwater, top episodi + export CSV. Nessun bug residuo, nessun segreto hardcoded.
 - Nuova tab129 "📊 Attribuzione P&L": P&L explain del trading desk — scomposizione della variazione del risultato in effetto prezzo (ΔP×Q0), effetto volume (ΔQ×P0), effetto incrociato (identità esatta, residuo 0), effetto coperture (forward long/short fino a 4) ed effetto cambio EUR/CHF opzionale, più scostamento vs budget (prezzo a volumi reali + volume) — helper calcola_attribuzione_pnl testato (40 check, 0 fail: 1 fix del test sul residuo budget, nessun fix del codice); KPI Δ P&L/prezzo/volume/incrociato/coperture/cambio, grafico waterfall plotly, dettaglio coperture, tabella waterfall + export CSV. Nessun bug residuo, nessun segreto hardcoded.
 - Nuova tab128 "🔋 LCOS batteria": costo livellato di ogni MWh scaricato (PV di CAPEX+OPEX+energia di ricarica diviso PV dell'energia scaricata, con degrado geometrico ed efficienza round-trip) — helper calcola_lcos testato (46 check, 0 fail: 1 fix del test su kwargs duplicati, nessun fix del codice); KPI LCOS/PV costi/PV energia/energia anno 1/quota CAPEX, barre sensibilità ai cicli annui, scomposizione PV costi per componente, sensibilità a vita utile e costo ricarica, tabella annuale + export CSV. Nessun bug residuo, nessun segreto hardcoded.
 - Nuova tab127 "🛡️ CVA controparte": perdita attesa da rischio di controparte sulle coperture (CVA = EAD × PD × LGD per controparte, EAD solo su MtM positivo, PD(periodo) = 1-(1-PD_annua)^t) — helper calcola_cva testato (52 check, 0 fail: 2 fix del test sulla tolleranza float, nessun fix del codice); input fino a 6 controparti con nome + rating (PD implicita AAA→CCC) o PD personalizzata, LGD e orizzonte; KPI CVA totale/peggior controparte/quota/esposte, barre CVA, dettaglio per controparte, scenari PD/LGD, sensibilità orizzonte + export CSV. Nessun bug residuo, nessun segreto hardcoded.
