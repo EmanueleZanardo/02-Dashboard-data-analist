@@ -966,6 +966,135 @@ def calcola_margin_call(prezzi, mw, direzione="long", prezzo_fix=None,
 
 
 
+def calcola_frontiera_fissazione(prezzi, mw, prezzo_forward=None, n_punti=21):
+    """Frontiera efficiente di fissazione: hedge ratio 0-100%.
+
+    Domanda operativa: "che quota dei miei consumi conviene fissare a
+    termine?" — per ogni quota fissata h (0%..100%) si calcola il costo
+    atteso e la sua volatilita' su blocchi settimanali consecutivi dei
+    prezzi del periodo selezionato:
+
+      - prezzi orari -> medie giornaliere p_d (NaN scartati);
+      - giorni raggruppati in blocchi consecutivi di 7 giorni (settimane);
+        servono almeno 2 settimane complete;
+      - prezzo forward F: passato dall'utente oppure, se None, proxy =
+        media delle medie giornaliere dei primi 7 giorni (stessa
+        convenzione del tab Margin call);
+      - costo settimanale con quota fissata h:
+        C_w(h) = MW x 24 x somma_d [ h x F + (1-h) x p_d ]
+               = h x C_fix_w + (1-h) x C_spot_w, lineare in h;
+      - costo atteso = media di C_w(h) sulle settimane;
+        volatilita' = deviazione standard campionaria (ddof=1);
+      - annualizzazione: media x 365.25/7, std x sqrt(365.25/7).
+
+    La frontiera e' una retta da (E[spot], vol_spot) a (F x E, 0): la sua
+    pendenza misura il PREMIO DI RISCHIO implicito — quanto costa, in
+    EUR/MWh e EUR/anno, eliminare la volatilita' fissando tutto.
+
+    KPI aggiuntivi: probabilita' (frequenza storica sulle settimane) che
+    il costo spot settimanale batta il costo fissato.
+
+    NaN-safe: prezzi NaN scartati; indice non datetime o meno di 2
+    settimane complete -> dict con KPI a None ed errore None. Parametri
+    non validi (MW <= 0, prezzo_forward <= 0, n_punti < 2) -> 'errore'
+    valorizzato.
+
+    Ritorna dict con 'errore', 'df_frontiera' (Hedge ratio (%), Costo
+    atteso settimanale (€), Volatilita' settimanale (€), Costo atteso
+    annuo (€), Volatilita' annua (€)), 'prezzo_forward', 'n_settimane',
+    'n_giorni', 'premio_rischio_mwh', 'premio_rischio_annuo',
+    'prob_spot_meglio_fix', 'costo_spot_atteso_annuo',
+    'vol_spot_annua'."""
+
+    cols = ["Hedge ratio (%)", "Costo atteso settimanale (€)",
+            "Volatilita' settimanale (€)", "Costo atteso annuo (€)",
+            "Volatilita' annua (€)"]
+    vuoto = {"errore": None, "df_frontiera": pd.DataFrame(columns=cols),
+             "prezzo_forward": None, "n_settimane": None, "n_giorni": None,
+             "premio_rischio_mwh": None, "premio_rischio_annuo": None,
+             "prob_spot_meglio_fix": None, "costo_spot_atteso_annuo": None,
+             "vol_spot_annua": None}
+    out = dict(vuoto)
+
+    def _err(msg):
+        v = dict(vuoto)
+        v["errore"] = msg
+        return v
+
+    try:
+        mw_f = float(mw)
+    except (TypeError, ValueError):
+        return _err("MW del carico non validi.")
+    if not (mw_f > 0):
+        return _err("I MW del carico devono essere > 0.")
+    try:
+        np_int = int(n_punti)
+    except (TypeError, ValueError):
+        return _err("Numero di punti della frontiera non valido.")
+    if np_int < 2:
+        return _err("Servono almeno 2 punti per la frontiera.")
+    try:
+        p = prezzi.astype(float)
+        p = p[~p.index.duplicated(keep="first")].sort_index()
+        if not isinstance(p.index, pd.DatetimeIndex):
+            return out
+    except Exception:
+        return out
+    p = p.dropna()
+    if len(p) == 0:
+        return out
+    giornalieri = p.resample("D").mean().dropna()
+    n_giorni = len(giornalieri)
+    if n_giorni < 14:
+        return out
+    if prezzo_forward is None:
+        fwd = float(giornalieri.iloc[:7].mean())
+    else:
+        try:
+            fwd = float(prezzo_forward)
+        except (TypeError, ValueError):
+            return _err("Prezzo forward non valido.")
+    if not (fwd > 0):
+        return _err("Il prezzo forward deve essere > 0.")
+
+    vals = giornalieri.values.astype(float)
+    n_sett = n_giorni // 7
+    vals = vals[:n_sett * 7].reshape(n_sett, 7)
+    # costo spot settimanale (profilo piatto 24h) e costo fissato settimanale
+    c_spot_w = mw_f * 24.0 * vals.sum(axis=1)
+    c_fix_w = mw_f * 24.0 * 7.0 * fwd
+    h = np.linspace(0.0, 1.0, np_int)
+    # C_w(h) = h*C_fix + (1-h)*C_spot, vettorizzato su (n_punti, n_sett)
+    c_w = h[:, None] * c_fix_w + (1.0 - h)[:, None] * c_spot_w[None, :]
+    mean_w = c_w.mean(axis=1)
+    std_w = c_w.std(axis=1, ddof=1)
+    fatt_annuo = 365.25 / 7.0
+    mean_a = mean_w * fatt_annuo
+    std_a = std_w * np.sqrt(fatt_annuo)
+
+    premio_mwh = fwd - float(giornalieri.iloc[:n_sett * 7].mean())
+    premio_annuo = premio_mwh * mw_f * 24.0 * 365.25
+    prob_meglio = float((c_spot_w < c_fix_w).mean())
+
+    righe = [{"Hedge ratio (%)": round(float(hh) * 100.0, 1),
+              "Costo atteso settimanale (€)": round(float(mw_), 0),
+              "Volatilita' settimanale (€)": round(float(sw), 0),
+              "Costo atteso annuo (€)": round(float(ma), 0),
+              "Volatilita' annua (€)": round(float(sa), 0)}
+             for hh, mw_, sw, ma, sa in zip(h, mean_w, std_w, mean_a, std_a)]
+    out["df_frontiera"] = pd.DataFrame(righe, columns=cols)
+    out.update({"prezzo_forward": round(fwd, 2),
+                "n_settimane": int(n_sett),
+                "n_giorni": int(n_sett * 7),
+                "premio_rischio_mwh": round(premio_mwh, 2),
+                "premio_rischio_annuo": round(premio_annuo, 0),
+                "prob_spot_meglio_fix": round(prob_meglio, 4),
+                "costo_spot_atteso_annuo": round(float(mean_a[0]), 0),
+                "vol_spot_annua": round(float(std_a[0]), 0)})
+    return out
+
+
+
 def calcola_efficienza_profilo(prezzi, mw_f1, mw_f2, mw_f3):
     """Efficienza (smartness) del profilo di carico rispetto ai prezzi spot.
 
@@ -13856,7 +13985,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -23720,6 +23849,65 @@ elif workspace == _('ws8'):
                 key="csv_mc",
             )
         st.caption("Uso pratico: alza il margine iniziale se le chiamate totali sono alte rispetto al nozionale, oppure riduci la size della copertura; il costo di finanziamento va sommato al costo dell'energia coperta per il vero costo 'tutto compreso'. Limiti: fixing stimato con proxy forward (non forward reali), regolamento giornaliero su medie giornaliere (ignora i movimenti infragiornalieri), nessuna remunerazione dell'equity positiva, profilo di carico piatto 24h.")
+    with tab120:
+        titolo_ff = edu("Frontiera di fissazione", "Per ogni quota di consumi fissata a termine (hedge ratio 0-100%) vedi il costo atteso e la sua volatilita', calcolati sulle settimane del periodo. La retta che unisce i punti e' la frontiera efficiente: la sua pendenza e' il premio di rischio implicito, cioe' quanto paghi in piu' per eliminare la volatilita' fissando tutto a termine.")
+        st.markdown(f"<h1>\U0001F4C8 {titolo_ff}</h1>", unsafe_allow_html=True)
+        ff1, ff2, ff3 = st.columns(3)
+        mw_ff = ff1.slider("Carico (MW, profilo piatto 24h)", min_value=0.5, max_value=50.0, value=5.0, step=0.5, key="ff_mw",
+                           help="Potenza media del carico, costante su tutte le ore: serve a scalare i costi in euro.")
+        usa_proxy_ff = ff2.checkbox("Forward = proxy (media primi 7 giorni)", value=True, key="ff_proxy",
+                                    help="Se spuntato, il prezzo forward e' stimato come media delle medie giornaliere dei primi 7 giorni del periodo. Altrimenti inserisci il prezzo a mano.")
+        if usa_proxy_ff:
+            fwd_ff = None
+        else:
+            fwd_ff = ff2.number_input("Prezzo forward (€/MWh)", min_value=0.01, value=80.0, step=1.0, key="ff_fwd")
+        h_mio = ff3.slider("Il mio hedge ratio attuale (%)", min_value=0.0, max_value=100.0, value=50.0, step=5.0, key="ff_mioh",
+                           help="La tua quota gia' fissata: il punto corrispondente viene evidenziato sulla frontiera.")
+        ris_ff = calcola_frontiera_fissazione(prezzi, mw_ff, fwd_ff)
+        if ris_ff["errore"]:
+            st.error(ris_ff["errore"])
+        elif ris_ff["premio_rischio_mwh"] is None:
+            st.warning("Servono almeno 14 giorni di prezzi per la frontiera (2 settimane complete): allarga il periodo in sidebar.")
+        else:
+            st.caption(f"Prezzo forward usato: € {ris_ff['prezzo_forward']:,.2f}/MWh"
+                       + (" (proxy: media dei primi 7 giorni)" if usa_proxy_ff else " (inserito manualmente)")
+                       + f" — {ris_ff['n_settimane']} settimane complete su {ris_ff['n_giorni']} giorni.")
+            k1, k2, k3 = st.columns(3)
+            render_kpi("Premio di rischio implicito", f"€ {ris_ff['premio_rischio_mwh']:,.2f}/MWh", k1)
+            render_kpi("Premio di rischio annuo", f"€ {ris_ff['premio_rischio_annuo']:,.0f}", k2)
+            render_kpi("Prob. che lo spot batta il fixing", f"{ris_ff['prob_spot_meglio_fix'] * 100:.1f}%", k3)
+            k4, k5, k6 = st.columns(3)
+            render_kpi("Costo atteso annuo (0% fissato)", f"€ {ris_ff['costo_spot_atteso_annuo']:,.0f}", k4)
+            render_kpi("Volatilita' annua (0% fissato)", f"€ {ris_ff['vol_spot_annua']:,.0f}", k5)
+            df_ff = ris_ff["df_frontiera"]
+            vol_mio = float(np.interp(h_mio, df_ff["Hedge ratio (%)"], df_ff["Volatilita' annua (€)"]))
+            costo_mio = float(np.interp(h_mio, df_ff["Hedge ratio (%)"], df_ff["Costo atteso annuo (€)"]))
+            render_kpi(f"Costo atteso annuo ({h_mio:.0f}% fissato)", f"€ {costo_mio:,.0f}", k6)
+            fig_ff = go.Figure()
+            fig_ff.add_trace(go.Scatter(x=df_ff["Volatilita' annua (€)"], y=df_ff["Costo atteso annuo (€)"],
+                                        mode="lines+markers", line=dict(color="#3b82f6"), marker=dict(size=5),
+                                        hovertemplate="Hedge %{text}%<br>Vol annua: € %{x:,.0f}<br>Costo atteso: € %{y:,.0f}<extra></extra>",
+                                        text=df_ff["Hedge ratio (%)"], name="Frontiera"))
+            fig_ff.add_trace(go.Scatter(x=[vol_mio], y=[costo_mio], mode="markers",
+                                        marker=dict(color="#f59e0b", size=14, symbol="star"),
+                                        hovertemplate=f"La tua posizione ({h_mio:.0f}%)<br>Vol annua: € {vol_mio:,.0f}<br>Costo atteso: € {costo_mio:,.0f}<extra></extra>",
+                                        name="La tua posizione"))
+            fig_ff.update_layout(template="plotly_dark", height=380,
+                                 title="Frontiera efficiente di fissazione (costo atteso vs volatilita', base annua)",
+                                 xaxis_title="Volatilita' annua del costo (€)",
+                                 yaxis_title="Costo atteso annuo (€)")
+            st.plotly_chart(fig_ff, use_container_width=True)
+            st.markdown("**Dettaglio per quota fissata**")
+            st.dataframe(df_ff, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta frontiera di fissazione (CSV)",
+                df_ff.to_csv(index=False).encode("utf-8"),
+                file_name=f"frontiera_fissazione_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Hedge ratio, costo atteso e volatilita' settimanali e annui per ogni punto della frontiera.",
+                key="csv_ff",
+            )
+        st.caption("Uso pratico: se il premio di rischio e' alto e la probabilita' che lo spot batta il fixing e' bassa, fissare di piu' costa caro ma dormi tranquillo; se il premio e' vicino a zero, la certezza e' quasi gratis. Muovi 'il mio hedge ratio' per vedere dove sei sulla frontiera. Limiti: forward stimato con proxy (non forward reali), settimane consecutive di 7 giorni (non settimane di calendario), volatilita' storica =/= volatilita' futura, profilo di carico piatto 24h.")
 
 
 # Footer
