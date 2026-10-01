@@ -16812,6 +16812,135 @@ def calcola_volatilita_termine(prezzi_orari, bucket="mese", min_giorni=10, min_b
             "serie_variazioni": var}
 
 
+def calcola_indice_stress(prezzi_orari, soglia=70.0, pesi=None):
+    """Indice di stress di mercato giornaliero (0-100): un numero unico che
+    dice quanto il mercato e' sotto stress ogni giorno.
+
+    4 componenti, normalizzate min-max sul periodo analizzato (0 = minimo
+    osservato, 1 = massimo osservato), poi media pesata x 100:
+      1. Livello prezzo    — media giornaliera (prezzi alti = stress), w 0.35
+      2. Range intraday    — (max-min)/|media|, con pavimento a 5 €/MWh per
+         non far esplodere il rapporto quando la media e' ~0, w 0.25
+      3. Shock giornaliero — |variazione della media vs giorno prima|, w 0.25
+      4. Ore negative      — quota di ore con prezzo < 0 (stress da eccesso
+         di rinnovabili / domanda debole), w 0.15
+    Classi: SSI < 30 calmo, < 50 tensionato, < 70 stressato, >= 70 crisi.
+    A cosa serve: termometro unico per il TEMPO delle coperture (SSI alto =
+    si fissa prima, si paga volentieri il premio delle opzioni), storicizza le
+    crisi per confrontare "quanto e' grave oggi" col passato; le componenti
+    spiegano sempre il perche' del punteggio, niente black box.
+    NaN-safe: serie vuota / indice non-datetime / < 72 ore -> errore pulito;
+    prezzi costanti -> tutte le componenti a 0 -> SSI 0 (calmo); tz-aware reso
+    naive; soglia fuori 0-100 o pesi non validi -> errore.
+    Ritorna dict con errore/valido/serie/tabella/ultimo/medio/massimo/
+    sopra_soglia/pct_crisi/n_giorni/mensile/pesi/verdetto.
+    """
+    PESI_DEF = (0.35, 0.25, 0.25, 0.15)
+    COLS_PT = ["Livello prezzo (pt)", "Range intraday (pt)",
+               "Shock giornaliero (pt)", "Ore negative (pt)"]
+
+    def _vuoto():
+        return pd.DataFrame({"Data": [], "SSI": [], "Classe": [],
+                             **{c: [] for c in COLS_PT}})
+
+    def _err(msg):
+        return {"errore": msg, "valido": False, "serie": _vuoto(),
+                "tabella": _vuoto(), "ultimo": None, "medio": None,
+                "massimo": None, "sopra_soglia": 0, "pct_crisi": 0.0,
+                "n_giorni": 0,
+                "mensile": pd.DataFrame({"Mese": [], "SSI medio": []}),
+                "pesi": PESI_DEF, "verdetto": msg}
+
+    if not isinstance(prezzi_orari, pd.Series):
+        return _err("Input non valido: serve una Series pandas.")
+    if not isinstance(prezzi_orari.index, pd.DatetimeIndex):
+        return _err("Indice non temporale: serve una serie oraria con DatetimeIndex.")
+    try:
+        soglia = float(soglia)
+    except (TypeError, ValueError):
+        return _err("soglia non numerica: usa un valore 0-100.")
+    if not (0.0 <= soglia <= 100.0):
+        return _err("soglia fuori range: usa un valore 0-100.")
+    if pesi is None:
+        w = PESI_DEF
+    else:
+        try:
+            w = tuple(float(x) for x in pesi)
+        except (TypeError, ValueError):
+            return _err("pesi non numerici: servono 4 valori >= 0.")
+        if len(w) != 4 or any(x < 0 for x in w) or sum(w) <= 0:
+            return _err("pesi non validi: servono 4 valori >= 0 con somma > 0.")
+        tot = sum(w)
+        w = tuple(x / tot for x in w)
+
+    p = pd.to_numeric(prezzi_orari, errors="coerce").dropna()
+    if len(p) < 72:
+        return _err("Serie troppo corta: servono almeno 72 ore di prezzi.")
+    idxn = p.index.tz_localize(None) if p.index.tz is not None else p.index
+    giorni = idxn.date
+    g = p.groupby(giorni)
+    media = g.mean()
+    rng = (g.max() - g.min()) / media.abs().clip(lower=5.0)
+    shock = media.diff().abs().fillna(0.0)
+    neg = (p < 0).groupby(giorni).mean()
+
+    def _mm(s):
+        lo, hi = float(s.min()), float(s.max())
+        if hi > lo:
+            return (s - lo) / (hi - lo)
+        return pd.Series(0.0, index=s.index)
+
+    comp = pd.DataFrame({"Livello prezzo": _mm(media),
+                         "Range intraday": _mm(rng),
+                         "Shock giornaliero": _mm(shock),
+                         "Ore negative": _mm(neg)})
+    pts = comp.mul(w, axis=1) * 100.0
+    ssi = pts.sum(axis=1).round(1)
+
+    def _classe(v):
+        if v < 30.0:
+            return "🟢 Calmo"
+        if v < 50.0:
+            return "🟡 Tensionato"
+        if v < 70.0:
+            return "🟠 Stressato"
+        return "🔴 Crisi"
+
+    classi = [_classe(v) for v in ssi.to_numpy()]
+    serie = pd.DataFrame({"Data": pd.to_datetime(ssi.index),
+                          "SSI": ssi.to_numpy(), "Classe": classi})
+    for i, c in enumerate(COLS_PT):
+        serie[c] = pts.iloc[:, i].to_numpy().round(1)
+
+    tabella = serie.sort_values("SSI", ascending=False).head(20).reset_index(drop=True)
+    mens = serie.groupby(serie["Data"].dt.to_period("M"))["SSI"].mean().round(1)
+    mensile = pd.DataFrame({"Mese": [str(m) for m in mens.index],
+                            "SSI medio": mens.to_numpy()})
+
+    ultimo_ssi = float(ssi.iloc[-1])
+    ultimo_data = str(ssi.index[-1])
+    massimo_idx = int(ssi.to_numpy().argmax())
+    sopra = int((ssi.to_numpy() >= soglia).sum())
+    crisi = float(np.mean([c == "🔴 Crisi" for c in classi])) * 100.0
+
+    if ultimo_ssi >= soglia:
+        verdetto = (f"🚨 Mercato in tensione l'ultimo giorno ({ultimo_data}): "
+                    f"SSI {ultimo_ssi:.1f} sopra la soglia {soglia:.0f}.")
+    else:
+        verdetto = (f"Mercato sotto controllo l'ultimo giorno ({ultimo_data}): "
+                    f"SSI {ultimo_ssi:.1f} sotto la soglia {soglia:.0f}.")
+
+    return {"errore": None, "valido": True, "serie": serie, "tabella": tabella,
+            "ultimo": {"data": ultimo_data, "ssi": ultimo_ssi,
+                       "classe": _classe(ultimo_ssi)},
+            "medio": float(ssi.mean()),
+            "massimo": {"data": str(ssi.index[massimo_idx]),
+                        "valore": float(ssi.iloc[massimo_idx])},
+            "sopra_soglia": sopra, "pct_crisi": round(crisi, 1),
+            "n_giorni": int(len(ssi)), "mensile": mensile, "pesi": w,
+            "verdetto": verdetto}
+
+
 # ==========================================
 # WORKSPACE 1: SIMULATORE STRATEGICO
 # ==========================================
@@ -17455,7 +17584,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -29444,6 +29573,85 @@ elif workspace == _('ws8'):
                 mime="text/csv",
                 key="csv_vol_termine",
                 help="Una riga per bucket: giorni, prezzo medio, vol annua in €/MWh e in % del prezzo.",
+            )
+
+    with tab142:
+        titolo_ms = edu("Indice di stress di mercato", "L'INDICE DI STRESS DI MERCATO (0-100) e' un termometro unico: ogni giorno combina 4 segnali — LIVELLO dei prezzi, AMPIEZZA del range intraday, SHOCK rispetto al giorno prima e quota di ORE NEGATIVE — in un solo numero. Sotto 30 il mercato e' calmo, sopra 70 e' in crisi. A cosa serve: (1) decide il TEMPO delle coperture — con SSI alto si fissa prima e si paga volentieri il premio delle opzioni (tab Fixing advisor / Frontiera di fissazione); (2) storicizza le crisi per confrontare 'quanto e' grave oggi' col passato; (3) le 4 componenti spiegano sempre il perche' del punteggio, niente black box.")
+        st.markdown(f"<h1>🚨 {titolo_ms}</h1>", unsafe_allow_html=True)
+        st.caption("Un numero unico 0-100 per ogni giorno: quanto il mercato è sotto stress e perché.")
+
+        ms_soglia = st.slider("Soglia di allerta SSI", 50.0, 90.0, 70.0, 1.0,
+                              key="ms142_soglia",
+                              help="I giorni con SSI sopra questa soglia vengono conteggiati come allerte.")
+        ms = calcola_indice_stress(prezzi, soglia=float(ms_soglia))
+        if ms["errore"]:
+            st.error(ms["errore"])
+        else:
+            ult = ms["ultimo"]
+            if ult["ssi"] >= float(ms_soglia):
+                st.error(f"🚨 {ms['verdetto']}")
+            else:
+                st.success(f"✅ {ms['verdetto']}")
+            k1, k2, k3, k4 = st.columns(4)
+            with k1:
+                st.metric("SSI ultimo giorno", f"{ult['ssi']:.1f}", ult["data"])
+            with k2:
+                st.metric("SSI medio periodo", f"{ms['medio']:.1f}")
+            with k3:
+                st.metric("SSI max", f"{ms['massimo']['valore']:.1f}", ms["massimo"]["data"])
+            with k4:
+                st.metric("Giorni sopra soglia", ms["sopra_soglia"], f"{ms['pct_crisi']:.1f}% in crisi")
+
+            st.markdown("**Indice di stress giornaliero**")
+            fig_ms = go.Figure()
+            fig_ms.add_trace(go.Scatter(x=ms["serie"]["Data"], y=ms["serie"]["SSI"], mode="lines",
+                                        name="SSI", line=dict(color="#f87171", width=1.5),
+                                        hovertemplate="%{x|%Y-%m-%d}: %{y:.1f}<extra></extra>"))
+            for liv, col, txt in [(70, "#ef4444", "Crisi"), (50, "#f59e0b", "Stressato"),
+                                  (30, "#84cc16", "Tensionato")]:
+                fig_ms.add_hline(y=liv, line_dash="dot", line_color=col,
+                                 annotation_text=txt, annotation_font_color=col)
+            fig_ms.add_hline(y=float(ms_soglia), line_dash="dash", line_color="#f43f5e",
+                             annotation_text=f"Soglia {float(ms_soglia):.0f}")
+            fig_ms.update_layout(template="plotly_dark", height=340, xaxis_title="",
+                                 yaxis_title="SSI 0-100", yaxis=dict(range=[0, 100]))
+            st.plotly_chart(fig_ms, use_container_width=True)
+
+            st.markdown("**SSI medio mensile**")
+            dm = ms["mensile"]
+            fig_msm = go.Figure()
+            fig_msm.add_trace(go.Bar(x=dm["Mese"], y=dm["SSI medio"], name="SSI medio",
+                                     marker_color="#38bdf8",
+                                     hovertemplate="%{x}: %{y:.1f}<extra></extra>"))
+            fig_msm.add_hline(y=float(ms_soglia), line_dash="dash", line_color="#f43f5e")
+            fig_msm.update_layout(template="plotly_dark", height=300, xaxis_title="",
+                                  yaxis_title="SSI medio")
+            st.plotly_chart(fig_msm, use_container_width=True)
+
+            st.markdown("**Top 10 giorni di stress: cosa li ha causati (punti SSI per componente)**")
+            top10 = ms["tabella"].head(10).iloc[::-1]
+            fig_mst = go.Figure()
+            for col, colore in [("Livello prezzo (pt)", "#ef4444"),
+                                ("Range intraday (pt)", "#f59e0b"),
+                                ("Shock giornaliero (pt)", "#a78bfa"),
+                                ("Ore negative (pt)", "#38bdf8")]:
+                fig_mst.add_trace(go.Bar(x=top10["Data"].dt.strftime("%Y-%m-%d"), y=top10[col],
+                                         name=col.replace(" (pt)", ""), marker_color=colore,
+                                         hovertemplate="%{y:.1f} pt<extra></extra>"))
+            fig_mst.update_layout(template="plotly_dark", height=380, barmode="stack",
+                                  xaxis_title="", yaxis_title="Punti SSI")
+            st.plotly_chart(fig_mst, use_container_width=True)
+
+            st.markdown("**Top 20 giorni di stress**")
+            st.dataframe(ms["tabella"], use_container_width=True, hide_index=True)
+            d0m, d1m = prezzi.index.min().date(), prezzi.index.max().date()
+            st.download_button(
+                "⬇️ Esporta indice di stress (CSV)",
+                ms["serie"].to_csv(index=False, sep=";").encode("utf-8"),
+                file_name=f"indice_stress_{d0m}_{d1m}.csv",
+                mime="text/csv",
+                key="csv_indice_stress",
+                help="Una riga per giorno: SSI, classe e punti per componente (la somma fa l'SSI).",
             )
 
 # Footer
