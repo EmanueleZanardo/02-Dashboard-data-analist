@@ -1228,6 +1228,156 @@ def calcola_ventaglio_prezzo(prezzi, n_giorni=90, n_scenari=2000, soglia=None,
     return out
 
 
+def calcola_lag_indicizzazione(prezzi, mw_f1=2.0, mw_f2=1.5, mw_f3=1.0):
+    """Confronto convenzioni di indicizzazione del prezzo di fornitura.
+
+    Domanda operativa: "quanto mi sarebbe costato il mio carico sul periodo
+    storico se il contratto fosse indicizzato allo spot ora per ora, alla
+    media mensile (M), alla media del mese precedente (M-1), a M-2, alla
+    media trimestrale o a una media mobile a 30 giorni?" — i contratti
+    italiani indicizzati al PUN usano spesso convenzioni con lag: il lag
+    smussa i picchi ma puo' far pagare di piu' quando i prezzi scendono.
+
+    Metodo:
+      - prezzi orari -> dropna; ogni ora e' valorizzata con la potenza della
+        sua fascia (mw_f1/mw_f2/mw_f3 via fascia_oraria); servono almeno
+        24 ore di storico;
+      - per ogni convenzione si costruisce il prezzo indicizzato orario:
+          'Spot': prezzo orario;
+          'Media M': media di tutte le ore dello stesso mese;
+          'M-1': media del mese precedente (NaN se indisponibile);
+          'M-2': media di due mesi prima (NaN se indisponibile);
+          'Trimestrale': media del trimestre solare di appartenenza;
+          'Mobile 30gg': media trailing delle ultime 720 ore
+            (NaN sulle prime 720 ore);
+      - costo orario = prezzo_indicizzato * mw; le ore con indice NaN sono
+        escluse dal costo di quella convenzione (copertura riportata);
+      - aggregazione mensile: tabella mese x convenzione (costo €);
+      - KPI: costo totale per convenzione, risparmio vs spot, tracking
+        error (std mensile della differenza vs spot), max deviazione
+        mensile assoluta vs spot; 'migliore' = convenzione piu' economica
+        tra quelle a copertura totale (Media M, Trimestrale).
+
+    Proprieta' testabile: con prezzi piatti tutte le convenzioni costano
+    uguale a parita' di ore coperte; 'Spot' copre sempre il 100% delle ore;
+    il costo 'Spot' e' esattamente somma(prezzo*mw).
+
+    NaN-safe: serie vuota o meno di 24 ore o energia nulla -> 'valido'
+    False. MW non validi o indice non datetime -> 'errore' valorizzato.
+
+    Ritorna dict con 'errore', 'valido', 'df_mensile' (colonne 'Mese' +
+    convenzioni), 'costo_totale', 'copertura', 'prezzo_medio' (€/MWh
+    sull'energia coperta, confronto equo tra coperture diverse),
+    'risparmio_vs_spot',
+    'tracking_error', 'max_dev_mensile', 'migliore', 'n_mesi', 'n_ore',
+    'mwh_totale', 'mw_f1', 'mw_f2', 'mw_f3', 'convenzioni'."""
+
+    CONV = ["Spot", "Media M", "M-1", "M-2", "Trimestrale", "Mobile 30gg"]
+    FULL = ["Media M", "Trimestrale"]  # copertura sempre 100%
+    vuoto = {"errore": None, "valido": False,
+             "df_mensile": pd.DataFrame(columns=["Mese"] + CONV),
+             "costo_totale": {}, "copertura": {}, "prezzo_medio": {},
+             "risparmio_vs_spot": {},
+             "tracking_error": {}, "max_dev_mensile": {}, "migliore": None,
+             "n_mesi": 0, "n_ore": 0, "mwh_totale": 0.0,
+             "mw_f1": None, "mw_f2": None, "mw_f3": None, "convenzioni": CONV}
+
+    def _err(msg):
+        v = dict(vuoto)
+        v["errore"] = msg
+        return v
+
+    try:
+        mws = [float(mw_f1), float(mw_f2), float(mw_f3)]
+    except (TypeError, ValueError):
+        return _err("Potenze per fascia non valide.")
+    if any(not (m >= 0) for m in mws) or sum(mws) <= 0:
+        return _err("Le potenze devono essere >= 0 e almeno una > 0.")
+    if any(m > 5000 for m in mws):
+        return _err("Potenza per fascia oltre il limite (5000 MW).")
+
+    try:
+        s = pd.Series(prezzi, dtype=float).dropna()
+    except Exception:
+        return _err("Serie prezzi non valida.")
+    if s.empty:
+        return dict(vuoto)
+    if not isinstance(s.index, pd.DatetimeIndex):
+        if pd.api.types.is_integer_dtype(s.index) or pd.api.types.is_float_dtype(s.index):
+            return _err("Indice dei prezzi non interpretabile come date.")
+        try:
+            s.index = pd.to_datetime(s.index)
+        except Exception:
+            return _err("Indice dei prezzi non interpretabile come date.")
+    ore = len(s)
+    if ore < 24:
+        return dict(vuoto)
+
+    fasce = s.index.map(fascia_oraria)
+    mw_h = fasce.map({"F1": mws[0], "F2": mws[1], "F3": mws[2]}).astype(float).to_numpy()
+    mwh = float(mw_h.sum())
+    if mwh <= 0:
+        return dict(vuoto)
+    p = s.to_numpy(dtype=float)
+
+    mese = s.index.to_period("M")
+    trim = s.index.to_period("Q")
+    media_mese = s.groupby(mese).transform("mean").to_numpy()
+    media_trim = s.groupby(trim).transform("mean").to_numpy()
+    mesi_ord = mese.unique()
+    map_media = dict(zip(mesi_ord, s.groupby(mese).mean().to_numpy()))
+    lag1 = np.array([map_media.get(mm - 1, np.nan) for mm in mese], dtype=float)
+    lag2 = np.array([map_media.get(mm - 2, np.nan) for mm in mese], dtype=float)
+    w = 720  # 30 giorni x 24 ore
+    mobile = np.full(ore, np.nan)
+    if ore > w:
+        csum = np.concatenate([[0.0], np.cumsum(p)])
+        mobile[w:] = (csum[w:ore] - csum[0:ore - w]) / w
+
+    indici = {"Spot": p, "Media M": media_mese, "M-1": lag1, "M-2": lag2,
+              "Trimestrale": media_trim, "Mobile 30gg": mobile}
+
+    righe = []
+    mesi_arr = mese.to_numpy()
+    for m in mesi_ord:
+        mask = mesi_arr == m
+        r = {"Mese": str(m)}
+        for c in CONV:
+            v = indici[c][mask] * mw_h[mask]
+            r[c] = round(float(np.nansum(v)), 2)
+        righe.append(r)
+    df = pd.DataFrame(righe, columns=["Mese"] + CONV)
+
+    copertura = {c: round(float(np.isfinite(indici[c]).mean()), 4) for c in CONV}
+    costo_totale = {c: round(float(df[c].sum()), 2) for c in CONV}
+    # €/MWh medio sull'energia effettivamente coperta: confronto equo anche
+    # tra convenzioni con copertura diversa (es. M-1 esclude il primo mese).
+    prezzo_medio = {}
+    for c in CONV:
+        e_cop = float(mw_h[np.isfinite(indici[c])].sum())
+        prezzo_medio[c] = round(costo_totale[c] / e_cop, 2) if e_cop > 0 else None
+    spot = costo_totale["Spot"]
+    risparmio = {c: round(spot - costo_totale[c], 2) for c in CONV if c != "Spot"}
+    te, md = {}, {}
+    for c in CONV:
+        if c == "Spot":
+            continue
+        delta = (df[c] - df["Spot"]).to_numpy(dtype=float)
+        te[c] = round(float(np.std(delta, ddof=1)) if len(delta) > 1 else 0.0, 2)
+        md[c] = round(float(np.abs(delta).max()) if len(delta) else 0.0, 2)
+    migliore = min(FULL, key=lambda c: costo_totale[c])
+
+    out = dict(vuoto)
+    out.update({"valido": True, "df_mensile": df, "costo_totale": costo_totale,
+                "copertura": copertura, "prezzo_medio": prezzo_medio,
+                "risparmio_vs_spot": risparmio,
+                "tracking_error": te, "max_dev_mensile": md,
+                "migliore": migliore, "n_mesi": len(mesi_ord), "n_ore": ore,
+                "mwh_totale": round(mwh, 2),
+                "mw_f1": mws[0], "mw_f2": mws[1], "mw_f3": mws[2]})
+    return out
+
+
 def calcola_rischio_quanto(prezzi, mw_base=2.0, rho=0.3, vol_vol=0.15,
                            n_giorni=90, n_scenari=2000, budget=None, seed=42):
     """Rischio quanto Monte Carlo: correlazione prezzo spot <-> volume prelevato.
@@ -14296,7 +14446,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -24361,7 +24511,78 @@ elif workspace == _('ws8'):
                 help="VaR95, ES95 e costo atteso per ogni livello di correlazione prezzo-volume.",
                 key="csv_rq",
             )
-        st.caption("Uso pratico: se il premio quanto e' grande, il tuo VaR 'a volume fisso' sottostima il rischio reale — alza il budget di rischio o valuta coperture sul volume (es. load-following, vedi tab 'Carico interrompibile'). Se la correlazione e' negativa (consumi meno quando costa di piu'), il tuo profilo ti protegge da solo. Limiti: GBM su medie giornaliere, volume log-normale con volatilita' costante scelta da te, correlazione costante sull'orizzonte, senza drift.")
+    with tab123:
+        titolo_li = edu("Lag di indicizzazione", "Molti contratti italiani indicizzano il prezzo al PUN con un 'lag': invece dello spot ora per ora paghi la media del mese (M), del mese precedente (M-1), di due mesi prima (M-2), del trimestre o una media mobile a 30 giorni. Il lag smussa i picchi di prezzo ma ti fa pagare di piu' quando i prezzi scendono: questo tab calcola quanto ti sarebbe costato il tuo carico con ciascuna convenzione sul periodo storico selezionato.")
+        st.markdown(f"<h1>\U0001F570 {titolo_li}</h1>", unsafe_allow_html=True)
+        li1, li2, li3 = st.columns(3)
+        mw1_li = li1.slider("Potenza F1 (MW)", min_value=0.0, max_value=20.0, value=2.0, step=0.1, key="li_mwf1",
+                            help="Prelievo medio nelle ore di punta (lun-ven 8-19).")
+        mw2_li = li2.slider("Potenza F2 (MW)", min_value=0.0, max_value=20.0, value=1.5, step=0.1, key="li_mwf2",
+                            help="Prelievo medio nelle ore intermedie.")
+        mw3_li = li3.slider("Potenza F3 (MW)", min_value=0.0, max_value=20.0, value=1.0, step=0.1, key="li_mwf3",
+                            help="Prelievo medio nelle ore fuori punta (notti, weekend).")
+        ris_li = calcola_lag_indicizzazione(prezzi, mw_f1=mw1_li, mw_f2=mw2_li, mw_f3=mw3_li)
+        if ris_li["errore"]:
+            st.error(ris_li["errore"])
+        elif not ris_li["valido"]:
+            st.warning("Servono almeno 24 ore di prezzi e un profilo di prelievo con energia > 0.")
+        else:
+            cop_li = ris_li["copertura"]
+            parziali = [c for c in ris_li["convenzioni"] if cop_li[c] < 0.999]
+            if parziali:
+                st.info("ℹ️ Convenzioni con copertura parziale sul periodo (servono piu' mesi di storico): "
+                        + ", ".join(f"{c} ({cop_li[c] * 100:.0f}%)" for c in parziali)
+                        + ". Il confronto 'migliore' usa solo convenzioni a copertura totale.")
+            ct = ris_li["costo_totale"]
+            mig = ris_li["migliore"]
+            risp_mig = ris_li["risparmio_vs_spot"][mig]
+            k1, k2, k3, k4 = st.columns(4)
+            render_kpi("Costo a spot", f"€ {ct['Spot']:,.0f}", k1)
+            render_kpi(f"Migliore: {mig}", f"€ {ct[mig]:,.0f}", k2)
+            segno = "+" if risp_mig >= 0 else ""
+            render_kpi("Risparmio migliore vs spot",
+                       f"{segno}€ {risp_mig:,.0f} ({segno}{risp_mig / ct['Spot'] * 100:.1f}%)" if ct["Spot"] else f"{segno}€ {risp_mig:,.0f}", k3)
+            render_kpi("Tracking error M-1", f"€ {ris_li['tracking_error']['M-1']:,.0f}/mese", k4)
+            df_li = ris_li["df_mensile"]
+            fig_li = go.Figure()
+            colori_li = {"Spot": "#3b82f6", "Media M": "#f59e0b", "M-1": "#ef4444",
+                         "M-2": "#a855f7", "Trimestrale": "#22c55e", "Mobile 30gg": "#14b8a6"}
+            for c in ris_li["convenzioni"]:
+                fig_li.add_trace(go.Scatter(x=df_li["Mese"], y=df_li[c], mode="lines+markers",
+                                            name=c, line=dict(color=colori_li[c], width=2.5 if c == "Spot" else 1.5),
+                                            hovertemplate="Mese %{x}<br>" + c + ": € %{y:,.0f}<extra></extra>"))
+            fig_li.update_layout(template="plotly_dark", height=380,
+                                 title=f"Costo mensile per convenzione di indicizzazione ({ris_li['n_mesi']} mesi, {ris_li['mwh_totale']:,.0f} MWh)",
+                                 xaxis_title="Mese", yaxis_title="Costo (€)")
+            st.plotly_chart(fig_li, use_container_width=True)
+            st.markdown("**Riepilogo per convenzione**")
+            righe_li = []
+            pm_li = ris_li["prezzo_medio"]
+            for c in ris_li["convenzioni"]:
+                riga = {"Convenzione": c, "Costo totale (€)": f"{ct[c]:,.0f}",
+                        "Copertura": f"{cop_li[c] * 100:.1f}%",
+                        "€/MWh medio": f"{pm_li[c]:,.2f}" if pm_li[c] is not None else "—"}
+                if c != "Spot":
+                    riga["Risparmio vs spot (€)"] = f"{ris_li['risparmio_vs_spot'][c]:+,.0f}"
+                    riga["Tracking error (€/mese)"] = f"{ris_li['tracking_error'][c]:,.0f}"
+                    riga["Max dev. mensile (€)"] = f"{ris_li['max_dev_mensile'][c]:,.0f}"
+                else:
+                    riga["Risparmio vs spot (€)"] = "—"
+                    riga["Tracking error (€/mese)"] = "—"
+                    riga["Max dev. mensile (€)"] = "—"
+                righe_li.append(riga)
+            st.dataframe(pd.DataFrame(righe_li), use_container_width=True, hide_index=True)
+            st.markdown("**Dettaglio mensile (€)**")
+            st.dataframe(df_li, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta costo mensile per convenzione (CSV)",
+                df_li.to_csv(index=False).encode("utf-8"),
+                file_name=f"lag_indicizzazione_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Costo mensile di fornitura per ciascuna convenzione di indicizzazione.",
+                key="csv_li",
+            )
+        st.caption("Uso pratico: se 'Media M' o 'Trimestrale' battono lo spot sul tuo periodo, un contratto con lag ti avrebbe fatto risparmiare — ma il tracking error dice quanto il costo mensile balla rispetto allo spot (budget meno prevedibile). M-1/M-2 premiano quando i prezzi salgono (paghi la media piu' bassa dei mesi scorsi) e puniscono quando scendono: guardali insieme al tab 'Fixing advisor'. Limiti: medie aritmetiche semplici su ore reali, nessun costo di sbilanciamento, nessuna componente fissa di contratto, profilo di prelievo costante per fascia.")
 
 
 # Footer
