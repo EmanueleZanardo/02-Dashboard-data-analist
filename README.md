@@ -50,7 +50,7 @@ I test estraggono le funzioni pure `calcola_*` / `profilo_*` / `shock_*` da
 
 ## Struttura
 
-- `app.py` — tutta la dashboard (8 workspace; lo Swissix ha 120 tab)
+- `app.py` — tutta la dashboard (8 workspace; lo Swissix ha 121 tab)
 - `requirements.txt` — dipendenze pinnate
 - `tests/` — test delle funzioni di calcolo
 - `singularity/` — pagina Next.js di embed (portfolio)
