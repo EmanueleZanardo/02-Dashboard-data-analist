@@ -36,9 +36,9 @@ def main() -> int:
         r = subprocess.run([sys.executable, str(f)], cwd=ROOT,
                            capture_output=True, text=True, timeout=600)
         out = r.stdout + r.stderr
-        m = re.search(r"checks:\s*(\d+),\s*fails:\s*(\d+)", out)
+        m = re.search(r"checks:\s*(\d+),\s*fails:\s*(\d+)", out, re.IGNORECASE)
         if not m:
-            m = re.search(r"(\d+)\s+check\s*/\s*(\d+)\s*fail", out)
+            m = re.search(r"(\d+)\s+check\s*/\s*(\d+)\s*fail", out, re.IGNORECASE)
         if not m and re.search(r"FAILURES:\s*none", out, re.IGNORECASE):
             # stile legacy alternativo: riepilogo "FAILURES: none",
             # i check si contano dalle righe PASS
