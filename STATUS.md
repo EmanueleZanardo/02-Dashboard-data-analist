@@ -1,10 +1,10 @@
 # STATUS.md — 02-Dashboard-data-analist (Singularity Quant ETRM)
 
-**Ultimo aggiornamento: 01/10/2026 03:40 CEST**
+**Ultimo aggiornamento: 01/10/2026 03:47 CEST**
 
 ## Stato
 - Dashboard Streamlit "Singularity Quant ETRM", live su https://czpox8o8x6arnxw96txnvt.streamlit.app/.
-- Ultimo commit: TBD (tab118, 01/10 03:40 CEST).
+- Ultimo commit: 47870f0 (test tab118, 01/10 03:47 CEST).
 - Test: 47/47 verdi (tests/test_helpers.py) + 37/37 check tab118; regressione: 19/19.
 
 ## Ultimi eventi verificati (01/10/2026)
