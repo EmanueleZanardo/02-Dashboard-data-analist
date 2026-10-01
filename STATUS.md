@@ -1,13 +1,14 @@
 # STATUS.md — 02-Dashboard-data-analist (Singularity Quant ETRM)
 
-**Ultimo aggiornamento: 01/10/2026 02:40 CEST**
+**Ultimo aggiornamento: 01/10/2026 03:40 CEST**
 
 ## Stato
 - Dashboard Streamlit "Singularity Quant ETRM", live su https://czpox8o8x6arnxw96txnvt.streamlit.app/.
-- Ultimo commit: 32b7a56 (STATUS tab117, 01/10 02:56 CEST).
-- Test: 47/47 verdi (tests/test_helpers.py) + 30/30 check tab115 + 45/45 check tab116 + 37/37 check tab117; regressione: 19/19.
+- Ultimo commit: TBD (tab118, 01/10 03:40 CEST).
+- Test: 47/47 verdi (tests/test_helpers.py) + 37/37 check tab118; regressione: 19/19.
 
 ## Ultimi eventi verificati (01/10/2026)
+- Nuova tab118 "🎯 Fixing advisor": segnale statistico per la decisione fissare-ora vs aspettare — helper calcola_fixing_advisor testato (37 check, 0 fail, dopo fix del ramo storia-piatta); punteggio 0-100 da percentile + trend normalizzato + volatilità + stagionalità, KPI, grafico prezzo vs media storica/recente, percentile rolling con soglie 40/60, stagionalità mensile + export CSV. Nessun bug, nessun segreto hardcoded.
 - Nuova tab117 "🗓️ Calendario del costo": costo giornaliero di fornitura (prezzo spot × MW della fascia) in calendario — helper calcola_calendario_costo testato (37 check, 0 fail); KPI costo totale/medio giornaliero/σ giornaliera/giorno più caro/più economico/quota top-10% giorni, heatmap settimanale del costo, costo medio per giorno della settimana, tabella giornaliera + aggregazione mensile + export CSV. Nessun bug, nessun segreto hardcoded.
 - QA 01:40 CEST: nessuna modifica al repo remoto da b96f2680; app.py compilava, nessun segreto hardcoded (chiavi solo via st.secrets).
 - Nuova tab116 "📤 Il mio carico": caricamento CSV del profilo di carico reale dell'utente (auto-riconoscimento colonne, conversioni kW/kWh, ricampionamento sub-orario, normalizzazione tz) oppure profilo demo uffici; helper parse_csv_carico + calcola_analisi_carico_reale testati (45 check, 0 fail); KPI energia/picco/fattore di carico/costo a spot/prezzo medio/correlazione, curva di durata del carico, profilo orario, tabella + export CSV. Push in 4 commit (2e8e57d, b712344, e847ac1, b96f268), HEAD remoto verificato b96f268.
