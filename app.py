@@ -1569,6 +1569,183 @@ def calcola_costo_chf(prezzi, mw_f1=2.0, mw_f2=1.5, mw_f3=1.0, fx=None,
     return out
 
 
+def calcola_costo_go(prezzi, mw_f1=2.0, mw_f2=1.5, mw_f3=1.0,
+                     quota_verde=1.0, prezzo_go=None, mix_go=None):
+    """Costo delle Garanzie d'Origine (GO) per rendere verde la fornitura.
+
+    Domanda operativa: "quanto mi costa certificare come rinnovabile la mia
+    fornitura elettrica?" — in Svizzera e in UE il fornitore acquista
+    Garanzie d'Origine (1 GO = 1 MWh da fonte rinnovabile certificata) e il
+    loro prezzo (€/MWh, quotato su EEX) si somma al costo dell'energia.
+
+    Metodo:
+      - prezzi orari -> dropna; energia oraria = MW della fascia
+        (mw_f1/mw_f2/mw_f3 via fascia_oraria); servono almeno 24 ore e
+        energia totale > 0 (i prezzi servono solo a definire il periodo);
+      - prezzo_go: scalare €/MWh oppure dict {"idro": p, "solare": p,
+        "eolico": p}; con il dict, mix_go = {"idro": w, "solare": w,
+        "eolico": w} con pesi >= 0 normalizzati a somma 1 (se omesso, pesi
+        uguali sulle tecnologie indicate); default prezzo_go =
+        {"idro": 0.60, "solare": 1.80, "eolico": 1.20} con mix_go =
+        {"idro": 0.7, "solare": 0.2, "eolico": 0.1};
+      - MWh verdi = quota_verde * MWh totali; costo GO = MWh verdi *
+        prezzo medio ponderato delle tecnologie;
+      - aggregazione mensile: Mese, MWh totali, MWh verdi, Prezzo GO medio,
+        Costo GO (€);
+      - scenari: costo GO per quota verde 0/25/50/75/100% a parita' di mix;
+      - sensibilita': shock del prezzo GO di -50%, +50%, +100% -> delta €.
+
+    Proprieta' testabile: con prezzo scalare, costo GO = MWh verdi * prezzo
+    esattamente; con dict+mix, prezzo medio = somma(pesi normalizzati *
+    prezzo); la somma dei costi mensili = costo totale; quota 0 -> costo 0.
+
+    NaN-safe: serie vuota o meno di 24 ore o energia nulla -> 'valido'
+    False. MW non validi, quota fuori [0,1], prezzo negativo o non
+    interpretabile, pesi non numerici o a somma nulla, tecnologie
+    sconosciute -> 'errore' valorizzato.
+
+    Ritorna dict con 'errore', 'valido', 'df_mensile', 'costo_go',
+    'mwh_totali', 'mwh_verdi', 'prezzo_medio_go', 'incidenza_eur_mwh',
+    'scenari' ({quota: costo €}), 'sensibilita' ({-0.5, 0.5, 1.0}: delta €),
+    'mix_usato', 'n_mesi', 'n_ore', 'quota_verde', 'mw_f1', 'mw_f2',
+    'mw_f3'."""
+
+    TECNICHE = ("idro", "solare", "eolico")
+    PREZZI_DEFAULT = {"idro": 0.60, "solare": 1.80, "eolico": 1.20}
+    MIX_DEFAULT = {"idro": 0.7, "solare": 0.2, "eolico": 0.1}
+
+    vuoto = {"errore": None, "valido": False,
+             "df_mensile": pd.DataFrame(columns=["Mese", "MWh totali",
+                                                 "MWh verdi",
+                                                 "Prezzo GO medio",
+                                                 "Costo GO (€)"]),
+             "costo_go": 0.0, "mwh_totali": 0.0, "mwh_verdi": 0.0,
+             "prezzo_medio_go": None, "incidenza_eur_mwh": 0.0,
+             "scenari": {}, "sensibilita": {}, "mix_usato": None,
+             "n_mesi": 0, "n_ore": 0, "quota_verde": None,
+             "mw_f1": None, "mw_f2": None, "mw_f3": None}
+
+    def _err(msg):
+        v = dict(vuoto)
+        v["errore"] = msg
+        return v
+
+    try:
+        mws = [float(mw_f1), float(mw_f2), float(mw_f3)]
+    except (TypeError, ValueError):
+        return _err("Potenze per fascia non valide.")
+    if any(not (m >= 0) for m in mws) or sum(mws) <= 0:
+        return _err("Le potenze devono essere >= 0 e almeno una > 0.")
+    if any(m > 5000 for m in mws):
+        return _err("Potenza per fascia oltre il limite (5000 MW).")
+
+    try:
+        q = float(quota_verde)
+    except (TypeError, ValueError):
+        return _err("Quota verde non valida.")
+    if not (0.0 <= q <= 1.0):
+        return _err("La quota verde deve essere tra 0 e 1.")
+
+    try:
+        s = pd.Series(prezzi, dtype=float).dropna()
+    except Exception:
+        return _err("Serie prezzi non valida.")
+    if s.empty:
+        return dict(vuoto)
+    if not isinstance(s.index, pd.DatetimeIndex):
+        if pd.api.types.is_integer_dtype(s.index) or pd.api.types.is_float_dtype(s.index):
+            return _err("Indice dei prezzi non interpretabile come date.")
+        try:
+            s.index = pd.to_datetime(s.index)
+        except Exception:
+            return _err("Indice dei prezzi non interpretabile come date.")
+    ore = len(s)
+    if ore < 24:
+        return dict(vuoto)
+
+    # --- prezzo medio ponderato delle GO ---
+    try:
+        if prezzo_go is None:
+            prezzi_t = dict(PREZZI_DEFAULT)
+            mix = dict(MIX_DEFAULT)
+        elif isinstance(prezzo_go, dict):
+            prezzi_t = {str(k): float(v) for k, v in prezzo_go.items()}
+            if mix_go is None:
+                mix = {k: 1.0 for k in prezzi_t}
+            elif isinstance(mix_go, dict):
+                mix = {str(k): float(v) for k, v in mix_go.items()}
+            else:
+                return _err("mix_go deve essere un dict tecnologia->peso.")
+        else:
+            pv = float(prezzo_go)
+            if not (pv >= 0):
+                return _err("Il prezzo GO deve essere >= 0.")
+            prezzi_t = None
+            prezzo_medio = pv
+            mix = None
+        if prezzi_t is not None:
+            sconosciute = [k for k in list(prezzi_t) + list(mix)
+                           if k not in TECNICHE]
+            if sconosciute:
+                return _err(f"Tecnologie GO sconosciute: {sorted(set(sconosciute))}.")
+            if any(not (p >= 0) for p in prezzi_t.values()):
+                return _err("I prezzi GO devono essere >= 0.")
+            if set(mix) != set(prezzi_t):
+                return _err("mix_go deve coprire esattamente le tecnologie di prezzo_go.")
+            if any(not (w >= 0) for w in mix.values()):
+                return _err("I pesi del mix GO devono essere >= 0.")
+            somma_pesi = sum(mix.values())
+            if not (somma_pesi > 0):
+                return _err("La somma dei pesi del mix GO deve essere > 0.")
+            mix = {k: w / somma_pesi for k, w in mix.items()}
+            prezzo_medio = sum(mix[k] * prezzi_t[k] for k in prezzi_t)
+    except (TypeError, ValueError) as e:
+        return _err(f"Prezzo/mix GO non interpretabile: {e}")
+
+    fasce = s.index.map(fascia_oraria)
+    mw_h = fasce.map({"F1": mws[0], "F2": mws[1], "F3": mws[2]}).astype(float).to_numpy()
+    mwh = float(mw_h.sum())
+    if mwh <= 0:
+        return dict(vuoto)
+    mwh_verdi = mwh * q
+    costo_go = mwh_verdi * prezzo_medio
+    incidenza = costo_go / mwh if mwh else 0.0
+
+    mese = s.index.to_period("M")
+    mesi_ord = mese.unique()
+    righe = []
+    for m in mesi_ord:
+        mask = mese.to_numpy() == m
+        mt = float(np.sum(mw_h[mask]))
+        mv = mt * q
+        righe.append({"Mese": str(m), "MWh totali": round(mt, 2),
+                      "MWh verdi": round(mv, 2),
+                      "Prezzo GO medio": round(prezzo_medio, 4),
+                      "Costo GO (€)": round(mv * prezzo_medio, 2)})
+    df = pd.DataFrame(righe, columns=["Mese", "MWh totali", "MWh verdi",
+                                      "Prezzo GO medio", "Costo GO (€)"])
+
+    scenari = {qq: round(mwh * qq * prezzo_medio, 2)
+               for qq in (0.0, 0.25, 0.5, 0.75, 1.0)}
+    sens = {shock: round(costo_go * shock, 2)
+            for shock in (-0.5, 0.5, 1.0)}
+
+    out = dict(vuoto)
+    out.update({"valido": True, "df_mensile": df,
+                "costo_go": round(costo_go, 2),
+                "mwh_totali": round(mwh, 2),
+                "mwh_verdi": round(mwh_verdi, 2),
+                "prezzo_medio_go": round(prezzo_medio, 4),
+                "incidenza_eur_mwh": round(incidenza, 4),
+                "scenari": scenari, "sensibilita": sens,
+                "mix_usato": ({k: round(w, 4) for k, w in mix.items()}
+                              if mix is not None else None),
+                "n_mesi": len(mesi_ord), "n_ore": ore,
+                "quota_verde": q,
+                "mw_f1": mws[0], "mw_f2": mws[1], "mw_f3": mws[2]})
+    return out
+
+
 def calcola_rischio_quanto(prezzi, mw_base=2.0, rho=0.3, vol_vol=0.15,
                            n_giorni=90, n_scenari=2000, budget=None, seed=42):
     """Rischio quanto Monte Carlo: correlazione prezzo spot <-> volume prelevato.
@@ -14637,7 +14814,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -24860,6 +25037,77 @@ elif workspace == _('ws8'):
             )
         st.caption("Uso pratico: se il franco si rafforza (EURCHF giu') paghi meno a parita' di prezzi in euro — la tabella di sensibilita' quantifica subito l'effetto sul tuo budget in CHF. Confronta il tasso coperto col tasso medio ponderato: se il forward e' sotto la media storica, la copertura ti sta facendo pagare di piu'. Limiti: cambio giornaliero propagato alle ore (niente intraday FX), nessun costo di transazione sul cambio, profilo di prelievo costante per fascia.")
 
+
+    with tab125:
+        titolo_go = edu("Garanzie d'origine", "Le Garanzie d'Origine (GO) certificano che 1 MWh e' stato prodotto da fonte rinnovabile: il fornitore le acquista sul mercato (quotazioni EEX in €/MWh, idroelettrico il piu' economico, solare/eolico piu' cari) per etichettare come 'verde' la tua fornitura. Questo tab calcola quanto ti costa rendere verde il tuo prelievo: scegli la quota di energia da coprire, i prezzi per tecnologia e il mix, e vedi costo totale, incidenza in €/MWh e scenari a confronto. Limiti: i prezzi GO sono input manuali (il mercato si muove), niente distinzione per paese di origine, costo puramente additivo all'energia.")
+        st.markdown(f"<h1>🌱 {titolo_go}</h1>", unsafe_allow_html=True)
+        go1, go2, go3 = st.columns(3)
+        mw1_go = go1.slider("Potenza F1 (MW)", min_value=0.0, max_value=20.0, value=2.0, step=0.1, key="go_mwf1",
+                            help="Prelievo medio nelle ore di punta (lun-ven 8-19).")
+        mw2_go = go2.slider("Potenza F2 (MW)", min_value=0.0, max_value=20.0, value=1.5, step=0.1, key="go_mwf2",
+                            help="Prelievo medio nelle ore intermedie.")
+        mw3_go = go3.slider("Potenza F3 (MW)", min_value=0.0, max_value=20.0, value=1.0, step=0.1, key="go_mwf3",
+                            help="Prelievo medio nelle ore fuori punta (notti, weekend).")
+        quota_go = st.slider("Quota di energia coperta da GO (%)", min_value=0, max_value=100, value=100, step=5,
+                             key="go_quota",
+                             help="Percentuale del tuo prelievo che vuoi certificare come rinnovabile.")
+        st.markdown("**Prezzi GO per tecnologia (€/MWh)**")
+        gp1, gp2, gp3 = st.columns(3)
+        p_idro = gp1.number_input("Idroelettrico (€/MWh)", min_value=0.0, value=0.60, step=0.05, format="%.2f",
+                                 key="go_p_idro", help="GO idroelettriche: le piu' liquide ed economiche.")
+        p_solare = gp2.number_input("Solare (€/MWh)", min_value=0.0, value=1.80, step=0.05, format="%.2f",
+                                    key="go_p_solare", help="GO da fotovoltaico.")
+        p_eolico = gp3.number_input("Eolico (€/MWh)", min_value=0.0, value=1.20, step=0.05, format="%.2f",
+                                    key="go_p_eolico", help="GO da eolico.")
+        st.markdown("**Mix di acquisto GO (pesi %, normalizzati)**")
+        gm1, gm2, gm3 = st.columns(3)
+        w_idro = gm1.slider("Peso idroelettrico (%)", min_value=0, max_value=100, value=70, step=5, key="go_w_idro")
+        w_solare = gm2.slider("Peso solare (%)", min_value=0, max_value=100, value=20, step=5, key="go_w_solare")
+        w_eolico = gm3.slider("Peso eolico (%)", min_value=0, max_value=100, value=10, step=5, key="go_w_eolico")
+        ris_go = calcola_costo_go(prezzi, mw_f1=mw1_go, mw_f2=mw2_go, mw_f3=mw3_go,
+                                  quota_verde=quota_go / 100.0,
+                                  prezzo_go={"idro": p_idro, "solare": p_solare, "eolico": p_eolico},
+                                  mix_go={"idro": w_idro, "solare": w_solare, "eolico": w_eolico})
+        if ris_go["errore"]:
+            st.error(ris_go["errore"])
+        elif not ris_go["valido"]:
+            st.warning("Servono almeno 24 ore di prezzi e un profilo di prelievo con energia > 0.")
+        else:
+            k1, k2, k3, k4 = st.columns(4)
+            render_kpi("Costo GO totale", f"€ {ris_go['costo_go']:,.0f}", k1)
+            render_kpi("MWh verdi", f"{ris_go['mwh_verdi']:,.0f}", k2)
+            render_kpi("Prezzo GO medio", f"€ {ris_go['prezzo_medio_go']:.2f}/MWh", k3)
+            render_kpi("Incidenza fornitura", f"€ {ris_go['incidenza_eur_mwh']:.2f}/MWh", k4)
+            mix_txt = ", ".join(f"{t} {w * 100:.0f}%" for t, w in ris_go["mix_usato"].items())
+            st.caption(f"Mix GO normalizzato: {mix_txt} — quota verde {quota_go}% su {ris_go['mwh_totali']:,.0f} MWh totali.")
+            df_go = ris_go["df_mensile"]
+            fig_go = go.Figure()
+            fig_go.add_trace(go.Bar(x=df_go["Mese"], y=df_go["Costo GO (€)"],
+                                    name="Costo GO (€)", marker_color="#22c55e",
+                                    hovertemplate="Mese %{x}<br>€ %{y:,.0f}<extra></extra>"))
+            fig_go.update_layout(template="plotly_dark", height=360,
+                                 title=f"Costo mensile Garanzie d'origine ({ris_go['n_mesi']} mesi)",
+                                 xaxis_title="Mese", yaxis_title="€")
+            st.plotly_chart(fig_go, use_container_width=True)
+            st.markdown("**Scenari per quota verde (stesso mix)**")
+            df_scen = pd.DataFrame([{"Quota verde": f"{int(q * 100)}%", "Costo GO (€)": f"€ {c:,.0f}"}
+                                    for q, c in sorted(ris_go["scenari"].items())])
+            st.dataframe(df_scen, use_container_width=True, hide_index=True)
+            st.markdown("**Sensibilità al prezzo delle GO**")
+            st.dataframe(pd.DataFrame([
+                {"Shock prezzo GO": f"{int(s * 100):+d}%", "Δ costo": f"{'€ ' if d >= 0 else '−€ '}{abs(d):,.0f}"}
+                for s, d in sorted(ris_go["sensibilita"].items())]),
+                use_container_width=True, hide_index=True)
+            st.markdown("**Dettaglio mensile**")
+            st.dataframe(df_go, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta costo GO mensile (CSV)",
+                df_go.to_csv(index=False).encode("utf-8"),
+                file_name=f"costo_go_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Costo mensile delle Garanzie d'origine con MWh verdi e prezzo medio.",
+                key="csv_go",
+            )
 
 # Footer
 
