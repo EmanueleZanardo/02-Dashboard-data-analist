@@ -39,9 +39,13 @@ def main() -> int:
         m = re.search(r"checks:\s*(\d+),\s*fails:\s*(\d+)", out, re.IGNORECASE)
         if not m:
             m = re.search(r"(\d+)\s+check\s*/\s*(\d+)\s*fail", out, re.IGNORECASE)
-        if not m and re.search(r"FAILURES:\s*none", out, re.IGNORECASE):
-            # stile legacy alternativo: riepilogo "FAILURES: none",
-            # i check si contano dalle righe PASS
+        if not m:
+            m = re.search(r"check\s*=\s*(\d+)[^\d]{0,10}fail\w*\s*=\s*(\d+)",
+                          out, re.IGNORECASE)
+        if not m and re.search(r"FAIL(?:URES)?:\s*(none|nessuno|0)\b", out,
+                               re.IGNORECASE):
+            # stili legacy alternativi ("FAILURES: none", "FAILS: nessuno",
+            # "FAILURES: 0"): 0 fail, i check si contano dalle righe PASS
             c, fl = len(re.findall(r"(?m)^PASS\b", out)), 0
         elif m:
             c, fl = int(m.group(1)), int(m.group(2))
