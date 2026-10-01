@@ -11905,6 +11905,119 @@ def calcola_stima_bolletta(prezzi, mw_f1, mw_f2, mw_f3,
     return out
 
 
+def calcola_riconciliazione_fattura(prezzi, mw_f1, mw_f2, mw_f3, fattura,
+                                    perdite_pct=10.4, dispacciamento=4.0,
+                                    pcv_mese=11.0, oneri=14.0, accisa=22.7,
+                                    iva_pct=22.0, toll_ass_eur=50.0,
+                                    toll_pct=2.0):
+    """Riconciliazione fattura fornitore vs stima ricostruita dallo spot.
+
+    Domanda operativa: "la fattura del fornitore e' corretta?" — inserisci
+    gli importi fatturati per voce e la funzione li confronta con la
+    ricostruzione calcolata da calcola_stima_bolletta (spot x profilo
+    F1/F2/F3 + perdite, dispacciamento, PCV, oneri, accisa, IVA).
+
+    - fattura: dict voce -> importo fatturato in EUR (None = voce saltata);
+      chiavi ammesse: "energia", "perdite", "dispacciamento", "pcv",
+      "oneri", "accisa", "imponibile", "iva", "totale";
+    - una voce e' ANOMALA se supera ENTRAMBE le soglie: |scostamento| >
+      toll_ass_eur E |scostamento %| > toll_pct (doppia soglia per non
+      segnalare rumore: piccole voci in % o grandi voci in EUR);
+    - lo scostamento % e' None quando l'atteso e' zero (in quel caso basta
+      la soglia in EUR).
+
+    NaN-safe: serie vuota o profilo a zero -> errore; parametri non
+    numerici o tolleranze negative -> errore; fattura vuota/tutta None ->
+    errore.
+
+    Ritorna dict con 'errore', 'df' (Voce, Atteso, Fatturato, Scostamento,
+    Scost. %, Esito), 'n_voci', 'n_anomalie', 'voci_anomale' (etichette),
+    'scost_totale_eur', 'scost_totale_pct' (dalla voce "totale" se
+    presente, altrimenti None), 'mwh', 'n_mesi', 'verdetto'
+    ("ok" / "anomalie").
+    """
+    VOCI = [("energia", "Materia energia", "energia_eur"),
+            ("perdite", "Perdite di rete", "perdite_eur"),
+            ("dispacciamento", "Dispacciamento", "disp_eur"),
+            ("pcv", "PCV", "pcv_eur"),
+            ("oneri", "Oneri di sistema", "oneri_eur"),
+            ("accisa", "Accisa", "accisa_eur"),
+            ("imponibile", "Imponibile", "imponibile_eur"),
+            ("iva", "IVA", "iva_eur"),
+            ("totale", "TOTALE FATTURA", "totale_eur")]
+    colonne = ["Voce", "Atteso (\u20ac)", "Fatturato (\u20ac)",
+               "Scostamento (\u20ac)", "Scost. (%)", "Esito"]
+    vuoto = {"errore": None, "df": pd.DataFrame(columns=colonne),
+             "n_voci": 0, "n_anomalie": 0, "voci_anomale": [],
+             "scost_totale_eur": None, "scost_totale_pct": None,
+             "mwh": 0.0, "n_mesi": 0, "verdetto": None}
+
+    def _err(msg):
+        out = dict(vuoto)
+        out["df"] = pd.DataFrame(columns=colonne)
+        out["errore"] = msg
+        return out
+
+    try:
+        ta = float(toll_ass_eur); tp = float(toll_pct)
+    except Exception:
+        return _err("Soglie non valide: inserisci valori numerici.")
+    if not (np.isfinite(ta) and np.isfinite(tp)):
+        return _err("Soglie non valide: inserisci valori numerici.")
+    if ta < 0 or tp < 0:
+        return _err("Le soglie non possono essere negative.")
+    if not isinstance(fattura, dict):
+        return _err("Fattura non valida: serve un dizionario voce -> importo.")
+
+    righe_in = []
+    for chiave, etichetta, campo in VOCI:
+        val = fattura.get(chiave)
+        if val is None:
+            continue
+        try:
+            fval = float(val)
+        except Exception:
+            return _err(f"Voce '{etichetta}': importo non numerico.")
+        if not np.isfinite(fval):
+            return _err(f"Voce '{etichetta}': importo non valido.")
+        righe_in.append((etichetta, campo, round(fval, 2)))
+    if not righe_in:
+        return _err("Inserisci almeno una voce della fattura da confrontare.")
+
+    bo = calcola_stima_bolletta(prezzi, mw_f1, mw_f2, mw_f3,
+                                perdite_pct=perdite_pct,
+                                dispacciamento=dispacciamento,
+                                pcv_mese=pcv_mese, oneri=oneri, accisa=accisa,
+                                iva_pct=iva_pct)
+    if bo["errore"]:
+        return _err(f"Stima non calcolabile: {bo['errore']}")
+    if bo["mwh"] == 0:
+        return _err("Profilo a zero: imposta una potenza maggiore di zero "
+                    "in almeno una fascia.")
+
+    righe, anomalie = [], []
+    sc_tot_eur = sc_tot_pct = None
+    for etichetta, campo, fval in righe_in:
+        atteso = round(float(bo[campo]), 2)
+        sc = round(fval - atteso, 2)
+        pct = round(sc / abs(atteso) * 100.0, 2) if atteso != 0 else None
+        anomala = abs(sc) > ta and (pct is None or abs(pct) > tp)
+        esito = "\U0001f534 ANOMALA" if anomala else "\U0001f7e2 ok"
+        if anomala:
+            anomalie.append(etichetta)
+        if campo == "totale_eur":
+            sc_tot_eur, sc_tot_pct = sc, pct
+        righe.append({"Voce": etichetta, "Atteso (\u20ac)": atteso,
+                      "Fatturato (\u20ac)": fval, "Scostamento (\u20ac)": sc,
+                      "Scost. (%)": pct, "Esito": esito})
+    df = pd.DataFrame(righe, columns=colonne)
+    return {"errore": None, "df": df, "n_voci": len(righe),
+            "n_anomalie": len(anomalie), "voci_anomale": anomalie,
+            "scost_totale_eur": sc_tot_eur, "scost_totale_pct": sc_tot_pct,
+            "mwh": bo["mwh"], "n_mesi": bo["n_mesi"],
+            "verdetto": "anomalie" if anomalie else "ok"}
+
+
 def calcola_margine_fornitore(prezzi, mw_f1, mw_f2, mw_f3, prezzo_offerta,
                               spread=0.0, perdite_pct=0.0, dispacciamento=4.0,
                               oneri=14.0):
@@ -16884,7 +16997,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -28471,6 +28584,121 @@ elif workspace == _('ws8'):
                 mime="text/csv",
                 help="Una riga per mese: giorni, tocchi del target e hit rate.",
                 key="csv_radar_target",
+            )
+
+    with tab138:
+        titolo_rf = edu("Riconciliazione fattura", "La RICONCILIAZIONE FATTURA risponde alla domanda \"la fattura del fornitore e' corretta?\": inserisci gli importi fatturati per voce e la dashboard li confronta con la ricostruzione calcolata dallo spot (stesso motore del tab 🧾 Stima bolletta: spot x profilo F1/F2/F3 + perdite, dispacciamento, PCV, oneri di sistema, accisa, IVA). Una voce e' ANOMALA solo se supera ENTRAMBE le soglie: scostamento in € oltre la tolleranza assoluta E scostamento in % oltre la tolleranza relativa (doppia soglia per non segnalare rumore: le voci piccole in valore assoluto o in percentuale da sole non bastano). A cosa serve: (1) contestare al fornitore solo le voci davvero fuori tolleranza, con i numeri in mano; (2) intercettare errori di fatturazione (conguagli, accise sbagliate, oneri non dovuti); (3) verificare che il profilo F1/F2/F3 usato dal fornitore sia coerente col tuo. Diverso dal tab 🧾 Stima bolletta (stima ex-ante del totale): qui parti dalla fattura REALE e la auditi voce per voce.")
+        st.markdown(f"<h1>📝 {titolo_rf}</h1>", unsafe_allow_html=True)
+        st.caption("Inserisci gli importi della fattura del fornitore: la dashboard li confronta voce per voce con la ricostruzione dallo spot.")
+
+        st.markdown("**Parametri di ricostruzione** (gli stessi del tab 🧾 Stima bolletta)")
+        r0, r1, r2 = st.columns(3)
+        with r0:
+            rf_perd = st.number_input("Perdite di rete (% su energia)", min_value=0.0, value=10.4, step=0.1,
+                                     key="rf138_perd")
+        with r1:
+            rf_disp = st.number_input("Dispacciamento (€/MWh)", min_value=0.0, value=4.0, step=0.5,
+                                     key="rf138_disp")
+        with r2:
+            rf_pcv = st.number_input("PCV (€/mese)", min_value=0.0, value=11.0, step=1.0,
+                                    key="rf138_pcv")
+        r3, r4, r5 = st.columns(3)
+        with r3:
+            rf_oneri = st.number_input("Oneri di sistema (€/MWh)", min_value=0.0, value=14.0, step=1.0,
+                                      key="rf138_oneri")
+        with r4:
+            rf_acc = st.number_input("Accisa (€/MWh)", min_value=0.0, value=22.7, step=0.1,
+                                    key="rf138_acc")
+        with r5:
+            rf_iva = st.number_input("IVA (%)", min_value=0.0, value=22.0, step=1.0,
+                                    key="rf138_iva")
+        t0, t1 = st.columns(2)
+        with t0:
+            rf_toll_eur = st.number_input("Tolleranza assoluta (€)", min_value=0.0, value=50.0, step=10.0,
+                                         key="rf138_toll_eur",
+                                         help="Una voce e' anomala solo se lo scostamento supera ANCHE questa soglia in euro.")
+        with t1:
+            rf_toll_pct = st.number_input("Tolleranza relativa (%)", min_value=0.0, value=2.0, step=0.5,
+                                         key="rf138_toll_pct",
+                                         help="Una voce e' anomala solo se lo scostamento supera ANCHE questa soglia in percentuale.")
+
+        st.markdown("**Importi fatturati dal fornitore (€)** — lascia una voce vuota per saltarla")
+        f0, f1, f2 = st.columns(3)
+        with f0:
+            rf_e = st.number_input("Materia energia", value=None, placeholder="es. 12500.00", key="rf138_e")
+        with f1:
+            rf_p = st.number_input("Perdite di rete", value=None, placeholder="es. 1300.00", key="rf138_p")
+        with f2:
+            rf_d = st.number_input("Dispacciamento", value=None, placeholder="es. 850.00", key="rf138_d")
+        f3, f4, f5 = st.columns(3)
+        with f3:
+            rf_c = st.number_input("PCV", value=None, placeholder="es. 66.00", key="rf138_c")
+        with f4:
+            rf_o = st.number_input("Oneri di sistema", value=None, placeholder="es. 2900.00", key="rf138_o")
+        with f5:
+            rf_a = st.number_input("Accisa", value=None, placeholder="es. 4700.00", key="rf138_a")
+        f6, f7, f8 = st.columns(3)
+        with f6:
+            rf_i = st.number_input("Imponibile", value=None, placeholder="es. 23000.00", key="rf138_i")
+        with f7:
+            rf_v = st.number_input("IVA", value=None, placeholder="es. 5060.00", key="rf138_v")
+        with f8:
+            rf_t = st.number_input("TOTALE fattura", value=None, placeholder="es. 28060.00", key="rf138_t")
+
+        fattura_rf = {"energia": rf_e, "perdite": rf_p, "dispacciamento": rf_d,
+                      "pcv": rf_c, "oneri": rf_o, "accisa": rf_a,
+                      "imponibile": rf_i, "iva": rf_v, "totale": rf_t}
+        rf = calcola_riconciliazione_fattura(prezzi, mw_f1, mw_f2, mw_f3, fattura_rf,
+                                             perdite_pct=rf_perd, dispacciamento=rf_disp,
+                                             pcv_mese=rf_pcv, oneri=rf_oneri, accisa=rf_acc,
+                                             iva_pct=rf_iva, toll_ass_eur=rf_toll_eur,
+                                             toll_pct=rf_toll_pct)
+        if rf["errore"]:
+            st.info(f"ℹ️ {rf['errore']}")
+        else:
+            k1, k2, k3, k4 = st.columns(4)
+            verdetto_emoji = "🟢" if rf["verdetto"] == "ok" else "🔴"
+            render_kpi(edu("Verdetto", "Ok se nessuna voce supera le soglie di tolleranza, anomalie altrimenti."),
+                       f"{verdetto_emoji} {rf['verdetto'].upper()}", k1)
+            render_kpi(edu("Voci anomale", "Quante voci della fattura superano ENTRAMBE le soglie di tolleranza."),
+                       f"{rf['n_anomalie']}<br><small>su {rf['n_voci']} voci confrontate</small>", k2)
+            if rf["scost_totale_eur"] is None:
+                render_kpi("Scostamento totale", "—<br><small>inserisci il TOTALE fattura</small>", k3)
+            else:
+                pct_txt = f"{rf['scost_totale_pct']:+,.2f} %" if rf["scost_totale_pct"] is not None else "n.d."
+                render_kpi(edu("Scostamento totale", "Fatturato meno atteso sul TOTALE: positivo = il fornitore ha fatturato piu' della stima."),
+                           f"{rf['scost_totale_eur']:+,.2f} €<br><small>{pct_txt}</small>", k3)
+            render_kpi(edu("Energia analizzata", "MWh del periodo ricostruiti dallo spot x profilo F1/F2/F3."),
+                       f"{rf['mwh']:,.0f} MWh<br><small>{rf['n_mesi']} mesi</small>", k4)
+
+            df_rf = rf["df"]
+            colori_rf = ["#ef4444" if "ANOMALA" in str(x) else "#22c55e" for x in df_rf["Esito"]]
+            fig_rf = go.Figure()
+            fig_rf.add_trace(go.Bar(x=df_rf["Voce"], y=df_rf["Scostamento (€)"],
+                                    marker_color=colori_rf, name="Scostamento",
+                                    hovertemplate="%{x}: %{y:+,.2f} €<extra></extra>"))
+            fig_rf.update_layout(template="plotly_dark", height=360,
+                                 title="Scostamento per voce: fatturato − atteso (rosso = anomala)",
+                                 xaxis_title="", yaxis_title="€")
+            st.plotly_chart(fig_rf, use_container_width=True)
+
+            if rf["n_anomalie"]:
+                st.error(f"🔴 {rf['n_anomalie']} {'voce anomala' if rf['n_anomalie'] == 1 else 'voci anomale'}: " +
+                         ", ".join(rf["voci_anomale"]) +
+                         " — supera(no) sia la tolleranza assoluta che quella relativa. Verifica con il fornitore prima di pagare.")
+            else:
+                st.success(f"✅ Nessuna anomalia: le {rf['n_voci']} voci confrontate rientrano nelle tolleranze "
+                           f"(±{rf_toll_eur:,.0f} € e ±{rf_toll_pct:,.1f} %).")
+
+            st.markdown("**Dettaglio per voce**")
+            st.dataframe(df_rf, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta riconciliazione (CSV)",
+                df_rf.to_csv(index=False).encode("utf-8"),
+                file_name=f"riconciliazione_fattura_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Una riga per voce: atteso, fatturato, scostamento in € e %, esito.",
+                key="csv_riconciliazione_fattura",
             )
 
 # Footer
