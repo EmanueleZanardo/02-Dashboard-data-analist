@@ -1,13 +1,14 @@
 # STATUS.md — 02-Dashboard-data-analist (Singularity Quant ETRM)
 
-**Ultimo aggiornamento: 01/10/2026 11:55 CEST**
+**Ultimo aggiornamento: 01/10/2026 12:55 CEST**
 
 ## Stato
 - Dashboard Streamlit "Singularity Quant ETRM", live su https://czpox8o8x6arnxw96txnvt.streamlit.app/.
-- Ultimo commit: (QA 01/10 11:40 - STATUS.md tab126).
-- Test: 47/47 verdi (tests/test_helpers.py) + 44/44 check tab126; regressione: 19/19.
+- Ultimo commit: (QA 01/10 12:40 - STATUS.md tab127).
+- Test: 47/47 verdi (tests/test_helpers.py) + 52/52 check tab127; regressione: 19/19.
 
 ## Ultimi eventi verificati (01/10/2026)
+- Nuova tab127 "🛡️ CVA controparte": perdita attesa da rischio di controparte sulle coperture (CVA = EAD × PD × LGD per controparte, EAD solo su MtM positivo, PD(periodo) = 1-(1-PD_annua)^t) — helper calcola_cva testato (52 check, 0 fail: 2 fix del test sulla tolleranza float, nessun fix del codice); input fino a 6 controparti con nome + rating (PD implicita AAA→CCC) o PD personalizzata, LGD e orizzonte; KPI CVA totale/peggior controparte/quota/esposte, barre CVA, dettaglio per controparte, scenari PD/LGD, sensibilità orizzonte + export CSV. Nessun bug residuo, nessun segreto hardcoded.
 - Nuova tab126 "⚡ Ricavi da riserva (SDL)": ricavi dai servizi di riserva Swissgrid per un impianto flessibile (primaria FCR, secondaria aFRR, terziaria mFRR +/- con prezzi di potenza CHF/MW/h da aste settimanali + energia attivata per la terziaria) — helper calcola_ricavi_riserva testato (44 check, 0 fail: 1 fix del test sull'attesa dei mesi coperti da 2000h); KPI ricavo totale/medio mensile/miglior prodotto/quota, barre mensili impilate per prodotto, tabella ricavo per prodotto con annuo stimato per MW, scenari di scala MW, sensibilità ai prezzi di potenza, dettaglio mensile + export CSV. Nessun bug residuo, nessun segreto hardcoded.
 - Nuova tab125 "🌱 Garanzie d'origine": costo delle GO per rendere verde la fornitura (prezzi per tecnologia idro/solare/eolico con mix pesato normalizzato, quota verde 0-100%) — helper calcola_costo_go testato (50 check, 0 fail, nessun fix necessario); KPI costo totale/MWh verdi/prezzo medio/incidenza €/MWh, barre mensili, scenari per quota, sensibilità al prezzo GO ±, tabella mensile + export CSV. Nessun bug residuo, nessun segreto hardcoded.
 - Nuova tab124 "💱 Costo in franchi (EUR/CHF)": conversione del costo di fornitura in CHF con tasso costante, storico giornaliero BCE (scarica_fx_ecb via Frankfurter, cache 24h, fallback tasso costante) o forward coperto — helper calcola_costo_chf testato (53 check, 0 fail: 2 fix reali durante lo sviluppo — segno del risparmio_cambio e to_numpy su maschera PeriodArray); KPI costo €/CHF/tasso medio ponderato/sensibilità ±5%, confronto copertura cambio, grafico mensile € vs CHF + EURCHF medio, tabella sensibilità + dettaglio mensile + export CSV. Nessun bug residuo, nessun segreto hardcoded.
