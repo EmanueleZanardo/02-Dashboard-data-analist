@@ -4,8 +4,8 @@
 
 ## Stato
 - Dashboard Streamlit "Singularity Quant ETRM", live su https://czpox8o8x6arnxw96txnvt.streamlit.app/.
-- Ultimo commit: TBD (QA 01/10 21:39 - tab138 Riconciliazione fattura).
-- Test: suite run_all.py in corso; test tab138: 41 check, 0 fail. Nessun segreto hardcoded.
+- Ultimo commit: 063b4da (QA 01/10 21:39 - tab138 Riconciliazione fattura).
+- Test: app.py compila (py_compile OK); test tab138: 41 check, 0 fail; secrets scan: nessun segreto hardcoded. Suite completa run_all.py interrotta da un restart del servizio runtime (da rieseguire al prossimo ciclo); pytest non disponibile in questa VM (verificato: nessun pytest installato).
 
 ## Ultimi eventi verificati (01/10/2026)
 - Nuova tab138 "📝 Riconciliazione fattura" (completamento lavoro ciclo 20:40, rimasto non committato): audit voce-per-voce della fattura del fornitore vs ricostruzione dallo spot — helper calcola_riconciliazione_fattura (stesso motore del tab 🧾 Stima bolletta: spot x profilo F1/F2/F3 + perdite, dispacciamento, PCV, oneri, accisa, IVA; voci energia/perdite/dispacciamento/PCV/oneri/accisa/imponibile/IVA/totale; voce ANOMALA solo se supera ENTRAMBE le soglie — scostamento € > tolleranza assoluta E scostamento % > tolleranza relativa; NaN-safe, serie vuota/profilo zero/fattura vuota -> errore pulito), testato con 41 check, 0 fail; UI con 9 number_input (value=None: voce vuota = saltata), parametri di ricostruzione + doppia tolleranza, KPI verdetto/voci anomale/scostamento totale/energia analizzata, barre scostamento per voce (rosso = anomala), dettaglio per voce + export CSV. README 137->138 tab.
