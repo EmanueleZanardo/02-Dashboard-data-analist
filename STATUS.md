@@ -4,7 +4,7 @@
 
 ## Stato
 - Dashboard Streamlit "Singularity Quant ETRM", live su https://czpox8o8x6arnxw96txnvt.streamlit.app/.
-- Ultimo commit: <PENDING> (QA 02/10 01:39 - tab142 Indice di stress di mercato).
+- Ultimo commit: fdfba75 (QA 02/10 01:39 - tab142 Indice di stress di mercato).
 - Test: app.py compila (py_compile OK); test tab142: 41 check, 0 fail; suite test_helpers.py 47/47 verdi; secrets scan: nessun segreto hardcoded. pytest non disponibile in questa VM.
 
 ## Ultimi eventi verificati (02/10/2026)
