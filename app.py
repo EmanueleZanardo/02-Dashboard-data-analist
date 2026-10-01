@@ -819,6 +819,153 @@ def calcola_fixing_advisor(prezzi, giorni_finestra=30):
 
 
 
+def calcola_margin_call(prezzi, mw, direzione="long", prezzo_fix=None,
+                        margine_iniziale_pct=10.0, margine_manut_pct=5.0,
+                        tasso_annuo_pct=4.0):
+    """Simulatore di margin call su una copertura forward (rischio di liquidita').
+
+    Domanda operativa: "ho fissato X MW a termine a prezzo F: quanto margine
+    mi serve e quanto mi costano le chiamate di margine se il mercato si muove
+    contro di me?" — walk-forward sui prezzi orari del periodo selezionato
+    (aggregati a medie giornaliere):
+
+      - Nozionale = MW x 24 h x prezzo_fix x N_giorni.
+      - Margine iniziale = nozionale x margine_iniziale_pct%; la posizione
+        parte con equity = margine iniziale.
+      - Ogni giorno: P&L_g = segno x MW x 24 x (P_g - prezzo_fix), con
+        segno = +1 (long) / -1 (short); equity_g = equity_{g-1} + P&L_g.
+      - Se equity_g < margine di mantenimento (nozionale x margine_manut_pct%):
+        margin call = margine iniziale - equity_g (riporta l'equity al livello
+        iniziale); l'equity post-ricarica torna al margine iniziale.
+      - Costo di finanziamento = (margine_iniziale x N_giorni
+        + somma su ogni chiamata di call_i x giorni_residui_i)
+        x tasso_annuo / 365: il margine iniziale resta immobilizzato per tutto
+        il periodo, ogni chiamata resta immobilizzata fino a fine periodo.
+
+    prezzo_fix = None -> proxy del forward = media delle medie giornaliere dei
+    primi 7 giorni del periodo (approssimazione dichiarata in UI).
+
+    NaN-safe: prezzi NaN scartati; indice non datetime o meno di 2 giorni ->
+    dict con KPI a None ed errore None. Parametri non validi (MW <= 0,
+    direzione diversa da long/short, 0 < manut < iniziale <= 100 non
+    rispettato, prezzo_fix <= 0, tasso < 0) -> 'errore' valorizzato.
+
+    Ritorna dict con 'errore', 'df_giorni' (Data, Prezzo (€/MWh),
+    P&L giornaliero (€), Equity (€), Margin call (€)), 'prezzo_fix',
+    'nozionale', 'margine_iniziale', 'margine_manutenzione', 'mtm_finale',
+    'chiamate_totali', 'max_margin_call', 'n_giorni_margin_call',
+    'margine_max_richiesto', 'equity_minima' (minimo toccato prima delle
+    ricariche), 'costo_finanziamento'."""
+
+    cols = ["Data", "Prezzo (€/MWh)", "P&L giornaliero (€)", "Equity (€)",
+            "Margin call (€)"]
+    vuoto = {"errore": None, "df_giorni": pd.DataFrame(columns=cols),
+             "prezzo_fix": None, "nozionale": None, "margine_iniziale": None,
+             "margine_manutenzione": None, "mtm_finale": None,
+             "chiamate_totali": None, "max_margin_call": None,
+             "n_giorni_margin_call": None, "margine_max_richiesto": None,
+             "equity_minima": None, "costo_finanziamento": None}
+    out = dict(vuoto)
+
+    def _err(msg):
+        v = dict(vuoto)
+        v["errore"] = msg
+        return v
+
+    try:
+        mw_f = float(mw)
+    except (TypeError, ValueError):
+        return _err("MW della posizione non validi.")
+    if not (mw_f > 0):
+        return _err("I MW della posizione devono essere > 0.")
+    if direzione not in ("long", "short"):
+        return _err("Direzione non valida: usare 'long' o 'short'.")
+    try:
+        mi_p = float(margine_iniziale_pct)
+        mm_p = float(margine_manut_pct)
+        tasso = float(tasso_annuo_pct)
+    except (TypeError, ValueError):
+        return _err("Percentuali di margine / tasso non validi.")
+    if not (0.0 < mm_p < mi_p <= 100.0):
+        return _err("Serve 0 < margine di mantenimento < margine iniziale <= 100%.")
+    if tasso < 0.0:
+        return _err("Il tasso annuo non puo' essere negativo.")
+    try:
+        p = prezzi.astype(float)
+        p = p[~p.index.duplicated(keep="first")].sort_index()
+        if not isinstance(p.index, pd.DatetimeIndex):
+            return out
+    except Exception:
+        return out
+    p = p.dropna()
+    if len(p) == 0:
+        return out
+    giornalieri = p.resample("D").mean().dropna()
+    n = len(giornalieri)
+    if n < 2:
+        return out
+    if prezzo_fix is None:
+        prezzo_fix_f = float(giornalieri.iloc[:7].mean())
+    else:
+        try:
+            prezzo_fix_f = float(prezzo_fix)
+        except (TypeError, ValueError):
+            return _err("Prezzo di fixing non valido.")
+    if not (prezzo_fix_f > 0):
+        return _err("Il prezzo di fixing deve essere > 0.")
+
+    segno = 1.0 if direzione == "long" else -1.0
+    nozionale = mw_f * 24.0 * prezzo_fix_f * n
+    mi = nozionale * mi_p / 100.0
+    mm = nozionale * mm_p / 100.0
+    pnl = segno * mw_f * 24.0 * (giornalieri.values.astype(float) - prezzo_fix_f)
+
+    eq = mi
+    eq_min = mi
+    tot_call = 0.0
+    max_call = 0.0
+    n_call = 0
+    costo_num = 0.0  # capitale immobilizzato x giorni (per il finanziamento)
+    equity, calls = [], []
+    for i, pg in enumerate(pnl):
+        eq += float(pg)
+        eq_min = min(eq_min, eq)  # minimo toccato prima dell'eventuale ricarica
+        call = 0.0
+        if eq < mm:
+            call = mi - eq
+            tot_call += call
+            max_call = max(max_call, call)
+            n_call += 1
+            costo_num += call * (n - 1 - i)
+            eq = mi
+        equity.append(eq)
+        calls.append(call)
+
+    mtm = float(pnl.sum())
+    costo_fin = (mi * n + costo_num) * (tasso / 100.0) / 365.0
+    righe = [{"Data": d,
+              "Prezzo (€/MWh)": round(float(pr), 2),
+              "P&L giornaliero (€)": round(float(pg), 2),
+              "Equity (€)": round(float(e), 2),
+              "Margin call (€)": round(float(c), 2)}
+             for d, pr, pg, e, c in zip(giornalieri.index, giornalieri.values,
+                                       pnl, equity, calls)]
+    out["df_giorni"] = pd.DataFrame(righe, columns=cols)
+    out.update({"prezzo_fix": round(prezzo_fix_f, 2),
+                "nozionale": round(nozionale, 2),
+                "margine_iniziale": round(mi, 2),
+                "margine_manutenzione": round(mm, 2),
+                "mtm_finale": round(mtm, 2),
+                "chiamate_totali": round(tot_call, 2),
+                "max_margin_call": round(max_call, 2),
+                "n_giorni_margin_call": n_call,
+                "margine_max_richiesto": round(mi + tot_call, 2),
+                "equity_minima": round(eq_min, 2),
+                "costo_finanziamento": round(costo_fin, 2)})
+    return out
+
+
+
 def calcola_efficienza_profilo(prezzi, mw_f1, mw_f2, mw_f3):
     """Efficienza (smartness) del profilo di carico rispetto ai prezzi spot.
 
@@ -13709,7 +13856,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -23494,6 +23641,85 @@ elif workspace == _('ws8'):
                 key="csv_fx",
             )
         st.caption("Uso pratico: FISSA quando il percentile è basso e il trend sale — blocchi un livello storicamente buono; ASPETTA quando il prezzo è al top storico e il trend scende. Limiti: segnale statistico sul passato, non previsione; con periodi brevi la storia è corta e il punteggio è meno affidabile; non include forward/costi di copertura.")
+
+
+    with tab119:
+        titolo_mc = edu("Margin call simulator", "Hai fissato MW a termine e il mercato si muove contro di te: la controparte chiede margini aggiuntivi (margin call). Questo tab simula walk-forward sui prezzi del periodo: nozionale = MW x 24h x prezzo di fixing x giorni, margine iniziale in % del nozionale, e ogni giorno in cui l'equity scende sotto il margine di mantenimento scatta una chiamata che riporta l'equity al livello iniziale. Vedi quanto margine massimo ti serve davvero e quanto ti costa finanziarlo.")
+        st.markdown(f"<h1>\U0001F4C9 {titolo_mc}</h1>", unsafe_allow_html=True)
+        mc1, mc2, mc3 = st.columns(3)
+        mw_mc = mc1.slider("Posizione forward (MW)", min_value=0.5, max_value=50.0, value=5.0, step=0.5, key="mc_mw",
+                           help="MW fissati a termine, tutte le 24 ore di ogni giorno del periodo.")
+        dir_mc = mc2.selectbox("Direzione", ["long", "short"], index=0, key="mc_dir",
+                               help="long = hai COMPRATO a termine (guadagni se il prezzo sale); short = hai VENDUTO a termine.")
+        usa_proxy_mc = mc3.checkbox("Fixing = proxy forward (media primi 7 giorni)", value=True, key="mc_proxy",
+                                    help="Se spuntato, il prezzo di fixing e' stimato come media delle medie giornaliere dei primi 7 giorni del periodo (proxy del prezzo forward). Altrimenti inserisci il prezzo a mano.")
+        if usa_proxy_mc:
+            fix_mc = None
+        else:
+            fix_mc = mc3.number_input("Prezzo di fixing (€/MWh)", min_value=0.01, value=80.0, step=1.0, key="mc_fix")
+        mc4, mc5, mc6 = st.columns(3)
+        mi_mc = mc4.slider("Margine iniziale (% nozionale)", min_value=1.0, max_value=50.0, value=10.0, step=0.5, key="mc_mi",
+                           help="% del nozionale versata all'apertura: e' il cuscinetto di partenza dell'equity.")
+        mm_mc = mc5.slider("Margine di mantenimento (% nozionale)", min_value=0.5, max_value=50.0, value=5.0, step=0.5, key="mc_mm",
+                           help="Sotto questo livello di equity scatta la margin call.")
+        tasso_mc = mc6.slider("Tasso finanziamento annuo (%)", min_value=0.0, max_value=15.0, value=4.0, step=0.25, key="mc_tasso",
+                              help="Costo del capitale immobilizzato nei margini (iniziale per tutto il periodo, ogni chiamata fino a fine periodo).")
+        ris_mc = calcola_margin_call(prezzi, mw_mc, dir_mc, fix_mc, mi_mc, mm_mc, tasso_mc)
+        if ris_mc["errore"]:
+            st.error(ris_mc["errore"])
+        elif ris_mc["mtm_finale"] is None:
+            st.warning("Servono almeno 2 giorni di prezzi per la simulazione: allarga il periodo in sidebar.")
+        else:
+            st.caption(f"Prezzo di fixing usato: € {ris_mc['prezzo_fix']:,.2f}/MWh"
+                       + (" (proxy: media dei primi 7 giorni)" if usa_proxy_mc else " (inserito manualmente)")
+                       + f" — nozionale € {ris_mc['nozionale']:,.0f}.")
+            k1, k2, k3 = st.columns(3)
+            render_kpi("MtM finale posizione", f"€ {ris_mc['mtm_finale']:,.0f}", k1)
+            render_kpi("Margin call max (1 giorno)", f"€ {ris_mc['max_margin_call']:,.0f}", k2)
+            render_kpi("Chiamate totali", f"€ {ris_mc['chiamate_totali']:,.0f}", k3)
+            k4, k5, k6 = st.columns(3)
+            render_kpi("Giorni in margin call", f"{ris_mc['n_giorni_margin_call']}", k4)
+            render_kpi("Margine max richiesto", f"€ {ris_mc['margine_max_richiesto']:,.0f}", k5)
+            render_kpi("Costo finanziamento margini", f"€ {ris_mc['costo_finanziamento']:,.0f}", k6)
+            df_mc = ris_mc["df_giorni"]
+            fig_mc = go.Figure()
+            fig_mc.add_trace(go.Scatter(x=df_mc["Data"], y=df_mc["Equity (€)"], mode="lines",
+                                        line=dict(color="#22c55e"),
+                                        hovertemplate="%{x|%d %b %Y}<br>Equity: € %{y:,.0f}<extra></extra>",
+                                        name="Equity (post-ricariche)"))
+            fig_mc.add_hline(y=ris_mc["margine_iniziale"], line_dash="dash", line_color="#3b82f6",
+                             annotation_text=f"Margine iniziale € {ris_mc['margine_iniziale']:,.0f}")
+            fig_mc.add_hline(y=ris_mc["margine_manutenzione"], line_dash="dash", line_color="#ef4444",
+                             annotation_text=f"Mantenimento € {ris_mc['margine_manutenzione']:,.0f}")
+            fig_mc.update_layout(template="plotly_dark", height=340,
+                                 title="Equity giornaliera vs livelli di margine",
+                                 xaxis_title="", yaxis_title="€")
+            st.plotly_chart(fig_mc, use_container_width=True)
+            df_call = df_mc[df_mc["Margin call (€)"] > 0]
+            if len(df_call):
+                fig_mcb = go.Figure(go.Bar(x=df_call["Data"], y=df_call["Margin call (€)"],
+                                           marker_color="#ef4444",
+                                           hovertemplate="%{x|%d %b %Y}<br>Call: € %{y:,.0f}<extra></extra>",
+                                           name="Margin call"))
+                fig_mcb.update_layout(template="plotly_dark", height=260,
+                                      title="Margin call giornaliere (€)",
+                                      xaxis_title="", yaxis_title="€")
+                st.plotly_chart(fig_mcb, use_container_width=True)
+            else:
+                st.info("Nessuna margin call nel periodo: l'equity non e' mai scesa sotto il margine di mantenimento.")
+            st.markdown("**Dettaglio giornaliero**")
+            st.dataframe(df_mc.head(500), use_container_width=True, hide_index=True)
+            if len(df_mc) > 500:
+                st.caption(f"Tabella troncata alle prime 500 righe su {len(df_mc):,} — l'export CSV contiene tutto.")
+            st.download_button(
+                "⬇️ Esporta margin call simulator (CSV)",
+                df_mc.to_csv(index=False).encode("utf-8"),
+                file_name=f"margin_call_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Data, prezzo medio giornaliero, P&L, equity post-ricariche e margin call per ogni giorno.",
+                key="csv_mc",
+            )
+        st.caption("Uso pratico: alza il margine iniziale se le chiamate totali sono alte rispetto al nozionale, oppure riduci la size della copertura; il costo di finanziamento va sommato al costo dell'energia coperta per il vero costo 'tutto compreso'. Limiti: fixing stimato con proxy forward (non forward reali), regolamento giornaliero su medie giornaliere (ignora i movimenti infragiornalieri), nessuna remunerazione dell'equity positiva, profilo di carico piatto 24h.")
 
 
 # Footer
