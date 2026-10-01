@@ -1228,6 +1228,183 @@ def calcola_ventaglio_prezzo(prezzi, n_giorni=90, n_scenari=2000, soglia=None,
     return out
 
 
+def calcola_rischio_quanto(prezzi, mw_base=2.0, rho=0.3, vol_vol=0.15,
+                           n_giorni=90, n_scenari=2000, budget=None, seed=42):
+    """Rischio quanto Monte Carlo: correlazione prezzo spot <-> volume prelevato.
+
+    Domanda operativa: "quanto mi costa in piu' il fatto che quando i prezzi
+    sono alti consumo anche di piu' (ondata di freddo/caldo)?" — il costo di
+    fornitura e' somma_giorno(prezzo_g x volume_g): se prezzo e volume si
+    muovono insieme (correlazione positiva), la coda del costo e' piu' pesante
+    di quanto stimano i modelli che tengono il volume fisso.
+
+    Metodo:
+      - prezzi orari -> medie giornaliere p_d (NaN scartati); servono almeno
+        30 giorni di storico; serie con prezzi negativi traslata di uno shift
+        positivo (stesso approccio di calcola_ventaglio_prezzo);
+      - prezzo: GBM martingala calibrato sui log-rendimenti storici
+        (sigma_g = std campionaria; drift = 0);
+      - volume giornaliero: log-normale con media esatta = mw_base*24 MWh e
+        log-volatilita' giornaliera vol_vol (parametro utente, es. 0.15);
+      - correlazione: shock del volume W = rho*Z + sqrt(1-rho^2)*eps, con Z
+        shock del prezzo ed eps ~ N(0,1) indipendente; |rho| < 1;
+      - costo per scenario = somma_giorno(p_g * v_g) su n_giorni;
+      - VaR95/ES95 sul costo; "premio quanto" = VaR95(rho) - VaR95(rho=0)
+        calcolato con gli STESSI shock di base (confronto pulito).
+
+    Proprieta' testabile: con vol_vol=0 il volume e' deterministico e rho
+    diventa ininfluente (premio quanto = 0).
+
+    NaN-safe: prezzi NaN scartati; indice non datetime o meno di 30 giorni ->
+    dict con KPI a None ed errore None. Parametri non validi ->
+    'errore' valorizzato.
+
+    Ritorna dict con 'errore', 'df_sensibilita' (rho, VaR95 (EUR),
+    ES95 (EUR), Costo atteso (EUR) per rho in [-0.8, -0.4, 0, 0.4, 0.8]),
+    'costi_scenari' (lista dei costi totali per scenario, EUR),
+    'costo_atteso', 'std_costo', 'var95', 'es95', 'costo_mediano',
+    'var95_rho0', 'premio_quanto', 'prob_budget', 'prezzo_partenza',
+    'vol_annua_prezzo', 'mw_base', 'rho', 'vol_vol', 'n_giorni',
+    'n_scenari', 'n_giorni_storico', 'shift_usato', 'seed'."""
+
+    cols = ["rho", "VaR95 (EUR)", "ES95 (EUR)", "Costo atteso (EUR)"]
+    vuoto = {"errore": None, "df_sensibilita": pd.DataFrame(columns=cols),
+             "costi_scenari": [], "costo_atteso": None, "std_costo": None,
+             "var95": None, "es95": None, "costo_mediano": None,
+             "var95_rho0": None, "premio_quanto": None, "prob_budget": None,
+             "prezzo_partenza": None, "vol_annua_prezzo": None,
+             "mw_base": None, "rho": None, "vol_vol": None, "n_giorni": None,
+             "n_scenari": None, "n_giorni_storico": None, "shift_usato": None,
+             "seed": None}
+    out = dict(vuoto)
+
+    def _err(msg):
+        v = dict(vuoto)
+        v["errore"] = msg
+        return v
+
+    try:
+        mw = float(mw_base)
+    except (TypeError, ValueError):
+        return _err("Potenza base (MW) non valida.")
+    if not (mw > 0) or mw > 5000:
+        return _err("La potenza base deve essere tra 0 e 5000 MW.")
+    try:
+        rho_f = float(rho)
+    except (TypeError, ValueError):
+        return _err("Correlazione non valida.")
+    if not (-0.999 <= rho_f <= 0.999):
+        return _err("La correlazione deve essere tra -0.999 e 0.999.")
+    try:
+        vv = float(vol_vol)
+    except (TypeError, ValueError):
+        return _err("Volatilita' del volume non valida.")
+    if not (0.0 <= vv <= 2.0):
+        return _err("La volatilita' del volume deve essere tra 0 e 2.")
+    try:
+        h = int(n_giorni)
+    except (TypeError, ValueError):
+        return _err("Orizzonte in giorni non valido.")
+    if h < 7 or h > 365:
+        return _err("L'orizzonte deve essere tra 7 e 365 giorni.")
+    try:
+        ns = int(n_scenari)
+    except (TypeError, ValueError):
+        return _err("Numero di scenari non valido.")
+    if ns < 100 or ns > 20000:
+        return _err("Gli scenari devono essere tra 100 e 20000.")
+    try:
+        seed_i = int(seed)
+    except (TypeError, ValueError):
+        return _err("Seed non valido.")
+    budget_f = None
+    if budget is not None:
+        try:
+            budget_f = float(budget)
+        except (TypeError, ValueError):
+            return _err("Budget non valido.")
+        if budget_f < 0:
+            return _err("Il budget non puo' essere negativo.")
+
+    try:
+        idx = pd.DatetimeIndex(prezzi.index)
+        s = pd.Series(np.asarray(prezzi, dtype=float), index=idx).dropna()
+        giornalieri = s.resample("D").mean().dropna()
+    except Exception:
+        return dict(vuoto)
+    n_stor = len(giornalieri)
+    if n_stor < 30:
+        return dict(vuoto)
+    vals = giornalieri.to_numpy(dtype=float)
+
+    shift = max(0.0, -float(np.min(vals)) + 1.0)
+    xt = vals + shift
+    with np.errstate(divide="ignore", invalid="ignore"):
+        lr = np.log(xt[1:] / xt[:-1])
+    lr = lr[np.isfinite(lr)]
+    sigma_g = float(np.std(lr, ddof=1)) if len(lr) > 1 else 0.0
+
+    rng = np.random.default_rng(seed_i)
+    z = rng.standard_normal((ns, h))
+    eps = rng.standard_normal((ns, h))
+    p0t = float(vals[-1]) + shift
+    t = np.arange(1, h + 1, dtype=float)
+    if sigma_g > 0:
+        p_paths = p0t * np.exp(-0.5 * sigma_g ** 2 * t[None, :] +
+                               sigma_g * np.sqrt(t[None, :]) * z) - shift
+    else:
+        p_paths = np.full((ns, h), float(vals[-1]))
+
+    v0 = mw * 24.0
+    rhos = [-0.8, -0.4, 0.0, 0.4, 0.8]
+    righe = []
+    costi_principali = None
+    var95_rho0 = None
+    for r in rhos:
+        w = r * z + np.sqrt(max(0.0, 1.0 - r ** 2)) * eps
+        v_paths = v0 * np.exp(-0.5 * vv ** 2 + vv * w)
+        costi = (p_paths * v_paths).sum(axis=1)
+        var95_r = float(np.percentile(costi, 95))
+        es95_r = float(costi[costi >= var95_r].mean())
+        atteso_r = float(costi.mean())
+        righe.append({"rho": r, "VaR95 (EUR)": round(var95_r, 0),
+                      "ES95 (EUR)": round(es95_r, 0),
+                      "Costo atteso (EUR)": round(atteso_r, 0)})
+        if abs(r - rho_f) == min(abs(rr - rho_f) for rr in rhos):
+            costi_principali = costi
+        if r == 0.0:
+            var95_rho0 = var95_r
+
+    # Serie principale al rho utente esatto (non solo griglia)
+    w_u = rho_f * z + np.sqrt(max(0.0, 1.0 - rho_f ** 2)) * eps
+    v_u = v0 * np.exp(-0.5 * vv ** 2 + vv * w_u)
+    costi_u = (p_paths * v_u).sum(axis=1)
+    var95_u = float(np.percentile(costi_u, 95))
+    es95_u = float(costi_u[costi_u >= var95_u].mean())
+
+    prob = None
+    if budget_f is not None:
+        prob = round(float((costi_u > budget_f).mean()), 4)
+
+    out.update({"df_sensibilita": pd.DataFrame(righe, columns=cols),
+                "costi_scenari": [round(float(c), 2) for c in costi_u],
+                "costo_atteso": round(float(costi_u.mean()), 0),
+                "std_costo": round(float(costi_u.std(ddof=1)), 0),
+                "var95": round(var95_u, 0),
+                "es95": round(es95_u, 0),
+                "costo_mediano": round(float(np.median(costi_u)), 0),
+                "var95_rho0": round(var95_rho0, 0),
+                "premio_quanto": round(var95_u - var95_rho0, 0),
+                "prob_budget": prob,
+                "prezzo_partenza": round(float(vals[-1]), 2),
+                "vol_annua_prezzo": round(sigma_g * np.sqrt(365.0) * 100.0, 1),
+                "mw_base": mw, "rho": rho_f, "vol_vol": vv,
+                "n_giorni": h, "n_scenari": ns,
+                "n_giorni_storico": int(n_stor),
+                "shift_usato": round(shift, 2), "seed": seed_i})
+    return out
+
+
 
 def calcola_efficienza_profilo(prezzi, mw_f1, mw_f2, mw_f3):
     """Efficienza (smartness) del profilo di carico rispetto ai prezzi spot.
@@ -14119,7 +14296,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -24106,6 +24283,85 @@ elif workspace == _('ws8'):
                 key="csv_vp",
             )
         st.caption("Uso pratico: se la probabilita' di superare la tua soglia di budget e' alta, considera fissare di piu' (vedi tab120 'Frontiera di fissazione'); se la banda P10-P90 e' stretta, il forward costera' poco premio. Limiti: GBM su medie giornaliere (niente picchi orari), volatilita' storica =/= futura, senza drift le traiettorie sono martingale, prezzi negativi gestiti con shift positivo.")
+    with tab122:
+        titolo_rq = edu("Rischio quanto", "Il costo e' prezzo x volume, giorno per giorno: se quando i prezzi schizzano (ondata di freddo, picco serale) consumi anche di piu', la coda del costo e' piu' pesante di quanto dice un VaR a volume fisso. Questo tab simula 2000 scenari congiunti di prezzo e volume con la correlazione che scegli tu: il 'premio quanto' e' quanto VaR95 aumenta rispetto a ignorare la correlazione.")
+        st.markdown(f"<h1>\u26A1 {titolo_rq}</h1>", unsafe_allow_html=True)
+        rq1, rq2, rq3 = st.columns(3)
+        mw_rq = rq1.slider("Potenza base (MW)", min_value=0.1, max_value=50.0, value=2.0, step=0.1, key="rq_mw",
+                           help="Prelievo medio giornaliero: il volume giornaliero simulato ha media MW x 24h.")
+        rho_rq = rq2.slider("Correlazione prezzo-volume", min_value=-0.8, max_value=0.8, value=0.3, step=0.05, key="rq_rho",
+                            help="Positiva se consumi di piu' quando i prezzi sono alti (tipico inverno/riscaldamento). Con volume deterministico e' ininfluente.")
+        vv_rq = rq3.slider("Volatilita' giornaliera del volume", min_value=0.0, max_value=0.5, value=0.15, step=0.01, key="rq_vv",
+                           help="Log-volatilita' giornaliera del prelievo (es. 0.15 = +-15% tipico). A 0 il volume e' deterministico e la correlazione non conta.")
+        rq4, rq5, rq6 = st.columns(3)
+        h_rq = rq4.slider("Orizzonte (giorni)", min_value=7, max_value=365, value=90, step=1, key="rq_h",
+                          help="Quanti giorni di costo simulare (7-365).")
+        ns_rq = rq5.slider("Scenari Monte Carlo", min_value=100, max_value=20000, value=2000, step=100, key="rq_ns",
+                           help="Numero di scenari congiunti prezzo-volume.")
+        budget_rq = rq6.number_input("Budget di costo (€, 0 = nessuno)", min_value=0.0, value=0.0, step=1000.0, key="rq_budget",
+                                     help="Soglia di costo sull'orizzonte: viene calcolata la probabilita' di superarla.")
+        ris_rq = calcola_rischio_quanto(prezzi, mw_base=mw_rq, rho=rho_rq, vol_vol=vv_rq,
+                                        n_giorni=h_rq, n_scenari=ns_rq,
+                                        budget=budget_rq if budget_rq > 0 else None)
+        if ris_rq["errore"]:
+            st.error(ris_rq["errore"])
+        elif ris_rq["costo_atteso"] is None:
+            st.warning("Servono almeno 30 giorni di prezzi per calibrare la volatilita' storica: allarga il periodo in sidebar.")
+        else:
+            st.caption(f"Calibrato su {ris_rq['n_giorni_storico']} giorni di prezzi reali"
+                       + (f" — prezzi negativi traslati di € {ris_rq['shift_usato']:,.2f}/MWh" if ris_rq["shift_usato"] > 0 else "")
+                       + f" — {ns_rq} scenari, seed {ris_rq['seed']} (risultati riproducibili).")
+            k1, k2, k3 = st.columns(3)
+            render_kpi("Costo atteso orizzonte", f"€ {ris_rq['costo_atteso']:,.0f}", k1)
+            render_kpi("Deviazione std del costo", f"€ {ris_rq['std_costo']:,.0f}", k2)
+            render_kpi("VaR95 del costo", f"€ {ris_rq['var95']:,.0f}", k3)
+            k4, k5, k6 = st.columns(3)
+            render_kpi("ES95 del costo", f"€ {ris_rq['es95']:,.0f}", k4)
+            premio_txt = f"€ {ris_rq['premio_quanto']:,.0f}"
+            render_kpi("Premio quanto (VaR95 - VaR95 a corr. 0)", premio_txt, k5)
+            if budget_rq > 0:
+                render_kpi(f"P(costo > € {budget_rq:,.0f})", f"{ris_rq['prob_budget'] * 100:.1f}%", k6)
+            else:
+                render_kpi("Costo mediano", f"€ {ris_rq['costo_mediano']:,.0f}", k6)
+            costi = np.array(ris_rq["costi_scenari"])
+            fig_rq = go.Figure()
+            fig_rq.add_trace(go.Histogram(x=costi, nbinsx=60, name="Scenari di costo",
+                                          marker_color="#3b82f6", opacity=0.75,
+                                          hovertemplate="Costo: € %{x:,.0f}<br>Scenari: %{y}<extra></extra>"))
+            for val, nome, col in [(ris_rq["costo_atteso"], "Atteso", "#f59e0b"),
+                                   (ris_rq["var95"], "VaR95", "#ef4444"),
+                                   (ris_rq["es95"], "ES95", "#a855f7")]:
+                fig_rq.add_vline(x=val, line=dict(color=col, width=2, dash="dash"),
+                                 annotation_text=f"{nome} € {val:,.0f}",
+                                 annotation_position="top")
+            fig_rq.update_layout(template="plotly_dark", height=380,
+                                 title=f"Distribuzione Monte Carlo del costo totale ({h_rq} giorni, {ns_rq} scenari)",
+                                 xaxis_title="Costo totale (€)", yaxis_title="Scenari",
+                                 showlegend=False)
+            st.plotly_chart(fig_rq, use_container_width=True)
+            st.markdown("**Sensibilita' del rischio alla correlazione**")
+            df_rq = ris_rq["df_sensibilita"]
+            fig_rqs = go.Figure()
+            fig_rqs.add_trace(go.Bar(x=[f"{x:+.1f}" for x in df_rq["rho"]], y=df_rq["VaR95 (EUR)"],
+                                     name="VaR95", marker_color="#ef4444",
+                                     hovertemplate="rho %{x}<br>VaR95: € %{y:,.0f}<extra></extra>"))
+            fig_rqs.add_trace(go.Bar(x=[f"{x:+.1f}" for x in df_rq["rho"]], y=df_rq["ES95 (EUR)"],
+                                     name="ES95", marker_color="#a855f7",
+                                     hovertemplate="rho %{x}<br>ES95: € %{y:,.0f}<extra></extra>"))
+            fig_rqs.update_layout(template="plotly_dark", height=320, barmode="group",
+                                  title="VaR95 ed ES95 al variare della correlazione prezzo-volume",
+                                  xaxis_title="Correlazione (rho)", yaxis_title="€")
+            st.plotly_chart(fig_rqs, use_container_width=True)
+            st.dataframe(df_rq, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta sensibilita' rischio quanto (CSV)",
+                df_rq.to_csv(index=False).encode("utf-8"),
+                file_name=f"rischio_quanto_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="VaR95, ES95 e costo atteso per ogni livello di correlazione prezzo-volume.",
+                key="csv_rq",
+            )
+        st.caption("Uso pratico: se il premio quanto e' grande, il tuo VaR 'a volume fisso' sottostima il rischio reale — alza il budget di rischio o valuta coperture sul volume (es. load-following, vedi tab 'Carico interrompibile'). Se la correlazione e' negativa (consumi meno quando costa di piu'), il tuo profilo ti protegge da solo. Limiti: GBM su medie giornaliere, volume log-normale con volatilita' costante scelta da te, correlazione costante sull'orizzonte, senza drift.")
 
 
 # Footer
