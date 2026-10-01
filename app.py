@@ -1094,6 +1094,140 @@ def calcola_frontiera_fissazione(prezzi, mw, prezzo_forward=None, n_punti=21):
     return out
 
 
+def calcola_ventaglio_prezzo(prezzi, n_giorni=90, n_scenari=2000, soglia=None,
+                             con_drift=False, seed=42):
+    """Ventaglio di prezzo Monte Carlo (fan chart) sul prezzo giornaliero.
+
+    Domanda operativa: "tra N giorni il prezzo spot dove puo' arrivare?" —
+    simula n_scenari traiettorie del prezzo medio giornaliero con moto
+    geometrico browniano (GBM) calibrato sui log-rendimenti storici del
+    periodo selezionato:
+
+      - prezzi orari -> medie giornaliere p_d (NaN scartati);
+      - servono almeno 30 giorni di storico;
+      - prezzi negativi: tutta la serie viene traslata di uno shift
+        (max(0, -min + 1.0)) cosi' il GBM lavora su valori positivi, e lo
+        shift viene sottratto ai risultati (documentato nel caption UI);
+      - log-rendimenti r_d = ln(x_d / x_{d-1}) sulla serie traslata;
+        sigma_g = std campionaria (ddof=1); se sigma_g = 0 le traiettorie
+        sono deterministiche;
+      - drift: media dei log-rendimenti se con_drift=True, altrimenti 0
+        (martingala — scelta di default, piu' prudente per il budgeting);
+      - S_t = (p0 + shift) * exp((mu - 0.5*sigma_g^2)*t + sigma_g*sqrt(t)*Z),
+        con Z ~ N(0,1) a seed fisso per riproducibilita';
+      - per ogni giorno dell'orizzonte: P10/P25/P50/P75/P90 sui n_scenari.
+
+    NaN-safe: prezzi NaN scartati; indice non datetime o meno di 30
+    giorni -> dict con KPI a None ed errore None. Parametri non validi
+    (n_giorni non in [7, 365], n_scenari non in [100, 20000], seed non
+    intero) -> 'errore' valorizzato. soglia None -> prob_soglia None.
+
+    Ritorna dict con 'errore', 'df_bande' (Giorno, P10 (€/MWh),
+    P25 (€/MWh), P50 (€/MWh), P75 (€/MWh), P90 (€/MWh)),
+    'prezzo_partenza', 'vol_annua', 'p50_fine', 'p10_fine', 'p90_fine',
+    'prob_soglia', 'n_giorni_storico', 'shift_usato', 'con_drift',
+    'seed'."""
+
+    cols = ["Giorno", "P10 (€/MWh)", "P25 (€/MWh)", "P50 (€/MWh)",
+            "P75 (€/MWh)", "P90 (€/MWh)"]
+    vuoto = {"errore": None, "df_bande": pd.DataFrame(columns=cols),
+             "prezzo_partenza": None, "vol_annua": None, "p50_fine": None,
+             "p10_fine": None, "p90_fine": None, "prob_soglia": None,
+             "n_giorni_storico": None, "shift_usato": None,
+             "con_drift": None, "seed": None}
+    out = dict(vuoto)
+
+    def _err(msg):
+        v = dict(vuoto)
+        v["errore"] = msg
+        return v
+
+    try:
+        h = int(n_giorni)
+    except (TypeError, ValueError):
+        return _err("Orizzonte in giorni non valido.")
+    if h < 7 or h > 365:
+        return _err("L'orizzonte deve essere tra 7 e 365 giorni.")
+    try:
+        ns = int(n_scenari)
+    except (TypeError, ValueError):
+        return _err("Numero di scenari non valido.")
+    if ns < 100 or ns > 20000:
+        return _err("Gli scenari devono essere tra 100 e 20000.")
+    try:
+        seed_i = int(seed)
+    except (TypeError, ValueError):
+        return _err("Seed non valido.")
+    if soglia is not None:
+        try:
+            soglia_f = float(soglia)
+        except (TypeError, ValueError):
+            return _err("Soglia di prezzo non valida.")
+    else:
+        soglia_f = None
+    try:
+        p = prezzi.astype(float)
+        p = p[~p.index.duplicated(keep="first")].sort_index()
+        if not isinstance(p.index, pd.DatetimeIndex):
+            return out
+    except Exception:
+        return out
+    p = p.dropna()
+    if len(p) == 0:
+        return out
+    giornalieri = p.resample("D").mean().dropna()
+    n_stor = len(giornalieri)
+    if n_stor < 30:
+        return out
+    vals = giornalieri.values.astype(float)
+    shift = max(0.0, float(-vals.min()) + 1.0)
+    xt = vals + shift
+    p0t = float(xt[-1])
+    lr = np.log(xt[1:] / xt[:-1])
+    sigma_g = float(lr.std(ddof=1)) if len(lr) >= 2 else 0.0
+    mu = float(lr.mean()) if (con_drift and len(lr) >= 1) else 0.0
+
+    rng = np.random.default_rng(seed_i)
+    if sigma_g > 0.0:
+        z = rng.standard_normal((ns, h))
+        t = np.arange(1, h + 1, dtype=float)
+        log_mult = (mu - 0.5 * sigma_g ** 2) * t[None, :] + \
+            sigma_g * np.sqrt(t[None, :]) * z
+        paths = p0t * np.exp(log_mult) - shift
+    else:
+        t = np.arange(1, h + 1, dtype=float)
+        line = p0t * np.exp(mu * t) - shift
+        paths = np.repeat(line[None, :], ns, axis=0)
+
+    p10, p25 = np.percentile(paths, [10, 25], axis=0)
+    p50 = np.percentile(paths, 50, axis=0)
+    p75, p90 = np.percentile(paths, [75, 90], axis=0)
+    righe = [{"Giorno": int(g + 1),
+              "P10 (€/MWh)": round(float(a), 2),
+              "P25 (€/MWh)": round(float(b), 2),
+              "P50 (€/MWh)": round(float(c), 2),
+              "P75 (€/MWh)": round(float(d), 2),
+              "P90 (€/MWh)": round(float(e), 2)}
+             for g, (a, b, c, d, e) in enumerate(zip(p10, p25, p50, p75, p90))]
+    out["df_bande"] = pd.DataFrame(righe, columns=cols)
+
+    prob = None
+    if soglia_f is not None:
+        prob = round(float((paths[:, -1] > soglia_f).mean()), 4)
+    p0 = float(vals[-1])
+    out.update({"prezzo_partenza": round(p0, 2),
+                "vol_annua": round(sigma_g * np.sqrt(365.0) * 100.0, 1),
+                "p50_fine": round(float(p50[-1]), 2),
+                "p10_fine": round(float(p10[-1]), 2),
+                "p90_fine": round(float(p90[-1]), 2),
+                "prob_soglia": prob,
+                "n_giorni_storico": int(n_stor),
+                "shift_usato": round(shift, 2),
+                "con_drift": bool(con_drift),
+                "seed": seed_i})
+    return out
+
+
 
 def calcola_efficienza_profilo(prezzi, mw_f1, mw_f2, mw_f3):
     """Efficienza (smartness) del profilo di carico rispetto ai prezzi spot.
@@ -13985,7 +14119,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -23907,7 +24041,71 @@ elif workspace == _('ws8'):
                 help="Hedge ratio, costo atteso e volatilita' settimanali e annui per ogni punto della frontiera.",
                 key="csv_ff",
             )
-        st.caption("Uso pratico: se il premio di rischio e' alto e la probabilita' che lo spot batta il fixing e' bassa, fissare di piu' costa caro ma dormi tranquillo; se il premio e' vicino a zero, la certezza e' quasi gratis. Muovi 'il mio hedge ratio' per vedere dove sei sulla frontiera. Limiti: forward stimato con proxy (non forward reali), settimane consecutive di 7 giorni (non settimane di calendario), volatilita' storica =/= volatilita' futura, profilo di carico piatto 24h.")
+    with tab121:
+        titolo_vp = edu("Ventaglio di prezzo", "2000 simulazioni Monte Carlo del prezzo spot giornaliero: partono dall'ultimo prezzo osservato e si allargano secondo la volatilita' storica. La banda scura e' il range centrale (P25-P75), quella chiara il P10-P90. La mediana e' lo scenario 'centrale'; la probabilita' di superare la tua soglia e' la quota di scenari che la attraversano all'orizzonte.")
+        st.markdown(f"<h1>\U0001F3B0 {titolo_vp}</h1>", unsafe_allow_html=True)
+        vp1, vp2, vp3 = st.columns(3)
+        h_vp = vp1.slider("Orizzonte (giorni)", min_value=7, max_value=365, value=90, step=1, key="vp_h",
+                          help="Quanti giorni nel futuro simulare (7-365).")
+        ns_vp = vp2.slider("Scenari Monte Carlo", min_value=100, max_value=20000, value=2000, step=100, key="vp_ns",
+                           help="Numero di traiettorie simulate: piu' scenari, bande piu' stabili (calcolo piu' lento).")
+        drift_vp = vp3.checkbox("Includi il drift storico", value=False, key="vp_drift",
+                                help="Se spuntato, le traiettorie seguono il trend medio storico dei log-rendimenti; altrimenti sono martingale (default: piu' prudente per il budgeting).")
+        soglia_vp = vp3.number_input("Soglia di prezzo (€/MWh)", min_value=0.01, value=150.0, step=5.0, key="vp_soglia",
+                                     help="La probabilita' riportata e' la quota di scenari il cui prezzo all'orizzonte supera questa soglia.")
+        ris_vp = calcola_ventaglio_prezzo(prezzi, n_giorni=h_vp, n_scenari=ns_vp, soglia=soglia_vp, con_drift=drift_vp)
+        if ris_vp["errore"]:
+            st.error(ris_vp["errore"])
+        elif ris_vp["prezzo_partenza"] is None:
+            st.warning("Servono almeno 30 giorni di prezzi per calibrare la volatilita' storica: allarga il periodo in sidebar.")
+        else:
+            st.caption(f"Calibrato su {ris_vp['n_giorni_storico']} giorni di prezzi reali"
+                       + (f" — drift storico incluso" if ris_vp["con_drift"] else " — martingala (nessun drift)")
+                       + (f" — prezzi negativi traslati di € {ris_vp['shift_usato']:,.2f}/MWh" if ris_vp["shift_usato"] > 0 else "")
+                       + f" — seed {ris_vp['seed']} (risultati riproducibili).")
+            df_vp = ris_vp["df_bande"]
+            k1, k2, k3 = st.columns(3)
+            render_kpi("Ultimo prezzo osservato", f"€ {ris_vp['prezzo_partenza']:,.2f}/MWh", k1)
+            render_kpi("Volatilita' storica annua", f"{ris_vp['vol_annua']:.1f}%", k2)
+            render_kpi(f"P50 all'orizzonte ({h_vp}g)", f"€ {ris_vp['p50_fine']:,.2f}/MWh", k3)
+            k4, k5, k6 = st.columns(3)
+            render_kpi(f"Banda P10-P90 all'orizzonte", f"€ {ris_vp['p10_fine']:,.0f} - {ris_vp['p90_fine']:,.0f}/MWh", k4)
+            render_kpi(f"P(prezzo > € {soglia_vp:,.0f} all'orizzonte)", f"{ris_vp['prob_soglia'] * 100:.1f}%", k5)
+            ampiezza = (ris_vp["p90_fine"] - ris_vp["p10_fine"]) / max(ris_vp["p50_fine"], 1e-9) * 100
+            render_kpi("Ampiezza ventaglio (P90-P10)/P50", f"{ampiezza:.0f}%", k6)
+            fig_vp = go.Figure()
+            fig_vp.add_trace(go.Scatter(x=df_vp["Giorno"], y=df_vp["P90 (€/MWh)"], mode="lines",
+                                        line=dict(width=0), showlegend=False, hoverinfo="skip"))
+            fig_vp.add_trace(go.Scatter(x=df_vp["Giorno"], y=df_vp["P10 (€/MWh)"], mode="lines",
+                                        line=dict(width=0), fill="tonexty", fillcolor="rgba(59,130,246,0.15)",
+                                        name="Banda P10-P90",
+                                        hovertemplate="Giorno %{x}<br>P90: € %{customdata[0]:,.2f}/MWh<br>P10: € %{y:,.2f}/MWh<extra></extra>",
+                                        customdata=np.array([df_vp["P90 (€/MWh)"]]).T))
+            fig_vp.add_trace(go.Scatter(x=df_vp["Giorno"], y=df_vp["P75 (€/MWh)"], mode="lines",
+                                        line=dict(width=0), showlegend=False, hoverinfo="skip"))
+            fig_vp.add_trace(go.Scatter(x=df_vp["Giorno"], y=df_vp["P25 (€/MWh)"], mode="lines",
+                                        line=dict(width=0), fill="tonexty", fillcolor="rgba(59,130,246,0.30)",
+                                        name="Banda P25-P75",
+                                        hovertemplate="Giorno %{x}<br>P75: € %{customdata[0]:,.2f}/MWh<br>P25: € %{y:,.2f}/MWh<extra></extra>",
+                                        customdata=np.array([df_vp["P75 (€/MWh)"]]).T))
+            fig_vp.add_trace(go.Scatter(x=df_vp["Giorno"], y=df_vp["P50 (€/MWh)"], mode="lines",
+                                        line=dict(color="#f59e0b", width=2), name="Mediana P50",
+                                        hovertemplate="Giorno %{x}<br>Mediana: € %{y:,.2f}/MWh<extra></extra>"))
+            fig_vp.update_layout(template="plotly_dark", height=420,
+                                 title=f"Ventaglio Monte Carlo del prezzo giornaliero ({ns_vp} scenari, {h_vp} giorni)",
+                                 xaxis_title="Giorni da oggi", yaxis_title="€/MWh")
+            st.plotly_chart(fig_vp, use_container_width=True)
+            st.markdown("**Dettaglio per giorno simulato**")
+            st.dataframe(df_vp, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta ventaglio di prezzo (CSV)",
+                df_vp.to_csv(index=False).encode("utf-8"),
+                file_name=f"ventaglio_prezzo_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Bande P10/P25/P50/P75/P90 del prezzo giornaliero per ogni giorno dell'orizzonte simulato.",
+                key="csv_vp",
+            )
+        st.caption("Uso pratico: se la probabilita' di superare la tua soglia di budget e' alta, considera fissare di piu' (vedi tab120 'Frontiera di fissazione'); se la banda P10-P90 e' stretta, il forward costera' poco premio. Limiti: GBM su medie giornaliere (niente picchi orari), volatilita' storica =/= futura, senza drift le traiettorie sono martingale, prezzi negativi gestiti con shift positivo.")
 
 
 # Footer
