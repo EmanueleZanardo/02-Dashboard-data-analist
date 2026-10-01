@@ -2080,6 +2080,184 @@ def calcola_cva(esposizioni, pd_annua_pct=1.0, lgd_pct=45.0, orizzonte_anni=1.0,
             "sens_orizzonte": sens_orizzonte, "pd_periodo": pd_per}
 
 
+def calcola_lcos(capex_eur, opex_annuo_eur=0.0, capacita_kwh=1000.0,
+                 cicli_annui=365.0, dod=0.9, efficienza_pct=85.0,
+                 degrado_annuo_pct=2.0, tasso_sconto_pct=5.0, vita_anni=10,
+                 costo_ricarica_eur_mwh=80.0, valore_residuo_eur=0.0):
+    """Levelized Cost of Storage (LCOS) di una batteria.
+
+    Domanda operativa: "quanto mi costa ogni MWh che la batteria scarica
+    davvero?" — il LCOS e' il costo pieno (CAPEX + OPEX + energia di ricarica,
+    tutto attualizzato) diviso per l'energia scaricata attualizzata sulla
+    vita utile. E' il metro per decidere se la batteria conviene: se il LCOS
+    supera il valore che la batteria genera (arbitraggio, riserva, picchi
+    evitati), l'investimento non si ripaga.
+
+    Metodo:
+      - energia scaricata anno t [MWh] =
+        cicli_annui * capacita_kwh/1000 * dod * (1-degrado)^(t-1);
+      - energia caricata anno t = scaricata / efficienza;
+      - costo anno t = opex + caricata * costo_ricarica;
+      - PV costi = capex + Somma_t costo(t)/(1+r)^t - residuo/(1+r)^vita;
+      - PV energia = Somma_t scaricata(t)/(1+r)^t;
+      - LCOS = PV costi / PV energia (EUR/MWh);
+      - sensibilita': LCOS al variare dei cicli annui (0.25x/0.5x/1x/2x),
+        della vita utile (5/10/15/20 anni) e del costo di ricarica (0x/0.5x/
+        1x/1.5x); scomposizione del PV costi in CAPEX/OPEX/ricarica/residuo.
+
+    Proprieta' testabile: con degrado=0, efficienza=100% e tasso=0,
+    LCOS = (capex + vita*(opex + E_ch*costo_ricarica)) / (vita*E_dis)
+    esattamente; raddoppiare i cicli riduce il LCOS; degrado o efficienza
+    peggiori alzano il LCOS; PV energia = somma attualizzata delle
+    scaricate annue.
+
+    NaN-safe: input non numerici o fuori limite -> 'errore' valorizzato,
+    mai eccezioni.
+
+    Ritorna dict con 'errore', 'valido', 'lcos_eur_mwh', 'pv_costi_eur',
+    'pv_energia_mwh', 'energia_annua_mwh' (anno 1), 'quota_capex',
+    'quota_opex', 'quota_ricarica', 'quota_residuo' (sul PV costi),
+    'sens_cicli' ({cicli: lcos}), 'sens_vita' ({anni: lcos}),
+    'sens_ricarica' ({costo: lcos}), 'df' (tabella annuale)."""
+
+    vuoto = {"errore": None, "valido": False, "lcos_eur_mwh": 0.0,
+             "pv_costi_eur": 0.0, "pv_energia_mwh": 0.0,
+             "energia_annua_mwh": 0.0, "quota_capex": 0.0, "quota_opex": 0.0,
+             "quota_ricarica": 0.0, "quota_residuo": 0.0, "sens_cicli": {},
+             "sens_vita": {}, "sens_ricarica": {},
+             "df": pd.DataFrame(
+                 columns=["Anno", "Energia scaricata (MWh)",
+                          "Energia caricata (MWh)", "OPEX (EUR)",
+                          "Costo ricarica (EUR)", "Costo attualizzato (EUR)",
+                          "Energia attualizzata (MWh)"])}
+
+    def _err(msg):
+        v = dict(vuoto)
+        v["df"] = pd.DataFrame(columns=list(vuoto["df"].columns))
+        v["errore"] = msg
+        return v
+
+    try:
+        capex = float(capex_eur)
+        opex = float(opex_annuo_eur)
+        cap = float(capacita_kwh)
+        cicli = float(cicli_annui)
+        dod_f = float(dod)
+        eff = float(efficienza_pct) / 100.0
+        degr = float(degrado_annuo_pct) / 100.0
+        r = float(tasso_sconto_pct) / 100.0
+        vita = float(vita_anni)
+        c_ric = float(costo_ricarica_eur_mwh)
+        residuo = float(valore_residuo_eur)
+    except (TypeError, ValueError):
+        return _err("Parametri non numerici: controlla gli input.")
+
+    vals = [capex, opex, cap, cicli, dod_f, eff, degr, r, vita, c_ric, residuo]
+    if any(not np.isfinite(v) for v in vals):
+        return _err("Parametri non validi: valori infiniti o NaN.")
+    if capex < 0:
+        return _err("CAPEX negativo non ammesso.")
+    if opex < 0:
+        return _err("OPEX annuo negativo non ammesso.")
+    if cap <= 0 or cap > 1e9:
+        return _err("Capacita' non valida (0 < kWh <= 1e9).")
+    if cicli <= 0 or cicli > 5000:
+        return _err("Cicli annui non validi (0 < cicli <= 5000).")
+    if not 0 < dod_f <= 1:
+        return _err("DoD non valida (0 < DoD <= 1).")
+    if not 0 < eff <= 1:
+        return _err("Efficienza non valida (0 < eff <= 100%).")
+    if not 0 <= degr < 1:
+        return _err("Degrado annuo non valido (0 <= degrado < 100%).")
+    if not 0 <= r <= 1:
+        return _err("Tasso di sconto non valido (0-100%).")
+    if not 1 <= vita <= 40:
+        return _err("Vita utile non valida (1-40 anni).")
+    if c_ric < 0:
+        return _err("Costo di ricarica negativo non ammesso.")
+    if residuo < 0:
+        return _err("Valore residuo negativo non ammesso.")
+    vita_i = int(round(vita))
+
+    def _lcos_con(cicli_v, vita_v, c_ric_v):
+        vita_n = int(round(vita_v))
+        pv_c = capex
+        pv_e = 0.0
+        pv_opex = 0.0
+        pv_ric = 0.0
+        e_dis_1 = cicli_v * cap / 1000.0 * dod_f
+        for t in range(1, vita_n + 1):
+            fatt = (1.0 - degr) ** (t - 1)
+            e_dis = e_dis_1 * fatt
+            e_ch = e_dis / eff
+            disc = (1.0 + r) ** t
+            pv_opex += opex / disc
+            pv_ric += e_ch * c_ric_v / disc
+            pv_c += (opex + e_ch * c_ric_v) / disc
+            pv_e += e_dis / disc
+        pv_res = residuo / ((1.0 + r) ** vita_n)
+        pv_c -= pv_res
+        if pv_e <= 0:
+            return None, None
+        return pv_c / pv_e, {"pv_costi": pv_c, "pv_energia": pv_e,
+                            "pv_capex": capex, "pv_opex": pv_opex,
+                            "pv_ric": pv_ric, "pv_res": pv_res,
+                            "e_dis_1": e_dis_1}
+
+    base = _lcos_con(cicli, vita, c_ric)
+    if base[0] is None:
+        return _err("Energia scaricata nulla: controlla cicli, capacita' e degrado.")
+    lcos, parti = base
+
+    # --- tabella annuale (parametri base) ---
+    righe = []
+    for t in range(1, vita_i + 1):
+        fatt = (1.0 - degr) ** (t - 1)
+        e_dis = parti["e_dis_1"] * fatt
+        e_ch = e_dis / eff
+        disc = (1.0 + r) ** t
+        c_ric_t = e_ch * c_ric
+        righe.append({"Anno": t,
+                      "Energia scaricata (MWh)": round(e_dis, 2),
+                      "Energia caricata (MWh)": round(e_ch, 2),
+                      "OPEX (EUR)": round(opex, 2),
+                      "Costo ricarica (EUR)": round(c_ric_t, 2),
+                      "Costo attualizzato (EUR)": round((opex + c_ric_t) / disc, 2),
+                      "Energia attualizzata (MWh)": round(e_dis / disc, 2)})
+    df = pd.DataFrame(righe, columns=list(vuoto["df"].columns))
+
+    # --- sensibilita' ---
+    sens_cicli = {}
+    for f in (0.25, 0.5, 1.0, 2.0):
+        cv = max(1.0, round(cicli * f, 1))
+        lv, _ = _lcos_con(cv, vita, c_ric)
+        if lv is not None:
+            sens_cicli[cv] = lv
+    sens_vita = {}
+    for vv in (5, 10, 15, 20):
+        if 1 <= vv <= 40:
+            lv, _ = _lcos_con(cicli, vv, c_ric)
+            if lv is not None:
+                sens_vita[vv] = lv
+    sens_ricarica = {}
+    for f in (0.0, 0.5, 1.0, 1.5):
+        crv = round(c_ric * f, 2)
+        lv, _ = _lcos_con(cicli, vita, crv)
+        if lv is not None:
+            sens_ricarica[crv] = lv
+
+    pv_c = parti["pv_costi"]
+    q = lambda x: x / pv_c if pv_c > 0 else 0.0
+    return {"errore": None, "valido": True, "lcos_eur_mwh": lcos,
+            "pv_costi_eur": pv_c, "pv_energia_mwh": parti["pv_energia"],
+            "energia_annua_mwh": parti["e_dis_1"],
+            "quota_capex": q(parti["pv_capex"]), "quota_opex": q(parti["pv_opex"]),
+            "quota_ricarica": q(parti["pv_ric"]),
+            "quota_residuo": q(parti["pv_res"]),
+            "sens_cicli": sens_cicli, "sens_vita": sens_vita,
+            "sens_ricarica": sens_ricarica, "df": df}
+
+
 def calcola_rischio_quanto(prezzi, mw_base=2.0, rho=0.3, vol_vol=0.15,
                            n_giorni=90, n_scenari=2000, budget=None, seed=42):
     """Rischio quanto Monte Carlo: correlazione prezzo spot <-> volume prelevato.
@@ -15148,7 +15326,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -25653,6 +25831,143 @@ elif workspace == _('ws8'):
                 mime="text/csv",
                 help="Dettaglio CVA per controparte.",
                 key="csv_cva",
+            )
+
+    with tab128:
+        titolo_lcos = edu("LCOS batteria", "Il LCOS (Levelized Cost of Storage) e' il costo pieno di ogni MWh che la batteria scarica davvero nell'arco della sua vita: CAPEX + OPEX + energia di ricarica, tutto attualizzato al tasso di sconto, diviso per l'energia scaricata attualizzata (che cala ogni anno per il degrado). Confrontalo con il valore che la batteria genera (arbitraggio, riserva, picchi evitati): se il LCOS e' sopra, l'investimento non si ripaga. Limiti: cicli annui costanti, degrado geometrico, nessun ricavo modellato qui.")
+        st.markdown(f"<h1>🔋 {titolo_lcos}</h1>", unsafe_allow_html=True)
+        st.caption("Valori dimostrativi: inserisci i parametri del tuo sistema di accumulo.")
+        c1, c2, c3 = st.columns(3)
+        capex_l = c1.number_input("CAPEX totale (EUR)", min_value=0.0,
+                                  value=350000.0, step=10000.0, format="%.0f",
+                                  key="lcos_capex",
+                                  help="Costo chiavi in mano del sistema di accumulo.")
+        opex_l = c2.number_input("OPEX annuo (EUR)", min_value=0.0,
+                                  value=7000.0, step=500.0, format="%.0f",
+                                  key="lcos_opex")
+        cap_l = c3.number_input("Capacita' utile (kWh)", min_value=1.0,
+                                value=1000.0, step=50.0, format="%.0f",
+                                key="lcos_cap")
+        c4, c5, c6 = st.columns(3)
+        cicli_l = c4.number_input("Cicli equivalenti / anno", min_value=1.0,
+                                  max_value=5000.0, value=365.0, step=10.0,
+                                  format="%.0f", key="lcos_cicli",
+                                  help="Un ciclo = una scarica completa della capacita' utile.")
+        dod_l = c5.number_input("DoD — profondita' di scarica", min_value=0.05,
+                                max_value=1.0, value=0.90, step=0.05,
+                                format="%.2f", key="lcos_dod")
+        eff_l = c6.number_input("Efficienza round-trip (%)", min_value=1.0,
+                                max_value=100.0, value=85.0, step=1.0,
+                                format="%.1f", key="lcos_eff")
+        c7, c8, c9 = st.columns(3)
+        degr_l = c7.number_input("Degrado capacita' (%/anno)", min_value=0.0,
+                                 max_value=99.0, value=2.0, step=0.5,
+                                 format="%.1f", key="lcos_degr")
+        tasso_l = c8.number_input("Tasso di sconto (%/anno)", min_value=0.0,
+                                  max_value=100.0, value=5.0, step=0.5,
+                                  format="%.1f", key="lcos_tasso")
+        vita_l = c9.number_input("Vita utile (anni)", min_value=1.0,
+                                 max_value=40.0, value=10.0, step=1.0,
+                                 format="%.0f", key="lcos_vita")
+        c10, c11 = st.columns(2)
+        ric_l = c10.number_input("Costo energia di ricarica (€/MWh)",
+                                 min_value=0.0, value=80.0, step=5.0,
+                                 format="%.1f", key="lcos_ric")
+        res_l = c11.number_input("Valore residuo a fine vita (EUR)",
+                                 min_value=0.0, value=0.0, step=1000.0,
+                                 format="%.0f", key="lcos_res")
+        ris_l = calcola_lcos(capex_l, opex_annuo_eur=opex_l,
+                             capacita_kwh=cap_l, cicli_annui=cicli_l,
+                             dod=dod_l, efficienza_pct=eff_l,
+                             degrado_annuo_pct=degr_l,
+                             tasso_sconto_pct=tasso_l, vita_anni=vita_l,
+                             costo_ricarica_eur_mwh=ric_l,
+                             valore_residuo_eur=res_l)
+        if ris_l["errore"]:
+            st.error(ris_l["errore"])
+        elif not ris_l["valido"]:
+            st.warning("Parametri non validi per il calcolo del LCOS.")
+        else:
+            k1, k2, k3, k4, k5 = st.columns(5)
+            render_kpi("LCOS", f"€ {ris_l['lcos_eur_mwh']:,.1f}/MWh", k1)
+            render_kpi("PV costi totali", f"€ {ris_l['pv_costi_eur']:,.0f}", k2)
+            render_kpi("PV energia scaricata",
+                       f"{ris_l['pv_energia_mwh']:,.0f} MWh", k3)
+            render_kpi("Energia scaricata anno 1",
+                       f"{ris_l['energia_annua_mwh']:,.0f} MWh", k4)
+            render_kpi("Quota CAPEX sul PV costi",
+                       f"{ris_l['quota_capex'] * 100:.1f}%", k5)
+            st.markdown("**Sensibilita' del LCOS ai cicli annui**")
+            sc = ris_l["sens_cicli"]
+            fig_l1 = go.Figure()
+            fig_l1.add_trace(go.Bar(
+                x=[f"{c:,.0f} cicli/anno" for c in sc.keys()],
+                y=list(sc.values()), marker_color="#38bdf8", name="LCOS",
+                hovertemplate="%{x}<br>€ %{y:,.1f}/MWh<extra></extra>"))
+            fig_l1.update_layout(template="plotly_dark", height=340,
+                                 title="LCOS al variare dell'utilizzo",
+                                 xaxis_title="", yaxis_title="€/MWh")
+            st.plotly_chart(fig_l1, use_container_width=True)
+            st.markdown("**Scomposizione del costo attualizzato**")
+            fig_l2 = go.Figure()
+            fig_l2.add_trace(go.Bar(
+                x=["PV costi"],
+                y=[ris_l["quota_capex"] * ris_l["pv_costi_eur"]],
+                name="CAPEX", marker_color="#f87171"))
+            fig_l2.add_trace(go.Bar(
+                x=["PV costi"],
+                y=[ris_l["quota_opex"] * ris_l["pv_costi_eur"]],
+                name="OPEX", marker_color="#fbbf24"))
+            fig_l2.add_trace(go.Bar(
+                x=["PV costi"],
+                y=[ris_l["quota_ricarica"] * ris_l["pv_costi_eur"]],
+                name="Ricarica", marker_color="#38bdf8"))
+            if ris_l["quota_residuo"] > 0:
+                fig_l2.add_trace(go.Bar(
+                    x=["PV costi"],
+                    y=[-ris_l["quota_residuo"] * ris_l["pv_costi_eur"]],
+                    name="Residuo", marker_color="#4ade80"))
+            fig_l2.update_layout(template="plotly_dark", height=340,
+                                 barmode="relative",
+                                 title="PV costi per componente (EUR)",
+                                 yaxis_title="EUR")
+            st.plotly_chart(fig_l2, use_container_width=True)
+            st.markdown("**Sensibilita' alla vita utile e al costo di ricarica**")
+            t1, t2 = st.columns(2)
+            with t1:
+                st.dataframe(pd.DataFrame([
+                    {"Vita utile": f"{int(v)} anni",
+                     "LCOS": f"€ {l:,.1f}/MWh"}
+                    for v, l in sorted(ris_l["sens_vita"].items())]),
+                    use_container_width=True, hide_index=True)
+            with t2:
+                st.dataframe(pd.DataFrame([
+                    {"Costo ricarica": f"€ {c:,.1f}/MWh",
+                     "LCOS": f"€ {l:,.1f}/MWh"}
+                    for c, l in sorted(ris_l["sens_ricarica"].items())]),
+                    use_container_width=True, hide_index=True)
+            st.markdown("**Dettaglio annuale**")
+            st.dataframe(ris_l["df"].assign(
+                **{"Energia scaricata (MWh)":
+                   ris_l["df"]["Energia scaricata (MWh)"].map(lambda v: f"{v:,.1f}"),
+                   "Energia caricata (MWh)":
+                   ris_l["df"]["Energia caricata (MWh)"].map(lambda v: f"{v:,.1f}"),
+                   "OPEX (EUR)":
+                   ris_l["df"]["OPEX (EUR)"].map(lambda v: f"€ {v:,.0f}"),
+                   "Costo ricarica (EUR)":
+                   ris_l["df"]["Costo ricarica (EUR)"].map(lambda v: f"€ {v:,.0f}"),
+                   "Costo attualizzato (EUR)":
+                   ris_l["df"]["Costo attualizzato (EUR)"].map(lambda v: f"€ {v:,.0f}"),
+                   "Energia attualizzata (MWh)":
+                   ris_l["df"]["Energia attualizzata (MWh)"].map(lambda v: f"{v:,.1f}")}),
+                use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta LCOS annuale (CSV)",
+                ris_l["df"].to_csv(index=False).encode("utf-8"),
+                file_name=f"lcos_batteria_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Dettaglio annuale del calcolo LCOS.",
+                key="csv_lcos",
             )
 
 # Footer
