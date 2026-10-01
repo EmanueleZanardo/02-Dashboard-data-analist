@@ -166,6 +166,7 @@ stoccaggio gas, PPA, idroelettrico, power-to-heat.
 132. 🕐 Volatilità intraday
 133. 🔀 Regimi di prezzo
 134. 📑 Report di periodo
+135. 📏 Premio di rischio
 
 </details>
 
@@ -237,7 +238,7 @@ python3 tests/test_helpers.py      # esempio di file legacy: N check, 0 fail att
 ## Struttura
 
 - `app.py` — tutta la dashboard (funzioni pure `calcola_*`/`profilo_*` +
-  8 workspace Streamlit; lo Swissix ha 134 tab)
+  8 workspace Streamlit; lo Swissix ha 135 tab)
 - `requirements.txt` — dipendenze pinnate
 - `tests/` — test delle funzioni di calcolo (`appfuncs.py`, `conftest.py`,
   `run_all.py`, file `test_*.py`)
