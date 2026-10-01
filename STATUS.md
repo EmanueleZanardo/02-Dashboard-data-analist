@@ -1,13 +1,14 @@
 # STATUS.md — 02-Dashboard-data-analist (Singularity Quant ETRM)
 
-**Ultimo aggiornamento: 01/10/2026 07:55 CEST**
+**Ultimo aggiornamento: 01/10/2026 08:55 CEST**
 
 ## Stato
 - Dashboard Streamlit "Singularity Quant ETRM", live su https://czpox8o8x6arnxw96txnvt.streamlit.app/.
-- Ultimo commit: (QA 01/10 07:40 - STATUS.md tab122).
-- Test: 47/47 verdi (tests/test_helpers.py) + 66/66 check tab122; regressione: 19/19.
+- Ultimo commit: (QA 01/10 08:40 - STATUS.md tab123).
+- Test: 47/47 verdi (tests/test_helpers.py) + 55/55 check tab123; regressione: 19/19.
 
 ## Ultimi eventi verificati (01/10/2026)
+- Nuova tab123 "🕰️ Lag di indicizzazione": confronto convenzioni di indicizzazione del prezzo di fornitura (Spot, Media M, M-1, M-2, Trimestrale, Mobile 30gg) sul periodo storico con profilo F1/F2/F3 — helper calcola_lag_indicizzazione testato (55 check, 0 fail: 6 in sviluppo con fix del test e 2 fix reali — guardia contro indici numerici interpretati come nanosecondi, e nuovo KPI €/MWh medio sull'energia coperta per confronti equi tra coperture diverse); KPI costo spot/migliore a copertura totale/risparmio/tracking error M-1, grafico costo mensile per convenzione, tabella riepilogo + dettaglio mensile + export CSV. Nessun bug residuo, nessun segreto hardcoded.
 - Nuova tab122 "⚡ Rischio quanto": Monte Carlo congiunto prezzo-volume (GBM martingala sul prezzo calibrato sui log-rendimenti storici, volume log-normale con media = MWx24h, correlazione via Cholesky, seed fisso) — helper calcola_rischio_quanto testato (66 check, 0 fail, dopo fix del test sul ramo shift con serie negativa piatta); KPI costo atteso/std/VaR95/ES95/premio quanto (= VaR95 - VaR95 a correlazione 0)/P(superamento budget), istogramma scenari con linee atteso-VaR-ES, sensibilita' VaR/ES a rho in [-0.8..0.8], tabella + export CSV. Nessun bug residuo, nessun segreto hardcoded.
 - Nuova tab121 "🎰 Ventaglio di prezzo": fan chart Monte Carlo del prezzo giornaliero (GBM calibrato sui log-rendimenti storici, drift opzionale, seed fisso riproducibile, shift positivo per serie con prezzi negativi) — helper calcola_ventaglio_prezzo testato (43 check, 0 fail); bande P10-P90/P25-P75 + mediana P50 su orizzonte 7-365 giorni e 100-20000 scenari, KPI prezzo partenza/vol annua/P50 all'orizzonte/banda P10-P90/P(soglia superata)/ampiezza ventaglio, tabella + export CSV. Nessun bug residuo, nessun segreto hardcoded.
 - Nuova tab120 "📈 Frontiera di fissazione": frontiera efficiente dell'hedge ratio (0-100%) — helper calcola_frontiera_fissazione testato (38 check, 0 fail, dopo fix di un bug reale: c_fix_w scalare usato come array nel broadcast numpy); costo atteso vs volatilità su blocchi settimanali consecutivi, annualizzazione, premio di rischio implicito €/MWh e €/anno, P(sporco batte fixing), marker "la tua posizione" sulla frontiera, tabella + export CSV. Nessun bug residuo, nessun segreto hardcoded.
