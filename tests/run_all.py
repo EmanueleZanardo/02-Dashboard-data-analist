@@ -42,7 +42,7 @@ def main() -> int:
         if not m:
             m = re.search(r"check\s*=\s*(\d+)[^\d]{0,10}fail\w*\s*=\s*(\d+)",
                           out, re.IGNORECASE)
-        if not m and re.search(r"FAIL(?:URES)?:\s*(none|nessuno|0)\b", out,
+        if not m and re.search(r"FAILS?(?:URES)?:\s*(none|nessuno|0)\b", out,
                                re.IGNORECASE):
             # stili legacy alternativi ("FAILURES: none", "FAILS: nessuno",
             # "FAILURES: 0"): 0 fail, i check si contano dalle righe PASS
