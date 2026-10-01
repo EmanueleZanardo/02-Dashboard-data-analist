@@ -1746,6 +1746,178 @@ def calcola_costo_go(prezzi, mw_f1=2.0, mw_f2=1.5, mw_f3=1.0,
     return out
 
 
+def calcola_ricavi_riserva(prezzi, mw_primaria=0.0, mw_secondaria=0.0,
+                           mw_terziaria_pos=0.0, mw_terziaria_neg=0.0,
+                           prezzo_primaria=14.0, prezzo_secondaria=9.0,
+                           prezzo_terziaria_pos=5.0, prezzo_terziaria_neg=4.0,
+                           ore_chiamata_terz_pos=0.0, ore_chiamata_terz_neg=0.0,
+                           prezzo_energia_pos=120.0, prezzo_energia_neg=40.0):
+    """Ricavi dai servizi di riserva (SDL) di Swissgrid per un impianto flessibile.
+
+    Domanda operativa: "quanto ricavo se offro la mia flessibilita' sul
+    mercato dei servizi di sistema?" — Swissgrid acquista riserva primaria
+    (FCR, simmetrica), secondaria (aFRR, simmetrica) e terziaria (mFRR,
+    positiva/negativa) con aste settimanali: il ricavo e' MW offerti x
+    prezzo di potenza (CHF/MW/h) x ore del periodo, piu' per la terziaria
+    l'eventuale energia attivata (ore di chiamata x MW x prezzo energia).
+
+    Metodo:
+      - prezzi orari -> dropna; la serie definisce solo il periodo coperto
+        (ore e mesi); servono almeno 24 ore con indice datetime;
+      - per ogni prodotto: ricavo_potenza = MW * prezzo_potenza * n_ore;
+      - terziaria: ricavo_energia = MW * ore_chiamata * prezzo_energia
+        (positiva = energia immessa remunerata; negativa = energia assorbita
+        remunerata; prezzi >= 0 in entrambi i casi);
+      - aggregazione mensile: il ricavo di potenza segue le ore di ogni
+        mese, il ricavo energia e' ripartito sui mesi in proporzione alle
+        ore;
+      - ricavo annuo stimato per MW = prezzo_potenza * 8760;
+      - scenari: fattori di scala 0 / 0.5 / 1 / 1.5 / 2 sui MW offerti a
+        parita' di prezzi;
+      - sensibilita': shock dei prezzi di potenza -30%, +30%, +100%.
+
+    Proprieta' testabile: ricavo_potenza = MW*prezzo*n_ore esattamente; la
+    somma dei totali mensili = ricavo totale; scenari lineari nei MW;
+    MW nulli -> ricavo 0; ore di chiamata oltre n_ore -> errore.
+
+    NaN-safe: serie vuota o con meno di 24 ore o indice non datetime ->
+    'valido' False. MW negativi o oltre 5000, prezzi negativi, ore di
+    chiamata negative o oltre n_ore -> 'errore' valorizzato.
+
+    Ritorna dict con 'errore', 'valido', 'df_mensile', 'ricavo_totale',
+    'ricavo_medio_mensile', 'per_prodotto' ({nome: {etichetta, mw,
+    prezzo_potenza, ricavo_potenza, ricavo_energia, ricavo_totale, quota,
+    annuo_per_mw}}), 'miglior_prodotto', 'quota_migliore', 'scenari'
+    ({fattore: ricavo}), 'sensibilita' ({shock: delta CHF}), 'n_mesi',
+    'n_ore'."""
+
+    PRODOTTI = (("primaria", "Riserva primaria (FCR)"),
+                ("secondaria", "Riserva secondaria (aFRR)"),
+                ("terziaria_pos", "Riserva terziaria + (mFRR)"),
+                ("terziaria_neg", "Riserva terziaria - (mFRR)"))
+
+    def _cols():
+        return ["Mese", "Ore", "Primaria (CHF)", "Secondaria (CHF)",
+                "Terziaria + (CHF)", "Terziaria - (CHF)", "Totale (CHF)"]
+
+    vuoto = {"errore": None, "valido": False,
+             "df_mensile": pd.DataFrame(columns=_cols()),
+             "ricavo_totale": 0.0, "ricavo_medio_mensile": 0.0,
+             "per_prodotto": {}, "miglior_prodotto": None,
+             "quota_migliore": 0.0, "scenari": {}, "sensibilita": {},
+             "n_mesi": 0, "n_ore": 0}
+
+    def _err(msg):
+        v = dict(vuoto)
+        v["df_mensile"] = pd.DataFrame(columns=_cols())
+        v["errore"] = msg
+        return v
+
+    try:
+        mws = [float(mw_primaria), float(mw_secondaria),
+               float(mw_terziaria_pos), float(mw_terziaria_neg)]
+    except (TypeError, ValueError):
+        return _err("MW offerti per prodotto non validi.")
+    if any(not (m >= 0) for m in mws):
+        return _err("I MW offerti devono essere >= 0.")
+    if any(m > 5000 for m in mws):
+        return _err("MW offerti oltre il limite (5000 MW).")
+
+    try:
+        prz = [float(prezzo_primaria), float(prezzo_secondaria),
+               float(prezzo_terziaria_pos), float(prezzo_terziaria_neg)]
+    except (TypeError, ValueError):
+        return _err("Prezzi di potenza non validi.")
+    if any(not (p >= 0) for p in prz):
+        return _err("I prezzi di potenza devono essere >= 0.")
+    if any(p > 100000 for p in prz):
+        return _err("Prezzo di potenza oltre il limite (100000 CHF/MW/h).")
+
+    try:
+        ore_p = float(ore_chiamata_terz_pos)
+        ore_n = float(ore_chiamata_terz_neg)
+        pe_p = float(prezzo_energia_pos)
+        pe_n = float(prezzo_energia_neg)
+    except (TypeError, ValueError):
+        return _err("Ore di chiamata o prezzi energia non validi.")
+    if ore_p < 0 or ore_n < 0:
+        return _err("Le ore di chiamata devono essere >= 0.")
+    if pe_p < 0 or pe_n < 0:
+        return _err("I prezzi dell'energia attivata devono essere >= 0.")
+
+    try:
+        s = pd.Series(prezzi, dtype=float).dropna()
+    except Exception:
+        return _err("Serie prezzi non interpretabile.")
+    if not isinstance(s.index, pd.DatetimeIndex):
+        return _err("La serie prezzi deve avere indice datetime.")
+    if len(s) < 24:
+        v = dict(vuoto)
+        v["df_mensile"] = pd.DataFrame(columns=_cols())
+        return v
+    n_ore = len(s)
+    if ore_p > n_ore or ore_n > n_ore:
+        return _err("Le ore di chiamata non possono superare le ore del periodo.")
+
+    mesi = s.index.strftime("%Y-%m")
+    ore_mese = mesi.value_counts().sort_index()
+
+    per_prod = {}
+    totale = 0.0
+    rate_mensili = []
+    for (chiave, etichetta), mw, prz_h in zip(PRODOTTI, mws, prz):
+        ric_pot = mw * prz_h * n_ore
+        ric_en = 0.0
+        if chiave == "terziaria_pos":
+            ric_en = mw * ore_p * pe_p
+        elif chiave == "terziaria_neg":
+            ric_en = mw * ore_n * pe_n
+        ric_tot = ric_pot + ric_en
+        totale += ric_tot
+        per_prod[chiave] = {"etichetta": etichetta, "mw": mw,
+                            "prezzo_potenza": prz_h,
+                            "ricavo_potenza": ric_pot,
+                            "ricavo_energia": ric_en,
+                            "ricavo_totale": ric_tot,
+                            "annuo_per_mw": prz_h * 8760.0}
+        en_mese = (ric_en * (ore_mese / n_ore)).to_numpy() if n_ore else 0.0
+        rate_mensili.append((chiave, mw * prz_h, en_mese))
+
+    dfm = pd.DataFrame({"Mese": ore_mese.index, "Ore": ore_mese.to_numpy()})
+    tot_mese = np.zeros(len(ore_mese))
+    nomi_col = {"primaria": "Primaria (CHF)",
+                "secondaria": "Secondaria (CHF)",
+                "terziaria_pos": "Terziaria + (CHF)",
+                "terziaria_neg": "Terziaria - (CHF)"}
+    for chiave, rate_h, en_mese in rate_mensili:
+        col = rate_h * ore_mese.to_numpy() + np.asarray(en_mese, dtype=float)
+        dfm[nomi_col[chiave]] = np.round(col, 2)
+        tot_mese = tot_mese + col
+    dfm["Totale (CHF)"] = np.round(tot_mese, 2)
+
+    for p in per_prod.values():
+        p["quota"] = p["ricavo_totale"] / totale if totale > 0 else 0.0
+
+    migliore = None
+    quota_migliore = 0.0
+    if totale > 0:
+        migliore = max(per_prod, key=lambda k: per_prod[k]["ricavo_totale"])
+        quota_migliore = per_prod[migliore]["quota"]
+
+    scenari = {f: totale * f for f in (0.0, 0.5, 1.0, 1.5, 2.0)}
+
+    ric_pot_tot = sum(mw * prz_h * n_ore for mw, prz_h in zip(mws, prz))
+    sensibilita = {shock: ric_pot_tot * shock for shock in (-0.3, 0.3, 1.0)}
+
+    n_mesi = len(ore_mese)
+    return {"errore": None, "valido": True, "df_mensile": dfm,
+            "ricavo_totale": totale,
+            "ricavo_medio_mensile": totale / n_mesi if n_mesi else 0.0,
+            "per_prodotto": per_prod, "miglior_prodotto": migliore,
+            "quota_migliore": quota_migliore, "scenari": scenari,
+            "sensibilita": sensibilita, "n_mesi": n_mesi, "n_ore": n_ore}
+
+
 def calcola_rischio_quanto(prezzi, mw_base=2.0, rho=0.3, vol_vol=0.15,
                            n_giorni=90, n_scenari=2000, budget=None, seed=42):
     """Rischio quanto Monte Carlo: correlazione prezzo spot <-> volume prelevato.
@@ -14814,7 +14986,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -25107,6 +25279,107 @@ elif workspace == _('ws8'):
                 mime="text/csv",
                 help="Costo mensile delle Garanzie d'origine con MWh verdi e prezzo medio.",
                 key="csv_go",
+            )
+
+    with tab126:
+        titolo_rs = edu("Ricavi da riserva (SDL)", "I Servizi Di Sistema (SDL) sono la riserva di potenza che Swissgrid compra con aste settimanali per tenere la rete a 50 Hz: primaria (FCR, simmetrica, reazione in secondi), secondaria (aFRR, simmetrica, minuti) e terziaria (mFRR, positiva/negativa, quarti d'ora). Il ricavo e' MW offerti x prezzo di potenza (CHF/MW/h) x ore, piu' per la terziaria l'energia effettivamente attivata (ore di chiamata x MW x prezzo energia). Questo tab stima quanto rende la tua flessibilita' sul periodo dei prezzi caricati: i prezzi di potenza sono input manuali (le aste si muovono ogni settimana). Limiti: niente vincoli tecnici dell'impianto (rampe, energia disponibile), niente costo opportunita' vs mercato energia, prezzi di potenza costanti sul periodo.")
+        st.markdown(f"<h1>⚡ {titolo_rs}</h1>", unsafe_allow_html=True)
+        st.markdown("**MW offerti per prodotto**")
+        rs1, rs2, rs3, rs4 = st.columns(4)
+        mw_rs_p = rs1.number_input("Primaria FCR (MW)", min_value=0.0, value=2.0, step=0.5,
+                                   key="rs_mw_p", help="Riserva primaria simmetrica.")
+        mw_rs_s = rs2.number_input("Secondaria aFRR (MW)", min_value=0.0, value=1.0, step=0.5,
+                                   key="rs_mw_s", help="Riserva secondaria simmetrica.")
+        mw_rs_tp = rs3.number_input("Terziaria + mFRR (MW)", min_value=0.0, value=0.0, step=0.5,
+                                    key="rs_mw_tp", help="Riserva terziaria positiva (immissione).")
+        mw_rs_tn = rs4.number_input("Terziaria - mFRR (MW)", min_value=0.0, value=0.0, step=0.5,
+                                    key="rs_mw_tn", help="Riserva terziaria negativa (assorbimento).")
+        st.markdown("**Prezzi di potenza — aste settimanali (CHF/MW/h)**")
+        rp1, rp2, rp3, rp4 = st.columns(4)
+        pz_rs_p = rp1.number_input("Prezzo primaria", min_value=0.0, value=14.0, step=0.5, format="%.2f",
+                                   key="rs_pz_p")
+        pz_rs_s = rp2.number_input("Prezzo secondaria", min_value=0.0, value=9.0, step=0.5, format="%.2f",
+                                   key="rs_pz_s")
+        pz_rs_tp = rp3.number_input("Prezzo terziaria +", min_value=0.0, value=5.0, step=0.5, format="%.2f",
+                                    key="rs_pz_tp")
+        pz_rs_tn = rp4.number_input("Prezzo terziaria -", min_value=0.0, value=4.0, step=0.5, format="%.2f",
+                                    key="rs_pz_tn")
+        st.markdown("**Energia attivata — solo terziaria (ore nel periodo e prezzo CHF/MWh)**")
+        re1, re2, re3, re4 = st.columns(4)
+        ore_rs_tp = re1.number_input("Ore chiamata terz. +", min_value=0.0, value=0.0, step=10.0,
+                                     key="rs_ore_tp", help="Ore in cui la terziaria positiva viene attivata.")
+        ore_rs_tn = re2.number_input("Ore chiamata terz. -", min_value=0.0, value=0.0, step=10.0,
+                                     key="rs_ore_tn", help="Ore in cui la terziaria negativa viene attivata.")
+        pe_rs_tp = re3.number_input("Prezzo energia +", min_value=0.0, value=120.0, step=5.0, format="%.0f",
+                                    key="rs_pe_tp")
+        pe_rs_tn = re4.number_input("Prezzo energia -", min_value=0.0, value=40.0, step=5.0, format="%.0f",
+                                    key="rs_pe_tn")
+        ris_rs = calcola_ricavi_riserva(prezzi, mw_primaria=mw_rs_p, mw_secondaria=mw_rs_s,
+                                        mw_terziaria_pos=mw_rs_tp, mw_terziaria_neg=mw_rs_tn,
+                                        prezzo_primaria=pz_rs_p, prezzo_secondaria=pz_rs_s,
+                                        prezzo_terziaria_pos=pz_rs_tp,
+                                        prezzo_terziaria_neg=pz_rs_tn,
+                                        ore_chiamata_terz_pos=ore_rs_tp,
+                                        ore_chiamata_terz_neg=ore_rs_tn,
+                                        prezzo_energia_pos=pe_rs_tp,
+                                        prezzo_energia_neg=pe_rs_tn)
+        if ris_rs["errore"]:
+            st.error(ris_rs["errore"])
+        elif not ris_rs["valido"]:
+            st.warning("Servono almeno 24 ore di prezzi per definire il periodo di offerta.")
+        else:
+            k1, k2, k3, k4 = st.columns(4)
+            render_kpi("Ricavo totale periodo", f"CHF {ris_rs['ricavo_totale']:,.0f}", k1)
+            render_kpi("Ricavo medio mensile", f"CHF {ris_rs['ricavo_medio_mensile']:,.0f}", k2)
+            if ris_rs["miglior_prodotto"]:
+                mp = ris_rs["per_prodotto"][ris_rs["miglior_prodotto"]]
+                render_kpi("Miglior prodotto", f"{mp['etichetta'].split(' (')[0]}", k3)
+                render_kpi("Quota miglior prodotto", f"{ris_rs['quota_migliore'] * 100:.1f}%", k4)
+            else:
+                render_kpi("Miglior prodotto", "—", k3)
+                render_kpi("Quota miglior prodotto", "—", k4)
+            df_rs = ris_rs["df_mensile"]
+            fig_rs = go.Figure()
+            colori_rs = {"Primaria (CHF)": "#38bdf8", "Secondaria (CHF)": "#a78bfa",
+                         "Terziaria + (CHF)": "#22c55e", "Terziaria - (CHF)": "#f59e0b"}
+            for col_rs, clr in colori_rs.items():
+                fig_rs.add_trace(go.Bar(x=df_rs["Mese"], y=df_rs[col_rs], name=col_rs,
+                                        marker_color=clr,
+                                        hovertemplate="Mese %{x}<br>CHF %{y:,.0f}<extra></extra>"))
+            fig_rs.update_layout(template="plotly_dark", height=380, barmode="stack",
+                                 title=f"Ricavi mensili da riserva per prodotto ({ris_rs['n_mesi']} mesi, {ris_rs['n_ore']:,} ore)",
+                                 xaxis_title="Mese", yaxis_title="CHF")
+            st.plotly_chart(fig_rs, use_container_width=True)
+            st.markdown("**Ricavo per prodotto e annuo stimato per MW**")
+            st.dataframe(pd.DataFrame([
+                {"Prodotto": p["etichetta"], "MW offerti": f"{p['mw']:,.1f}",
+                 "Prezzo potenza": f"CHF {p['prezzo_potenza']:.2f}/MW/h",
+                 "Ricavo potenza": f"CHF {p['ricavo_potenza']:,.0f}",
+                 "Ricavo energia": f"CHF {p['ricavo_energia']:,.0f}",
+                 "Ricavo totale": f"CHF {p['ricavo_totale']:,.0f}",
+                 "Quota": f"{p['quota'] * 100:.1f}%",
+                 "Annuo stimato/MW": f"CHF {p['annuo_per_mw']:,.0f}"}
+                for p in ris_rs["per_prodotto"].values()]),
+                use_container_width=True, hide_index=True)
+            st.markdown("**Scenari di scala (MW offerti)**")
+            st.dataframe(pd.DataFrame([
+                {"Scala MW offerti": f"{int(f * 100)}%", "Ricavo totale": f"CHF {c:,.0f}"}
+                for f, c in sorted(ris_rs["scenari"].items())]),
+                use_container_width=True, hide_index=True)
+            st.markdown("**Sensibilità ai prezzi di potenza**")
+            st.dataframe(pd.DataFrame([
+                {"Shock prezzi potenza": f"{int(s * 100):+d}%", "Δ ricavo": f"{'CHF ' if d >= 0 else '−CHF '}{abs(d):,.0f}"}
+                for s, d in sorted(ris_rs["sensibilita"].items())]),
+                use_container_width=True, hide_index=True)
+            st.markdown("**Dettaglio mensile**")
+            st.dataframe(df_rs, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta ricavi riserva mensili (CSV)",
+                df_rs.to_csv(index=False).encode("utf-8"),
+                file_name=f"ricavi_riserva_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Ricavi mensili da servizi di riserva (SDL) per prodotto.",
+                key="csv_riserva",
             )
 
 # Footer
