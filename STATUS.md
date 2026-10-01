@@ -1,13 +1,14 @@
 # STATUS.md — 02-Dashboard-data-analist (Singularity Quant ETRM)
 
-**Ultimo aggiornamento: 01/10/2026 10:55 CEST**
+**Ultimo aggiornamento: 01/10/2026 11:55 CEST**
 
 ## Stato
 - Dashboard Streamlit "Singularity Quant ETRM", live su https://czpox8o8x6arnxw96txnvt.streamlit.app/.
-- Ultimo commit: (QA 01/10 09:40 - STATUS.md tab124).
-- Test: 47/47 verdi (tests/test_helpers.py) + 50/50 check tab125; regressione: 19/19.
+- Ultimo commit: (QA 01/10 11:40 - STATUS.md tab126).
+- Test: 47/47 verdi (tests/test_helpers.py) + 44/44 check tab126; regressione: 19/19.
 
 ## Ultimi eventi verificati (01/10/2026)
+- Nuova tab126 "⚡ Ricavi da riserva (SDL)": ricavi dai servizi di riserva Swissgrid per un impianto flessibile (primaria FCR, secondaria aFRR, terziaria mFRR +/- con prezzi di potenza CHF/MW/h da aste settimanali + energia attivata per la terziaria) — helper calcola_ricavi_riserva testato (44 check, 0 fail: 1 fix del test sull'attesa dei mesi coperti da 2000h); KPI ricavo totale/medio mensile/miglior prodotto/quota, barre mensili impilate per prodotto, tabella ricavo per prodotto con annuo stimato per MW, scenari di scala MW, sensibilità ai prezzi di potenza, dettaglio mensile + export CSV. Nessun bug residuo, nessun segreto hardcoded.
 - Nuova tab125 "🌱 Garanzie d'origine": costo delle GO per rendere verde la fornitura (prezzi per tecnologia idro/solare/eolico con mix pesato normalizzato, quota verde 0-100%) — helper calcola_costo_go testato (50 check, 0 fail, nessun fix necessario); KPI costo totale/MWh verdi/prezzo medio/incidenza €/MWh, barre mensili, scenari per quota, sensibilità al prezzo GO ±, tabella mensile + export CSV. Nessun bug residuo, nessun segreto hardcoded.
 - Nuova tab124 "💱 Costo in franchi (EUR/CHF)": conversione del costo di fornitura in CHF con tasso costante, storico giornaliero BCE (scarica_fx_ecb via Frankfurter, cache 24h, fallback tasso costante) o forward coperto — helper calcola_costo_chf testato (53 check, 0 fail: 2 fix reali durante lo sviluppo — segno del risparmio_cambio e to_numpy su maschera PeriodArray); KPI costo €/CHF/tasso medio ponderato/sensibilità ±5%, confronto copertura cambio, grafico mensile € vs CHF + EURCHF medio, tabella sensibilità + dettaglio mensile + export CSV. Nessun bug residuo, nessun segreto hardcoded.
 - Nuova tab123 "🕰️ Lag di indicizzazione": confronto convenzioni di indicizzazione del prezzo di fornitura (Spot, Media M, M-1, M-2, Trimestrale, Mobile 30gg) sul periodo storico con profilo F1/F2/F3 — helper calcola_lag_indicizzazione testato (55 check, 0 fail: 6 in sviluppo con fix del test e 2 fix reali — guardia contro indici numerici interpretati come nanosecondi, e nuovo KPI €/MWh medio sull'energia coperta per confronti equi tra coperture diverse); KPI costo spot/migliore a copertura totale/risparmio/tracking error M-1, grafico costo mensile per convenzione, tabella riepilogo + dettaglio mensile + export CSV. Nessun bug residuo, nessun segreto hardcoded.
