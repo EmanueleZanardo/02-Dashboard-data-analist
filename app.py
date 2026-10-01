@@ -1378,6 +1378,197 @@ def calcola_lag_indicizzazione(prezzi, mw_f1=2.0, mw_f2=1.5, mw_f3=1.0):
     return out
 
 
+@st.cache_data(ttl=86400, show_spinner=False)
+def scarica_fx_ecb(data_inizio, data_fine, timeout=10):
+    """Cambio giornaliero EUR/CHF da Frankfurter (dati BCE), serie pandas.
+
+    Domanda operativa: il prezzo Swissix/ENTSO-E e' in €/MWh ma un cliente
+    svizzero paga in franchi: il tasso EURCHF reale sposta il costo finale.
+
+    Ritorna pd.Series indicizzata per data (solo giorni con quotazione,
+    NaN scartati) oppure None se il download fallisce (offline, timeout,
+    formato inatteso): il chiamante deve avere un fallback (tasso costante).
+    """
+    try:
+        import urllib.request as _u
+        import json as _j
+        d0 = pd.Timestamp(data_inizio).strftime("%Y-%m-%d")
+        d1 = pd.Timestamp(data_fine).strftime("%Y-%m-%d")
+        url = (f"https://api.frankfurter.app/{d0}..{d1}?from=EUR&to=CHF")
+        req = _u.Request(url, headers={"User-Agent": "singularity-etrm/1.0"})
+        with _u.urlopen(req, timeout=timeout) as resp:
+            payload = _j.loads(resp.read().decode("utf-8"))
+        rates = payload.get("rates") or {}
+        if not rates:
+            return None
+        s = pd.Series({pd.Timestamp(k): float(v.get("CHF", float("nan")))
+                       for k, v in rates.items()}, dtype=float).dropna().sort_index()
+        return s if not s.empty else None
+    except Exception:
+        return None
+
+
+def calcola_costo_chf(prezzi, mw_f1=2.0, mw_f2=1.5, mw_f3=1.0, fx=None,
+                      fx_coperto=None):
+    """Costo di fornitura in franchi svizzeri (EUR/CHF) e impatto del cambio.
+
+    Domanda operativa: "quanto mi costa davvero in CHF la mia fornitura
+    indicizzata a prezzi in euro, e quanto mi sposta il conto un movimento
+    del cambio?" — il prezzo spot e' in €/MWh (ENTSO-E/Swissix) ma la cassa
+    e' in franchi: un EURCHF che si muove del 5% sposta il costo finale
+    dello stesso 5%.
+
+    Metodo:
+      - prezzi orari -> dropna; costo orario EUR = prezzo * MW della fascia
+        (mw_f1/mw_f2/mw_f3 via fascia_oraria); servono almeno 24 ore;
+      - fx: scalare (tasso costante, es. 0.95) oppure pd.Series giornaliera
+        EURCHF (data -> tasso; viene propagata alle ore con forward-fill,
+        poi back-fill sui buchi iniziali); se None, tasso costante 0.95;
+      - costo orario CHF = costo orario EUR * fx orario;
+      - aggregazione mensile: Mese, Costo EUR, Costo CHF, EURCHF medio;
+      - KPI: costo totale EUR/CHF, tasso medio ponderato sull'energia
+        (= CHF/EUR, confronto pulito), sensibilita': variazione del costo
+        CHF per shock del cambio di +/-1% e +/-5%;
+      - copertura del cambio: se fx_coperto (tasso forward negoziato) e'
+        fornito, costo a tasso coperto e risparmio/perdita vs tasso reale.
+
+    Proprieta' testabile: con fx scalare, costo CHF = costo EUR * fx
+    esattamente e il tasso medio ponderato = fx; il costo EUR e' identico
+    a somma(prezzo*mw).
+
+    NaN-safe: serie vuota o meno di 24 ore o energia nulla -> 'valido'
+    False. MW non validi, fx non valido (scalare <= 0 o serie vuota) o
+    indice non datetime -> 'errore' valorizzato.
+
+    Ritorna dict con 'errore', 'valido', 'df_mensile', 'costo_eur',
+    'costo_chf', 'fx_medio_ponderato', 'fx_usato' ('storico'/'costante'),
+    'n_giorni_fx', 'costo_chf_coperto', 'risparmio_cambio',
+    'sensibilita' ({-0.05,-0.01,0.01,0.05}: delta CHF),
+    'n_mesi', 'n_ore', 'mwh_totale', 'mw_f1', 'mw_f2', 'mw_f3'."""
+
+    vuoto = {"errore": None, "valido": False,
+             "df_mensile": pd.DataFrame(columns=["Mese", "Costo EUR",
+                                                 "Costo CHF", "EURCHF medio"]),
+             "costo_eur": 0.0, "costo_chf": 0.0, "fx_medio_ponderato": None,
+             "fx_usato": None, "n_giorni_fx": 0, "costo_chf_coperto": None,
+             "risparmio_cambio": None, "sensibilita": {},
+             "n_mesi": 0, "n_ore": 0, "mwh_totale": 0.0,
+             "mw_f1": None, "mw_f2": None, "mw_f3": None}
+
+    def _err(msg):
+        v = dict(vuoto)
+        v["errore"] = msg
+        return v
+
+    try:
+        mws = [float(mw_f1), float(mw_f2), float(mw_f3)]
+    except (TypeError, ValueError):
+        return _err("Potenze per fascia non valide.")
+    if any(not (m >= 0) for m in mws) or sum(mws) <= 0:
+        return _err("Le potenze devono essere >= 0 e almeno una > 0.")
+    if any(m > 5000 for m in mws):
+        return _err("Potenza per fascia oltre il limite (5000 MW).")
+
+    try:
+        s = pd.Series(prezzi, dtype=float).dropna()
+    except Exception:
+        return _err("Serie prezzi non valida.")
+    if s.empty:
+        return dict(vuoto)
+    if not isinstance(s.index, pd.DatetimeIndex):
+        if pd.api.types.is_integer_dtype(s.index) or pd.api.types.is_float_dtype(s.index):
+            return _err("Indice dei prezzi non interpretabile come date.")
+        try:
+            s.index = pd.to_datetime(s.index)
+        except Exception:
+            return _err("Indice dei prezzi non interpretabile come date.")
+    ore = len(s)
+    if ore < 24:
+        return dict(vuoto)
+
+    fasce = s.index.map(fascia_oraria)
+    mw_h = fasce.map({"F1": mws[0], "F2": mws[1], "F3": mws[2]}).astype(float).to_numpy()
+    mwh = float(mw_h.sum())
+    if mwh <= 0:
+        return dict(vuoto)
+    costo_eur_h = s.to_numpy(dtype=float) * mw_h
+
+    fx_usato = "costante"
+    n_giorni_fx = 0
+    try:
+        if fx is None:
+            fx_h = np.full(ore, 0.95)
+        elif isinstance(fx, pd.Series):
+            fxd = pd.Series(fx, dtype=float).dropna()
+            if fxd.empty or (fxd <= 0).any():
+                return _err("Serie EURCHF non valida (vuota o tassi <= 0).")
+            if not isinstance(fxd.index, pd.DatetimeIndex):
+                fxd.index = pd.to_datetime(fxd.index)
+            fxd = fxd.sort_index()
+            giornate = pd.Series(s.index.normalize()).drop_duplicates().to_numpy()
+            fx_g = fxd.reindex(pd.DatetimeIndex(giornate)).ffill().bfill()
+            fx_h = fx_g.reindex(s.index.normalize()).to_numpy(dtype=float)
+            fx_usato = "storico"
+            n_giorni_fx = int(fxd.notna().sum())
+        else:
+            fxv = float(fx)
+            if not (fxv > 0):
+                return _err("Tasso EURCHF deve essere > 0.")
+            fx_h = np.full(ore, fxv)
+    except Exception as e:
+        return _err(f"Tasso EURCHF non interpretabile: {e}")
+    if not np.all(np.isfinite(fx_h)) or (fx_h <= 0).any():
+        return _err("Tasso EURCHF non valido sulle ore del periodo.")
+
+    costo_chf_h = costo_eur_h * fx_h
+    costo_eur = float(np.sum(costo_eur_h))
+    costo_chf = float(np.sum(costo_chf_h))
+    fx_medio = costo_chf / costo_eur if costo_eur != 0 else None
+
+    mese = s.index.to_period("M")
+    mesi_ord = mese.unique()
+    righe = []
+    for m in mesi_ord:
+        mask = mese.to_numpy() == m
+        ce = float(np.sum(costo_eur_h[mask]))
+        cc = float(np.sum(costo_chf_h[mask]))
+        righe.append({"Mese": str(m), "Costo EUR": round(ce, 2),
+                      "Costo CHF": round(cc, 2),
+                      "EURCHF medio": round(cc / ce, 4) if ce != 0 else None})
+    df = pd.DataFrame(righe, columns=["Mese", "Costo EUR", "Costo CHF",
+                                      "EURCHF medio"])
+
+    sens = {}
+    for shock in (-0.05, -0.01, 0.01, 0.05):
+        sens[shock] = round(costo_chf * shock, 2)
+
+    costo_chf_coperto = None
+    risparmio_cambio = None
+    if fx_coperto is not None:
+        try:
+            fxc = float(fx_coperto)
+        except (TypeError, ValueError):
+            return _err("Tasso di cambio coperto non valido.")
+        if not (fxc > 0):
+            return _err("Tasso di cambio coperto deve essere > 0.")
+        costo_chf_coperto = round(costo_eur * fxc, 2)
+        risparmio_cambio = round(costo_chf - costo_chf_coperto, 2)
+
+    out = dict(vuoto)
+    out.update({"valido": True, "df_mensile": df,
+                "costo_eur": round(costo_eur, 2),
+                "costo_chf": round(costo_chf, 2),
+                "fx_medio_ponderato": round(fx_medio, 4) if fx_medio else None,
+                "fx_usato": fx_usato, "n_giorni_fx": n_giorni_fx,
+                "costo_chf_coperto": costo_chf_coperto,
+                "risparmio_cambio": risparmio_cambio,
+                "sensibilita": sens,
+                "n_mesi": len(mesi_ord), "n_ore": ore,
+                "mwh_totale": round(mwh, 2),
+                "mw_f1": mws[0], "mw_f2": mws[1], "mw_f3": mws[2]})
+    return out
+
+
 def calcola_rischio_quanto(prezzi, mw_base=2.0, rho=0.3, vol_vol=0.15,
                            n_giorni=90, n_scenari=2000, budget=None, seed=42):
     """Rischio quanto Monte Carlo: correlazione prezzo spot <-> volume prelevato.
@@ -14446,7 +14637,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -24583,6 +24774,91 @@ elif workspace == _('ws8'):
                 key="csv_li",
             )
         st.caption("Uso pratico: se 'Media M' o 'Trimestrale' battono lo spot sul tuo periodo, un contratto con lag ti avrebbe fatto risparmiare — ma il tracking error dice quanto il costo mensile balla rispetto allo spot (budget meno prevedibile). M-1/M-2 premiano quando i prezzi salgono (paghi la media piu' bassa dei mesi scorsi) e puniscono quando scendono: guardali insieme al tab 'Fixing advisor'. Limiti: medie aritmetiche semplici su ore reali, nessun costo di sbilanciamento, nessuna componente fissa di contratto, profilo di prelievo costante per fascia.")
+
+    with tab124:
+        titolo_chf = edu("Costo in franchi (EUR/CHF)", "I prezzi Swissix/ENTSO-E sono in €/MWh ma un cliente svizzero paga la bolletta in franchi: il tasso EURCHF applicato al tuo costo orario sposta il conto finale. Con il tasso storico giornaliero (fonte BCE via Frankfurter) vedi quanto il cambio ha inciso mese per mese; con un tasso costante vedi la conversione pura; con il tasso coperto (forward negoziato col fornitore) vedi se la copertura del cambio ti ha fatto risparmiare o ti e' costata.")
+        st.markdown(f"<h1>💱 {titolo_chf}</h1>", unsafe_allow_html=True)
+        chf1, chf2, chf3 = st.columns(3)
+        mw1_chf = chf1.slider("Potenza F1 (MW)", min_value=0.0, max_value=20.0, value=2.0, step=0.1, key="chf_mwf1",
+                              help="Prelievo medio nelle ore di punta (lun-ven 8-19).")
+        mw2_chf = chf2.slider("Potenza F2 (MW)", min_value=0.0, max_value=20.0, value=1.5, step=0.1, key="chf_mwf2",
+                              help="Prelievo medio nelle ore intermedie.")
+        mw3_chf = chf3.slider("Potenza F3 (MW)", min_value=0.0, max_value=20.0, value=1.0, step=0.1, key="chf_mwf3",
+                              help="Prelievo medio nelle ore fuori punta (notti, weekend).")
+        usa_storico = st.toggle("Usa tasso storico giornaliero EUR/CHF (fonte BCE)", value=True,
+                                help="Scarica le quotazioni giornaliere EUR/CHF dalla BCE (via Frankfurter). Se il download fallisce, ripiega sul tasso costante.",
+                                key="chf_storico")
+        fx_serie = None
+        if usa_storico:
+            with st.spinner("Scaricamento EUR/CHF giornaliero..."):
+                fx_serie = scarica_fx_ecb(prezzi.index.min(), prezzi.index.max())
+            if fx_serie is None:
+                st.warning("⚠️ Download EUR/CHF non riuscito: uso il tasso costante qui sotto.")
+        fx_cost = st.number_input("Tasso EURCHF costante (fallback / confronto)", min_value=0.01, value=0.95,
+                                  step=0.01, format="%.4f", key="chf_fxcost",
+                                  help="Tasso usato se il download storico fallisce, o come base di confronto.")
+        copre = st.checkbox("Ho un tasso di cambio coperto (forward) da confrontare", value=False, key="chf_copre")
+        fx_coperto_in = None
+        if copre:
+            fx_coperto_in = st.number_input("Tasso EURCHF coperto (forward negoziato)", min_value=0.01, value=0.93,
+                                            step=0.01, format="%.4f", key="chf_fxcoperto",
+                                            help="Tasso di cambio bloccato col fornitore/tesoreria: il tab calcola quanto ti ha fatto risparmiare (o costare) rispetto al tasso reale.")
+        ris_chf = calcola_costo_chf(prezzi, mw_f1=mw1_chf, mw_f2=mw2_chf, mw_f3=mw3_chf,
+                                    fx=fx_serie if fx_serie is not None else fx_cost,
+                                    fx_coperto=fx_coperto_in)
+        if ris_chf["errore"]:
+            st.error(ris_chf["errore"])
+        elif not ris_chf["valido"]:
+            st.warning("Servono almeno 24 ore di prezzi e un profilo di prelievo con energia > 0.")
+        else:
+            if ris_chf["fx_usato"] == "storico":
+                st.info(f"ℹ️ Tasso storico giornaliero BCE: {ris_chf['n_giorni_fx']} quotazioni sul periodo.")
+            k1, k2, k3, k4 = st.columns(4)
+            render_kpi("Costo totale (€)", f"€ {ris_chf['costo_eur']:,.0f}", k1)
+            render_kpi("Costo totale (CHF)", f"CHF {ris_chf['costo_chf']:,.0f}", k2)
+            render_kpi("EURCHF medio ponderato", f"{ris_chf['fx_medio_ponderato']:.4f}", k3)
+            s_chf = ris_chf["sensibilita"]
+            render_kpi("Sensibilità cambio ±5%", f"±CHF {abs(s_chf[0.05]):,.0f}", k4)
+            if ris_chf["risparmio_cambio"] is not None:
+                rc = ris_chf["risparmio_cambio"]
+                segno_rc = "🟢" if rc >= 0 else "🔴"
+                st.info(f"{segno_rc} Copertura cambio @ {fx_coperto_in:.4f}: costo a tasso coperto CHF {ris_chf['costo_chf_coperto']:,.0f} — "
+                        f"{'risparmio' if rc >= 0 else 'extracosto'} di CHF {abs(rc):,.0f} rispetto al tasso reale.")
+            df_chf = ris_chf["df_mensile"]
+            fig_chf = go.Figure()
+            fig_chf.add_trace(go.Scatter(x=df_chf["Mese"], y=df_chf["Costo EUR"], mode="lines+markers",
+                                         name="Costo (€)", line=dict(color="#3b82f6", width=2),
+                                         hovertemplate="Mese %{x}<br>€ %{y:,.0f}<extra></extra>"))
+            fig_chf.add_trace(go.Scatter(x=df_chf["Mese"], y=df_chf["Costo CHF"], mode="lines+markers",
+                                         name="Costo (CHF)", line=dict(color="#ef4444", width=2),
+                                         hovertemplate="Mese %{x}<br>CHF %{y:,.0f}<extra></extra>"))
+            if ris_chf["fx_usato"] == "storico":
+                fig_chf.add_trace(go.Scatter(x=df_chf["Mese"], y=df_chf["EURCHF medio"], mode="lines",
+                                             name="EURCHF medio", line=dict(color="#eab308", width=1.5, dash="dash"),
+                                             yaxis="y2",
+                                             hovertemplate="Mese %{x}<br>EURCHF %{y:.4f}<extra></extra>"))
+                fig_chf.update_layout(yaxis2=dict(title="EURCHF", overlaying="y", side="right",
+                                                  showgrid=False, tickformat=".4f"))
+            fig_chf.update_layout(template="plotly_dark", height=380,
+                                  title=f"Costo mensile in € e CHF ({ris_chf['n_mesi']} mesi, {ris_chf['mwh_totale']:,.0f} MWh)",
+                                  xaxis_title="Mese", yaxis_title="Costo")
+            st.plotly_chart(fig_chf, use_container_width=True)
+            st.markdown("**Sensibilità al cambio**")
+            st.dataframe(pd.DataFrame([
+                {"Shock EURCHF": f"{int(s * 100):+d}%", "Δ costo (CHF)": f"{'CHF ' if d >= 0 else '−CHF '}{abs(d):,.0f}"}
+                for s, d in sorted(ris_chf["sensibilita"].items())]),
+                use_container_width=True, hide_index=True)
+            st.markdown("**Dettaglio mensile**")
+            st.dataframe(df_chf, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta costo mensile €/CHF (CSV)",
+                df_chf.to_csv(index=False).encode("utf-8"),
+                file_name=f"costo_chf_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Costo mensile di fornitura in euro e franchi con EURCHF medio del mese.",
+                key="csv_chf",
+            )
+        st.caption("Uso pratico: se il franco si rafforza (EURCHF giu') paghi meno a parita' di prezzi in euro — la tabella di sensibilita' quantifica subito l'effetto sul tuo budget in CHF. Confronta il tasso coperto col tasso medio ponderato: se il forward e' sotto la media storica, la copertura ti sta facendo pagare di piu'. Limiti: cambio giornaliero propagato alle ore (niente intraday FX), nessun costo di transazione sul cambio, profilo di prelievo costante per fascia.")
 
 
 # Footer
