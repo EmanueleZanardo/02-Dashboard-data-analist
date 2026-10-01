@@ -5221,8 +5221,23 @@ def calcola_mtm(prezzi, contratti):
     0 ore e MtM 0, senza errori.
     Ritorna (df_dettaglio, cumul_mtm): il DataFrame ha un rigo per contratto
     (Nome, Lato, Prezzo fisso, Volume, Ore delivery, Prezzo medio realizzato, MtM);
-    cumul_mtm è la Series del MtM cumulato orario sommato su tutti i contratti."""
+    cumul_mtm è la Series del MtM cumulato orario sommato su tutti i contratti.
+    Serie prezzi vuota o con indice non datetime -> (df vuoto con le colonne
+    giuste, serie cumulata vuota), senza AttributeError."""
+    _COLS = ["Nome", "Lato", "Prezzo fisso (€/MWh)", "Volume (MW)",
+             "Ore delivery", "Prezzo medio realizzato (€/MWh)", "MtM (€)"]
+
+    def _vuoto():
+        return (pd.DataFrame(columns=_COLS),
+                pd.Series(dtype=float, name="MtM cumulato (€)"))
+
+    try:
+        prezzi = pd.Series(prezzi, dtype=float)
+    except Exception:
+        return _vuoto()
     idx = prezzi.index
+    if not isinstance(idx, pd.DatetimeIndex) or len(prezzi) == 0:
+        return _vuoto()
     v = prezzi.values.astype(float)
     righe = []
     mtm_orario_tot = np.zeros(len(v))
@@ -5257,8 +5272,7 @@ def calcola_mtm(prezzi, contratti):
                       "Volume (MW)": mw, "Ore delivery": ore,
                       "Prezzo medio realizzato (€/MWh)": round(realizzato, 2),
                       "MtM (€)": round(mtm, 2)})
-    df = pd.DataFrame(righe, columns=["Nome", "Lato", "Prezzo fisso (€/MWh)", "Volume (MW)",
-                                      "Ore delivery", "Prezzo medio realizzato (€/MWh)", "MtM (€)"])
+    df = pd.DataFrame(righe, columns=_COLS)
     cumul = pd.Series(np.cumsum(mtm_orario_tot), index=idx, name="MtM cumulato (€)")
     return df, cumul
 
