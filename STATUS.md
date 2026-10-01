@@ -1,14 +1,15 @@
 # STATUS.md — 02-Dashboard-data-analist (Singularity Quant ETRM)
 
-**Ultimo aggiornamento: 01/10/2026 01:40 CEST**
+**Ultimo aggiornamento: 01/10/2026 ~02:00 CEST**
 
 ## Stato
 - Dashboard Streamlit "Singularity Quant ETRM", live su https://czpox8o8x6arnxw96txnvt.streamlit.app/.
-- Ultimi commit: 4ae9624 (test tab115), 604eb24 (STATUS tab115), d7e971f (tab115 Comparatore tariffe).
-- Test: 47/47 verdi (tests/test_helpers.py) + 30/30 check tab115 + 45/45 nuovi check tab116; regressione: 19/19.
+- Ultimo commit: b96f2680 (test tab116, 01/10 01:51 CEST).
+- Test: 47/47 verdi (tests/test_helpers.py) + 30/30 check tab115 + 45/45 check tab116; regressione: 19/19.
 
 ## Ultimi eventi verificati (01/10/2026)
-- Nuova tab116 "📤 Il mio carico": caricamento CSV del profilo di carico reale dell'utente (auto-riconoscimento colonne, conversioni kW/kWh, ricampionamento sub-orario, normalizzazione tz) oppure profilo demo uffici; helper parse_csv_carico + calcola_analisi_carico_reale testati (45 check, 0 fail); KPI energia/picco/fattore di carico/costo a spot/prezzo medio/correlazione, curva di durata del carico, profilo orario, tabella + export CSV. Nessun bug, nessun segreto hardcoded.
+- QA 01:40 CEST: nessuna modifica al repo remoto da b96f2680; app.py compilava, nessun segreto hardcoded (chiavi solo via st.secrets).
+- Nuova tab116 "📤 Il mio carico": caricamento CSV del profilo di carico reale dell'utente (auto-riconoscimento colonne, conversioni kW/kWh, ricampionamento sub-orario, normalizzazione tz) oppure profilo demo uffici; helper parse_csv_carico + calcola_analisi_carico_reale testati (45 check, 0 fail); KPI energia/picco/fattore di carico/costo a spot/prezzo medio/correlazione, curva di durata del carico, profilo orario, tabella + export CSV. Push in 4 commit (2e8e57d, b712344, e847ac1, b96f268), HEAD remoto verificato b96f268.
 - Nuova tab115 "🧾 Comparatore tariffe": confronto di 6 strutture tariffarie (spot indicizzata, flat, F1/F2/F3, peak/off-peak, spot+spread, spot con cap) sullo stesso profilo di prelievo; helper calcola_confronto_tariffe testato (30 check, 0 fail); KPI migliore/risparmio vs peggiore, barre orizzontali, tabella + export CSV. Nessun bug, nessun segreto hardcoded.
 
 ## Ultimi eventi verificati (30/09/2026)
