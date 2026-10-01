@@ -1918,6 +1918,168 @@ def calcola_ricavi_riserva(prezzi, mw_primaria=0.0, mw_secondaria=0.0,
             "sensibilita": sensibilita, "n_mesi": n_mesi, "n_ore": n_ore}
 
 
+# Probabilita' di default annua (%) implicita per classe di rating: stime
+# indicative di mercato, coerenti con le tabelle storiche delle agenzie.
+# L'utente puo' sempre sovrascriverle con "Personalizzato" nella UI.
+CVA_RATING_PD = {
+    "AAA": 0.02, "AA": 0.04, "A": 0.08, "BBB": 0.25,
+    "BB": 0.90, "B": 3.00, "CCC": 12.00,
+}
+
+
+def calcola_cva(esposizioni, pd_annua_pct=1.0, lgd_pct=45.0, orizzonte_anni=1.0,
+                nomi=None):
+    """Credit Valuation Adjustment (CVA) sulle posizioni di copertura.
+
+    Domanda operativa: "quanto perdo in atteso se una controparte dei miei
+    forward fallisce?" — il CVA e' la perdita attesa da rischio di
+    controparte: per ogni controparte, CVA = EAD x PD(periodo) x LGD, dove
+    EAD e' l'esposizione al default (solo MtM positivo: se il MtM e'
+    negativo devo io soldi alla controparte, quindi il suo default non mi
+    fa perdere il mark-to-market), PD(periodo) = 1-(1-PD_annua)^t con
+    PD_annua in frazione, LGD la perdita in caso di default in frazione.
+
+    Metodo:
+      - esposizioni: dict {nome: mtm_eur} oppure lista/array di MtM in EUR
+        (i nomi arrivano da `nomi` o sono generati "Controparte 1..N");
+      - validazione: almeno una controparte e al massimo 50, MtM numerici
+        con |MtM| <= 1e12, nomi univoci e non vuoti, PD annua in [0,100] %,
+        LGD in [0,100] %, orizzonte in (0, 30] anni;
+      - per controparte: ead = max(mtm, 0.0); cva = ead * pd_per * lgd;
+      - quota = cva_i / cva_totale (0.0 se il totale e' 0);
+      - peggior controparte = quella con CVA massimo (None se tutte a 0);
+      - scenari PD: fattori 0.5 / 2 / 5 sulla PD annua a orizzonte fissato;
+      - scenari LGD: shock -20pp / +20pp con clamp in [0, 100];
+      - sensibilita' orizzonte: CVA totale a t = 0.5x / 1x / 2x
+        (clamp a 30 anni).
+
+    Proprieta' testabile: CVA = EAD*PD*LGD esattamente a orizzonte 1;
+    la somma dei CVA per controparte = cva_totale; le quote sommano a 1
+    quando il totale e' > 0; MtM negativi non contribuiscono; PD=0 o
+    LGD=0 -> CVA 0; PD doppia a orizzonte 1 -> CVA doppio.
+
+    NaN-safe: input non numerici, vuoti o fuori limite -> 'errore'
+    valorizzato, mai eccezioni.
+
+    Ritorna dict con 'errore', 'valido', 'df' (Nome, MtM (EUR), EAD (EUR),
+    PD annua (%), PD periodo (%), LGD (%), CVA (EUR), Quota), 'cva_totale',
+    'n_controparti', 'n_esposte', 'peggior_controparte', 'cva_peggiore',
+    'quota_peggiore', 'scenari_pd' ({fattore: cva}), 'scenari_lgd'
+    ({shock_pp: cva}), 'sens_orizzonte' ({t_anni: cva}), 'pd_periodo'."""
+
+    vuoto = {"errore": None, "valido": False,
+             "df": pd.DataFrame(
+                 columns=["Nome", "MtM (EUR)", "EAD (EUR)", "PD annua (%)",
+                          "PD periodo (%)", "LGD (%)", "CVA (EUR)", "Quota"]),
+             "cva_totale": 0.0, "n_controparti": 0, "n_esposte": 0,
+             "peggior_controparte": None, "cva_peggiore": 0.0,
+             "quota_peggiore": 0.0, "scenari_pd": {}, "scenari_lgd": {},
+             "sens_orizzonte": {}, "pd_periodo": 0.0}
+
+    def _err(msg):
+        v = dict(vuoto)
+        v["df"] = pd.DataFrame(columns=list(vuoto["df"].columns))
+        v["errore"] = msg
+        return v
+
+    # --- normalizza esposizioni in lista (nome, mtm) ---
+    coppie = []
+    try:
+        if isinstance(esposizioni, dict):
+            items = list(esposizioni.items())
+        else:
+            items = list(esposizioni)
+    except TypeError:
+        return _err("Esposizioni non valide: serve un dict {nome: MtM} o una lista di MtM.")
+    if not items:
+        return _err("Nessuna controparte: inserisci almeno un MtM.")
+    if len(items) > 50:
+        return _err("Troppe controparti (max 50).")
+    nomi_dati = list(nomi) if nomi is not None else []
+    for i, it in enumerate(items):
+        if isinstance(esposizioni, dict):
+            nome, mtm = it
+        else:
+            nome = nomi_dati[i] if i < len(nomi_dati) else f"Controparte {i + 1}"
+            mtm = it
+        try:
+            nome_s = str(nome).strip()
+            mtm_f = float(mtm)
+        except (TypeError, ValueError):
+            return _err(f"Controparte {i + 1}: nome o MtM non validi.")
+        if not nome_s:
+            return _err(f"Controparte {i + 1}: nome vuoto.")
+        if not np.isfinite(mtm_f) or abs(mtm_f) > 1e12:
+            return _err(f"'{nome_s}': MtM non valido (|MtM| <= 1e12).")
+        coppie.append((nome_s, mtm_f))
+    visti = set()
+    for nome_s, _ in coppie:
+        if nome_s in visti:
+            return _err(f"Nome controparte duplicato: '{nome_s}'.")
+        visti.add(nome_s)
+
+    # --- parametri ---
+    try:
+        pd_a = float(pd_annua_pct) / 100.0
+        lgd = float(lgd_pct) / 100.0
+        t_anni = float(orizzonte_anni)
+    except (TypeError, ValueError):
+        return _err("PD, LGD o orizzonte non validi.")
+    if not (0.0 <= pd_a <= 1.0):
+        return _err("La PD annua deve stare in [0, 100] %.")
+    if not (0.0 <= lgd <= 1.0):
+        return _err("La LGD deve stare in [0, 100] %.")
+    if not (0.0 < t_anni <= 30.0) or not np.isfinite(t_anni):
+        return _err("L'orizzonte deve stare in (0, 30] anni.")
+
+    def _pd_per(p_annua, t):
+        return 1.0 - (1.0 - p_annua) ** t
+
+    pd_per = _pd_per(pd_a, t_anni)
+
+    righe = []
+    for nome_s, mtm_f in coppie:
+        ead = max(mtm_f, 0.0)
+        cva = ead * pd_per * lgd
+        righe.append({"Nome": nome_s, "MtM (EUR)": mtm_f, "EAD (EUR)": ead,
+                      "PD annua (%)": pd_a * 100.0,
+                      "PD periodo (%)": pd_per * 100.0,
+                      "LGD (%)": lgd * 100.0, "CVA (EUR)": cva})
+    df = pd.DataFrame(righe)
+    cva_tot = float(df["CVA (EUR)"].sum())
+    if cva_tot > 0:
+        df["Quota"] = df["CVA (EUR)"] / cva_tot
+    else:
+        df["Quota"] = 0.0
+    n_esposte = int((df["EAD (EUR)"] > 0).sum())
+    if cva_tot > 0:
+        idx = int(df["CVA (EUR)"].idxmax())
+        peggiore = df.loc[idx, "Nome"]
+        cva_peg = float(df.loc[idx, "CVA (EUR)"])
+        quota_peg = float(df.loc[idx, "Quota"])
+    else:
+        peggiore, cva_peg, quota_peg = None, 0.0, 0.0
+
+    ead_tot = float(df["EAD (EUR)"].sum())
+    scenari_pd = {f: ead_tot * _pd_per(min(pd_a * f, 1.0), t_anni) * lgd
+                  for f in (0.5, 2.0, 5.0)}
+    scenari_lgd = {}
+    for shock_pp in (-20.0, 20.0):
+        lgd_s = min(max(lgd * 100.0 + shock_pp, 0.0), 100.0) / 100.0
+        scenari_lgd[shock_pp] = ead_tot * pd_per * lgd_s
+    sens_orizzonte = {}
+    for mult in (0.5, 1.0, 2.0):
+        t_s = min(t_anni * mult, 30.0)
+        sens_orizzonte[t_s] = ead_tot * _pd_per(pd_a, t_s) * lgd
+
+    return {"errore": None, "valido": True, "df": df,
+            "cva_totale": cva_tot, "n_controparti": len(coppie),
+            "n_esposte": n_esposte, "peggior_controparte": peggiore,
+            "cva_peggiore": cva_peg, "quota_peggiore": quota_peg,
+            "scenari_pd": scenari_pd, "scenari_lgd": scenari_lgd,
+            "sens_orizzonte": sens_orizzonte, "pd_periodo": pd_per}
+
+
 def calcola_rischio_quanto(prezzi, mw_base=2.0, rho=0.3, vol_vol=0.15,
                            n_giorni=90, n_scenari=2000, budget=None, seed=42):
     """Rischio quanto Monte Carlo: correlazione prezzo spot <-> volume prelevato.
@@ -14986,7 +15148,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -25380,6 +25542,117 @@ elif workspace == _('ws8'):
                 mime="text/csv",
                 help="Ricavi mensili da servizi di riserva (SDL) per prodotto.",
                 key="csv_riserva",
+            )
+
+    with tab127:
+        titolo_cva = edu("CVA controparte", "Il CVA (Credit Valuation Adjustment) e' la perdita attesa da rischio di controparte sulle tue coperture: per ogni controparte vale EAD x PD x LGD, dove EAD e' l'esposizione al default (solo il MtM positivo conta: se il MtM e' negativo sei tu a dovere soldi a loro), PD la probabilita' di default sul tuo orizzonte, LGD la perdita in caso di default. Inserisci il MtM per controparte (positivo = credito tuo, negativo = debito tuo), scegli il rating per la PD implicita o una PD personalizzata. Limiti: esposizione solo sul MtM corrente (niente PFE/profilo futuro), niente netting tra controparti, PD costante sull'orizzonte.")
+        st.markdown(f"<h1>🛡️ {titolo_cva}</h1>", unsafe_allow_html=True)
+        st.caption("Valori dimostrativi: inserisci i tuoi MtM per controparte.")
+        n_cva = st.slider("Numero di controparti", min_value=1, max_value=6, value=3,
+                          key="cva_n")
+        demo_mtm = [150000.0, -60000.0, 90000.0, 0.0, 0.0, 0.0]
+        demo_rat = ["A", "BBB", "BB", "BBB", "A", "BB"]
+        nomi_cva, mtm_cva, pd_cva = [], [], []
+        cols_cva = st.columns(n_cva)
+        for i in range(n_cva):
+            with cols_cva[i]:
+                nm = st.text_input(f"Nome {i + 1}", value=f"Controparte {i + 1}",
+                                   key=f"cva_nome_{i}")
+                rt = st.selectbox(f"Rating {i + 1}",
+                                  options=list(CVA_RATING_PD.keys()) + ["✏️ Personalizzato"],
+                                  index=list(CVA_RATING_PD.keys()).index(demo_rat[i]),
+                                  key=f"cva_rating_{i}",
+                                  help="PD annua implicita dal rating.")
+                if rt == "✏️ Personalizzato":
+                    pdv = st.number_input(f"PD annua % {i + 1}", min_value=0.0,
+                                           max_value=100.0, value=1.0, step=0.1,
+                                           format="%.2f", key=f"cva_pd_{i}")
+                else:
+                    pdv = CVA_RATING_PD[rt]
+                    st.caption(f"PD implicita: {pdv:.2f}%/anno")
+                mtm = st.number_input(f"MtM (EUR) {i + 1}", value=demo_mtm[i],
+                                      step=10000.0, format="%.0f", key=f"cva_mtm_{i}",
+                                      help="Positivo = credito tuo verso la controparte.")
+                nomi_cva.append(nm)
+                mtm_cva.append(mtm)
+                pd_cva.append(pdv)
+        p1, p2 = st.columns(2)
+        lgd_cva = p1.number_input("LGD — perdita in caso di default (%)", min_value=0.0,
+                                  max_value=100.0, value=45.0, step=5.0, format="%.1f",
+                                  key="cva_lgd",
+                                  help="Quota dell'esposizione persa se la controparte fallisce.")
+        t_cva = p2.number_input("Orizzonte (anni)", min_value=0.1, max_value=30.0,
+                                value=1.0, step=0.5, format="%.1f", key="cva_t")
+        # PD per controparte (rating o personalizzata), un solo calcolo con PD media
+        # ponderata sull'EAD per restare coerente con calcola_cva
+        ead_tmp = [max(m, 0.0) for m in mtm_cva]
+        ead_tot_tmp = sum(ead_tmp)
+        if ead_tot_tmp > 0:
+            pd_media = sum(e * p for e, p in zip(ead_tmp, pd_cva)) / ead_tot_tmp
+        else:
+            pd_media = sum(pd_cva) / len(pd_cva)
+        ris_cva = calcola_cva(dict(zip(nomi_cva, mtm_cva)), pd_annua_pct=pd_media,
+                              lgd_pct=lgd_cva, orizzonte_anni=t_cva)
+        if ris_cva["errore"]:
+            st.error(ris_cva["errore"])
+        elif not ris_cva["valido"]:
+            st.warning("Inserisci almeno una controparte con MtM valido.")
+        else:
+            k1, k2, k3, k4 = st.columns(4)
+            render_kpi("CVA totale (perdita attesa)", f"€ {ris_cva['cva_totale']:,.0f}", k1)
+            render_kpi("Peggior controparte",
+                       ris_cva["peggior_controparte"] or "—", k2)
+            render_kpi("Quota peggior controparte",
+                       f"{ris_cva['quota_peggiore'] * 100:.1f}%", k3)
+            render_kpi("Controparti esposte",
+                       f"{ris_cva['n_esposte']}/{ris_cva['n_controparti']}", k4)
+            df_cva = ris_cva["df"]
+            df_cva_pos = df_cva[df_cva["EAD (EUR)"] > 0]
+            if not df_cva_pos.empty:
+                fig_cva = go.Figure()
+                fig_cva.add_trace(go.Bar(
+                    x=df_cva_pos["Nome"], y=df_cva_pos["CVA (EUR)"],
+                    marker_color="#f87171", name="CVA",
+                    hovertemplate="%{x}<br>€ %{y:,.0f}<extra></extra>"))
+                fig_cva.update_layout(template="plotly_dark", height=340,
+                                      title="CVA per controparte (solo MtM positivi)",
+                                      xaxis_title="Controparte", yaxis_title="EUR")
+                st.plotly_chart(fig_cva, use_container_width=True)
+            else:
+                st.info("Nessuna esposizione positiva: con tutti i MtM ≤ 0 il CVA è zero.")
+            st.markdown("**Dettaglio per controparte**")
+            st.dataframe(df_cva.assign(
+                **{"MtM (EUR)": df_cva["MtM (EUR)"].map(lambda v: f"€ {v:,.0f}"),
+                  "EAD (EUR)": df_cva["EAD (EUR)"].map(lambda v: f"€ {v:,.0f}"),
+                  "CVA (EUR)": df_cva["CVA (EUR)"].map(lambda v: f"€ {v:,.0f}"),
+                  "Quota": df_cva["Quota"].map(lambda v: f"{v * 100:.1f}%"),
+                  "PD annua (%)": df_cva["PD annua (%)"].map(lambda v: f"{v:.2f}%"),
+                  "PD periodo (%)": df_cva["PD periodo (%)"].map(lambda v: f"{v:.2f}%"),
+                  "LGD (%)": df_cva["LGD (%)"].map(lambda v: f"{v:.1f}%")}),
+                use_container_width=True, hide_index=True)
+            st.markdown("**Scenari PD (shock sulla probabilità di default)**")
+            st.dataframe(pd.DataFrame([
+                {"Shock PD": f"{int(f * 100)}% della base" if f < 1 else f"{int(f)}× la base",
+                 "CVA totale": f"€ {c:,.0f}"}
+                for f, c in sorted(ris_cva["scenari_pd"].items())]),
+                use_container_width=True, hide_index=True)
+            st.markdown("**Scenari LGD (shock in punti percentuali)**")
+            st.dataframe(pd.DataFrame([
+                {"Shock LGD": f"{s:+.0f} pp", "CVA totale": f"€ {c:,.0f}"}
+                for s, c in sorted(ris_cva["scenari_lgd"].items())]),
+                use_container_width=True, hide_index=True)
+            st.markdown("**Sensibilità all'orizzonte**")
+            st.dataframe(pd.DataFrame([
+                {"Orizzonte": f"{t:.1f} anni", "CVA totale": f"€ {c:,.0f}"}
+                for t, c in sorted(ris_cva["sens_orizzonte"].items())]),
+                use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta CVA per controparte (CSV)",
+                ris_cva["df"].to_csv(index=False).encode("utf-8"),
+                file_name=f"cva_controparte_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Dettaglio CVA per controparte.",
+                key="csv_cva",
             )
 
 # Footer
