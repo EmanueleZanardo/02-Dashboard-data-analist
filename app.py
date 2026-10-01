@@ -2690,6 +2690,148 @@ def genera_csv_report(riep, d0, d1):
     return "\n".join(righe) + "\n"
 
 
+def calcola_premio_rischio(prezzi, lookback_mesi=3, copertura_min=0.7):
+    """Premio di rischio ex-post del forward: F_proxy - spot realizzato.
+
+    Per ogni mese di consegna M presente nei dati storici:
+      - FORWARD PROXY: media oraria dello spot nella finestra di formazione,
+        cioe' i `lookback_mesi` mesi di calendario immediatamente prima di M
+        (proxy backward-looking del prezzo forward quotabile prima della
+        consegna: e' il livello medio che il mercato "vedeva" prima di M);
+      - REALIZZATO: media oraria dello spot nel mese di consegna M;
+      - PREMIO = Forward proxy - Realizzato, in EUR/MWh e in % sul realizzato
+        (calcolato anche in versione Peak, ore lun-ven 8:00-20:00).
+
+    Lettura operativa: il premio ex-post dice chi ha pagato il rischio.
+      - Premio positivo persistente: il forward e' costato piu' dello spot
+        realizzato -> l'ACQUIRENTE a termine ha pagato il premio (il venditore
+        ha incassato piu' che sullo spot); per un consumatore conviene essere
+        cauti nel fissare a termine, per un produttore conviene vendere forward.
+      - Premio negativo persistente: il forward quotava sotto lo spot
+        realizzato -> il VENDITORE a termine ha lasciato soldi sul tavolo;
+        per un acquirente fissare il prezzo in anticipo ha pagato.
+    Diverso dal tab "Struttura a termine" (pendenza contango/backwardation tra
+    strip impliciti) e dal tab "Spread calendario" (spread tra strip): qui si
+    confronta il livello forward osservabile PRIMA con lo spot realizzato
+    DOPO, mese per mese, misurando il bias sistematico del forward.
+
+    NaN-safe: serie vuota, indice non datetime, lookback/copertura non validi
+    -> 'ok' False; mesi di consegna o finestre di formazione con copertura
+    oraria < copertura_min saltati onestamente; mai eccezioni.
+
+    Ritorna dict con 'ok', 'lookback_mesi', 'n_mesi', 'df' (colonne:
+    'Mese consegna', 'Ore formazione', 'Ore consegna',
+    'Forward proxy Base (\u20ac/MWh)', 'Realizzato Base (\u20ac/MWh)',
+    'Premio Base (\u20ac/MWh)', 'Premio Base (%)',
+    'Forward proxy Peak (\u20ac/MWh)', 'Realizzato Peak (\u20ac/MWh)',
+    'Premio Peak (\u20ac/MWh)', 'Premio Peak (%)'),
+    'premio_medio_base', 'premio_medio_pct_base', 'premio_medio_peak',
+    'quota_mesi_positivi', 'premio_ultimo_mese', 'mese_ultimo',
+    'bias_max_assoluto', 'mese_bias_max'.
+    """
+    E = "\u20ac/MWh"
+    cols = ["Mese consegna", "Ore formazione", "Ore consegna",
+            "Forward proxy Base (" + E + ")", "Realizzato Base (" + E + ")",
+            "Premio Base (" + E + ")", "Premio Base (%)",
+            "Forward proxy Peak (" + E + ")", "Realizzato Peak (" + E + ")",
+            "Premio Peak (" + E + ")", "Premio Peak (%)"]
+    vuoto = {"ok": False, "lookback_mesi": lookback_mesi, "n_mesi": 0,
+             "df": pd.DataFrame(columns=cols),
+             "premio_medio_base": None, "premio_medio_pct_base": None,
+             "premio_medio_peak": None, "quota_mesi_positivi": None,
+             "premio_ultimo_mese": None, "mese_ultimo": None,
+             "bias_max_assoluto": None, "mese_bias_max": None}
+
+    try:
+        lb = int(lookback_mesi)
+        if lb < 1 or float(lookback_mesi) != lb:
+            return dict(vuoto)
+        cop = float(copertura_min)
+        if not (0 < cop <= 1):
+            return dict(vuoto)
+    except Exception:
+        return dict(vuoto)
+
+    try:
+        p = prezzi.astype(float)
+        p = p[~p.index.duplicated(keep="first")].sort_index()
+    except Exception:
+        return dict(vuoto)
+    if len(p) == 0:
+        return dict(vuoto)
+    try:
+        if not isinstance(p.index, pd.DatetimeIndex):
+            return dict(vuoto)
+    except Exception:
+        return dict(vuoto)
+
+    mesi = sorted({(t.year, t.month) for t in p.index})
+    righe = []
+    for (y, m) in mesi:
+        try:
+            inizio = pd.Timestamp(y, m, 1)
+            form_ini = inizio - pd.DateOffset(months=lb)
+            fine = inizio + pd.DateOffset(months=1)
+        except Exception:
+            continue
+        form = p[(p.index >= form_ini) & (p.index < inizio)]
+        dlv = p[(p.index >= inizio) & (p.index < fine)]
+        ore_form_att = int((inizio - form_ini).total_seconds() // 3600)
+        ore_dlv_att = int((fine - inizio).total_seconds() // 3600)
+        if ore_form_att <= 0 or ore_dlv_att <= 0:
+            continue
+        if len(form) < cop * ore_form_att or len(dlv) < cop * ore_dlv_att:
+            continue
+        fidx, didx = form.index, dlv.index
+        fp = (fidx.dayofweek < 5) & (fidx.hour >= 8) & (fidx.hour < 20)
+        dp = (didx.dayofweek < 5) & (didx.hour >= 8) & (didx.hour < 20)
+        F_b, S_b = float(form.mean()), float(dlv.mean())
+        F_p = float(form[fp].mean()) if fp.any() else np.nan
+        S_p = float(dlv[dp].mean()) if dp.any() else np.nan
+        if not (np.isfinite(F_b) and np.isfinite(S_b)):
+            continue
+        pb = F_b - S_b
+        ppb = pb / S_b * 100.0 if S_b != 0 else np.nan
+        if np.isfinite(F_p) and np.isfinite(S_p):
+            pp = F_p - S_p
+            ppp = pp / S_p * 100.0 if S_p != 0 else np.nan
+        else:
+            pp, ppp = np.nan, np.nan
+        righe.append({
+            "Mese consegna": f"{y:04d}-{m:02d}",
+            "Ore formazione": int(len(form)),
+            "Ore consegna": int(len(dlv)),
+            "Forward proxy Base (" + E + ")": round(F_b, 2),
+            "Realizzato Base (" + E + ")": round(S_b, 2),
+            "Premio Base (" + E + ")": round(pb, 2),
+            "Premio Base (%)": round(float(ppb), 2) if np.isfinite(ppb) else np.nan,
+            "Forward proxy Peak (" + E + ")": round(float(F_p), 2) if np.isfinite(F_p) else np.nan,
+            "Realizzato Peak (" + E + ")": round(float(S_p), 2) if np.isfinite(S_p) else np.nan,
+            "Premio Peak (" + E + ")": round(float(pp), 2) if np.isfinite(pp) else np.nan,
+            "Premio Peak (%)": round(float(ppp), 2) if np.isfinite(ppp) else np.nan,
+        })
+
+    df = pd.DataFrame(righe, columns=cols)
+    out = dict(vuoto)
+    out["df"] = df
+    out["n_mesi"] = len(df)
+    if len(df):
+        out["ok"] = True
+        pb_s = df["Premio Base (" + E + ")"].dropna()
+        ppb_s = df["Premio Base (%)"].dropna()
+        ppk_s = df["Premio Peak (" + E + ")"].dropna()
+        out["premio_medio_base"] = round(float(pb_s.mean()), 2) if len(pb_s) else None
+        out["premio_medio_pct_base"] = round(float(ppb_s.mean()), 2) if len(ppb_s) else None
+        out["premio_medio_peak"] = round(float(ppk_s.mean()), 2) if len(ppk_s) else None
+        out["quota_mesi_positivi"] = round(float((pb_s > 0).mean() * 100), 1) if len(pb_s) else None
+        out["premio_ultimo_mese"] = float(df["Premio Base (" + E + ")"].iloc[-1])
+        out["mese_ultimo"] = str(df["Mese consegna"].iloc[-1])
+        i_max = pb_s.abs().idxmax()
+        out["bias_max_assoluto"] = round(float(pb_s.loc[i_max]), 2)
+        out["mese_bias_max"] = str(df.loc[i_max, "Mese consegna"])
+    return out
+
+
 def calcola_drawdown_mtm(serie_pnl, soglia_eur=0.0):
     """Analisi drawdown della curva P&L cumulata di una posizione aperta.
 
@@ -16238,7 +16380,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -27510,6 +27652,118 @@ elif workspace == _('ws8'):
                 mime="text/csv",
                 help="Un solo file con tutte le sezioni: KPI, MENSILE, FASCE, SETTIMANALE, GIORNI (separatore ';').",
                 key="csv_report",
+            )
+
+    with tab135:
+        titolo_pr = edu("Premio di rischio ex-post del forward", "Il PREMIO DI RISCHIO ex-post misura quanto il FORWARD e' costato di piu' (o di meno) dello SPOT realizzato, mese per mese. Per ogni mese di consegna il tab confronta il FORWARD PROXY — la media dello spot nei mesi di formazione immediatamente precedenti (il livello medio che il mercato 'vedeva' prima della consegna) — con il PREZZO REALIZZATO nel mese di consegna. PREMIO = Forward proxy - Realizzato. Un premio positivo persistente significa che comprare a termine e' costato sistematicamente piu' che restare sullo spot: l'acquirente paga il rischio e il venditore incassa di piu' vendendo forward. Un premio negativo persistente significa che il forward quotava sotto lo spot realizzato: chi vendeva a termine ha lasciato soldi sul tavolo. Diverso dal tab 'Struttura a termine' (la PENDENZA contango/backwardation tra strip impliciti) e dallo 'Spread calendario' (spread tra strip): qui c'e' il confronto PRIMA vs DOPO, il bias sistematico del forward rispetto alla realta'.")
+        st.markdown(f"<h1>📏 {titolo_pr}</h1>", unsafe_allow_html=True)
+        st.caption("Forward proxy (media spot nella finestra di formazione) vs spot realizzato nel mese di consegna: chi ha pagato il rischio?")
+
+        c_pr1, c_pr2 = st.columns(2)
+        with c_pr1:
+            lb_pr = st.selectbox("Finestra di formazione (mesi prima della consegna)",
+                                 options=[1, 2, 3, 6], index=2,
+                                 help="Di quanti mesi di calendario prima della consegna si calcola la media spot usata come proxy del forward.",
+                                 key="lb_premio")
+        with c_pr2:
+            prof_pr = st.radio("Profilo", options=["Base", "Peak"],
+                               horizontal=True,
+                               help="Base = tutte le ore; Peak = ore lun-ven 8:00-20:00.",
+                               key="prof_premio")
+
+        pr = calcola_premio_rischio(prezzi, lookback_mesi=lb_pr)
+        if not pr["ok"] or pr["n_mesi"] < 2:
+            st.warning(f"Dati insufficienti per il premio di rischio (servono almeno {lb_pr + 1} mesi di storico con buona copertura oraria).")
+        else:
+            df_pr = pr["df"]
+            col_f = f"Forward proxy {prof_pr} (€/MWh)"
+            col_s = f"Realizzato {prof_pr} (€/MWh)"
+            col_p = f"Premio {prof_pr} (€/MWh)"
+            col_pp = f"Premio {prof_pr} (%)"
+            ser_p = df_pr[col_p].dropna()
+            ser_pp = df_pr[col_pp].dropna()
+
+            p1, p2, p3 = st.columns(3)
+            render_kpi(edu(f"Premio medio {prof_pr} (€/MWh)", "Media dei premi mensili: quanto in media il forward e' costato piu' (o meno) dello spot realizzato."),
+                       f"{ser_p.mean():+.2f}" if len(ser_p) else "n/d", p1)
+            render_kpi(edu(f"Premio medio {prof_pr} (%)", "Premio medio in percentuale sul prezzo realizzato: la 'tassa' percentuale del forward."),
+                       f"{ser_pp.mean():+.2f} %" if len(ser_pp) else "n/d", p2)
+            render_kpi(edu("Mesi con premio positivo", "Quota di mesi in cui il forward e' costato piu' dello spot realizzato."),
+                       f"{(ser_p > 0).mean() * 100:.1f} %" if len(ser_p) else "n/d", p3)
+            p4, p5 = st.columns(2)
+            ult_pr = df_pr.iloc[-1]
+            render_kpi(edu(f"Premio ultimo mese — {ult_pr['Mese consegna']} (€/MWh)", "Premio dell'ultimo mese di consegna completo disponibile."),
+                       f"{ult_pr[col_p]:+.2f}", p4)
+            i_bm = ser_p.abs().idxmax()
+            render_kpi(edu("Bias massimo assoluto (€/MWh)", "Il mese con lo scostamento forward-vs-realizzato piu' ampio: l'errore piu' costoso del forward."),
+                       f"{ser_p.loc[i_bm]:+.2f} ({df_pr.loc[i_bm, 'Mese consegna']})", p5)
+
+            medio_pr = float(ser_p.mean())
+            if medio_pr > 2:
+                st.caption(f"📊 Verdetto: premio medio {medio_pr:+.2f} €/MWh — il forward ha costato sistematicamente PIU' dello spot: chi compra a termine paga il rischio, chi vende incassa di piu' vendendo forward.")
+            elif medio_pr < -2:
+                st.caption(f"📊 Verdetto: premio medio {medio_pr:+.2f} €/MWh — il forward quotava sistematicamente SOTTO lo spot realizzato: chi vendeva a termine lasciava soldi sul tavolo, per un acquirente fissare in anticipo ha pagato.")
+            else:
+                st.caption(f"📊 Verdetto: premio medio {medio_pr:+.2f} €/MWh — forward in linea con lo spot realizzato, nessun bias sistematico evidente.")
+
+            st.markdown(f"**Premio mensile {prof_pr} (€/MWh)** — positivo = forward piu' caro dello spot")
+            colori_pr = ["#ef4444" if v >= 0 else "#10b981" for v in df_pr[col_p]]
+            fig_pr = go.Figure()
+            fig_pr.add_trace(go.Bar(
+                x=df_pr["Mese consegna"], y=df_pr[col_p], name="Premio",
+                marker_color=colori_pr,
+                hovertemplate="Mese: %{x}<br>Premio: %{y:+.2f} €/MWh<br>Forward proxy: %{customdata[0]:,.2f}<br>Realizzato: %{customdata[1]:,.2f}<extra></extra>",
+                customdata=df_pr[[col_f, col_s]].to_numpy()))
+            fig_pr.add_hline(y=0, line_color="#9ca3af", line_width=1)
+            fig_pr.update_layout(template="plotly_dark", height=380,
+                                 title=f"Premio di rischio mensile — {prof_pr} (finestra {lb_pr} mesi)",
+                                 xaxis_title="Mese di consegna", yaxis_title="Premio (€/MWh)")
+            st.plotly_chart(fig_pr, use_container_width=True)
+
+            st.markdown(f"**Forward proxy vs spot realizzato ({prof_pr})**")
+            fig_fs = go.Figure()
+            fig_fs.add_trace(go.Scatter(
+                x=df_pr["Mese consegna"], y=df_pr[col_f], name="Forward proxy",
+                mode="lines+markers", line=dict(color="#8b5cf6", width=2),
+                hovertemplate="Mese: %{x}<br>Forward proxy: %{y:,.2f} €/MWh<extra></extra>"))
+            fig_fs.add_trace(go.Scatter(
+                x=df_pr["Mese consegna"], y=df_pr[col_s], name="Spot realizzato",
+                mode="lines+markers", line=dict(color="#3b82f6", width=2),
+                hovertemplate="Mese: %{x}<br>Realizzato: %{y:,.2f} €/MWh<extra></extra>"))
+            fig_fs.update_layout(template="plotly_dark", height=360,
+                                 title="Cosa quotava il forward vs cosa e' successo davvero",
+                                 xaxis_title="Mese di consegna", yaxis_title="€/MWh")
+            st.plotly_chart(fig_fs, use_container_width=True)
+
+            st.markdown(f"**Scatter forward proxy vs realizzato ({prof_pr})** — sopra la bisettrice il forward ha sovrastimato")
+            lim_pr = [float(min(df_pr[col_f].min(), df_pr[col_s].min())),
+                      float(max(df_pr[col_f].max(), df_pr[col_s].max()))]
+            fig_sc = go.Figure()
+            fig_sc.add_trace(go.Scatter(
+                x=df_pr[col_s], y=df_pr[col_f], mode="markers+text",
+                text=df_pr["Mese consegna"], textposition="top center",
+                textfont=dict(size=9, color="#9ca3af"),
+                marker=dict(color="#eab308", size=9),
+                name="Mesi",
+                hovertemplate="Mese: %{text}<br>Realizzato: %{x:,.2f}<br>Forward proxy: %{y:,.2f}<extra></extra>"))
+            fig_sc.add_trace(go.Scatter(
+                x=lim_pr, y=lim_pr, mode="lines", name="Bisettrice (premio 0)",
+                line=dict(color="#9ca3af", dash="dash")))
+            fig_sc.update_layout(template="plotly_dark", height=420,
+                                 title="Forward proxy vs spot realizzato",
+                                 xaxis_title="Spot realizzato (€/MWh)",
+                                 yaxis_title="Forward proxy (€/MWh)")
+            st.plotly_chart(fig_sc, use_container_width=True)
+
+            st.markdown("**Dettaglio mensile**")
+            st.dataframe(df_pr, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta premio di rischio (CSV)",
+                df_pr.to_csv(index=False).encode("utf-8"),
+                file_name=f"premio_rischio_{d0}_{d1}.csv",
+                mime="text/csv",
+                help="Mese per mese: forward proxy, spot realizzato e premio (Base e Peak).",
+                key="csv_premio_rischio",
             )
 
 # Footer
