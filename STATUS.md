@@ -4,10 +4,11 @@
 
 ## Stato
 - Dashboard Streamlit "Singularity Quant ETRM", live su https://czpox8o8x6arnxw96txnvt.streamlit.app/.
-- Ultimo commit: (QA 01/10 12:40 - STATUS.md tab127).
-- Test: 47/47 verdi (tests/test_helpers.py) + 52/52 check tab127; regressione: 19/19.
+- Ultimo commit: (QA 01/10 13:40 - STATUS.md tab128).
+- Test: 47/47 verdi (tests/test_helpers.py) + 52/52 check tab127 + 46/46 check tab128; regressione: 19/19.
 
 ## Ultimi eventi verificati (01/10/2026)
+- Nuova tab128 "🔋 LCOS batteria": costo livellato di ogni MWh scaricato (PV di CAPEX+OPEX+energia di ricarica diviso PV dell'energia scaricata, con degrado geometrico ed efficienza round-trip) — helper calcola_lcos testato (46 check, 0 fail: 1 fix del test su kwargs duplicati, nessun fix del codice); KPI LCOS/PV costi/PV energia/energia anno 1/quota CAPEX, barre sensibilità ai cicli annui, scomposizione PV costi per componente, sensibilità a vita utile e costo ricarica, tabella annuale + export CSV. Nessun bug residuo, nessun segreto hardcoded.
 - Nuova tab127 "🛡️ CVA controparte": perdita attesa da rischio di controparte sulle coperture (CVA = EAD × PD × LGD per controparte, EAD solo su MtM positivo, PD(periodo) = 1-(1-PD_annua)^t) — helper calcola_cva testato (52 check, 0 fail: 2 fix del test sulla tolleranza float, nessun fix del codice); input fino a 6 controparti con nome + rating (PD implicita AAA→CCC) o PD personalizzata, LGD e orizzonte; KPI CVA totale/peggior controparte/quota/esposte, barre CVA, dettaglio per controparte, scenari PD/LGD, sensibilità orizzonte + export CSV. Nessun bug residuo, nessun segreto hardcoded.
 - Nuova tab126 "⚡ Ricavi da riserva (SDL)": ricavi dai servizi di riserva Swissgrid per un impianto flessibile (primaria FCR, secondaria aFRR, terziaria mFRR +/- con prezzi di potenza CHF/MW/h da aste settimanali + energia attivata per la terziaria) — helper calcola_ricavi_riserva testato (44 check, 0 fail: 1 fix del test sull'attesa dei mesi coperti da 2000h); KPI ricavo totale/medio mensile/miglior prodotto/quota, barre mensili impilate per prodotto, tabella ricavo per prodotto con annuo stimato per MW, scenari di scala MW, sensibilità ai prezzi di potenza, dettaglio mensile + export CSV. Nessun bug residuo, nessun segreto hardcoded.
 - Nuova tab125 "🌱 Garanzie d'origine": costo delle GO per rendere verde la fornitura (prezzi per tecnologia idro/solare/eolico con mix pesato normalizzato, quota verde 0-100%) — helper calcola_costo_go testato (50 check, 0 fail, nessun fix necessario); KPI costo totale/MWh verdi/prezzo medio/incidenza €/MWh, barre mensili, scenari per quota, sensibilità al prezzo GO ±, tabella mensile + export CSV. Nessun bug residuo, nessun segreto hardcoded.
