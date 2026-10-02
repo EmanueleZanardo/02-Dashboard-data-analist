@@ -18523,6 +18523,192 @@ def calcola_segnali_tecnici(prezzi, rsi_period=14, macd_fast=12, macd_slow=26,
 
 
 
+def _pesi_profilo_tipo(nome, ore, dow, mese):
+    """Pesi orari (relativi) di un profilo tipo di cliente.
+
+    ore/dow/mese: array numpy (ora 0-23, weekday 0=lun..6=dom, mese 1-12).
+    Ritorna array float >= 0 della stessa lunghezza. Profili deterministici,
+    senza dati esterni:
+      - 'residenziale': picco serale 19-22, notte bassa, weekend piu' carico di giorno;
+      - 'uffici': 8-18 feriali, quasi zero notte/weekend;
+      - 'industriale_2t': due turni 6-22 feriali, minimo il resto;
+      - 'industriale_3t': continuo 24/7 (piatto);
+      - 'pompa_calore': base residenziale + zoccolo, pesata per stagione
+        (inverno x1.6, spalla x1.0, estate x0.3 solo ACS).
+    """
+    ore = np.asarray(ore, dtype=int)
+    dow = np.asarray(dow, dtype=int)
+    mese = np.asarray(mese, dtype=int)
+    feriale = dow < 5
+
+    res_fer = np.array([0.15, 0.12, 0.12, 0.12, 0.12, 0.15,
+                        0.45, 0.70, 0.45, 0.40, 0.38, 0.38,
+                        0.45, 0.38, 0.38, 0.38, 0.45, 0.60,
+                        0.85, 1.00, 1.00, 0.85, 0.55, 0.30])
+    res_we = np.array([0.15, 0.12, 0.12, 0.12, 0.12, 0.15,
+                       0.35, 0.55, 0.65, 0.65, 0.65, 0.65,
+                       0.70, 0.65, 0.65, 0.65, 0.65, 0.70,
+                       0.85, 1.00, 1.00, 0.85, 0.55, 0.30])
+    uff_fer = np.array([0.05, 0.05, 0.05, 0.05, 0.05, 0.05,
+                        0.05, 0.35, 1.00, 1.00, 1.00, 1.00,
+                        1.00, 1.00, 1.00, 1.00, 1.00, 1.00,
+                        0.50, 0.25, 0.05, 0.05, 0.05, 0.05])
+    ind2_fer = np.array([0.12, 0.12, 0.12, 0.12, 0.12, 0.12,
+                         1.00, 1.00, 1.00, 1.00, 1.00, 1.00,
+                         1.00, 1.00, 1.00, 1.00, 1.00, 1.00,
+                         1.00, 1.00, 1.00, 1.00, 0.12, 0.12])
+
+    if nome == "residenziale":
+        w = np.where(feriale, res_fer[ore], res_we[ore])
+    elif nome == "uffici":
+        w = np.where(feriale, uff_fer[ore], 0.05)
+    elif nome == "industriale_2t":
+        w = np.where(feriale, ind2_fer[ore], 0.12)
+    elif nome == "industriale_3t":
+        w = np.ones_like(ore, dtype=float)
+    elif nome == "pompa_calore":
+        base = np.where(feriale, res_fer[ore], res_we[ore])
+        base = np.maximum(base, 0.35)
+        stag = np.where(np.isin(mese, [11, 12, 1, 2, 3]), 1.6,
+               np.where(np.isin(mese, [4, 10]), 1.0, 0.3))
+        w = base * stag
+    else:
+        raise ValueError(f"profilo tipo sconosciuto: {nome}")
+    return w.astype(float)
+
+
+PROFILI_TIPO = [
+    ("residenziale", "🏠 Residenziale", "Picco serale, consumi concentrati 17-22."),
+    ("uffici", "🏢 Uffici", "Prelievo 8-18 nei feriali, quasi zero notte e weekend."),
+    ("industriale_2t", "🏭 Industriale 2 turni", "Prelievo pieno 6-22 feriali, minimo il resto."),
+    ("industriale_3t", "🏗️ Industriale continuo", "Prelievo costante 24/7, fattore di carico 100%."),
+    ("pompa_calore", "🔥 Pompa di calore", "Profilo residenziale con zoccolo, pesato sulla stagione (inverno x1.6)."),
+]
+
+
+def calcola_profili_tipo(prezzi, energia_annua_mwh=1000.0, profili=None, min_ore=168):
+    """Confronto del costo di fornitura per profili tipo di cliente.
+
+    Domanda operativa: "quanto costa servire un residenziale rispetto a un
+    industriale continuo, a parita' di energia annua?" — applica i profili
+    orari standard (_pesi_profilo_tipo) ai prezzi spot del periodo e calcola
+    per ciascuno: energia, costo, prezzo catturato (€/MWh), premio/sconto
+    rispetto al prezzo medio aritmetico, picco, fattore di carico e quota
+    di energia per fascia F1/F2/F3. L'energia annua viene riscalata sul
+    periodo (ore_periodo / 8760), cosi' i profili restano confrontabili su
+    periodi di qualsiasi lunghezza.
+
+    NaN-safe: serie vuota / indice non-datetime / non numerica / troppo
+    corta / energia non positiva -> errore pulito; tz-aware reso naive;
+    deterministico.
+    """
+    def _err(msg):
+        return {"errore": msg, "valido": False}
+
+    try:
+        en = float(energia_annua_mwh)
+    except (TypeError, ValueError):
+        return _err("energia_annua_mwh non valida")
+    if not np.isfinite(en) or en <= 0:
+        return _err("energia_annua_mwh deve essere positiva")
+
+    if profili is None:
+        nomi = [p[0] for p in PROFILI_TIPO]
+    else:
+        nomi = [p for p in profili if p in dict((x[0], x[1]) for x in PROFILI_TIPO)]
+        if not nomi:
+            return _err("nessun profilo valido selezionato")
+
+    try:
+        s = pd.Series(prezzi).dropna()
+    except (TypeError, ValueError):
+        return _err("serie prezzi non valida")
+    if len(s) == 0:
+        return _err("serie prezzi vuota")
+    if not isinstance(s.index, pd.DatetimeIndex):
+        return _err("l'indice dei prezzi deve essere datetime")
+    try:
+        s = s.astype(float)
+    except (TypeError, ValueError):
+        return _err("prezzi non numerici")
+    if len(s) < int(min_ore):
+        return _err(f"servono almeno {int(min_ore)} ore di prezzi")
+
+    idx = s.index
+    if idx.tz is not None:
+        idx = idx.tz_localize(None)
+    ore = idx.hour.to_numpy()
+    dow = idx.dayofweek.to_numpy()
+    mese = idx.month.to_numpy()
+    pv = s.to_numpy(dtype=float)
+    n_ore = len(s)
+    energia_periodo = en * n_ore / 8760.0
+    prezzo_medio = float(np.mean(pv))
+    fasce = np.array([_fascia_aeegsi(h, w) for h, w in zip(ore.tolist(), dow.tolist())])
+
+    etichette = {p[0]: (p[1], p[2]) for p in PROFILI_TIPO}
+    righe, mensili = [], []
+    for nome in nomi:
+        w = _pesi_profilo_tipo(nome, ore, dow, mese)
+        sw = float(w.sum())
+        if sw <= 0:
+            return _err(f"profilo '{nome}' con pesi nulli sul periodo")
+        mwh_h = w / sw * energia_periodo
+        costo_h = mwh_h * pv
+        costo = float(costo_h.sum())
+        catturato = costo / energia_periodo
+        picco = float(mwh_h.max())
+        fc = energia_periodo / (picco * n_ore) * 100.0 if picco > 0 else 0.0
+        q_f1 = float(mwh_h[fasce == "F1"].sum() / energia_periodo * 100.0)
+        q_f2 = float(mwh_h[fasce == "F2"].sum() / energia_periodo * 100.0)
+        q_f3 = float(mwh_h[fasce == "F3"].sum() / energia_periodo * 100.0)
+        etichetta = etichette[nome][0]
+        righe.append({
+            "Profilo": etichetta,
+            "Energia (MWh)": round(energia_periodo, 1),
+            "Costo (€)": round(costo, 0),
+            "Prezzo catturato (€/MWh)": round(catturato, 2),
+            "Premio vs medio (€/MWh)": round(catturato - prezzo_medio, 2),
+            "Picco (MW)": round(picco, 3),
+            "Fattore di carico (%)": round(fc, 1),
+            "Quota F1 (%)": round(q_f1, 1),
+            "Quota F2 (%)": round(q_f2, 1),
+            "Quota F3 (%)": round(q_f3, 1),
+        })
+        mese_lbl = idx.strftime("%Y-%m")
+        for m in sorted(set(mese_lbl.tolist())):
+            mk = mese_lbl == m
+            mensili.append({
+                "Mese": m, "Profilo": etichetta,
+                "MWh": round(float(mwh_h[mk].sum()), 1),
+                "Costo (€)": round(float(costo_h[mk].sum()), 0),
+            })
+
+    tabella = pd.DataFrame(righe)
+    df_mens = pd.DataFrame(mensili).sort_values(["Mese", "Profilo"]).reset_index(drop=True)
+    idx_min = tabella["Prezzo catturato (€/MWh)"].idxmin()
+    idx_max = tabella["Prezzo catturato (€/MWh)"].idxmax()
+    verdetto = (f"A parita' di energia ({energia_periodo:,.0f} MWh nel periodo), "
+                f"{tabella.loc[idx_min, 'Profilo']} cattura il prezzo piu' basso "
+                f"({tabella.loc[idx_min, 'Prezzo catturato (€/MWh)']:.2f} €/MWh), "
+                f"{tabella.loc[idx_max, 'Profilo']} il piu' alto "
+                f"({tabella.loc[idx_max, 'Prezzo catturato (€/MWh)']:.2f} €/MWh): "
+                f"differenza {tabella.loc[idx_max, 'Prezzo catturato (€/MWh)'] - tabella.loc[idx_min, 'Prezzo catturato (€/MWh)']:.2f} €/MWh "
+                f"({(tabella.loc[idx_max, 'Prezzo catturato (€/MWh)'] - tabella.loc[idx_min, 'Prezzo catturato (€/MWh)']) * energia_periodo:,.0f} € sul periodo).")
+    return {
+        "errore": None, "valido": True,
+        "tabella": tabella, "mensile": df_mens,
+        "prezzo_medio": round(prezzo_medio, 2),
+        "energia_periodo": round(energia_periodo, 1),
+        "n_ore": n_ore,
+        "profilo_min": tabella.loc[idx_min, "Profilo"],
+        "profilo_max": tabella.loc[idx_max, "Profilo"],
+        "catturato_min": float(tabella.loc[idx_min, "Prezzo catturato (€/MWh)"]),
+        "catturato_max": float(tabella.loc[idx_max, "Prezzo catturato (€/MWh)"]),
+        "verdetto": verdetto,
+    }
+
+
 def calcola_rischio_orario(prezzi, mw_f1=1.0, mw_f2=1.0, mw_f3=1.0, min_giorni=30):
     """Scomposizione del rischio del costo giornaliero per ora del giorno.
 
@@ -19304,7 +19490,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -32293,6 +32479,87 @@ elif workspace == _('ws8'):
 
 
 
+
+
+    with tab153:
+        titolo_pt = edu("Profili tipo di cliente", "Il PREZZO CATTURATO e' il prezzo medio che un cliente paga davvero, pesato su QUANDO consuma: due clienti con la stessa energia annua pagano prezzi diversi se uno consuma di sera (ore care) e l'altro di notte (ore economiche). Il PREMIO vs medio dice quanto il profilo costa in piu' (positivo) o in meno (negativo) rispetto al prezzo medio aritmetico del periodo. Il FATTORE DI CARICO misura quanto il prelievo e' costante: 100% = sempre uguale, valori bassi = picchi concentrati.")
+        st.markdown(f"<h1>👥 {titolo_pt}</h1>", unsafe_allow_html=True)
+        st.caption("Costo di fornitura a parità di energia annua per 5 profili standard di cliente — chi cattura il prezzo più basso?")
+        pt1, pt2 = st.columns(2)
+        with pt1:
+            pt_mwh = st.number_input("Energia annua per profilo (MWh)", min_value=1.0, value=1000.0,
+                                    step=100.0, key="pt153_mwh",
+                                    help="Energia annua di riferimento: viene riscalata sul periodo selezionato (ore/8760).")
+        with pt2:
+            pt_sel = st.multiselect("Profili da confrontare",
+                                    options=[p[0] for p in PROFILI_TIPO],
+                                    default=[p[0] for p in PROFILI_TIPO],
+                                    format_func=lambda n: dict((p[0], p[1]) for p in PROFILI_TIPO)[n],
+                                    key="pt153_sel",
+                                    help="Deseleziona i profili che non ti interessano.")
+
+        ris_pt = calcola_profili_tipo(prezzi, pt_mwh, pt_sel if pt_sel else None)
+        if ris_pt["errore"] or not ris_pt["valido"]:
+            st.warning(f"⚠️ {ris_pt['errore']}")
+        else:
+            tab_pt = ris_pt["tabella"]
+            k1, k2, k3, k4 = st.columns(4)
+            render_kpi(edu("Profilo più economico", "Il profilo con il prezzo catturato più basso: consuma nelle ore più economiche."),
+                       f"{ris_pt['profilo_min']} · {ris_pt['catturato_min']:.2f} €/MWh", k1)
+            render_kpi(edu("Profilo più caro", "Il profilo con il prezzo catturato più alto: consuma nelle ore più care."),
+                       f"{ris_pt['profilo_max']} · {ris_pt['catturato_max']:.2f} €/MWh", k2)
+            render_kpi(edu("Differenza max-min", "Quanto cambia il prezzo catturato tra il profilo più caro e il più economico, a parità di energia."),
+                       f"{ris_pt['catturato_max'] - ris_pt['catturato_min']:.2f} €/MWh", k3)
+            render_kpi(edu("Prezzo medio periodo", "Media aritmetica dei prezzi orari: il riferimento neutro contro cui si misura il premio di ogni profilo."),
+                       f"{ris_pt['prezzo_medio']:.2f} €/MWh", k4)
+            st.caption(f"📊 {ris_pt['verdetto']}")
+
+            fig_pt = go.Figure()
+            colori_pt = ["#22c55e" if v < 0 else "#ef4444" for v in tab_pt["Premio vs medio (€/MWh)"]]
+            fig_pt.add_trace(go.Bar(x=tab_pt["Profilo"], y=tab_pt["Prezzo catturato (€/MWh)"],
+                                    name="Prezzo catturato", marker_color=colori_pt,
+                                    hovertemplate="%{x}<br>Catturato: %{y:.2f} €/MWh<extra></extra>"))
+            fig_pt.add_hline(y=ris_pt["prezzo_medio"], line_dash="dash", line_color="#6b7280",
+                             annotation_text=f"Medio periodo {ris_pt['prezzo_medio']:.2f}")
+            fig_pt.update_layout(template="plotly_dark", height=400,
+                                 title="Prezzo catturato per profilo tipo (€/MWh) — verde = sotto la media, rosso = sopra",
+                                 yaxis_title="€/MWh")
+            st.plotly_chart(fig_pt, use_container_width=True)
+
+            fig_fq = go.Figure()
+            for fascia, col in (("Quota F1 (%)", "#f59e0b"), ("Quota F2 (%)", "#3b82f6"), ("Quota F3 (%)", "#22c55e")):
+                fig_fq.add_trace(go.Bar(x=tab_pt["Profilo"], y=tab_pt[fascia], name=fascia.split()[1],
+                                        marker_color=col,
+                                        hovertemplate="%{x}<br>%{fullData.name}: %{y:.1f}%<extra></extra>"))
+            fig_fq.update_layout(template="plotly_dark", height=380, barmode="stack",
+                                 title="Distribuzione dell'energia per fascia AEEGSI",
+                                 yaxis_title="% dell'energia", xaxis_title="",
+                                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+            st.plotly_chart(fig_fq, use_container_width=True)
+
+            st.markdown("**Costo mensile per profilo**")
+            dfm = ris_pt["mensile"].pivot(index="Mese", columns="Profilo", values="Costo (€)").fillna(0)
+            fig_pm = go.Figure()
+            for col in dfm.columns:
+                fig_pm.add_trace(go.Scatter(x=dfm.index, y=dfm[col], mode="lines+markers", name=col,
+                                            hovertemplate="Mese %{x}<br>Costo: € %{y:,.0f}<extra></extra>"))
+            fig_pm.update_layout(template="plotly_dark", height=380,
+                                 title="Costo mensile di fornitura per profilo (€)",
+                                 yaxis_title="€",
+                                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+            st.plotly_chart(fig_pm, use_container_width=True)
+
+            st.markdown("**Dettaglio per profilo**")
+            st.dataframe(tab_pt, use_container_width=True, hide_index=True)
+            d0p, d1p = prezzi.index.min().date(), prezzi.index.max().date()
+            st.download_button(
+                "⬇️ Esporta profili tipo (CSV)",
+                tab_pt.to_csv(index=False, sep=";").encode("utf-8"),
+                file_name=f"profili_tipo_{d0p}_{d1p}.csv",
+                mime="text/csv",
+                key="csv_profili_tipo",
+                help="Una riga per profilo: energia, costo, prezzo catturato, premio vs medio, picco, fattore di carico e quote F1/F2/F3.",
+            )
 
 
 # Footer
