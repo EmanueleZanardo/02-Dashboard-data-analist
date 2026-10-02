@@ -1,6 +1,9 @@
 # STATUS.md — 02-Dashboard-data-analist (Singularity Quant ETRM)
 
-**Ultimo aggiornamento: 02/10/2026 ~03:00 CEST**
+**Ultimo aggiornamento: 02/10/2026 ~04:00 CEST**
+
+## 02/10/2026 ~04:00 CEST — ciclo QA orario
+- Nuova tab144 "⏳ Baricentro del costo": ora media CIRCOLARE ponderata del giorno in cui si concentra la spesa (costo orario = prezzo spot x MW fascia F1/F2/F3, pesi = costi non negativi; la media circolare evita il falso "mezzogiorno" quando il costo sta attorno a mezzanotte) — helper calcola_baricentro_costo (baricentro HH:MM + deviazione standard circolare ±h, quota di costo entro ±2h dal baricentro, conteggio ore a costo negativo escluse dai pesi, tabella mensile con baricentro/dispersione/quota/costo per rilevare lo spostamento del profilo ex-post demand response; NaN-safe, tz-aware reso naive, serie vuota/indice non-datetime/MW zero/costo non positivo -> errore pulito); UI con input MW per fascia, 4 KPI, grafico 24h con linea del baricentro, tabella mensile + export CSV. Testato con 41 check, 0 fail. README 143->144 tab, docs/AGGIUNGERE_TAB.md 143->144.
 
 ## 02/10/2026 ~03:00 CEST — ciclo QA orario
 - Nuova tab143 "📊 Efficienza del fixing": valutazione ex-post del prezzo fissato (€/MWh) contro il mercato del periodo — helper calcola_efficienza_fixing (% ore battute = quota ore con mercato >= fixing, sovracosto vs media €/MWh e %, distanza dal minimo di periodo = costo opportunità del timing perfetto, distanza dal massimo, verdetto per % ore battute >=90 Eccellente / >=70 Buono / >=50 Nella norma / >=30 Caro / <30 Molto caro, tabella mensile con media/scarto/ore battute; NaN-safe, tz-aware reso naive, serie vuota/indice non-datetime/<24 ore/prezzo non numerico o <= 0 -> errore pulito); UI con number_input prezzo fissato (default = media di periodo), verdetto, 4 KPI, istogramma prezzi con linee fixing/media/P10/P90, tabella mensile + export CSV. Testato con 45 check, 0 fail. README 142->143 tab, docs/AGGIUNGERE_TAB.md 142->143.
@@ -12,8 +15,8 @@
 
 ## Stato
 - Dashboard Streamlit "Singularity Quant ETRM", live su https://czpox8o8x6arnxw96txnvt.streamlit.app/.
-- Ultimo commit: 85acadc (QA 02/10 02:39 - tab143 Efficienza del fixing).
-- Test: app.py compila (py_compile OK); test tab143: 45 check, 0 fail; suite test_helpers.py 47/47 verdi; secrets scan: nessun segreto hardcoded. pytest non disponibile in questa VM.
+- Ultimo commit: 67ea857 (QA 02/10 03:39 - tab144 Baricentro del costo).
+- Test: app.py compila (py_compile OK); test tab144: 41 check, 0 fail; suite test_helpers.py 47/47 verdi; secrets scan: nessun segreto hardcoded. pytest non disponibile in questa VM.
 
 ## Ultimi eventi verificati (02/10/2026)
 - Nuova tab142 "🚨 Indice di stress di mercato": termometro unico 0-100 giornaliero — helper calcola_indice_stress (4 componenti normalizzate min-max sul periodo: livello prezzo w0.35, range intraday (max-min)/|media| con pavimento 5 €/MWh w0.25, shock giornaliero |Δ media| w0.25, quota ore negative w0.15; classi <30 calmo / <50 tensionato / <70 stressato / >=70 crisi; pesi custom normalizzati; NaN-safe, tz-aware reso naive, serie vuota/indice non-datetime/<72 ore/soglia o pesi non validi -> errore pulito; prezzi costanti -> SSI 0); UI con slider soglia allerta, 4 KPI (SSI ultimo giorno, medio, max, giorni sopra soglia + % crisi) + verdetto, serie giornaliera con bande di classe, SSI medio mensile, stacked bar top-10 giorni per componente, tabella top-20 + export CSV. Testato con 41 check, 0 fail (3 fix del test in sviluppo, nessun fix del codice: mensile 60gg=3 mesi; contributo ore negative verificato in punti, non in SSI totale; classe SSI=50 e' "Stressato" perche' la soglia e' <50). README 141->142 tab, docs/AGGIUNGERE_TAB.md 141->142.
