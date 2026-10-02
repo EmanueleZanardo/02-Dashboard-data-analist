@@ -15,6 +15,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from scipy.stats import norm
 
 APP = Path(__file__).resolve().parent.parent / "app.py"
 
@@ -44,7 +45,7 @@ def load(*names):
     global _TREE
     if _TREE is None:
         _TREE = ast.parse(APP.read_text(encoding="utf-8"))
-    ns = {"np": np, "pd": pd, "st": _DummySt()}
+    ns = {"np": np, "pd": pd, "st": _DummySt(), "norm": norm}
     out = {}
     for node in _TREE.body:
         if isinstance(node, ast.FunctionDef) and node.name in names:
