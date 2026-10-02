@@ -127,15 +127,15 @@ rb = calcola(hours(vals), carico_base_mw=10.0, forma_carico="diurno",
 check("determinismo: stesso prezzo equo",
       close(ra["prezzo_fisso_equo_eur_mwh"], rb["prezzo_fisso_equo_eur_mwh"]))
 
-# --- 8. registry tab162 ---
+# --- 8. registry tab162 (robusto a nuove tab: appartenenza, non conteggio esatto) ---
 m = re.search(r"tab1, tab2, .*? = st\.tabs\(\[", src, re.S)
 dvars = re.findall(r"tab\d+", m.group(0))
-check("registry: 162 variabili dichiarate, ultima tab162",
-      len(dvars) == 162 and dvars[-1] == "tab162")
+check("registry: tab162 dichiarata tra le variabili",
+      "tab162" in dvars and dvars == sorted(dvars, key=lambda t: int(t[3:])))
 check("registry: titolo presente", '"💰 Prezzo fisso equo"' in src)
 withs = re.findall(r"^    with (tab\d+):", src, re.M)
-check("registry: 162 with-blocks in sequenza 1..162",
-      withs == ["tab%d" % i for i in range(1, 163)])
+check("registry: tab162 presente, sequenza senza buchi da 1",
+      "tab162" in withs and withs == ["tab%d" % i for i in range(1, len(withs) + 1)])
 keys = re.findall(r'key="(pf162_[^"]+)"', src)
 check("registry: chiavi widget pf162 uniche",
       len(keys) == len(set(keys)) and len(keys) >= 6)
