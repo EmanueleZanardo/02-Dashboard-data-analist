@@ -18523,6 +18523,143 @@ def calcola_segnali_tecnici(prezzi, rsi_period=14, macd_fast=12, macd_slow=26,
 
 
 
+def calcola_rischio_orario(prezzi, mw_f1=1.0, mw_f2=1.0, mw_f3=1.0, min_giorni=30):
+    """Scomposizione del rischio del costo giornaliero per ora del giorno.
+
+    Domanda operativa: "quali ore guidano la volatilita' del mio costo
+    giornaliero?" — un'ora puo' costare poco in media ma essere molto
+    volatile (es. la punta serale). La scomposizione di Eulero attribuisce
+    a ciascuna ora la sua quota della VARIANZA del costo giornaliero:
+        contributo_h = cov(costo_h, costo_giornaliero) / var(costo_giornaliero)
+    e la somma dei 24 contributi fa esattamente il 100%.
+
+    La "leva di rischio" = contributo / quota di costo: sopra 1 l'ora pesa
+    sul rischio piu' di quanto pesi sul costo — sono le ore dove coperture
+    mirate, cap o spostamento del carico rendono di piu'.
+
+    Il costo orario e' prezzo x MW della fascia AEEGSI di quell'ora (via
+    _fascia_aeegsi). Giorni con < 20 ore valide scartati (bordi periodo);
+    ore ambigue del cambio DST sommate.
+
+    NaN-safe: serie vuota / indice non-datetime / troppo corta / MW non
+    validi / costo giornaliero (quasi) costante -> errore pulito; tz-aware
+    reso naive; deterministico.
+    """
+    def _err(msg):
+        return {"errore": msg, "valido": False, "n_giorni": 0,
+                "giorni_richiesti": min_giorni}
+
+    try:
+        mg = int(min_giorni)
+    except (TypeError, ValueError):
+        return _err("min_giorni non valido")
+    if mg < 10:
+        return _err("min_giorni non valido (minimo 10)")
+    min_giorni = mg
+
+    for nome, mw in (("mw_f1", mw_f1), ("mw_f2", mw_f2), ("mw_f3", mw_f3)):
+        try:
+            v = float(mw)
+        except (TypeError, ValueError):
+            return _err("%s non valido" % nome)
+        if not np.isfinite(v) or v < 0:
+            return _err("%s non valido (deve essere >= 0)" % nome)
+    mw_f1, mw_f2, mw_f3 = float(mw_f1), float(mw_f2), float(mw_f3)
+    if mw_f1 + mw_f2 + mw_f3 <= 0:
+        return _err("potenza nulla in tutte le fasce: costo sempre zero")
+
+    if prezzi is None or len(prezzi) == 0:
+        return _err("serie prezzi vuota")
+    if not isinstance(prezzi.index, pd.DatetimeIndex):
+        return _err("indice non datetime")
+    idxn = prezzi.index.tz_localize(None) if prezzi.index.tz is not None else prezzi.index
+    p = pd.to_numeric(prezzi, errors="coerce")
+    p.index = idxn
+    p = p.dropna()
+    if len(p) == 0:
+        return _err("serie prezzi vuota dopo pulizia NaN")
+
+    # ora/weekday allineati a p (dopo dropna)
+    idxc = p.index
+    ore = idxc.hour.to_numpy()
+    wd = idxc.weekday.to_numpy()
+    fasce = np.array([_fascia_aeegsi(h, d) for h, d in zip(ore, wd)])
+    mw_ora = np.where(fasce == "F1", mw_f1, np.where(fasce == "F2", mw_f2, mw_f3))
+    costo = pd.Series(p.to_numpy(dtype=float) * mw_ora, index=idxc, name="costo")
+
+    df = pd.DataFrame({"giorno": idxc.floor("D"), "ora": ore, "costo": costo.to_numpy()})
+    mat = df.groupby(["giorno", "ora"])["costo"].sum().unstack("ora")
+    mat = mat.reindex(columns=range(24))
+    mat = mat.dropna(thresh=20)  # giorni con almeno 20 ore valide
+    n_giorni = int(len(mat))
+    if n_giorni < min_giorni:
+        return _err("serie troppo corta: %d giorni, richiesti %d" % (n_giorni, min_giorni))
+
+    tot = mat.sum(axis=1)
+    var_tot = float(tot.var(ddof=1))
+    if not np.isfinite(var_tot) or var_tot <= 0:
+        return _err("costo giornaliero (quasi) costante: nessun rischio da scomporre")
+
+    covs = np.array([float(mat[h].cov(tot)) if mat[h].notna().any() else 0.0
+                     for h in range(24)])
+    covs = np.nan_to_num(covs, nan=0.0)
+    contrib = covs / var_tot * 100.0
+
+    medie = mat.mean(axis=0).to_numpy(dtype=float)
+    medie = np.nan_to_num(medie, nan=0.0)
+    somma_medie = float(medie.sum())
+    quota = medie / somma_medie * 100.0 if somma_medie > 0 else np.zeros(24)
+    vol_ora = mat.std(ddof=1).to_numpy(dtype=float)
+    vol_ora = np.nan_to_num(vol_ora, nan=0.0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        leva = np.where(quota > 1e-9, contrib / np.maximum(quota, 1e-9), 0.0)
+    leva = np.clip(np.nan_to_num(leva, nan=0.0, posinf=999.0, neginf=-99.0), -99.0, 999.0)
+
+    tabella = pd.DataFrame({
+        "Ora": ["%02d:00" % h for h in range(24)],
+        "Costo medio (€/g)": np.round(medie, 2),
+        "Quota costo (%)": np.round(quota, 2),
+        "Volatilità (€/g)": np.round(vol_ora, 2),
+        "Contributo rischio (%)": np.round(contrib, 2),
+        "Leva rischio (x)": np.round(leva, 2),
+    })
+
+    ordine = np.argsort(-contrib, kind="stable")
+    ora_top = int(ordine[0])
+    contrib_top = float(contrib[ora_top])
+    top3 = [int(h) for h in ordine[:3]]
+    top3_conc = float(contrib[top3].sum())
+    vol_giornaliera = float(tot.std(ddof=1))
+    costo_medio_giorno = float(tot.mean())
+    leva_top = float(leva[ora_top])
+
+    if leva_top > 1.5:
+        nota_leva = ("leva di rischio %.1fx: l'ora pesa sul rischio molto piu' "
+                     "che sul costo — candidata ideale per coperture mirate o "
+                     "spostamento del carico." % leva_top)
+    elif leva_top > 1.0:
+        nota_leva = ("leva di rischio %.1fx: l'ora pesa sul rischio piu' che "
+                     "sul costo." % leva_top)
+    else:
+        nota_leva = ("leva di rischio %.1fx: l'ora e' costosa ma relativamente "
+                     "prevedibile." % leva_top)
+    verdetto = ("L'ora %02d:00 spiega il %.1f%% della varianza del costo "
+                "giornaliero (%s). Le 3 ore piu' rischiose (%s) concentrano il "
+                "%.1f%% del rischio: e' li' che si gioca la volatilita' del "
+                "conto energia." % (ora_top, contrib_top, nota_leva,
+                                    ", ".join("%02d:00" % h for h in top3),
+                                    top3_conc))
+
+    return {"errore": None, "valido": True, "n_giorni": n_giorni,
+            "giorni_richiesti": min_giorni, "tabella": tabella,
+            "ora_top": ora_top, "contrib_top": contrib_top,
+            "top3_ore": top3, "top3_conc": top3_conc,
+            "vol_giornaliera": vol_giornaliera,
+            "costo_medio_giorno": costo_medio_giorno,
+            "verdetto": verdetto}
+
+
+
 # ==========================================
 # WORKSPACE 1: SIMULATORE STRATEGICO
 # ==========================================
@@ -19167,7 +19304,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -32075,6 +32212,85 @@ elif workspace == _('ws8'):
                 key="csv_segnali",
                 help="Una riga per segnale: data, indicatore, BUY/SELL, prezzo ed esito sul periodo.",
             )
+
+    with tab152:
+        titolo_ro = edu("Rischio orario", "Il COSTO MEDIO per ora dice dove spendi, ma il RISCHIO (la varianza del tuo costo giornaliero) puo' concentrarsi in ore diverse: la punta serale magari pesa il 5% del costo ma il 25% della sua volatilita'. La scomposizione di Eulero attribuisce a ogni ora la sua quota esatta della varianza del costo giornaliero — la somma fa 100%. La LEVA DI RISCHIO = quota di rischio / quota di costo: sopra 1 l'ora e' piu' pericolosa che costosa, ed e' li' che coperture mirate, cap o spostamento del carico rendono di piu'.")
+        st.markdown(f"<h1>⚠️ {titolo_ro}</h1>", unsafe_allow_html=True)
+        st.caption("Scomposizione della varianza del costo giornaliero per ora del giorno — dove si concentra davvero il rischio.")
+        ro1, ro2, ro3 = st.columns(3)
+        with ro1:
+            ro_mw1 = st.number_input("MW in F1", min_value=0.0, value=1.0, step=0.5,
+                                    key="ro152_f1",
+                                    help="Potenza nelle ore di punta (lun–ven 08:00–19:00).")
+        with ro2:
+            ro_mw2 = st.number_input("MW in F2", min_value=0.0, value=1.0, step=0.5,
+                                    key="ro152_f2",
+                                    help="Potenza nelle ore intermedie.")
+        with ro3:
+            ro_mw3 = st.number_input("MW in F3", min_value=0.0, value=1.0, step=0.5,
+                                    key="ro152_f3",
+                                    help="Potenza nelle ore fuori punta (notte, weekend).")
+
+        ris_ro = calcola_rischio_orario(prezzi, ro_mw1, ro_mw2, ro_mw3)
+        if ris_ro["errore"] or not ris_ro["valido"]:
+            st.warning(f"⚠️ {ris_ro['errore']}")
+        else:
+            tab_ro = ris_ro["tabella"]
+            k1, k2, k3, k4 = st.columns(4)
+            render_kpi(edu("Ora più rischiosa", "L'ora del giorno che spiega la quota maggiore della varianza del costo giornaliero."),
+                       f"{ris_ro['ora_top']:02d}:00 ({ris_ro['contrib_top']:.1f}%)", k1)
+            render_kpi(edu("Concentrazione top-3", "Quota di rischio spiegata dalle 3 ore più volatili: più è alta, più il rischio è concentrato in poche ore."),
+                       f"{ris_ro['top3_conc']:.1f}%", k2)
+            render_kpi(edu("Volatilità costo giornaliero", "Deviazione standard del costo giornaliero: l'ampiezza tipica dell'oscillazione giorno su giorno."),
+                       f"€ {ris_ro['vol_giornaliera']:,.0f}", k3)
+            render_kpi(edu("Costo medio giornaliero", "Costo medio al giorno nel periodo selezionato."),
+                       f"€ {ris_ro['costo_medio_giorno']:,.0f}", k4)
+            st.caption(f"📊 {ris_ro['verdetto']} Analisi su {ris_ro['n_giorni']} giorni.")
+
+            leva = tab_ro["Leva rischio (x)"].to_numpy()
+            colori = np.where(leva > 1.5, "#ef4444", np.where(leva > 1.0, "#f59e0b", "#3b82f6"))
+            fig_ro = go.Figure()
+            fig_ro.add_trace(go.Bar(
+                x=tab_ro["Ora"], y=tab_ro["Contributo rischio (%)"], name="Contributo rischio",
+                marker_color=colori,
+                hovertemplate="Ora %{x}<br>Rischio: %{y:.1f}%<br>Leva: %{customdata:.2f}x<extra></extra>",
+                customdata=leva,
+            ))
+            fig_ro.update_layout(template="plotly_dark", height=400,
+                                 title="Contributo di ogni ora alla varianza del costo giornaliero (%)",
+                                 xaxis_title="Ora del giorno", yaxis_title="Contributo rischio (%)",
+                                 xaxis=dict(tickmode="linear", dtick=2))
+            st.plotly_chart(fig_ro, use_container_width=True)
+            st.caption("🔴 leva > 1,5x (molto più rischiosa che costosa) · 🟠 leva 1–1,5x · 🔵 leva ≤ 1x (costosa ma prevedibile)")
+
+            fig_lv = go.Figure()
+            fig_lv.add_trace(go.Bar(x=tab_ro["Ora"], y=tab_ro["Quota costo (%)"],
+                                    name="Quota costo %", marker_color="#3b82f6", opacity=0.7,
+                                    hovertemplate="Ora %{x}<br>Quota costo: %{y:.1f}%<extra></extra>"))
+            fig_lv.add_trace(go.Bar(x=tab_ro["Ora"], y=tab_ro["Contributo rischio (%)"],
+                                    name="Quota rischio %", marker_color="#ef4444", opacity=0.7,
+                                    hovertemplate="Ora %{x}<br>Quota rischio: %{y:.1f}%<extra></extra>"))
+            fig_lv.update_layout(template="plotly_dark", height=380, barmode="group",
+                                 title="Quota di costo vs quota di rischio per ora — dove la barra rossa supera la blu, il rischio è sproporzionato",
+                                 xaxis_title="Ora del giorno", yaxis_title="%",
+                                 xaxis=dict(tickmode="linear", dtick=2),
+                                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+            st.plotly_chart(fig_lv, use_container_width=True)
+
+            st.markdown("**Dettaglio per ora**")
+            st.dataframe(tab_ro, use_container_width=True, hide_index=True)
+            d0r, d1r = prezzi.index.min().date(), prezzi.index.max().date()
+            st.download_button(
+                "⬇️ Esporta rischio orario (CSV)",
+                tab_ro.to_csv(index=False, sep=";").encode("utf-8"),
+                file_name=f"rischio_orario_{d0r}_{d1r}.csv",
+                mime="text/csv",
+                key="csv_rischio_orario",
+                help="Una riga per ora: costo medio, quota di costo, volatilità, contributo al rischio e leva.",
+            )
+
+
+
 
 
 
