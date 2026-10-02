@@ -17446,6 +17446,182 @@ def calcola_ottimizza_potenza(prezzi, mw_f1, mw_f2, mw_f3, p_contr_kw,
             "mensile": pd.DataFrame(righe, columns=cols_m), "scansione": scansione}
 
 
+def calcola_rollover_coperture(prezzi, mw=1.0, quota_copertura_pct=50.0,
+                               mesi_anticipo=1, soglia_regime_pct=1.5):
+    """Backtest del costo di rolling di una copertura forward mensile continua.
+
+    Il desk compra ogni mese la consegna del mese successivo con una
+    copertura a termine "rolling": a fine mese chiude la copertura in
+    scadenza e apre quella nuova. Il ROLL di ogni mese e' la differenza tra
+    il prezzo pagato per la nuova copertura e quello pagato per la vecchia:
+      roll_i = strip_{i-k} - strip_{i-k-1}   (EUR/MWh, firmato: + = costo)
+    Roll positivo = curva in CONTANGO (il rolling costa soldi); roll
+    negativo = BACKWARDATION (il rolling guadagna).
+    roll_yield_i = -roll_i / strip_{i-k-1} * 100  (+ = guadagno in backwardation)
+    Regime: "contango" se roll_yield < -soglia, "backwardation" se
+    roll_yield > soglia, altrimenti "piatto" (soglia in %).
+    costo_eur_i = roll_i * MWh coperti del mese i (mw * ore_mese * quota/100).
+
+    Con i soli spot storici il prezzo "pagato" e' approssimato con lo strip
+    base implicito del mese di acquisto (media delle ore del mese): e' un
+    proxy di backtest, NON la vera curva forward quotata. mesi_anticipo
+    (1-3) sposta indietro la finestra di acquisto: con k=1 il prezzo per la
+    consegna del mese i e' lo strip del mese i-1, con k=2 lo strip del
+    mese i-2, ecc. Nota: con k>1 il roll cambia solo per la finestra
+    storica usata (i differenziali strip_j - strip_{j-1} sono gli stessi).
+
+    NaN-safe: serie vuota / indice non datetime / < 3 mesi / mw <= 0 /
+    quota fuori [0,100] / anticipo fuori [1,3] / soglia negativa ->
+    errore pulito; tz-aware reso naive; mesi con ore zero saltati.
+
+    Ritorna dict con errore/valido/n_ore/n_mesi_totali/n_roll/mw/
+    quota_copertura_pct/mesi_anticipo/totale_eur/roll_medio_eur_mwh/
+    yield_medio_pct/mesi_contango/mesi_backwardation/mesi_piatti/
+    costo_annuo_stimato/costo_fornitura/incidenza_pct/categoria/
+    verdetto/mensile/sensibilita.
+    """
+    cols_m = ["Mese", "Strip (\u20ac/MWh)", "Roll (\u20ac/MWh)", "Roll yield (%)",
+              "Regime", "MWh coperti", "Costo roll (\u20ac)"]
+    cols_s = ["Quota copertura (%)", "Costo annuo stimato (\u20ac)"]
+
+    def _err(msg):
+        return {"errore": msg, "valido": False, "n_ore": 0, "n_mesi_totali": 0,
+                "n_roll": 0, "mw": None, "quota_copertura_pct": None,
+                "mesi_anticipo": None, "totale_eur": None,
+                "roll_medio_eur_mwh": None, "yield_medio_pct": None,
+                "mesi_contango": 0, "mesi_backwardation": 0, "mesi_piatti": 0,
+                "costo_annuo_stimato": None, "costo_fornitura": None,
+                "incidenza_pct": None, "categoria": None, "verdetto": msg,
+                "mensile": pd.DataFrame(columns=cols_m),
+                "sensibilita": pd.DataFrame(columns=cols_s)}
+
+    if not isinstance(prezzi, pd.Series):
+        return _err("Input non valido: serve una Series pandas.")
+    try:
+        mw_f = float(mw)
+        quota = float(quota_copertura_pct)
+        soglia = float(soglia_regime_pct)
+    except (TypeError, ValueError):
+        return _err("Parametri non numerici: MW, quota e soglia devono essere numeri.")
+    if not mw_f > 0:
+        return _err("Potenza non valida: inserisci MW > 0.")
+    if not 0.0 <= quota <= 100.0:
+        return _err("Quota di copertura non valida: inserisci un valore tra 0 e 100.")
+    try:
+        k = int(mesi_anticipo)
+    except (TypeError, ValueError):
+        return _err("Anticipo non valido: mesi_anticipo deve essere intero tra 1 e 3.")
+    if k not in (1, 2, 3):
+        return _err("Anticipo non valido: mesi_anticipo deve essere 1, 2 o 3.")
+    if not soglia >= 0:
+        return _err("Soglia di regime non valida: non puo' essere negativa.")
+    try:
+        p = pd.to_numeric(prezzi, errors="coerce").dropna()
+        p = p[~p.index.duplicated(keep="first")].sort_index()
+    except Exception:
+        return _err("Input non valido: serie prezzi non leggibile.")
+    if len(p) == 0:
+        return _err("Serie vuota: nessun dato disponibile.")
+    if not isinstance(p.index, pd.DatetimeIndex):
+        return _err("Indice non temporale: serve una serie oraria con DatetimeIndex.")
+    idxn = p.index.tz_localize(None) if p.index.tz is not None else p.index
+
+    mesi = idxn.to_period("M")
+    strip = {}
+    ore_m = {}
+    for m, grp in pd.Series(p.values, index=idxn).groupby(mesi):
+        if len(grp) == 0:
+            continue
+        v = float(np.nanmean(grp.values))
+        if np.isnan(v):
+            continue
+        strip[str(m)] = v
+        ore_m[str(m)] = int(len(grp))
+    mesi_ord = sorted(strip.keys())
+    n_mesi = len(mesi_ord)
+    if n_mesi < 3:
+        return _err("Servono almeno 3 mesi di dati per simulare il rolling.")
+    if n_mesi - k - 1 < 1:
+        return _err(f"Con anticipo di {k} mesi servono almeno {k + 2} mesi di dati.")
+
+    righe = []
+    roll_vals, yield_vals, costi = [], [], []
+    n_cont = n_back = n_flat = 0
+    costo_fornitura = 0.0
+    for pos in range(k + 1, n_mesi):
+        m_del = mesi_ord[pos]          # mese di consegna coperto
+        s_new = strip[mesi_ord[pos - k]]
+        s_old = strip[mesi_ord[pos - k - 1]]
+        roll = s_new - s_old
+        yld = -roll / s_old * 100.0 if s_old != 0 else float("nan")
+        if not np.isnan(yld) and yld < -soglia:
+            regime = "contango"
+            n_cont += 1
+        elif not np.isnan(yld) and yld > soglia:
+            regime = "backwardation"
+            n_back += 1
+        else:
+            regime = "piatto"
+            n_flat += 1
+        mwh = mw_f * ore_m[m_del] * quota / 100.0
+        costo = roll * mwh
+        roll_vals.append(roll)
+        yield_vals.append(yld)
+        costi.append(costo)
+        costo_fornitura += strip[m_del] * ore_m[m_del] * mw_f
+        righe.append({"Mese": m_del, "Strip (\u20ac/MWh)": round(s_new, 2),
+                      "Roll (\u20ac/MWh)": round(roll, 2),
+                      "Roll yield (%)": round(yld, 2) if not np.isnan(yld) else None,
+                      "Regime": regime, "MWh coperti": round(mwh, 1),
+                      "Costo roll (\u20ac)": round(costo, 2)})
+
+    roll_vals = np.array(roll_vals)
+    n_roll = len(righe)
+    totale = float(np.sum(costi))
+    roll_medio = float(np.mean(roll_vals))
+    yv = np.array([y for y in yield_vals if not np.isnan(y)])
+    yield_medio = float(np.mean(yv)) if len(yv) else 0.0
+    costo_annuo = totale / n_roll * 12.0
+    incidenza = (abs(totale) / costo_fornitura * 100.0) if costo_fornitura > 0 else 0.0
+    if totale > 0.005:
+        categoria = "costo"
+        verdetto = (f"Il rolling ti e' costato {totale:,.0f} \u20ac sul periodo "
+                    f"({n_cont} mesi in contango, {n_back} in backwardation): la curva "
+                    "prezza i mesi lontani piu' dei vicini. Valuta coperture piu' lunghe "
+                    "o acquisti a pronti nei mesi di contango estremo.")
+    elif totale < -0.005:
+        categoria = "guadagno"
+        verdetto = (f"Il rolling ti ha fatto guadagnare {abs(totale):,.0f} \u20ac sul periodo "
+                    f"({n_back} mesi in backwardation, {n_cont} in contango): la curva "
+                    "prezza i mesi lontani meno dei vicini. Mantieni il rolling mensile, "
+                    "il mercato ti paga per farlo.")
+    else:
+        categoria = "neutro"
+        verdetto = (f"Rolling quasi neutro ({totale:,.2f} \u20ac sul periodo, {n_flat} mesi "
+                    "piatti): il costo del rolling non e' un driver in questo periodo.")
+
+    sens_righe = []
+    for q in range(0, 101, 10):
+        c_ann = costo_annuo * q / quota if quota > 0 else 0.0
+        sens_righe.append({"Quota copertura (%)": q,
+                           "Costo annuo stimato (\u20ac)": round(c_ann, 0)})
+
+    return {"errore": None, "valido": True, "n_ore": int(len(p)),
+            "n_mesi_totali": n_mesi, "n_roll": n_roll, "mw": mw_f,
+            "quota_copertura_pct": quota, "mesi_anticipo": k,
+            "totale_eur": round(totale, 2),
+            "roll_medio_eur_mwh": round(roll_medio, 2),
+            "yield_medio_pct": round(yield_medio, 2),
+            "mesi_contango": n_cont, "mesi_backwardation": n_back,
+            "mesi_piatti": n_flat,
+            "costo_annuo_stimato": round(costo_annuo, 0),
+            "costo_fornitura": round(costo_fornitura, 0),
+            "incidenza_pct": round(incidenza, 2),
+            "categoria": categoria, "verdetto": verdetto,
+            "mensile": pd.DataFrame(righe, columns=cols_m),
+            "sensibilita": pd.DataFrame(sens_righe, columns=cols_s)}
+
+
 # ==========================================
 # WORKSPACE 1: SIMULATORE STRATEGICO
 # ==========================================
@@ -18089,7 +18265,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -30483,6 +30659,96 @@ with tab146:
                 key="csv_potenza_impegnata",
                 help="Una riga per mese: picco stimato, quota fissa, penale e totale con la potenza attuale.",
             )
+
+
+with tab147:
+        titolo_rc = edu("Rollover coperture", "Il ROLLOVER e' l'operazione con cui il desk, a ogni scadenza, chiude la copertura forward sul mese in consegna e apre quella sul mese successivo. La differenza tra i due prezzi pagati e' il COSTO DI ROLLING: se la curva dei prezzi e' in CONTANGO (i mesi lontani costano piu' dei vicini) ogni roll ti costa soldi; se e' in BACKWARDATION (i mesi lontani costano meno) il roll ti paga. Questa tab fa il backtest del rolling mensile continuo sullo storico: il forward 'pagato' e' approssimato con lo strip base implicito del mese di acquisto (proxy, non la vera curva forward quotata). Diversa dal tab Struttura a termine (la pendenza fotografata oggi): qui si misura quanto il rolling e' costato/guadagnato davvero, mese per mese, in euro.")
+        st.markdown(f"<h1>🔄 {titolo_rc}</h1>", unsafe_allow_html=True)
+        st.caption("Quanto ti costa (o ti rende) rinnovare ogni mese la copertura forward: backtest del rolling mensile sullo storico.")
+        st.caption("💡 Usa pratico: se il costo annuo stimato e' alto e la curva resta in contango, valuta coperture trimestrali/annuali (meno roll) o acquisti a pronti nei mesi di contango estremo; se sei in backwardation, il rolling mensile ti paga — mantienilo.")
+        rc1, rc2, rc3 = st.columns(3)
+        with rc1:
+            rc_mw = st.number_input("Potenza coperta (MW)", min_value=0.1, value=1.0, step=0.5, key="roll147_mw",
+                                    help="Potenza del carico coperto dalla strategia rolling.")
+        with rc2:
+            rc_quota = st.slider("Quota di copertura (%)", min_value=0, max_value=100, value=50, step=5,
+                                 key="roll147_quota",
+                                 help="Percentuale del carico coperta a termine (il resto resta a spot).")
+        with rc3:
+            rc_ant = st.slider("Anticipo di acquisto (mesi)", min_value=1, max_value=3, value=1, step=1,
+                               key="roll147_ant",
+                               help="Quanti mesi prima della consegna compri la copertura: con 1 compri a fine mese la consegna del mese dopo.")
+        rc_soglia = st.slider("Soglia regime contango/backwardation (%)", min_value=0.5, max_value=5.0, value=1.5,
+                              step=0.5, key="roll147_soglia",
+                              help="Un mese e' in contango/backwardation se il roll yield supera questa soglia in valore assoluto.")
+        rc = calcola_rollover_coperture(prezzi, rc_mw, rc_quota, rc_ant, rc_soglia)
+        if rc["errore"]:
+            st.error(rc["errore"])
+        else:
+            if rc["categoria"] == "costo":
+                st.warning(rc["verdetto"])
+            elif rc["categoria"] == "guadagno":
+                st.success(rc["verdetto"])
+            else:
+                st.info(rc["verdetto"])
+            k1, k2, k3, k4 = st.columns(4)
+            with k1:
+                st.metric("Costo totale rolling", f"{rc['totale_eur']:,.0f} €",
+                          f"{rc['n_roll']} mesi analizzati")
+            with k2:
+                st.metric("Roll medio", f"{rc['roll_medio_eur_mwh']:+.2f} €/MWh/mese",
+                          f"yield {rc['yield_medio_pct']:+.2f} %")
+            with k3:
+                st.metric("Costo annuo stimato", f"{rc['costo_annuo_stimato']:,.0f} €",
+                          f"quota {rc['quota_copertura_pct']:.0f} %")
+            with k4:
+                st.metric("Mesi contango/backw.", f"{rc['mesi_contango']}/{rc['mesi_backwardation']}",
+                          f"incidenza {rc['incidenza_pct']:.2f} % sul costo fornitura")
+
+            st.markdown("**Costo di roll mensile (€/MWh): rosso = contango (paghi), verde = backwardation (guadagni)**")
+            fig_rc = go.Figure()
+            col_rc = {"contango": "#ef4444", "backwardation": "#22c55e", "piatto": "#a8a29e"}
+            mens = rc["mensile"]
+            fig_rc.add_trace(go.Bar(x=mens["Mese"], y=mens["Roll (€/MWh)"],
+                                    marker_color=[col_rc[r] for r in mens["Regime"]],
+                                    name="Roll €/MWh",
+                                    hovertemplate="%{x}: %{y:+.2f} €/MWh (%{customdata})<extra></extra>",
+                                    customdata=mens["Regime"]))
+            fig_rc.add_hline(y=0, line_color="#6b7280", line_width=1)
+            fig_rc.update_layout(template="plotly_dark", height=360, xaxis_title="Mese di consegna",
+                                 yaxis_title="Roll (€/MWh)", showlegend=False)
+            st.plotly_chart(fig_rc, use_container_width=True)
+
+            st.markdown("**Costo cumulato del rolling (€)**")
+            fig_rc2 = go.Figure()
+            cum = mens["Costo roll (€)"].cumsum()
+            fig_rc2.add_trace(go.Scatter(x=mens["Mese"], y=cum, mode="lines+markers",
+                                         name="Cumulato €", line=dict(color="#38bdf8", width=2),
+                                         hovertemplate="%{x}: %{y:,.0f} €<extra></extra>"))
+            fig_rc2.add_hline(y=0, line_color="#6b7280", line_width=1)
+            fig_rc2.update_layout(template="plotly_dark", height=320, xaxis_title="Mese di consegna",
+                                  yaxis_title="€ cumulati")
+            st.plotly_chart(fig_rc2, use_container_width=True)
+
+            st.markdown("**Sensibilità: costo annuo stimato in funzione della quota di copertura**")
+            fig_rc3 = go.Figure()
+            sens = rc["sensibilita"]
+            fig_rc3.add_trace(go.Scatter(x=sens["Quota copertura (%)"], y=sens["Costo annuo stimato (€)"],
+                                         mode="lines+markers", name="Costo annuo €",
+                                         line=dict(color="#f59e0b", width=2),
+                                         hovertemplate="quota %{x:.0f} %: %{y:,.0f} €<extra></extra>"))
+            fig_rc3.add_vline(x=rc["quota_copertura_pct"], line_dash="dash", line_color="#f59e0b",
+                              annotation_text=f"Attuale {rc['quota_copertura_pct']:.0f} %",
+                              annotation_font_color="#f59e0b")
+            fig_rc3.update_layout(template="plotly_dark", height=300, xaxis_title="Quota di copertura (%)",
+                                  yaxis_title="Costo annuo stimato (€)")
+            st.plotly_chart(fig_rc3, use_container_width=True)
+
+            st.markdown("**Dettaglio mensile del rolling**")
+            st.dataframe(mens, use_container_width=True)
+            csv_rc = mens.to_csv(index=False).encode("utf-8")
+            st.download_button("⬇️ Esporta dettaglio rolling (CSV)", data=csv_rc,
+                               file_name="rollover_coperture.csv", mime="text/csv", key="roll147_csv")
 
 
 # Footer
