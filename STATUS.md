@@ -1,3 +1,5 @@
+- Nuova tab147 "🔄 Rollover coperture": backtest del costo di rolling di una copertura forward mensile continua — helper calcola_rollover_coperture (roll firmato = strip_{i-k} - strip_{i-k-1}, roll yield, regime contango/backwardation/piatto con soglia %, MWh coperti = MW x ore x quota, costo annuo stimato annualizzato, incidenza sul costo fornitura a spot, sensibilità costo annuo vs quota 0-100%), testato con 58 check, 0 fail (3 fix del test: DST in tz_localize, denominatore del roll yield, colonna strip = prezzo pagato; nessun fix del codice); KPI costo totale rolling/roll medio/costo annuo stimato/mesi contango-backwardation, barre mensili roll €/MWh per regime, curva cumulata €, sensibilità quota, tabella + export CSV. Nessun bug residuo, nessun segreto hardcoded.
+
 # STATUS.md — 02-Dashboard-data-analist (Singularity Quant ETRM)
 
 **Ultimo aggiornamento: 02/10/2026 ~05:45 CEST**
