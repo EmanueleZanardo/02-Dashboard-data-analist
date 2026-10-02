@@ -18709,6 +18709,186 @@ def calcola_profili_tipo(prezzi, energia_annua_mwh=1000.0, profili=None, min_ore
     }
 
 
+def genera_forecast_naive(reali, metodo="lag24"):
+    """Genera una serie forecast naive dalla serie reale (benchmark di riferimento).
+
+    Domanda operativa: "il mio forecast vale qualcosa?" — se un modello vero non
+    batte questi benchmark banali, non serve a niente. Metodi:
+      "lag24"  = valore di 24h fa (ieri, stessa ora);
+      "lag168" = valore di 168h fa (stessa ora della settimana scorsa);
+      "mm24"   = media mobile delle 24 ore precedenti.
+    Restituisce la serie forecast sullo stesso indice della reale (con NaN in
+    testa dove il lag non ha storia). NaN-safe, tz-aware reso naive, deterministico.
+    """
+    def _err(msg):
+        return {"errore": msg, "valido": False}
+
+    try:
+        s = pd.Series(reali).dropna()
+    except (TypeError, ValueError):
+        return _err("serie reale non valida")
+    if len(s) == 0:
+        return _err("serie reale vuota")
+    if not isinstance(s.index, pd.DatetimeIndex):
+        return _err("l'indice della serie reale deve essere datetime")
+    try:
+        s = s.astype(float)
+    except (TypeError, ValueError):
+        return _err("valori della serie reale non numerici")
+    if s.index.tz is not None:
+        s = s.tz_convert(None)
+    s = s.sort_index()
+    if metodo == "lag24":
+        fc = s.shift(24)
+        descr = "Naive 24h (ieri, stessa ora)"
+    elif metodo == "lag168":
+        fc = s.shift(168)
+        descr = "Naive 168h (settimana scorsa, stessa ora)"
+    elif metodo == "mm24":
+        fc = s.shift(1).rolling(24, min_periods=1).mean()
+        descr = "Media mobile 24h precedenti"
+    else:
+        return _err(f"metodo '{metodo}' non riconosciuto")
+    return {"errore": None, "valido": True, "forecast": fc, "metodo": descr,
+            "n_ore": int(len(s))}
+
+
+def calcola_accuratezza_forecast(reali, forecast, min_ore=24, top_n=10):
+    """Valutazione di un forecast contro i valori reali.
+
+    Domanda operativa: "il mio forecast di prezzo/carico e' affidabile?" —
+    allinea reali e forecast sull'indice datetime comune e calcola MAE, RMSE,
+    MAPE, bias (errore medio firmato), deviazione std dell'errore e correlazione;
+    lo SKILL SCORE confronta il MAE col benchmark naive (persistenza 24h):
+    positivo = il forecast batte il naive, negativo = peggio del banale.
+    Profilo orario dell'errore (per ora del giorno) + peggiori ore per |errore|.
+
+    NaN-safe: serie vuota / indice non-datetime / non numerica / troppo poche
+    ore in comune / parametri non validi -> errore pulito; tz-aware reso naive;
+    deterministico.
+    """
+    def _err(msg):
+        return {"errore": msg, "valido": False}
+
+    try:
+        mo = int(min_ore)
+    except (TypeError, ValueError):
+        return _err("min_ore non valido")
+    if mo < 1:
+        return _err("min_ore deve essere >= 1")
+    try:
+        tn = int(top_n)
+    except (TypeError, ValueError):
+        return _err("top_n non valido")
+    if tn < 1:
+        return _err("top_n deve essere >= 1")
+
+    def _clean(s, nome):
+        try:
+            c = pd.Series(s).dropna()
+        except (TypeError, ValueError):
+            return None, f"{nome}: serie non valida"
+        if len(c) == 0:
+            return None, f"{nome}: serie vuota"
+        if not isinstance(c.index, pd.DatetimeIndex):
+            return None, f"{nome}: l'indice deve essere datetime"
+        try:
+            c = c.astype(float)
+        except (TypeError, ValueError):
+            return None, f"{nome}: valori non numerici"
+        if c.index.tz is not None:
+            c.index = c.index.tz_localize(None)
+        return c.sort_index(), None
+
+    r, em = _clean(reali, "reali")
+    if em:
+        return _err(em)
+    f, em = _clean(forecast, "forecast")
+    if em:
+        return _err(em)
+
+    df = pd.DataFrame({"reale": r, "forecast": f}).dropna()
+    if len(df) < mo:
+        return _err(f"servono almeno {mo} ore in comune tra reali e forecast (trovate {len(df)})")
+    e = (df["forecast"] - df["reale"]).to_numpy(dtype=float)
+    rv = df["reale"].to_numpy(dtype=float)
+    n = len(df)
+    mae = float(np.mean(np.abs(e)))
+    rmse = float(np.sqrt(np.mean(e ** 2)))
+    bias = float(np.mean(e))
+    std_e = float(np.std(e))
+    nz = rv != 0
+    mape = float(np.mean(np.abs(e[nz] / rv[nz])) * 100.0) if nz.any() else None
+    corr = None
+    if np.std(rv) > 0 and np.std(df["forecast"].to_numpy(dtype=float)) > 0:
+        corr = float(np.corrcoef(rv, df["forecast"].to_numpy(dtype=float))[0, 1])
+
+    # Skill score vs benchmark naive (persistenza 24h sulla serie reale)
+    skill = None
+    mae_naive = None
+    if n > 24:
+        nv = df["reale"].shift(24).dropna()
+        en = (nv - df["reale"].loc[nv.index]).to_numpy(dtype=float)
+        if len(en) > 0:
+            mae_naive = float(np.mean(np.abs(en)))
+            if mae_naive > 0:
+                skill = float(1.0 - mae / mae_naive)
+
+    ore = df.index.hour.to_numpy()
+    prof = pd.DataFrame({"ora": ore, "err": e, "ae": np.abs(e)}).groupby("ora").agg(
+        ore_n=("err", "size"),
+        err_medio=("err", "mean"),
+        mae=("ae", "mean"),
+    ).reset_index().sort_values("ora")
+
+    peg = df.assign(errore=e, aerr=np.abs(e)).nlargest(tn, "aerr")
+    peggiori = pd.DataFrame({
+        "Timestamp": peg.index.strftime("%Y-%m-%d %H:%M"),
+        "Reale": peg["reale"].round(2).to_numpy(),
+        "Forecast": peg["forecast"].round(2).to_numpy(),
+        "Errore": peg["errore"].round(2).to_numpy(),
+    })
+
+    righe = [
+        ("Ore valutate", f"{n}"),
+        ("MAE (errore medio assoluto)", f"{mae:.2f}"),
+        ("RMSE", f"{rmse:.2f}"),
+        ("Bias (errore medio firmato)", f"{bias:+.2f}"),
+        ("Deviazione std errore", f"{std_e:.2f}"),
+        ("MAPE", f"{mape:.2f} %" if mape is not None else "n/d (reali a zero)"),
+        ("Correlazione", f"{corr:.3f}" if corr is not None else "n/d (serie costante)"),
+        ("MAE benchmark naive 24h", f"{mae_naive:.2f}" if mae_naive is not None else "n/d (< 48h)"),
+        ("Skill score vs naive", f"{skill:+.1%}" if skill is not None else "n/d"),
+    ]
+    tabella = pd.DataFrame(righe, columns=["Metrica", "Valore"])
+
+    if abs(bias) < 0.1 * mae:
+        nota_bias = "senza distorsione sistematica"
+    elif bias > 0:
+        nota_bias = "sovrastima sistematica (forecast sopra il reale)"
+    else:
+        nota_bias = "sottostima sistematica (forecast sotto il reale)"
+    if skill is None:
+        nota_skill = "skill non calcolabile (serie troppo corta per il benchmark)"
+    elif skill >= 0.2:
+        nota_skill = f"batte il benchmark naive del {skill:.0%} — il modello aggiunge valore"
+    elif skill >= 0:
+        nota_skill = "in linea col benchmark naive — valore aggiunto marginale"
+    else:
+        nota_skill = f"peggio del naive ({skill:.0%}) — meglio usare ieri stessa ora"
+    verdetto = (f"Su {n} ore: MAE {mae:.2f}, RMSE {rmse:.2f}, {nota_bias}; {nota_skill}.")
+
+    return {
+        "errore": None, "valido": True,
+        "n_ore": n, "mae": mae, "rmse": rmse, "bias": bias,
+        "std_errore": std_e, "mape": mape, "correlazione": corr,
+        "mae_naive": mae_naive, "skill": skill,
+        "profilo_orario": prof, "peggiori": peggiori,
+        "tabella": tabella, "verdetto": verdetto,
+        "reali": df["reale"], "forecast_all": df["forecast"],
+    }
+
+
 def calcola_rischio_orario(prezzi, mw_f1=1.0, mw_f2=1.0, mw_f3=1.0, min_giorni=30):
     """Scomposizione del rischio del costo giornaliero per ora del giorno.
 
@@ -19490,7 +19670,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -32560,6 +32740,102 @@ elif workspace == _('ws8'):
                 key="csv_profili_tipo",
                 help="Una riga per profilo: energia, costo, prezzo catturato, premio vs medio, picco, fattore di carico e quote F1/F2/F3.",
             )
+    with tab154:
+        titolo_af = edu("Accuratezza del forecast", "Un FORECAST (previsione di prezzo o carico) si giudica solo contro i valori REALI: MAE = errore medio assoluto, RMSE = penalizza di piu' gli errori grossi, BIAS = errore medio firmato (positivo = il forecast sovrastima), MAPE = errore % medio. Lo SKILL SCORE dice se il modello batte il benchmark piu' banale possibile (il valore di ieri stessa ora): se non lo batte, il modello non serve a niente.")
+        st.markdown(f"<h1>🎯 {titolo_af}</h1>", unsafe_allow_html=True)
+        st.caption("Quanto è affidabile una previsione di prezzo/carico? MAE, RMSE, bias, MAPE e skill score contro il benchmark naive.")
+        af1, af2 = st.columns(2)
+        with af1:
+            af_metodo = st.selectbox("Forecast da valutare",
+                                     options=["lag24", "lag168", "mm24", "csv"],
+                                     format_func=lambda m: {"lag24": "Naive 24h (ieri, stessa ora)",
+                                                            "lag168": "Naive 168h (settimana scorsa)",
+                                                            "mm24": "Media mobile 24h precedenti",
+                                                            "csv": "📤 Carica forecast da CSV"}[m],
+                                     key="af154_metodo",
+                                     help="Valuta un benchmark naive generato dai reali, oppure carica il tuo forecast (CSV: prima colonna timestamp, seconda valore).")
+        with af2:
+            af_topn = st.slider("Peggiori ore da mostrare", min_value=5, max_value=20, value=10,
+                               key="af154_topn", help="Numero di ore con l'errore assoluto più alto da elencare in tabella.")
+        af_fc = None
+        af_descr = ""
+        if af_metodo == "csv":
+            up = st.file_uploader("CSV con timestamp e valore forecast", type=["csv"], key="af154_up",
+                                  help="Due colonne: timestamp (prima) e valore (seconda). L'allineamento ai reali avviene sul timestamp.")
+            if up is not None:
+                try:
+                    dfup = pd.read_csv(up)
+                    ts = pd.to_datetime(dfup.iloc[:, 0], errors="coerce")
+                    af_fc = pd.Series(dfup.iloc[:, 1].to_numpy(dtype=float), index=ts).dropna()
+                    af_fc.index = pd.DatetimeIndex(af_fc.index)
+                    af_descr = "Forecast caricato da CSV"
+                except (TypeError, ValueError):
+                    st.error("CSV non leggibile: servono due colonne (timestamp, valore).")
+        else:
+            gen = genera_forecast_naive(prezzi, metodo=af_metodo)
+            if gen["valido"]:
+                af_fc = gen["forecast"]
+                af_descr = gen["metodo"]
+            else:
+                st.error(gen["errore"])
+        if af_fc is not None:
+            ris_af = calcola_accuratezza_forecast(prezzi, af_fc, min_ore=24, top_n=af_topn)
+            if not ris_af["valido"]:
+                st.error(ris_af["errore"])
+            else:
+                st.success(f"✅ {af_descr} — {ris_af['verdetto']}")
+                k1, k2, k3, k4 = st.columns(4)
+                k1.metric("MAE", f"{ris_af['mae']:.2f}", help="Errore medio assoluto sui reali.")
+                k2.metric("RMSE", f"{ris_af['rmse']:.2f}", help="Radice dell'errore quadratico medio: penalizza gli errori grossi.")
+                k3.metric("Bias", f"{ris_af['bias']:+.2f}", help="Errore medio firmato: positivo = sovrastima sistematica, negativo = sottostima.")
+                k4.metric("Skill vs naive", f"{ris_af['skill']:+.1%}" if ris_af["skill"] is not None else "n/d",
+                          help="1 − MAE/MAE_naive. Positivo = il forecast batte 'ieri stessa ora'.")
+
+                st.markdown("**Reali vs forecast**")
+                rr, ff = ris_af["reali"], ris_af["forecast_all"]
+                if len(rr) > 24 * 60:
+                    rr_p = rr.resample("D").mean()
+                    ff_p = ff.reindex(rr_p.index, method="nearest")
+                else:
+                    rr_p, ff_p = rr, ff
+                fig_af = go.Figure()
+                fig_af.add_trace(go.Scatter(x=rr_p.index, y=rr_p.to_numpy(), mode="lines", name="Reali",
+                                            hovertemplate="%{x}<br>Reale: %{y:.2f}<extra></extra>"))
+                fig_af.add_trace(go.Scatter(x=ff_p.index, y=ff_p.to_numpy(), mode="lines", name="Forecast",
+                                            hovertemplate="%{x}<br>Forecast: %{y:.2f}<extra></extra>"))
+                fig_af.update_layout(template="plotly_dark", height=380,
+                                     title="Reali vs forecast", yaxis_title="€/MWh",
+                                     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+                st.plotly_chart(fig_af, use_container_width=True)
+
+                st.markdown("**Profilo orario dell'errore** (per ora del giorno)")
+                pr = ris_af["profilo_orario"]
+                colori = ["#ef4444" if v > 0 else "#22c55e" for v in pr["err_medio"].to_numpy()]
+                fig_ah = go.Figure()
+                fig_ah.add_trace(go.Bar(x=pr["ora"].to_numpy(), y=pr["err_medio"].to_numpy(),
+                                        marker_color=colori, name="Errore medio",
+                                        hovertemplate="Ora %{x}<br>Errore medio: %{y:+.2f}<extra></extra>"))
+                fig_ah.add_trace(go.Scatter(x=pr["ora"].to_numpy(), y=pr["mae"].to_numpy(),
+                                            mode="lines+markers", name="MAE",
+                                            hovertemplate="Ora %{x}<br>MAE: %{y:.2f}<extra></extra>"))
+                fig_ah.update_layout(template="plotly_dark", height=380,
+                                     title="Errore medio firmato (rosso = sovrastima, verde = sottostima) e MAE per ora",
+                                     xaxis_title="Ora del giorno", yaxis_title="€/MWh")
+                st.plotly_chart(fig_ah, use_container_width=True)
+
+                st.markdown("**Metriche**")
+                st.dataframe(ris_af["tabella"], use_container_width=True, hide_index=True)
+                st.markdown(f"**Peggiori {af_topn} ore per errore assoluto**")
+                st.dataframe(ris_af["peggiori"], use_container_width=True, hide_index=True)
+                d0a, d1a = prezzi.index.min().date(), prezzi.index.max().date()
+                st.download_button(
+                    "⬇️ Esporta accuratezza forecast (CSV)",
+                    pd.concat([ris_af["tabella"], ris_af["peggiori"]], ignore_index=True).to_csv(index=False, sep=";").encode("utf-8"),
+                    file_name=f"accuratezza_forecast_{d0a}_{d1a}.csv",
+                    mime="text/csv",
+                    key="csv_accuratezza_forecast",
+                    help="Metriche di accuratezza e peggiori ore per errore assoluto.",
+                )
 
 
 # Footer
