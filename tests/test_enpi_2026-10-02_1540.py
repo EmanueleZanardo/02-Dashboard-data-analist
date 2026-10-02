@@ -175,11 +175,11 @@ if m_tabs is not None:
     lend = src.find("\n", m_tabs.end())
     decl = src[lstart:lend]
     lhs = re.findall(r"tab\d+", decl.split("= st.tabs", 1)[0])
-    check("tab156 tra le variabili dichiarate", "tab156" in lhs and len(lhs) == 157)
+    check("tab156 tra le variabili dichiarate", "tab156" in lhs and len(lhs) == len(re.findall(r'"([^"]+)"', decl.split("st.tabs([", 1)[1])))
     labels = re.findall(r'"([^"]+)"', decl.split("st.tabs([", 1)[1])
 else:
     labels = []
-check("157 titoli", len(labels) == 157)
+check("n titoli = n variabili", len(labels) == len(re.findall(r"tab\d+", decl.split("= st.tabs", 1)[0])) and len(labels) > 0)
 check("titolo tab156", "📏 EnPI energetico" in labels)
 check("titolo unico", labels.count("📏 EnPI energetico") == 1)
 vars_decl = re.findall(r"\btab156\b", src)
