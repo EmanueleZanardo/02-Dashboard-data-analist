@@ -139,15 +139,15 @@ rb = calcola(pgn, {"A": load_series([10.0] * 48), "B": load_series([10.0 * x for
 check("determinismo: stesso costo totale",
       close(ra["costo_totale_eur"], rb["costo_totale_eur"], tol=1e-9))
 
-# --- 8. registry tab163 (aggiornato a 164 dopo aggiunta tab164) ---
+# --- 8. registry tab163 (robusto all'aggiunta di tab successive: era conteggio esatto 164) ---
 m = re.search(r"tab1, tab2, .*? = st\.tabs\(\[", src, re.S)
 dvars = re.findall(r"tab\d+", m.group(0))
-check("registry: 164 variabili dichiarate, ultima tab164",
-      len(dvars) == 164 and dvars[-1] == "tab164")
+check("registry: tab163 dichiarata tra le variabili",
+      "tab163" in dvars)
 check("registry: titolo presente", '"🏭 Costo per sito"' in src)
 withs = re.findall(r"^    with (tab\d+):", src, re.M)
-check("registry: 164 with-blocks in sequenza 1..164",
-      withs == ["tab%d" % i for i in range(1, 165)])
+check("registry: with-blocks in sequenza 1..N senza buchi, N titoli = N variabili",
+      withs == ["tab%d" % i for i in range(1, len(withs) + 1)] and len(dvars) == len(withs))
 keys = re.findall(r'key="(cs163_[^"]+)"', src)
 fkeys = re.findall(r'key=f"(cs163_[^"]+)"', src)
 check("registry: chiavi widget cs163 uniche",
