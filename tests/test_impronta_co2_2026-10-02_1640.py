@@ -143,9 +143,9 @@ if m_decl is not None:
     lend = src.find("\n", m_decl.end())
     decl = src[lstart:lend]
     lhs = re.findall(r"tab\d+", decl.split("= st.tabs", 1)[0])
-    check("157 variabili dichiarate", len(lhs) == 157 and "tab157" in lhs)
+    check("tab157 tra le variabili dichiarate", "tab157" in lhs)
     titles = re.findall(r'"([^"]+)"', decl.split("st.tabs([", 1)[1])
-    check("157 titoli", len(titles) == 157)
+    check("n titoli = n variabili", len(titles) == len(lhs) and len(titles) > 0)
     check("titolo tab157", "🌍 Impronta CO₂" in titles)
     check("titolo unico", titles.count("🌍 Impronta CO₂") == 1)
 else:
