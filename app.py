@@ -18889,6 +18889,182 @@ def calcola_accuratezza_forecast(reali, forecast, min_ore=24, top_n=10):
     }
 
 
+def calcola_normalizzazione_climatica(prezzi, mw_f1=1.0, mw_f2=1.0, mw_f3=1.0,
+                                            temperatura=None, t_base_risc=15.5,
+                                            t_base_raffr=22.0, min_giorni=30):
+    """Normalizzazione climatica del carico con gradi-giorno (HDD/CDD).
+
+    Domanda operativa: "quanto del mio carico e' clima e quanto e' struttura?" —
+    per confrontare due periodi (o budget vs consuntivo) bisogna togliere
+    l'effetto temperatura. Si aggrega a livello GIORNALIERO e si stima con OLS:
+        carico_medio_g(kW) = a + b * HDD_g + c * CDD_g
+    dove HDD = somma oraria di max(0, t_base_risc - T), CDD = somma oraria di
+    max(0, T - t_base_raffr). Il carico NORMALIZZATO toglie lo scostamento dal
+    clima medio del periodo:
+        y_norm = y - b*(HDD - HDD_medio) - c*(CDD - CDD_medio)
+    cosi' la media del normalizzato coincide con la media del reale e il
+    confronto tra periodi e' a parita' di clima.
+
+    Ritorna: R^2 del fit, b/c in kW per grado-giorno, quote % di carico da
+    riscaldamento / raffrescamento / base, energia reale vs normalizzata (MWh),
+    tabella giornaliera, verdetto con driver dominante e nota operativa.
+
+    NaN-safe: serie vuota / indice non-datetime / non numerica / temperatura
+    mancante o senza variabilita' utile / basi invertite / parametri non validi
+    -> errore pulito; tz-aware reso naive; deterministico.
+    """
+    def _err(msg):
+        return {"errore": msg, "valido": False}
+
+    try:
+        mg = int(min_giorni)
+    except (TypeError, ValueError):
+        return _err("min_giorni non valido")
+    if mg < 10:
+        return _err("min_giorni non valido (minimo 10)")
+    min_giorni = mg
+
+    for nome, mw in (("mw_f1", mw_f1), ("mw_f2", mw_f2), ("mw_f3", mw_f3)):
+        try:
+            v = float(mw)
+        except (TypeError, ValueError):
+            return _err("%s non valido" % nome)
+        if not np.isfinite(v) or v < 0:
+            return _err("%s non valido (deve essere >= 0)" % nome)
+    mw_f1, mw_f2, mw_f3 = float(mw_f1), float(mw_f2), float(mw_f3)
+    if mw_f1 + mw_f2 + mw_f3 <= 0:
+        return _err("potenza nulla in tutte le fasce: carico sempre zero")
+
+    try:
+        tbr = float(t_base_risc)
+        tbc = float(t_base_raffr)
+    except (TypeError, ValueError):
+        return _err("temperature di base non valide")
+    if not (np.isfinite(tbr) and np.isfinite(tbc)):
+        return _err("temperature di base non valide")
+    if tbr >= tbc:
+        return _err("la base riscaldamento deve essere < base raffrescamento")
+
+    def _clean(s, nome):
+        try:
+            c = pd.Series(s).dropna()
+        except (TypeError, ValueError):
+            return None, "%s: serie non valida" % nome
+        if len(c) == 0:
+            return None, "%s: serie vuota" % nome
+        if not isinstance(c.index, pd.DatetimeIndex):
+            return None, "%s: l'indice deve essere datetime" % nome
+        try:
+            c = c.astype(float)
+        except (TypeError, ValueError):
+            return None, "%s: valori non numerici" % nome
+        if c.index.tz is not None:
+            c.index = c.index.tz_localize(None)
+        return c.sort_index(), None
+
+    p, em = _clean(prezzi, "prezzi")
+    if em:
+        return _err(em)
+    if temperatura is None:
+        return _err("serie temperatura mancante: carica il CSV con le temperature orarie")
+    t, em = _clean(temperatura, "temperatura")
+    if em:
+        return _err(em)
+
+    # carico orario kW dal profilo MW per fascia AEEGSI
+    idxc = p.index
+    ore = idxc.hour.to_numpy()
+    wd = idxc.weekday.to_numpy()
+    fasce = np.array([_fascia_aeegsi(h, d) for h, d in zip(ore, wd)])
+    mw_ora = np.where(fasce == "F1", mw_f1, np.where(fasce == "F2", mw_f2, mw_f3))
+    carico = pd.Series(mw_ora * 1000.0, index=idxc, name="carico_kw")
+
+    df = pd.DataFrame({"carico_kw": carico, "temp": t}).dropna()
+    if len(df) == 0:
+        return _err("nessuna ora in comune tra prezzi e temperatura")
+
+    df["hdd_h"] = np.maximum(0.0, tbr - df["temp"].to_numpy(dtype=float))
+    df["cdd_h"] = np.maximum(0.0, df["temp"].to_numpy(dtype=float) - tbc)
+    df["giorno"] = df.index.floor("D")
+    gg = df.groupby("giorno").agg(
+        carico_medio=("carico_kw", "mean"),
+        hdd=("hdd_h", "sum"),
+        cdd=("cdd_h", "sum"),
+        n_ore=("carico_kw", "size"),
+    )
+    gg = gg[gg["n_ore"] >= 20]  # giorni con almeno 20 ore valide
+    n_giorni = int(len(gg))
+    if n_giorni < min_giorni:
+        return _err("serie troppo corta: %d giorni completi, richiesti %d" % (n_giorni, min_giorni))
+
+    y = gg["carico_medio"].to_numpy(dtype=float)
+    hdd = gg["hdd"].to_numpy(dtype=float)
+    cdd = gg["cdd"].to_numpy(dtype=float)
+    y_medio = float(np.mean(y))
+    if not np.isfinite(y_medio) or y_medio <= 0:
+        return _err("carico medio giornaliero non positivo")
+
+    X = np.column_stack([np.ones(n_giorni), hdd, cdd])
+    if int(np.linalg.matrix_rank(X)) < 3:
+        return _err("temperatura senza variabilita' utile: regressione non identificabile "
+                    "(servono giorni con HDD>0 e giorni con CDD>0)")
+    beta, residuals, rank, sv = np.linalg.lstsq(X, y, rcond=None)
+    a, b, c = float(beta[0]), float(beta[1]), float(beta[2])
+    y_hat = X @ beta
+    ss_res = float(np.sum((y - y_hat) ** 2))
+    ss_tot = float(np.sum((y - y_medio) ** 2))
+    if ss_tot <= 0:
+        r2 = 1.0 if ss_res <= 1e-12 else 0.0
+    else:
+        r2 = float(max(0.0, min(1.0, 1.0 - ss_res / ss_tot)))
+
+    hdd_medio = float(np.mean(hdd))
+    cdd_medio = float(np.mean(cdd))
+    y_norm = y - b * (hdd - hdd_medio) - c * (cdd - cdd_medio)
+
+    q_risc = b * hdd_medio / y_medio * 100.0
+    q_raffr = c * cdd_medio / y_medio * 100.0
+    q_base = 100.0 - q_risc - q_raffr
+    energia_mwh = float(y_medio * 24.0 * n_giorni / 1000.0)
+    energia_norm_mwh = float(np.mean(y_norm) * 24.0 * n_giorni / 1000.0)
+
+    tabella = pd.DataFrame({
+        "Data": gg.index.strftime("%Y-%m-%d"),
+        "Carico medio (kW)": np.round(y, 2),
+        "HDD": np.round(hdd, 1),
+        "CDD": np.round(cdd, 1),
+        "Carico normalizzato (kW)": np.round(y_norm, 2),
+    })
+
+    if r2 >= 0.70:
+        giudizio = "forte: il clima spiega bene il carico"
+    elif r2 >= 0.40:
+        giudizio = "moderato: il clima spiega una parte del carico"
+    else:
+        giudizio = "debole: il carico dipende poco dalla temperatura"
+    quote = {"riscaldamento": q_risc, "raffrescamento": q_raffr, "base": q_base}
+    driver = max(quote, key=lambda k: quote[k])
+    note = {
+        "riscaldamento": "il carico invernale e' il driver: confronta gli inverni a parita' di HDD.",
+        "raffrescamento": "il carico estivo e' il driver: confronta le estati a parita' di CDD.",
+        "base": "il carico e' quasi tutto strutturale: il clima conta poco, guarda al profilo.",
+    }
+    verdetto = ("Legame clima-carico %s (R² = %.2f). Driver dominante: %s (%.1f %%). %s"
+                % (giudizio, r2, driver, quote[driver], note[driver]))
+
+    return {"errore": None, "valido": True, "n_giorni": n_giorni,
+            "r2": r2, "base_kw": a,
+            "kw_per_gg_risc": b, "kw_per_gg_raffr": c,
+            "quota_risc_pct": float(q_risc), "quota_raffr_pct": float(q_raffr),
+            "quota_base_pct": float(q_base),
+            "carico_medio_kw": y_medio,
+            "energia_mwh": energia_mwh, "energia_norm_mwh": energia_norm_mwh,
+            "hdd_medio": hdd_medio, "cdd_medio": cdd_medio,
+            "tabella": tabella, "verdetto": verdetto,
+            "giorni": gg.index, "y": y, "y_norm": y_norm,
+            "hdd": hdd, "cdd": cdd}
+
+
 def calcola_rischio_orario(prezzi, mw_f1=1.0, mw_f2=1.0, mw_f3=1.0, min_giorni=30):
     """Scomposizione del rischio del costo giornaliero per ora del giorno.
 
@@ -19670,7 +19846,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -32835,6 +33011,106 @@ elif workspace == _('ws8'):
                     mime="text/csv",
                     key="csv_accuratezza_forecast",
                     help="Metriche di accuratezza e peggiori ore per errore assoluto.",
+                )
+
+    with tab155:
+        titolo_nc = edu("Normalizzazione climatica", "Un inverno rigido gonfia i consumi e un'estate torrida pure: per confrontare due periodi (o il consuntivo col budget) bisogna TOGLIERE l'effetto temperatura. I GRADI-GIORNO misurano quanto fa freddo/caldo rispetto a una soglia: HDD = somma oraria di max(0, base_risc - T), CDD = somma oraria di max(0, T - base_raffr). Una regressione lineare stima carico = base + b*HDD + c*CDD; il carico NORMALIZZATO riporta ogni giorno al clima medio del periodo, cosi' il confronto e' a parita' di clima. R^2 dice quanto il clima spiega davvero il tuo carico.")
+        st.markdown(f"<h1>🌡️ {titolo_nc}</h1>", unsafe_allow_html=True)
+        st.caption("Togli l'effetto temperatura dal carico con i gradi-giorno: confronti tra periodi a parità di clima.")
+        nc1, nc2, nc3 = st.columns(3)
+        with nc1:
+            nc_mw1 = st.number_input("MW in F1", min_value=0.0, value=1.0, step=0.5,
+                                    key="nc155_f1",
+                                    help="Potenza nelle ore di punta (lun–ven 08:00–19:00).")
+        with nc2:
+            nc_mw2 = st.number_input("MW in F2", min_value=0.0, value=1.0, step=0.5,
+                                    key="nc155_f2",
+                                    help="Potenza nelle ore intermedie.")
+        with nc3:
+            nc_mw3 = st.number_input("MW in F3", min_value=0.0, value=1.0, step=0.5,
+                                    key="nc155_f3",
+                                    help="Potenza nelle ore fuori punta (notte, weekend).")
+        nc4, nc5 = st.columns(2)
+        with nc4:
+            nc_tbr = st.number_input("Base riscaldamento (°C)", min_value=-10.0, max_value=25.0,
+                                     value=15.5, step=0.5, key="nc155_tbr",
+                                     help="Soglia sotto cui si accumulano gradi-giorno di riscaldamento (HDD).")
+        with nc5:
+            nc_tbc = st.number_input("Base raffrescamento (°C)", min_value=10.0, max_value=35.0,
+                                     value=22.0, step=0.5, key="nc155_tbc",
+                                     help="Soglia sopra cui si accumulano gradi-giorno di raffrescamento (CDD).")
+        up_nc = st.file_uploader("CSV con timestamp e temperatura oraria (°C)", type=["csv"],
+                                 key="nc155_up",
+                                 help="Due colonne: timestamp (prima) e temperatura in °C (seconda), allineata alle ore dei prezzi.")
+        temp_nc = None
+        if up_nc is not None:
+            try:
+                dfnc = pd.read_csv(up_nc)
+                ts_nc = pd.to_datetime(dfnc.iloc[:, 0], errors="coerce")
+                temp_nc = pd.Series(dfnc.iloc[:, 1].to_numpy(dtype=float), index=ts_nc).dropna()
+                temp_nc.index = pd.DatetimeIndex(temp_nc.index)
+            except (TypeError, ValueError):
+                st.error("CSV non leggibile: servono due colonne (timestamp, temperatura °C).")
+        if temp_nc is None:
+            st.info("📤 Carica il CSV con le temperature orarie per avviare la normalizzazione climatica.")
+        else:
+            ris_nc = calcola_normalizzazione_climatica(prezzi, nc_mw1, nc_mw2, nc_mw3,
+                                                       temperatura=temp_nc,
+                                                       t_base_risc=nc_tbr, t_base_raffr=nc_tbc)
+            if not ris_nc["valido"]:
+                st.error(ris_nc["errore"])
+            else:
+                st.success(f"✅ {ris_nc['verdetto']}")
+                k1, k2, k3, k4 = st.columns(4)
+                k1.metric("R² clima→carico", f"{ris_nc['r2']:.2f}",
+                          help="Quota di varianza del carico giornaliero spiegata dai gradi-giorno.")
+                k2.metric("kW / grado-giorno risc.", f"{ris_nc['kw_per_gg_risc']:.2f}",
+                          help="Sensibilità del carico al freddo: kW medi in più per ogni grado-giorno di riscaldamento.")
+                k3.metric("kW / grado-giorno raffr.", f"{ris_nc['kw_per_gg_raffr']:.2f}",
+                          help="Sensibilità del carico al caldo: kW medi in più per ogni grado-giorno di raffrescamento.")
+                k4.metric("Quota climatica", f"{ris_nc['quota_risc_pct'] + ris_nc['quota_raffr_pct']:.1f} %",
+                          help="Percentuale del carico medio spiegata da riscaldamento + raffrescamento.")
+
+                st.markdown("**Carico giornaliero vs gradi-giorno** (con retta di regressione)")
+                gg_nc = ris_nc["giorni"]
+                fig_nc1 = go.Figure()
+                fig_nc1.add_trace(go.Scatter(x=ris_nc["hdd"], y=ris_nc["y"], mode="markers",
+                                             name="Giorni (HDD)",
+                                             hovertemplate="HDD: %{x:.0f}<br>Carico: %{y:.0f} kW<extra></extra>"))
+                xs = np.linspace(float(np.min(ris_nc["hdd"])), float(np.max(ris_nc["hdd"])), 50)
+                fig_nc1.add_trace(go.Scatter(x=xs,
+                                             y=ris_nc["base_kw"] + ris_nc["kw_per_gg_risc"] * xs,
+                                             mode="lines", name="Fit HDD",
+                                             hovertemplate="HDD: %{x:.0f}<br>Fit: %{y:.0f} kW<extra></extra>"))
+                fig_nc1.update_layout(template="plotly_dark", height=360,
+                                       xaxis_title="HDD giornalieri", yaxis_title="Carico medio (kW)")
+                st.plotly_chart(fig_nc1, use_container_width=True)
+
+                st.markdown("**Carico reale vs normalizzato** (a parità di clima)")
+                fig_nc2 = go.Figure()
+                fig_nc2.add_trace(go.Scatter(x=gg_nc, y=ris_nc["y"], mode="lines",
+                                             name="Carico reale",
+                                             hovertemplate="%{x|%Y-%m-%d}<br>Reale: %{y:.0f} kW<extra></extra>"))
+                fig_nc2.add_trace(go.Scatter(x=gg_nc, y=ris_nc["y_norm"], mode="lines",
+                                             name="Carico normalizzato",
+                                             hovertemplate="%{x|%Y-%m-%d}<br>Normalizzato: %{y:.0f} kW<extra></extra>"))
+                fig_nc2.update_layout(template="plotly_dark", height=360,
+                                       title="Confronto a parità di clima",
+                                       yaxis_title="Carico medio giornaliero (kW)",
+                                       legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                                                   xanchor="right", x=1))
+                st.plotly_chart(fig_nc2, use_container_width=True)
+
+                st.markdown("**Tabella giornaliera**")
+                st.dataframe(ris_nc["tabella"], use_container_width=True, hide_index=True)
+                d0n, d1n = prezzi.index.min().date(), prezzi.index.max().date()
+                st.download_button(
+                    "⬇️ Esporta normalizzazione climatica (CSV)",
+                    ris_nc["tabella"].to_csv(index=False, sep=";").encode("utf-8"),
+                    file_name=f"normalizzazione_climatica_{d0n}_{d1n}.csv",
+                    mime="text/csv",
+                    key="csv_normalizzazione_climatica",
+                    help="Una riga per giorno: carico medio, HDD, CDD e carico normalizzato a parità di clima.",
                 )
 
 
