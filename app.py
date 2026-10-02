@@ -17888,6 +17888,258 @@ def calcola_peak_shaving(prezzi, mw_f1, mw_f2, mw_f3, cap_mwh, pot_mw,
             "sweep": sweep, "mensile": mensile}
 
 
+def _phi_std(z):
+    """CDF della normale standard (approssimazione Abramowitz-Stegun 7.1.26).
+
+    Solo numpy: serve ai test standalone che estraggono le funzioni via AST
+    senza gli import di modulo (scipy non disponibile nel namespace isolato).
+    """
+    x = float(z)
+    t = 1.0 / (1.0 + 0.2316419 * abs(x))
+    d = 0.3989422804014327 * np.exp(-x * x / 2.0)
+    p = d * t * (0.319381530 + t * (-0.356563782 + t * (1.781477937 +
+         t * (-1.821255978 + t * 1.330274429))))
+    return 1.0 - p if x >= 0 else p
+
+
+def _gammaln(x):
+    """Logaritmo della funzione Gamma (Lanczos g=7), solo numpy.
+
+    Serve alla correzione di Anis-Lloyd dell'R/S atteso per rumore bianco:
+    la stima R/S grezza su finestre piccole e' distorta verso l'alto
+    (su rumore bianco puro darebbe H ~ 0.65 invece di 0.5), quindi H si
+    stima come 0.5 + pendenza di log(R/S / E[R/S_bianco]) su log(n).
+    Implementata qui (e non via scipy) perche' i test standalone estraggono
+    le funzioni via AST senza gli import di modulo.
+    """
+    xa = np.atleast_1d(np.asarray(x, dtype=float))
+    if np.any(xa <= 0.0):
+        raise ValueError("gammaln: x deve essere > 0")
+    _c = np.array([0.99999999999980993, 676.5203681218851, -1259.1392167224028,
+                   771.32342877765313, -176.61502916214059, 12.507343278686905,
+                   -0.13857109526572012, 9.9843695780195716e-6,
+                   1.5056327351493116e-7])
+    refl = xa < 0.5
+    y = np.where(refl, 1.0 - xa, xa) - 1.0
+    a = _c[0] + sum(_c[k] / (y + k) for k in range(1, 9))
+    t = y + 7.5
+    out = 0.5 * np.log(2.0 * np.pi) + (y + 0.5) * np.log(t) - t + np.log(a)
+    if np.any(refl):
+        xr = xa[refl]
+        out[refl] = np.log(np.pi) - np.log(np.sin(np.pi * xr)) - out[refl]
+    return out[0] if np.ndim(x) == 0 else out
+
+
+def _rs_atteso_bianco(n):
+    """E[R/S_n] per rumore bianco gaussiano (Anis-Lloyd 1976).
+
+    E[R/S_n] = Gamma((n-1)/2) / (sqrt(pi) * Gamma(n/2))
+               * sum_{i=1}^{n-1} sqrt((n-i)/i)
+    Usato per correggere la distorsione da campione finito dell'analisi R/S.
+    """
+    n = int(n)
+    if n < 2:
+        return float("nan")
+    i = np.arange(1, n)
+    return float(np.exp(_gammaln((n - 1) / 2.0) - _gammaln(n / 2.0))
+                 / np.sqrt(np.pi) * np.sqrt((n - i) / i).sum())
+
+
+def calcola_hurst(prezzi, scala_min_giorni=4, n_scale=12, min_giorni=60):
+    """Esponente di Hurst (analisi R/S) sulle medie giornaliere + runs test di efficienza debole.
+
+    Domanda operativa: 'il prezzo dello spot ha memoria?' H misura la memoria
+    di LUNGO periodo della serie:
+      H < 0.45  -> MEAN-REVERTING (antipersistente): i movimenti tendono a
+                   rientrare; conviene comprare sui cali e vendere sui picchi,
+                   e dopo uno shock aspettare il rientro prima di fissare;
+      0.45-0.55 -> RANDOM WALK: nessuna memoria sfruttabile; il timing non
+                   paga, meglio medie di periodo e strategie sistematiche;
+      H > 0.55  -> PERSISTENTE (trending): i movimenti tendono a proseguire;
+                   conviene seguire il trend, non scommettere sul rientro.
+
+    Metodo: variazioni giornaliere delle medie giornaliere dei prezzi orari
+    (la serie stazionaria su cui l'analisi R/S e' valida: sui livelli grezzi
+    sia R che S crescerebbero con la scala, falsando H); analisi R/S
+    (rescaled range, S con ddof=0 come nella definizione classica) su finestre
+    non sovrapposte di n giorni, con n log-spaziato tra scala_min_giorni e
+    N/4 giorni (servono >= 4 scale valide). La stima R/S grezza e' distorta
+    verso l'alto sulle finestre piccole (su rumore bianco darebbe H ~ 0.65):
+    si applica la correzione di Anis-Lloyd e H = 0.5 + pendenza della retta
+    OLS in forma chiusa di log10(R/S / E[R/S_bianco]) su log10(n).
+    Completato dal RUNS TEST di Wald-Wolfowitz sui segni delle variazioni
+    giornaliere (forma debole dell'efficienza di mercato: con p < 5% i segni
+    delle variazioni non sono casuali).
+
+    Differenza rispetto agli altri tab: 'Mean reversion' stima AR(1) sulle ore
+    (memoria di BREVE periodo, half-life in ore); 'Autocorrelazione' mostra la
+    memoria per singolo lag; qui si misura la memoria di LUNGO periodo su piu'
+    scale (settimane/mesi), la scala rilevante per le decisioni di fixing,
+    di budgeting e di timing degli acquisti.
+
+    NaN-safe: ore NaN ignorate; giorni senza ore valide esclusi; serie vuota /
+    indice non datetime / meno di min_giorni giorni validi / serie giornaliera
+    costante o variazioni nulle (S = 0 ovunque) / meno di 4 scale valide ->
+    errore pulito.
+    Deterministico a parita' di input (nessun seed: solo aritmetica).
+
+    Ritorna dict con 'errore', 'valido', 'n_giorni', 'hurst', 'r2_fit',
+    'classe' ('mean-reverting'/'random-walk'/'persistente'), 'verdetto',
+    'segnale' (implicazione operativa), 'runs_n', 'runs_osservati',
+    'runs_attesi', 'runs_z', 'runs_p', 'runs_verdetto', 'n_scale' e 'scale'
+    (DataFrame: 'Finestra (giorni)', 'R/S medio', 'Fit R/S').
+    """
+    cols = ["Finestra (giorni)", "R/S medio", "Fit R/S"]
+    vuoto = {"errore": "Dati insufficienti: servono almeno 60 giorni di prezzi orari validi.",
+             "valido": False, "n_giorni": 0, "hurst": None, "r2_fit": None,
+             "classe": None, "verdetto": "", "segnale": "", "runs_n": 0,
+             "runs_osservati": None, "runs_attesi": None, "runs_z": None,
+             "runs_p": None, "runs_verdetto": "", "n_scale": 0,
+             "scale": pd.DataFrame(columns=cols)}
+
+    def _err(msg):
+        out = dict(vuoto)
+        out["errore"] = msg
+        return out
+
+    try:
+        p = pd.to_numeric(prezzi, errors="coerce").dropna()
+        p = p[~p.index.duplicated(keep="first")].sort_index()
+    except Exception:
+        return _err("Dati insufficienti: nessuna ora valida nel periodo.")
+    if len(p) == 0 or not isinstance(p.index, pd.DatetimeIndex):
+        return _err("Dati insufficienti: nessuna ora valida nel periodo.")
+    idx = p.index.tz_localize(None) if p.index.tz is not None else p.index
+    p = pd.Series(p.to_numpy(dtype=float), index=idx)
+    giorni = p.resample("D").mean().dropna()
+    n_g = len(giorni)
+    try:
+        mg = int(min_giorni)
+    except Exception:
+        mg = 60
+    if n_g < max(30, mg):
+        return _err(f"Dati insufficienti: servono almeno {max(30, mg)} giorni "
+                    f"validi, trovati {n_g}.")
+    x = giorni.to_numpy(dtype=float)
+    if not np.all(np.isfinite(x)) or np.all(x == x[0]):
+        return _err("Serie giornaliera costante o non finita: R/S non calcolabile.")
+    # R/S va calcolato sulle variazioni (serie stazionaria), non sui livelli:
+    # sui livelli sia R che S crescono con la scala e H risulta spurio (~1).
+    dx = np.diff(x)
+    dx = dx[np.isfinite(dx)]
+    if len(dx) < 30 or np.all(dx == 0.0):
+        return _err("Variazioni giornaliere insufficienti o nulle: R/S non calcolabile.")
+
+    try:
+        n_min = max(2, int(scala_min_giorni))
+    except Exception:
+        n_min = 4
+    try:
+        ns = max(4, min(24, int(n_scale)))
+    except Exception:
+        ns = 12
+    n_max = len(dx) // 4
+    if n_max <= n_min:
+        return _err("Serie troppo corta per le scale richieste.")
+    raw = np.unique(np.round(np.logspace(np.log10(n_min), np.log10(n_max), ns)).astype(int))
+    scale_n = [int(v) for v in raw if int(v) >= n_min]
+    if len(scale_n) < 4:
+        return _err("Meno di 4 scale valide per la stima di Hurst.")
+
+    def _rs_medio(v, n):
+        k = len(v) // n
+        if k < 2:
+            return np.nan
+        vals = []
+        for i in range(k):
+            ch = v[i * n:(i + 1) * n]
+            s = ch.std(ddof=0)  # ddof=0: definizione classica dell'R/S
+            if s > 0.0 and np.isfinite(s):
+                cum = np.cumsum(ch - ch.mean())
+                vals.append((cum.max() - cum.min()) / s)
+        return float(np.mean(vals)) if vals else np.nan
+
+    rs = np.array([_rs_medio(dx, n) for n in scale_n])
+    ok = np.isfinite(rs) & (rs > 0.0)
+    nn = np.array(scale_n, dtype=float)[ok]
+    rs = rs[ok]
+    if len(nn) < 4:
+        return _err("R/S non calcolabile su abbastanza scale (serie quasi costante?).")
+    e_bn = np.array([_rs_atteso_bianco(int(n)) for n in nn])
+    ok2 = np.isfinite(e_bn) & (e_bn > 0.0)
+    nn, rs, e_bn = nn[ok2], rs[ok2], e_bn[ok2]
+    if len(nn) < 4:
+        return _err("Correzione di Anis-Lloyd non valutabile sulle scale disponibili.")
+    lx = np.log10(nn)
+    ly = np.log10(rs / e_bn)  # scostamento dal rumore bianco
+    mx, my = lx.mean(), ly.mean()
+    den = ((lx - mx) ** 2).sum()
+    if den <= 0.0:
+        return _err("Scale degeneri: stima di Hurst impossibile.")
+    pendenza = float(((lx - mx) * (ly - my)).sum() / den)
+    hurst = 0.5 + pendenza  # correzione di Anis-Lloyd: il bianco ha pendenza 0
+    interc = float(my - pendenza * mx)
+    ss_tot = ((ly - my) ** 2).sum()
+    ss_res = ((ly - (interc + pendenza * lx)) ** 2).sum()
+    r2 = float(1.0 - ss_res / ss_tot) if ss_tot > 0.0 else 0.0
+    r2 = max(0.0, min(1.0, r2))
+
+    if hurst < 0.45:
+        classe = "mean-reverting"
+        segnale = ("Serie ANTIPERSISTENTE: i movimenti tendono a rientrare. "
+                   "Strategia: comprare sui cali, vendere sui picchi; dopo uno "
+                   "shock, aspettare il rientro prima di fissare il prezzo.")
+    elif hurst > 0.55:
+        classe = "persistente"
+        segnale = ("Serie PERSISTENTE: i movimenti tendono a proseguire. "
+                   "Strategia: seguire il trend in corso, non scommettere sul "
+                   "rientro; fissare presto se il trend e' al rialzo.")
+    else:
+        classe = "random-walk"
+        segnale = ("RANDOM WALK: nessuna memoria sfruttabile su queste scale. "
+                   "Il timing discrezionale non paga: meglio medie di periodo, "
+                   "acquisti programmati e strategie sistematiche.")
+
+    segni = np.sign(dx[dx != 0.0])
+    runs_n = int(len(segni))
+    r_osservati = r_attesi = r_z = r_p = None
+    r_verdetto = "Runs test non valutabile (variazioni insufficienti)."
+    if runs_n >= 20:
+        n_pos = int((segni > 0).sum())
+        n_neg = int((segni < 0).sum())
+        if n_pos > 0 and n_neg > 0:
+            r_osservati = int(1 + (np.diff(segni) != 0).sum())
+            n = float(runs_n)
+            mu = 2.0 * n_pos * n_neg / n + 1.0
+            var = (2.0 * n_pos * n_neg * (2.0 * n_pos * n_neg - n_pos - n_neg)
+                   / (n * n * (n - 1.0)))
+            r_attesi = float(mu)
+            if var > 0.0:
+                r_z = float((r_osservati - mu) / np.sqrt(var))
+                r_p = float(2.0 * (1.0 - _phi_std(abs(r_z))))
+                r_verdetto = ("Efficienza debole RIFIUTATA (p < 5%): i segni delle "
+                              "variazioni giornaliere non sono casuali."
+                              if r_p < 0.05 else
+                              "Efficienza debole NON rifiutata (p >= 5%): i segni "
+                              "delle variazioni sono compatibili col caso.")
+
+    verdetto = (f"H = {hurst:.3f} ({classe.replace('-', ' ')}, R2 del fit {r2:.3f} "
+                f"su {len(nn)} scale, {n_g} giorni). {segnale}")
+    df_scale = pd.DataFrame({
+        "Finestra (giorni)": nn.astype(int),
+        "R/S medio": np.round(rs, 4),
+        "Fit R/S": np.round(e_bn * 10.0 ** (interc + pendenza * lx), 4),
+    })
+    return {"errore": None, "valido": True, "n_giorni": int(n_g),
+            "hurst": round(hurst, 4), "r2_fit": round(r2, 4),
+            "classe": classe, "verdetto": verdetto, "segnale": segnale,
+            "runs_n": runs_n, "runs_osservati": r_osservati,
+            "runs_attesi": round(r_attesi, 2) if r_attesi is not None else None,
+            "runs_z": round(r_z, 3) if r_z is not None else None,
+            "runs_p": r_p, "runs_verdetto": r_verdetto,
+            "n_scale": int(len(nn)), "scale": df_scale}
+
+
 
 
 # ==========================================
@@ -18533,7 +18785,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -31130,6 +31382,96 @@ with tab148:
                 key="csv_peak_shaving",
                 help="Una riga per mese: picco lordo, picco netto e risparmio sulla quota di potenza.",
             )
+
+with tab149:
+    titolo_hu = edu("Esponente di Hurst", "L'ESPONENTE DI HURST (H) misura la memoria di LUNGO periodo del prezzo: H sotto 0.45 = la serie tende a RIENTRARE dopo ogni movimento (mean-reverting, conviene comprare sui cali); H sopra 0.55 = i movimenti tendono a PROSEGUIRE (persistente, conviene seguire il trend); H attorno a 0.5 = RANDOM WALK, nessuna memoria sfruttabile e il timing non paga. Si stima con l'analisi R/S (rescaled range): per finestre di n giorni si calcola il rapporto tra escursione massima e deviazione standard, e H e' la pendenza della retta di log(R/S) contro log(n). Il RUNS TEST verifica in piu' se i segni delle variazioni giornaliere sono casuali (forma debole dell'efficienza di mercato). Differenza col tab 'Mean reversion': quello misura la memoria di BREVE periodo (ore, half-life degli shock); qui la memoria su settimane e mesi, la scala delle decisioni di fixing e di budget.")
+    st.markdown(f"<h1>\U0001F300 {titolo_hu}</h1>", unsafe_allow_html=True)
+    st.caption("Memoria di lungo periodo del prezzo: la serie rientra, prosegue o cammina a caso?")
+    hu1, hu2 = st.columns(2)
+    with hu1:
+        hu_nmin = st.slider("Finestra minima (giorni)", min_value=2, max_value=30, value=4, step=1,
+                            key="hu149_nmin",
+                            help="La scala piu' piccola dell'analisi R/S. Piu' bassa = piu' scale, ma finestre corte rumorose.")
+    with hu2:
+        hu_nsc = st.slider("Numero di scale", min_value=6, max_value=20, value=12, step=1,
+                           key="hu149_nsc",
+                           help="Quante finestre log-spaziate usare per la retta di regressione.")
+    hu = calcola_hurst(prezzi, hu_nmin, hu_nsc)
+    if hu["errore"]:
+        st.error(hu["errore"])
+    else:
+        k1, k2, k3, k4 = st.columns(4)
+        with k1:
+            st.metric("Esponente di Hurst", f"{hu['hurst']:.3f}",
+                      hu["classe"].replace("-", " "))
+        with k2:
+            st.metric("R² del fit log-log", f"{hu['r2_fit']:.3f}",
+                      f"{hu['n_scale']} scale, {hu['n_giorni']} giorni")
+        with k3:
+            zp = f"p = {hu['runs_p']:.3f}" if hu["runs_p"] is not None else "—"
+            st.metric("Runs test (efficienza debole)", zp,
+                      f"z = {hu['runs_z']}" if hu["runs_z"] is not None else "n/d")
+        with k4:
+            rp = f"{hu['runs_osservati']} vs {hu['runs_attesi']:.0f} attesi" \
+                if hu["runs_osservati"] is not None else "—"
+            st.metric("Runs osservati", rp, f"su {hu['runs_n']} variazioni")
+        if hu["classe"] == "mean-reverting":
+            st.success(hu["verdetto"])
+        elif hu["classe"] == "persistente":
+            st.warning(hu["verdetto"])
+        else:
+            st.info(hu["verdetto"])
+        st.caption(f"\U0001F4A1 {hu['runs_verdetto']}")
+
+        st.markdown("**R/S in funzione della finestra (scala log-log): la pendenza e' H**")
+        fig_hu = go.Figure()
+        sc = hu["scale"]
+        fig_hu.add_trace(go.Scatter(x=sc["Finestra (giorni)"], y=sc["R/S medio"],
+                                    mode="markers", name="R/S osservato",
+                                    marker=dict(color="#38bdf8", size=8),
+                                    hovertemplate="n=%{x} gg: R/S %{y:.3f}<extra></extra>"))
+        fig_hu.add_trace(go.Scatter(x=sc["Finestra (giorni)"], y=sc["Fit R/S"],
+                                    mode="lines", name=f"Fit (H={hu['hurst']:.3f})",
+                                    line=dict(color="#22c55e", width=2, dash="dash"),
+                                    hovertemplate="n=%{x} gg: fit %{y:.3f}<extra></extra>"))
+        fig_hu.update_layout(template="plotly_dark", height=320,
+                             xaxis_title="Finestra (giorni, scala log)",
+                             yaxis_title="R/S medio (scala log)",
+                             xaxis_type="log", yaxis_type="log")
+        st.plotly_chart(fig_hu, use_container_width=True)
+
+        st.markdown("**Dove cade H: zone di regime**")
+        fig_hu2 = go.Figure()
+        fig_hu2.add_trace(go.Bar(x=[0.45], y=["H"], orientation="h", name="Mean-reverting (< 0.45)",
+                                 marker_color="#38bdf8",
+                                 hovertemplate="Mean-reverting: H < 0.45<extra></extra>"))
+        fig_hu2.add_trace(go.Bar(x=[0.10], y=["H"], orientation="h", name="Random walk (0.45–0.55)",
+                                 marker_color="#6b7280",
+                                 hovertemplate="Random walk: 0.45–0.55<extra></extra>"))
+        fig_hu2.add_trace(go.Bar(x=[0.45], y=["H"], orientation="h", name="Persistente (> 0.55)",
+                                 marker_color="#f59e0b",
+                                 hovertemplate="Persistente: H > 0.55<extra></extra>"))
+        fig_hu2.add_vline(x=hu["hurst"], line_dash="solid", line_color="#22c55e", line_width=3,
+                          annotation_text=f"H = {hu['hurst']:.3f}",
+                          annotation_font_color="#22c55e")
+        fig_hu2.update_layout(template="plotly_dark", height=200, barmode="stack",
+                              xaxis_title="Esponente di Hurst", xaxis_range=[0, 1],
+                              showlegend=True,
+                              legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                                          xanchor="right", x=1))
+        st.plotly_chart(fig_hu2, use_container_width=True)
+
+        st.markdown("**Dettaglio per scala**")
+        st.dataframe(sc, use_container_width=True, hide_index=True)
+        d0h, d1h = prezzi.index.min().date(), prezzi.index.max().date()
+        st.download_button(
+            "\u2B07\uFE0F Esporta Hurst R/S (CSV)",
+            sc.to_csv(index=False, sep=";").encode("utf-8"),
+            file_name=f"hurst_rs_{d0h}_{d1h}.csv",
+            mime="text/csv",
+            key="csv_hurst",
+            help="Una riga per scala: finestra in giorni, R/S medio osservato e valore del fit.",
+        )
 
 
 
