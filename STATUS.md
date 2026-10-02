@@ -1,6 +1,11 @@
 # STATUS.md — 02-Dashboard-data-analist (Singularity Quant ETRM)
 
-**Ultimo aggiornamento: 02/10/2026 01:39 CEST**
+**Ultimo aggiornamento: 02/10/2026 ~02:00 CEST**
+
+## 02/10/2026 ~02:00 CEST — aggiornamento documentale giornaliero
+- QA oraria attiva: nuova tab142 "🚨 Indice di stress di mercato" (ciclo 01:39 CEST 02/10, 41 check 0 fail); README e docs/AGGIUNGERE_TAB.md allineati a 142 tab.
+- Blitz 01/10 21:03: fix `calcola_mtm` su serie vuote/non-datetime (3 test di regressione) + nuova tab "🎯 Radar prezzo obiettivo" con Monte Carlo; test verdi.
+- Rischio noto: concorrenza tra QA/worker sul grande `app.py` — da gestire con pull freschi prima dei push.
 
 ## Stato
 - Dashboard Streamlit "Singularity Quant ETRM", live su https://czpox8o8x6arnxw96txnvt.streamlit.app/.
