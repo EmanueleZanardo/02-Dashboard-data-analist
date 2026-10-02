@@ -130,14 +130,17 @@ check("copertura piena: valido", r8["valido"])
 check("copertura piena piatto: rischio 14400 = 30% -> ALTO",
       r8["giudizio"] == "ALTO" and abs(r8["rischio_volume_eur"] - 14400.0) < 1e-6)
 
-# --- 9. registry tab161 ---
-decl = [ln for ln in src.splitlines() if "tab159, tab160, tab161 = st.tabs([" in ln]
+# --- 9. registry tab161 (robusto all'aggiunta di tab successive) ---
+decl = [ln for ln in src.splitlines() if re.search(r"tab159, tab160, tab161(, tab\d+)* = st\.tabs\(\[", ln)]
 check("registry: dichiarazione tab161", len(decl) == 1)
 seg = decl[0] if decl else ""
-check("registry: 161 titoli", seg.count('", "') == 160)
-check("registry: ultimo titolo Rischio volume", seg.rstrip().endswith('"📦 Rischio volume"])'))
+dvars = re.findall(r"tab\d+", seg.split("= st.tabs")[0])
+check("registry: tab161 tra le variabili dichiarate", "tab161" in dvars)
+check("registry: n titoli = n variabili", seg.count('", "') + 1 == len(dvars))
+check("registry: titolo Rischio volume presente", '"📦 Rischio volume"' in seg)
 withs = re.findall(r"^    with (tab\d+):", src, re.M)
-check("registry: 161 with tabN", len(withs) == 161)
+check("registry: with tabN in sequenza 1..n senza buchi",
+      withs == ["tab%d" % i for i in range(1, len(withs) + 1)])
 check("registry: with tab161 presente", "tab161" in withs)
 check("registry: helper a livello modulo",
       any(isinstance(n, ast.FunctionDef) and n.name == "calcola_rischio_volume" for n in tree.body))
