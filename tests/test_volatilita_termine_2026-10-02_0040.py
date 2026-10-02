@@ -156,11 +156,12 @@ check("uno.verdetto", "non stimabile" in r11["verdetto"], r11["verdetto"])
 check("uno.tabella_1riga", len(r11["tabella"]) == 1)
 check("uno.slope_none", r11["slope"] is None)
 
-# --- 12. Registry tab141 in app.py ---
+# --- 12. Registry tab141 in app.py (robusto all'aggiunta di nuove tab) ---
 src = open(APP, encoding="utf-8").read()
-m = re.search(r"tab139, tab140, tab141 = st\.tabs\(\[(.*?)\]\)", src, re.S)
-check("reg.dichiarazione", m is not None)
-check("reg.titolo", m is not None and "🌊 Volatilità a termine" in m.group(1))
+_decl141 = [l for l in src.splitlines() if "st.tabs(" in l and "tab1," in l]
+check("reg.dichiarazione",
+      any("tab141" in l.split("= st.tabs(")[0] for l in _decl141))
+check("reg.titolo", '"🌊 Volatilità a termine"' in src)
 check("reg.with", "    with tab141:" in src)
 check("reg.keys_uniche", src.count('key="vt141_bucket"') == 1 and src.count('key="csv_vol_termine"') == 1)
 
