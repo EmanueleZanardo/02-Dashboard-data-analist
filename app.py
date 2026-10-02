@@ -16941,6 +16941,107 @@ def calcola_indice_stress(prezzi_orari, soglia=70.0, pesi=None):
             "verdetto": verdetto}
 
 
+def calcola_efficienza_fixing(prezzi_orari, prezzo_fissato):
+    """Efficienza del fixing: quanto e' stato buono il tuo prezzo fissato (€/MWh)
+    contro il mercato del periodo.
+
+    Confronta il prezzo medio che hai fissato con la distribuzione dei prezzi
+    orari del periodo:
+      - % ore battute = quota di ore in cui il mercato e' stato uguale o piu'
+        caro del tuo fixing (100% = l'hai sempre battuto);
+      - sovracosto vs media di periodo, in €/MWh e in %;
+      - distanza dal minimo di periodo (costo opportunita' del timing perfetto)
+        e dal massimo di periodo.
+    Verdetto per % ore battute: >=90 Eccellente, >=70 Buono, >=50 Nella norma,
+    >=30 Caro, <30 Molto caro.
+    A cosa serve: valuta ex-post le decisioni di fissazione — un fixing sotto
+    la mediana batte il mercato piu' della meta' del tempo; la tabella mensile
+    mostra in quali mesi il fixing ha reso di piu' o di meno, utile per il
+    debriefing col fornitore.
+    NaN-safe: serie vuota / indice non-datetime / < 24 ore / prezzo fissato
+    non numerico o <= 0 -> errore pulito; tz-aware reso naive.
+    Ritorna dict con errore/valido/prezzo_fissato/media/mediana/p10/p25/p50/
+    p75/p90/min/max/n_ore/pct_battuto/sovracosto_eur/sovracosto_pct/dist_min/
+    dist_max/verdetto/mensile.
+    """
+    def _vuoto_mens():
+        return pd.DataFrame({"Mese": [], "Media €/MWh": [],
+                             "Scarto vs fixing €/MWh": [],
+                             "Ore battute %": []})
+
+    def _err(msg):
+        return {"errore": msg, "valido": False, "prezzo_fissato": None,
+                "media": None, "mediana": None, "p10": None, "p25": None,
+                "p50": None, "p75": None, "p90": None, "min": None,
+                "max": None, "n_ore": 0, "pct_battuto": None,
+                "sovracosto_eur": None, "sovracosto_pct": None,
+                "dist_min": None, "dist_max": None, "verdetto": msg,
+                "mensile": _vuoto_mens()}
+
+    if not isinstance(prezzi_orari, pd.Series):
+        return _err("Input non valido: serve una Series pandas.")
+    if not isinstance(prezzi_orari.index, pd.DatetimeIndex):
+        return _err("Indice non temporale: serve una serie oraria con DatetimeIndex.")
+    try:
+        pf = float(prezzo_fissato)
+    except (TypeError, ValueError):
+        return _err("Prezzo fissato non numerico: inserisci un valore > 0.")
+    if not pf > 0:
+        return _err("Prezzo fissato non valido: inserisci un valore > 0.")
+
+    p = pd.to_numeric(prezzi_orari, errors="coerce").dropna()
+    if len(p) < 24:
+        return _err("Serie troppo corta: servono almeno 24 ore di prezzi.")
+    vals = p.to_numpy(dtype=float)
+    q = np.percentile(vals, [10, 25, 50, 75, 90])
+
+    media = float(vals.mean())
+    pct_batt = float((vals >= pf).mean() * 100.0)
+    sovr_eur = pf - media
+    sovr_pct = (sovr_eur / media * 100.0) if abs(media) > 1e-9 else 0.0
+
+    if pct_batt >= 90.0:
+        verdetto = (f"🏆 Eccellente: hai battuto il mercato nel {pct_batt:.1f}% "
+                    "delle ore — fixing quasi perfetto.")
+    elif pct_batt >= 70.0:
+        verdetto = (f"✅ Buono: hai battuto il mercato nel {pct_batt:.1f}% "
+                    "delle ore.")
+    elif pct_batt >= 50.0:
+        verdetto = (f"➖ Nella norma: hai battuto il mercato nel "
+                    f"{pct_batt:.1f}% delle ore.")
+    elif pct_batt >= 30.0:
+        verdetto = (f"⚠️ Caro: hai battuto il mercato solo nel "
+                    f"{pct_batt:.1f}% delle ore.")
+    else:
+        verdetto = (f"🚨 Molto caro: hai battuto il mercato solo nel "
+                    f"{pct_batt:.1f}% delle ore.")
+
+    idxn = p.index.tz_localize(None) if p.index.tz is not None else p.index
+    mesi = idxn.to_period("M")
+    gm = p.groupby(mesi)
+    mm = gm.mean()
+    pbb = gm.apply(lambda s: float((s.to_numpy() >= pf).mean() * 100.0))
+    mensile = pd.DataFrame(
+        {"Mese": [str(m) for m in mm.index],
+         "Media €/MWh": mm.to_numpy().round(2),
+         "Scarto vs fixing €/MWh": (mm - pf).to_numpy().round(2),
+         "Ore battute %": pbb.to_numpy().round(1)})
+
+    return {"errore": None, "valido": True, "prezzo_fissato": pf,
+            "media": round(media, 2), "mediana": round(float(np.median(vals)), 2),
+            "p10": round(float(q[0]), 2), "p25": round(float(q[1]), 2),
+            "p50": round(float(q[2]), 2), "p75": round(float(q[3]), 2),
+            "p90": round(float(q[4]), 2),
+            "min": round(float(vals.min()), 2),
+            "max": round(float(vals.max()), 2),
+            "n_ore": int(len(vals)), "pct_battuto": round(pct_batt, 1),
+            "sovracosto_eur": round(sovr_eur, 2),
+            "sovracosto_pct": round(sovr_pct, 1),
+            "dist_min": round(pf - float(vals.min()), 2),
+            "dist_max": round(float(vals.max()) - pf, 2),
+            "verdetto": verdetto, "mensile": mensile}
+
+
 # ==========================================
 # WORKSPACE 1: SIMULATORE STRATEGICO
 # ==========================================
@@ -17584,7 +17685,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -29653,6 +29754,73 @@ elif workspace == _('ws8'):
                 key="csv_indice_stress",
                 help="Una riga per giorno: SSI, classe e punti per componente (la somma fa l'SSI).",
             )
+
+with tab143:
+        titolo_ef = edu("Efficienza del fixing", "L'EFFICIENZA DEL FIXING misura ex-post quanto e' stato buono il prezzo che hai fissato (€/MWh) contro il mercato del periodo: la % di ORE BATTUTE dice in quante ore il mercato e' stato uguale o piu' caro del tuo fixing (100% = l'hai sempre battuto); il SOVRACOSTO vs media dice quanto hai pagato in piu' (o in meno) per MWh rispetto al prezzo medio di periodo; la distanza dal MINIMO e' il costo opportunita' del timing perfetto. La tabella mensile mostra in quali mesi il fixing ha reso di piu' o di meno, utile per il debriefing col fornitore.")
+        st.markdown(f"<h1>📊 {titolo_ef}</h1>", unsafe_allow_html=True)
+        st.caption("Quanto è stato buono il tuo prezzo fissato contro il mercato del periodo.")
+
+        ef_default = round(float(prezzi.mean()), 1) if len(prezzi) else 100.0
+        ef_prezzo = st.number_input("Prezzo medio fissato (€/MWh)", min_value=0.01,
+                                    value=ef_default, step=1.0, format="%.2f",
+                                    key="ef143_prezzo",
+                                    help="Il prezzo medio a cui hai fissato le tue forniture nel periodo.")
+        ef = calcola_efficienza_fixing(prezzi, float(ef_prezzo))
+        if ef["errore"]:
+            st.error(ef["errore"])
+        else:
+            if ef["pct_battuto"] >= 70.0:
+                st.success(f"✅ {ef['verdetto']}")
+            elif ef["pct_battuto"] >= 50.0:
+                st.info(f"➖ {ef['verdetto']}")
+            else:
+                st.error(f"⚠️ {ef['verdetto']}")
+            k1, k2, k3, k4 = st.columns(4)
+            with k1:
+                st.metric("Ore battute dal fixing", f"{ef['pct_battuto']:.1f}%")
+            with k2:
+                st.metric("Sovracosto vs media", f"{ef['sovracosto_eur']:+.2f} €/MWh",
+                          f"{ef['sovracosto_pct']:+.1f}%")
+            with k3:
+                st.metric("Distanza dal minimo", f"{ef['dist_min']:.2f} €/MWh",
+                          "costo opportunità")
+            with k4:
+                st.metric("Distanza dal massimo", f"{ef['dist_max']:.2f} €/MWh")
+
+            st.markdown("**Distribuzione dei prezzi orari vs il tuo fixing**")
+            v_ef = pd.to_numeric(prezzi, errors="coerce").dropna().to_numpy()
+            conteggi_ef, bordi_ef = np.histogram(v_ef, bins=50)
+            centri_ef = (bordi_ef[:-1] + bordi_ef[1:]) / 2.0
+            fig_ef = go.Figure()
+            fig_ef.add_trace(go.Bar(x=centri_ef, y=conteggi_ef, name="Ore",
+                                    marker_color="#38bdf8",
+                                    hovertemplate="€%{x:.1f}/MWh: %{y} ore<extra></extra>"))
+            fig_ef.add_vline(x=ef["prezzo_fissato"], line_dash="solid", line_color="#ef4444",
+                             annotation_text=f"Fixing {ef['prezzo_fissato']:.1f}",
+                             annotation_font_color="#ef4444")
+            fig_ef.add_vline(x=ef["media"], line_dash="dash", line_color="#a78bfa",
+                             annotation_text=f"Media {ef['media']:.1f}",
+                             annotation_font_color="#a78bfa")
+            for pv_ef, txt_ef in [(ef["p10"], "P10"), (ef["p90"], "P90")]:
+                fig_ef.add_vline(x=pv_ef, line_dash="dot", line_color="#94a3b8",
+                                 annotation_text=f"{txt_ef} {pv_ef:.1f}",
+                                 annotation_font_color="#94a3b8")
+            fig_ef.update_layout(template="plotly_dark", height=360, xaxis_title="€/MWh",
+                                 yaxis_title="Ore")
+            st.plotly_chart(fig_ef, use_container_width=True)
+
+            st.markdown("**Mese per mese: il tuo fixing contro il mercato**")
+            st.dataframe(ef["mensile"], use_container_width=True, hide_index=True)
+            d0e, d1e = prezzi.index.min().date(), prezzi.index.max().date()
+            st.download_button(
+                "⬇️ Esporta efficienza fixing (CSV)",
+                ef["mensile"].to_csv(index=False, sep=";").encode("utf-8"),
+                file_name=f"efficienza_fixing_{d0e}_{d1e}.csv",
+                mime="text/csv",
+                key="csv_efficienza_fixing",
+                help="Una riga per mese: media di mercato, scarto vs il tuo fixing e % di ore battute.",
+            )
+
 
 # Footer
 
