@@ -20185,6 +20185,223 @@ def calcola_costo_per_sito(prezzi, carichi):
     }
 
 
+def calcola_elasticita_domanda(prezzi, carico, shift_pct=10.0, min_ore=168):
+    """Elasticita' della domanda al prezzo (regressione log-log OLS) + what-if demand response.
+
+    Domanda operativa: "di quanto il consumo reagisce al prezzo? E se
+    spostassi l'x% dell'energia dalle ore care a quelle economiche, quanto
+    risparmierei?" Stima l'elasticita' eps della regressione
+    log(carico) = a + eps * log(prezzo) sulle ore con prezzo e carico
+    strettamente positivi (i logaritmi richiedono valori > 0: le ore con
+    prezzo <= 0 — es. prezzi negativi — o carico <= 0 / NaN vengono
+    scartate, non riempite: un'ora senza consumo non informa la risposta
+    al prezzo).
+
+    Parametri
+    ---------
+    prezzi : pd.Series — prezzi orari EUR/MWh, indice datetime.
+    carico : pd.Series — carico orario MW, indice datetime.
+    shift_pct : float — quota % di energia spostata dalle ore care
+        (quartile di prezzo piu' alto) a quelle economiche (quartile piu'
+        basso) nello scenario what-if del KPI.
+    min_ore : int — ore utili minime per una stima attendibile.
+
+    Ritorna dict con: valido, errore, elasticita, intercetta, r2, p_value,
+    t_stat, n_ore, n_scartate, prezzo_medio, carico_medio_mw, tabella_cluster
+    (pd.DataFrame: elasticita'/R2 per quartile di prezzo), tabella_whatif
+    (pd.DataFrame: risparmio stimato per quote di spostamento 5/10/15/20/
+    25/30%), e_q4_mwh, p_q4_medio, p_q1_medio, giudizio, verdetto.
+
+    NaN-safe: serie vuota / indice non-datetime / <min_ore ore utili /
+    prezzo costante / carico non-serie -> errore pulito; tz-aware reso
+    naive; duplicati keep-first; deterministico (OLS puro, nessun seed).
+    """
+    def _err(msg):
+        return {"errore": msg, "valido": False}
+
+    def _ols(x, y):
+        """OLS y = a + b*x su array numpy. Ritorna dict o None se degenere."""
+        n = len(x)
+        if n < 3:
+            return None
+        xm = float(x.mean())
+        ym = float(y.mean())
+        xc = x - xm
+        yc = y - ym
+        sxx = float((xc ** 2).sum())
+        if sxx <= 0.0:
+            return None
+        b = float((xc * yc).sum() / sxx)
+        a = float(ym - b * xm)
+        yhat = a + b * x
+        ssr = float(((y - yhat) ** 2).sum())
+        sst = float((yc ** 2).sum())
+        r2 = 1.0 - ssr / sst if sst > 0.0 else 0.0
+        dof = n - 2
+        se_b = float(np.sqrt(ssr / dof) / np.sqrt(sxx)) if dof > 0 and ssr >= 0.0 else float("nan")
+        if not np.isfinite(se_b):
+            t, p = 0.0, 1.0
+        elif se_b == 0.0:
+            # fit perfetto (ssr = 0): t -> +/-inf, p -> 0 (b != 0);
+            # se anche b = 0 (carico costante) non c'e' relazione: p = 1
+            t = np.inf if b > 0 else (-np.inf if b < 0 else 0.0)
+            p = 0.0 if b != 0.0 else 1.0
+        else:
+            t = b / se_b
+            p = float(2.0 * (1.0 - norm.cdf(abs(t))))
+        return {"b": b, "a": a, "r2": max(0.0, min(1.0, r2)), "t": t, "p": p, "n": n}
+
+    # --- pulizia prezzi ---
+    if prezzi is None or len(prezzi) == 0:
+        return _err("serie prezzi vuota")
+    if not isinstance(prezzi.index, pd.DatetimeIndex):
+        return _err("indice prezzi non datetime")
+    idxn = prezzi.index.tz_localize(None) if prezzi.index.tz is not None else prezzi.index
+    p = pd.to_numeric(prezzi, errors="coerce")
+    p.index = idxn
+    p = p[~p.index.duplicated(keep="first")].sort_index().dropna()
+    if len(p) == 0:
+        return _err("serie prezzi senza valori validi")
+
+    # --- pulizia carico ---
+    if carico is None:
+        return _err("serie carico non fornita")
+    if not isinstance(carico, pd.Series):
+        return _err("carico deve essere una pd.Series oraria (MW)")
+    if not isinstance(carico.index, pd.DatetimeIndex):
+        return _err("indice carico non datetime")
+    idxc = carico.index.tz_localize(None) if carico.index.tz is not None else carico.index
+    q = pd.to_numeric(carico, errors="coerce")
+    q.index = idxc
+    q = q[~q.index.duplicated(keep="first")].sort_index()
+
+    idx = p.index.intersection(q.index)
+    if len(idx) == 0:
+        return _err("nessuna ora in comune tra prezzi e carico")
+    pp = p.loc[idx]
+    qq = q.loc[idx]
+    mask = (pp > 0) & (qq > 0) & pp.notna() & qq.notna()
+    n_scartate = int((~mask).sum())
+    pp = pp[mask]
+    qq = qq[mask]
+    n = len(pp)
+    if n < int(min_ore):
+        return _err(f"ore utili insufficienti: {n} "
+                    f"(servono almeno {int(min_ore)} ore con prezzo e carico positivi)")
+    if float(pp.std()) == 0.0 or int(pp.nunique()) < 2:
+        return _err("prezzo costante sul periodo: elasticita' non identificabile")
+
+    x = np.log(pp.to_numpy(dtype=float))
+    y = np.log(qq.to_numpy(dtype=float))
+    ols = _ols(x, y)
+    if ols is None:
+        return _err("regressione non identificabile sui dati")
+    eps = ols["b"]
+
+    # --- cluster per quartili di prezzo (stessa numerosita', ordinati per prezzo) ---
+    order = np.argsort(pp.to_numpy())
+    k = max(n // 4, 1)
+    gruppi = [("Q1 (economiche)", order[:k]),
+              ("Q2", order[k:2 * k]),
+              ("Q3", order[2 * k:3 * k]),
+              ("Q4 (care)", order[3 * k:])]
+    righe_c = []
+    for nome, pos in gruppi:
+        if len(pos) < 24:
+            continue
+        oc = _ols(x[pos], y[pos])
+        righe_c.append({
+            "Fascia prezzo": nome,
+            "Prezzo medio (EUR/MWh)": round(float(pp.iloc[pos].mean()), 2),
+            "Carico medio (MW)": round(float(qq.iloc[pos].mean()), 3),
+            "Ore": int(len(pos)),
+            "Elasticita'": round(oc["b"], 3) if oc else None,
+            "R2": round(oc["r2"], 3) if oc else None,
+        })
+    df_c = pd.DataFrame(righe_c)
+
+    # --- what-if: sposta s% dell'energia delle ore care (Q4) a quelle economiche (Q1) ---
+    pos_q4 = gruppi[3][1]
+    pos_q1 = gruppi[0][1]
+    e_q4 = float(qq.iloc[pos_q4].sum())
+    p_q4 = float(pp.iloc[pos_q4].mean())
+    p_q1 = float(pp.iloc[pos_q1].mean())
+    costo_tot = float((pp * qq).sum())
+    e_tot = float(qq.sum())
+    righe_w = []
+    for s in (5, 10, 15, 20, 25, 30):
+        e_sp = s / 100.0 * e_q4
+        risp = e_sp * (p_q4 - p_q1)
+        righe_w.append({
+            "Quota spostata (%)": s,
+            "Energia spostata (MWh)": round(e_sp, 1),
+            "Risparmio stimato (EUR)": round(risp, 0),
+            "Risparmio (%)": round(100.0 * risp / costo_tot, 2) if costo_tot > 0 else 0.0,
+            "Prezzo medio equivalente (EUR/MWh)": round((costo_tot - risp) / e_tot, 2) if e_tot > 0 else 0.0,
+        })
+    df_w = pd.DataFrame(righe_w)
+
+    sp = float(shift_pct)
+    e_sp_kpi = sp / 100.0 * e_q4
+    risp_kpi = e_sp_kpi * (p_q4 - p_q1)
+
+    pv = ols["p"]
+    if pv >= 0.05:
+        giudizio = "NON SIGNIFICATIVA"
+        verdetto = (f"ℹ️ Elasticita' stimata {eps:+.3f} ma NON significativa "
+                    f"(p-value {pv:.3f} ≥ 0.05): sui dati del periodo non c'e' "
+                    f"evidenza che il carico risponda al prezzo. Lo scenario "
+                    f"what-if resta una stima meccanica, non comportamentale.")
+    elif eps > 0:
+        giudizio = "CONTROINTUITIVA"
+        verdetto = (f"⚠️ Elasticita' POSITIVA ({eps:+.3f}, p-value {pv:.4f}): il "
+                    f"carico cresce quando il prezzo sale — comportamento "
+                    f"controintuitivo. Verificare confondenti (es. ondate di "
+                    f"calore/freddo che alzano insieme domanda e prezzi).")
+    elif abs(eps) >= 0.3:
+        giudizio = "ELASTICA"
+        verdetto = (f"✅ Domanda ELASTICA (ε = {eps:.3f}, p-value {pv:.4f}, "
+                    f"R² = {ols['r2']:.2f}): il carico risponde bene al prezzo — "
+                    f"la flessibilita'/il demand response hanno valore economico "
+                    f"reale. Spostare il {sp:.0f}% dell'energia dalle ore care "
+                    f"vale ~{risp_kpi:,.0f} €.".replace(",", " "))
+    elif abs(eps) >= 0.1:
+        giudizio = "MODERATA"
+        verdetto = (f"ℹ️ Domanda MODERATAMENTE reattiva (ε = {eps:.3f}, p-value "
+                    f"{pv:.4f}, R² = {ols['r2']:.2f}): c'e' risposta al prezzo "
+                    f"ma limitata — il demand response paga solo su volumi "
+                    f"importanti.")
+    else:
+        giudizio = "RIGIDA"
+        verdetto = (f"✅ Domanda RIGIDA (ε = {eps:.3f} ≈ 0, p-value {pv:.4f}): il "
+                    f"carico non risponde al prezzo — la leva e' solo "
+                    f"sull'acquisto (fissazioni, coperture), non sullo "
+                    f"spostamento dei consumi.")
+
+    return {
+        "errore": None,
+        "valido": True,
+        "elasticita": eps,
+        "intercetta": ols["a"],
+        "r2": ols["r2"],
+        "p_value": pv,
+        "t_stat": ols["t"],
+        "n_ore": n,
+        "n_scartate": n_scartate,
+        "prezzo_medio": float(pp.mean()),
+        "carico_medio_mw": float(qq.mean()),
+        "tabella_cluster": df_c,
+        "tabella_whatif": df_w,
+        "e_q4_mwh": e_q4,
+        "p_q4_medio": p_q4,
+        "p_q1_medio": p_q1,
+        "costo_totale": costo_tot,
+        "risparmio_kpi": risp_kpi,
+        "giudizio": giudizio,
+        "verdetto": verdetto,
+    }
+
+
 def calcola_prezzo_fisso_equo(prezzi, carico_base_mw=5.0, forma_carico="diurno",
                               premio_rischio_pct=5.0, margine_eur_mwh=3.0,
                               adder_volume_eur_mwh=1.0):
@@ -21151,7 +21368,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -35085,6 +35302,100 @@ elif workspace == _('ws8'):
                 key="cs163_csv",
                 help="Una riga per sito: energia, costo, prezzo medio, quote e scostamento dal medio di portafoglio.",
             )
+
+
+    with tab164:
+        titolo_el = edu("Elasticità domanda", "Di quanto il CONSUMO reagisce al PREZZO? L'elasticita' (eps) e' la variazione % del carico per ogni +1% del prezzo, stimata con regressione log-log sulle ore del periodo. Valori negativi = il carico cala quando il prezzo sale. Accanto alla stima, uno scenario what-if: spostare una quota dell'energia dalle ore piu' care (quartile Q4) a quelle piu' economiche (Q1) quanto farebbe risparmiare?")
+        st.markdown(f"<h1>⚡ {titolo_el}</h1>", unsafe_allow_html=True)
+        st.caption("Quanto il carico risponde al prezzo + scenario demand response Q4→Q1.")
+        PESI_EL = {
+            "piatto": [1.0] * 24,
+            "diurno": [0.625] * 7 + [1.25] * 14 + [0.625] * 3,
+            "notturno": [1.25] * 7 + [0.625] * 14 + [1.25] * 3,
+            "uffici": [0.3] * 7 + [0.8, 1.1] + [1.3] * 9 + [1.0, 0.7, 0.5, 0.4] + [0.3] * 2,
+        }
+        e0, e1, e2 = st.columns(3)
+        with e0:
+            mw_el = st.number_input("Carico medio (MW)", min_value=0.1,
+                                    max_value=10000.0, value=5.0, step=0.5,
+                                    key="el164_mw")
+        with e1:
+            forma_el = st.selectbox("Forma del profilo di carico",
+                                    ["Diurno", "Piatto", "Notturno", "Uffici"],
+                                    key="el164_forma",
+                                    help="Diurno = piu' carico 7-20; Notturno = piu' carico di notte; Uffici = profilo 9-17.")
+        with e2:
+            shift_el = st.slider("Quota spostata Q4→Q1 (%)", min_value=1,
+                                 max_value=30, value=10, key="el164_shift",
+                                 help="Quota dell'energia consumata nelle ore care (Q4) spostata alle ore economiche (Q1) nello scenario what-if.")
+        w_el = np.asarray(PESI_EL[forma_el.lower()], dtype=float)
+        w_el = w_el / w_el.mean()
+        ore_el = prezzi.index.hour.to_numpy()
+        carico_el = pd.Series(float(mw_el) * w_el[ore_el], index=prezzi.index)
+        ris_el = calcola_elasticita_domanda(prezzi, carico_el, shift_pct=float(shift_el))
+        if not ris_el["valido"]:
+            st.error(ris_el["errore"])
+        else:
+            if ris_el["giudizio"] in ("ELASTICA", "RIGIDA"):
+                st.success(f"✅ {ris_el['verdetto']}")
+            elif ris_el["giudizio"] == "CONTROINTUITIVA":
+                st.error(f"⚠️ {ris_el['verdetto']}")
+            else:
+                st.warning(f"ℹ️ {ris_el['verdetto']}")
+            k1, k2, k3, k4 = st.columns(4)
+            render_kpi(edu("Elasticità ε", "Variazione % del carico per +1% del prezzo (regressione log-log). Negativa = il carico cala quando il prezzo sale."), f"{ris_el['elasticita']:+.3f}", k1)
+            render_kpi(edu("R²", "Quota della variabilita' del carico spiegata dal prezzo (0-1). Vicino a 1 = il prezzo spiega quasi tutto."), f"{ris_el['r2']:.3f}", k2)
+            render_kpi(edu("p-value", "Probabilita' di osservare questo risultato se il carico NON rispondesse al prezzo. Sotto 0.05 la stima e' statisticamente significativa."), f"{ris_el['p_value']:.4f}", k3)
+            render_kpi(edu(f"Risparmio what-if ({int(shift_el)}%)", f"Spostando il {int(shift_el)}% dell'energia dalle ore care (Q4, {ris_el['p_q4_medio']:.2f} €/MWh) a quelle economiche (Q1, {ris_el['p_q1_medio']:.2f} €/MWh): risparmio stimato sul periodo."), f"{ris_el['risparmio_kpi']:,.0f} €".replace(",", " "), k4)
+
+            st.markdown("**Carico vs prezzo (scala log-log) con retta di regressione**")
+            n_el = ris_el["n_ore"]
+            st.caption(f"{n_el} ore utili ({ris_el['n_scartate']} ore scartate: prezzo/carico non positivi o NaN).")
+            fig_el = go.Figure()
+            # ricostruisco i punti utili per lo scatter: prezzo e carico positivi sull'indice comune
+            p_el = pd.to_numeric(prezzi, errors="coerce")
+            q_el = pd.to_numeric(carico_el, errors="coerce")
+            idx_el = p_el.dropna().index.intersection(q_el.dropna().index)
+            m_el = (p_el.loc[idx_el] > 0) & (q_el.loc[idx_el] > 0)
+            pu, qu = p_el.loc[idx_el][m_el], q_el.loc[idx_el][m_el]
+            xs_el = np.log(pu.to_numpy(dtype=float))
+            ys_el = np.log(qu.to_numpy(dtype=float))
+            xg_el = np.linspace(xs_el.min(), xs_el.max(), 100)
+            yg_el = ris_el["intercetta"] + ris_el["elasticita"] * xg_el
+            fig_el.add_trace(go.Scatter(x=xs_el, y=ys_el, mode="markers",
+                                        marker=dict(size=3, opacity=0.35, color="#38BDF8"),
+                                        name="Ore (log prezzo, log carico)"))
+            fig_el.add_trace(go.Scatter(x=xg_el, y=yg_el, mode="lines",
+                                        line=dict(color="#F87171", width=2),
+                                        name=f"OLS (ε={ris_el['elasticita']:+.3f})"))
+            fig_el.update_layout(xaxis_title="log(prezzo EUR/MWh)",
+                                 yaxis_title="log(carico MW)",
+                                 margin=dict(l=10, r=10, t=10, b=10))
+            st.plotly_chart(fig_el, use_container_width=True)
+
+            st.markdown("**Elasticità per quartile di prezzo**")
+            st.dataframe(ris_el["tabella_cluster"], use_container_width=True, hide_index=True)
+            st.markdown("**Scenario demand response: sposta energia da Q4 (care) a Q1 (economiche)**")
+            st.dataframe(ris_el["tabella_whatif"], use_container_width=True, hide_index=True)
+            d1, d2 = st.columns(2)
+            with d1:
+                st.download_button(
+                    "⬇️ Esporta elasticità per quartile (CSV)",
+                    ris_el["tabella_cluster"].to_csv(index=False, sep=";").encode("utf-8"),
+                    file_name="elasticita_quartili.csv",
+                    mime="text/csv",
+                    key="el164_csv_q",
+                    help="Una riga per quartile di prezzo: prezzo/carico medi, elasticità e R².",
+                )
+            with d2:
+                st.download_button(
+                    "⬇️ Esporta scenario demand response (CSV)",
+                    ris_el["tabella_whatif"].to_csv(index=False, sep=";").encode("utf-8"),
+                    file_name="elasticita_whatif.csv",
+                    mime="text/csv",
+                    key="el164_csv_w",
+                    help="Una riga per quota spostata: energia spostata e risparmio stimato.",
+                )
 
 
 # Footer
