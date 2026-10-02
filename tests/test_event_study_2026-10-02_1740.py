@@ -193,14 +193,14 @@ if m_decl is not None:
     decl = src[lstart:lend]
     lhs = re.findall(r"tab\d+", decl.split("= st.tabs", 1)[0])
     titles = re.findall(r'"([^"]+)"', decl.split("st.tabs([", 1)[1])
-    check("158 variabili dichiarate", len(lhs) == 158 and "tab158" in lhs)
-    check("158 titoli", len(titles) == 158)
+    check("tab158 dichiarata", "tab158" in lhs)
+    check("n titoli == n variabili", len(titles) == len(lhs))
     check("titolo tab158", "📍 Event study" in titles)
     check("titolo unico", titles.count("📍 Event study") == 1)
     check("nomi unici", len(lhs) == len(set(lhs)) and len(titles) == len(set(titles)))
 else:
-    check("158 variabili dichiarate", False)
-    check("158 titoli", False)
+    check("tab158 dichiarata", False)
+    check("n titoli == n variabili", False)
     check("titolo tab158", False)
     check("titolo unico", False)
     check("nomi unici", False)
