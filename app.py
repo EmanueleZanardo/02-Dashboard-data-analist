@@ -19658,6 +19658,227 @@ def calcola_event_study(prezzi, data_evento, finestra_gg=30, min_giorni=5):
             "tabella": tabella, "verdetto": verdetto}
 
 
+def calcola_business_case_rinnovabile(prezzi, tecnologia="fv", potenza_mw=10.0,
+                                             ore_equivalenti=1100.0, degrado_pct=0.5,
+                                             capex_eur_kw=900.0, opex_eur_kw_anno=15.0,
+                                             tasso_pct=6.0, vita_anni=25):
+    """Business case di un impianto rinnovabile merchant (fotovoltaico / eolico).
+
+    Domanda operativa: "se costruisco X MW che vendono a spot, il progetto
+    si ripaga?" Si genera un profilo di produzione orario DETERMINISTICO
+    (FV: campana diurna con durata del giorno e irraggiamento stagionali;
+    eolico: profilo mensile invernale + lieve modulazione diurna), normalizzato
+    in modo che l'energia annua sia esattamente potenza_mw x ore_equivalenti.
+    Il PREZZO CATTURATO (ricavo/energia sulla finestra dei prezzi) e' applicato
+    all'energia annua per il ricavo annuo; poi NPV, IRR (bisezione), payback semplice e
+    attualizzato, prezzo catturato e sconto di cattura vs prezzo medio,
+    sensibilita' a CAPEX e prezzo.
+
+    NaN-safe: serie vuota / indice non-datetime / < 168 ore valide /
+    parametri non validi -> errore pulito; tz-aware reso naive; duplicati
+    keep-first; deterministico (nessun seed, profili analitici).
+    """
+    def _err(msg):
+        return {"errore": msg, "valido": False}
+
+    if tecnologia not in ("fv", "eolico"):
+        return _err("tecnologia non valida (usare 'fv' o 'eolico')")
+    try:
+        pot = float(potenza_mw)
+        ore_eq = float(ore_equivalenti)
+        deg = float(degrado_pct)
+        capex_kw = float(capex_eur_kw)
+        opex_kw = float(opex_eur_kw_anno)
+        tasso = float(tasso_pct)
+        vita = int(vita_anni)
+    except (TypeError, ValueError):
+        return _err("parametri numerici non validi")
+    if not (0.0 < pot <= 10000.0):
+        return _err("potenza_mw non valida (0 < P <= 10000 MW)")
+    if not (0.0 < ore_eq <= 8760.0):
+        return _err("ore_equivalenti non valide (0 < h <= 8760)")
+    if not (0.0 <= deg <= 20.0):
+        return _err("degrado_pct non valido (0-20 %/anno)")
+    if capex_kw < 0.0:
+        return _err("capex_eur_kw non puo' essere negativo")
+    if opex_kw < 0.0:
+        return _err("opex_eur_kw_anno non puo' essere negativo")
+    if not (0.0 <= tasso <= 100.0):
+        return _err("tasso_pct non valido (0-100 %)")
+    if not (1 <= vita <= 50):
+        return _err("vita_anni non valida (1-50 anni)")
+    if float(vita_anni) != float(vita):
+        return _err("vita_anni deve essere un numero intero di anni")
+
+    if prezzi is None or len(prezzi) == 0:
+        return _err("serie prezzi vuota")
+    if not isinstance(prezzi.index, pd.DatetimeIndex):
+        return _err("indice non datetime")
+    idxn = prezzi.index.tz_localize(None) if prezzi.index.tz is not None else prezzi.index
+    p = pd.to_numeric(prezzi, errors="coerce")
+    p.index = idxn
+    p = p[~p.index.duplicated(keep="first")].sort_index().dropna()
+    if len(p) < 168:
+        return _err("servono almeno 168 ore valide di prezzi (una settimana)")
+
+    def _shape(m, hh):
+        m = np.asarray(m, dtype=float)
+        hh = np.asarray(hh, dtype=float)
+        if tecnologia == "fv":
+            dl = 12.0 + 3.6 * np.sin(2.0 * np.pi * (m - 3.5) / 12.0)
+            sr = 12.0 - dl / 2.0
+            x = (hh + 0.5 - sr) / dl
+            dentro = (x > 0.0) & (x < 1.0)
+            bell = np.where(dentro, np.sin(np.pi * np.clip(x, 0.0, 1.0)), 0.0)
+            irr = 0.60 + 0.40 * np.sin(2.0 * np.pi * (m - 4.5) / 12.0)
+            return bell * irr
+        w = 1.0 + 0.28 * np.cos(2.0 * np.pi * (m - 1.0) / 12.0)
+        return w * (1.0 + 0.10 * np.sin(2.0 * np.pi * (hh - 14.0) / 24.0))
+
+    giorni_mese = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    somma_anno = 0.0
+    for mi, gm in enumerate(giorni_mese, start=1):
+        hhg = np.arange(24.0)
+        somma_anno += float(gm * _shape(np.full(24, mi), hhg).sum())
+    if not np.isfinite(somma_anno) or somma_anno <= 0.0:
+        return _err("profilo di generazione degenere")
+    k = pot * ore_eq / somma_anno
+
+    m_arr = p.index.month.to_numpy()
+    hh_arr = p.index.hour.to_numpy()
+    energia = _shape(m_arr, hh_arr) * k
+    n_ore = int(len(p))
+    energia_tot = float(energia.sum())
+    ricavo = float((energia * p.to_numpy(dtype=float)).sum())
+    if energia_tot <= 0.0:
+        return _err("energia prodotta nulla sul periodo")
+    prezzo_catturato = ricavo / energia_tot
+    prezzo_medio = float(p.mean())
+    sconto = ((prezzo_medio - prezzo_catturato) / prezzo_medio * 100.0
+              if prezzo_medio > 0 else None)
+
+    # Energia annua esatta per definizione (P x ore equivalenti); il ricavo
+    # annuo usa il PREZZO CATTURATO stimato sulla finestra dei prezzi.
+    energia_annua = pot * ore_eq
+    ricavo_annuo = energia_annua * prezzo_catturato
+    opex_annuo = pot * 1000.0 * opex_kw
+    capex_tot = pot * 1000.0 * capex_kw
+
+    anni = np.arange(1, vita + 1)
+    deg_f = (1.0 - deg / 100.0) ** (anni - 1)
+    cf = ricavo_annuo * deg_f - opex_annuo
+    r_disc = tasso / 100.0
+    df_att = 1.0 / (1.0 + r_disc) ** anni
+    cf_att = cf * df_att
+    npv = -capex_tot + float(cf_att.sum())
+
+    def _npv_rate(rr):
+        return -capex_tot + float(np.sum(cf / (1.0 + rr) ** anni))
+
+    irr = None
+    irr_oltre = False
+    if np.all(cf <= 0.0):
+        irr = None
+    else:
+        lo, hi = -0.999, 5.0
+        n_lo, n_hi = _npv_rate(lo), _npv_rate(hi)
+        if n_lo <= 0.0:
+            irr = None
+        elif n_hi > 0.0:
+            irr_oltre = True
+        else:
+            for _ in range(200):
+                mid = (lo + hi) / 2.0
+                if _npv_rate(mid) > 0.0:
+                    lo = mid
+                else:
+                    hi = mid
+            irr = (lo + hi) / 2.0
+
+    def _payback(flussi):
+        cum = np.cumsum(flussi)
+        idx = np.where(cum >= capex_tot)[0]
+        if len(idx) == 0:
+            return None
+        t = int(idx[0])
+        prev = float(cum[t - 1]) if t > 0 else 0.0
+        fraz = (capex_tot - prev) / float(flussi[t]) if flussi[t] > 0 else 0.0
+        return round(t + fraz, 2)
+
+    payback = _payback(cf)
+    payback_att = _payback(cf_att)
+
+    fattori_capex = [0.70, 0.85, 1.0, 1.15, 1.30]
+    sens_capex = pd.DataFrame({
+        "Variazione CAPEX": ["-30%", "-15%", "base", "+15%", "+30%"],
+        "CAPEX (kEUR)": [round(capex_tot * f / 1000.0, 1) for f in fattori_capex],
+        "NPV (kEUR)": [round((npv + capex_tot * (1.0 - f)) / 1000.0, 1)
+                       for f in fattori_capex],
+    })
+    fattori_prezzo = [0.80, 0.90, 1.0, 1.10, 1.20]
+    sens_prezzo = pd.DataFrame({
+        "Variazione prezzo": ["-20%", "-10%", "base", "+10%", "+20%"],
+        "Prezzo catturato (EUR/MWh)": [round(prezzo_catturato * f, 2)
+                                       for f in fattori_prezzo],
+        "NPV (kEUR)": [round((npv + (f - 1.0) * float(np.sum(
+            ricavo_annuo * deg_f * df_att))) / 1000.0, 1)
+                       for f in fattori_prezzo],
+    })
+
+    cum_att = np.cumsum(cf_att) - capex_tot
+    tabella = pd.DataFrame({
+        "Anno": anni,
+        "Energia (MWh)": np.round(energia_annua * deg_f, 1),
+        "Ricavo (kEUR)": np.round(ricavo_annuo * deg_f / 1000.0, 1),
+        "OPEX (kEUR)": np.round(np.full(vita, opex_annuo) / 1000.0, 1),
+        "Cash flow (kEUR)": np.round(cf / 1000.0, 1),
+        "CF attualizzato (kEUR)": np.round(cf_att / 1000.0, 1),
+        "Cumulato att. (kEUR)": np.round(cum_att / 1000.0, 1),
+    })
+
+    nome_tec = "fotovoltaico" if tecnologia == "fv" else "eolico"
+    if npv > 0:
+        giudizio = "NPV POSITIVO: il progetto crea valore al tasso del %.1f%%" % tasso
+    elif npv == 0:
+        giudizio = "NPV nullo: il progetto rende esattamente il tasso del %.1f%%" % tasso
+    else:
+        giudizio = "NPV NEGATIVO: il progetto distrugge valore al tasso del %.1f%%" % tasso
+    if irr is None:
+        nota_irr = ("IRR non calcolabile (flussi mai positivi)" if not irr_oltre
+                    else "IRR oltre il 500%")
+    else:
+        nota_irr = "IRR %.1f%% %s il tasso di sconto (%.1f%%)" % (
+            irr * 100.0, "sopra" if irr * 100.0 > tasso else "sotto o pari a", tasso)
+    nota_pb = ("payback semplice %s anni, attualizzato %s anni" % (
+        ("%.1f" % payback) if payback is not None else "mai entro la vita utile",
+        ("%.1f" % payback_att) if payback_att is not None else "mai entro la vita utile"))
+    nota_prezzo = ("prezzo catturato %.2f EUR/MWh contro media di mercato %.2f "
+                   "EUR/MWh (sconto di cattura %s)" % (
+                       prezzo_catturato, prezzo_medio,
+                       ("%.1f%%" % sconto) if sconto is not None else "n/d"))
+    verdetto = (
+        "Impianto %s da %.1f MW (%d ore equivalenti/anno, %.1f GWh/anno): %s. "
+        "%s; %s. %s. Nota: prezzi del periodo ipotizzati ripetuti ogni anno, "
+        "degrado %.1f%%/anno sull'energia, OPEX costante, nessun curtailment "
+        "e nessuna valorizzazione di GO/certificati." % (
+            nome_tec, pot, int(round(ore_eq)), energia_annua / 1000.0,
+            giudizio, nota_irr, nota_pb, nota_prezzo, deg))
+
+    return {"errore": None, "valido": True,
+            "tecnologia": tecnologia, "potenza_mw": pot,
+            "ore_equivalenti": ore_eq, "n_ore": n_ore,
+            "energia_annua_mwh": energia_annua,
+            "ricavo_annuo_eur": ricavo_annuo,
+            "prezzo_catturato": prezzo_catturato,
+            "prezzo_medio": prezzo_medio,
+            "sconto_cattura_pct": sconto,
+            "capex_eur": capex_tot, "opex_annuo_eur": opex_annuo,
+            "npv_eur": npv, "irr": irr, "irr_oltre_500": irr_oltre,
+            "payback_anni": payback, "payback_att_anni": payback_att,
+            "tabella": tabella, "sens_capex": sens_capex,
+            "sens_prezzo": sens_prezzo, "verdetto": verdetto}
+
+
 # ==========================================
 # WORKSPACE 1: SIMULATORE STRATEGICO
 # ==========================================
@@ -20302,7 +20523,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -33832,6 +34053,93 @@ elif workspace == _('ws8'):
                 mime="text/csv",
                 key="ev158_csv",
                 help="Una riga per giorno: periodo pre/post, prezzo medio e scostamento dalla media pre.",
+            )
+
+
+    with tab159:
+        titolo_bcr = edu("Business case rinnovabile", "Il BUSINESS CASE di un impianto rinnovabile MERCHANT (che vende a spot, senza PPA): con un profilo di produzione deterministico (fotovoltaico = campana diurna con stagionalita', eolico = profilo invernale) normalizzato sulle tue ore equivalenti, calcola ricavo annuo, PREZZO CATTURATO (il prezzo medio che l'impianto realizza davvero, quasi sempre sotto la media di mercato = sconto di cattura), NPV, IRR e payback. I prezzi del periodo sono ipotizzati ripetuti ogni anno.")
+        st.markdown(f"<h1>☀️ {titolo_bcr}</h1>", unsafe_allow_html=True)
+        st.caption("NPV / IRR / payback di un impianto FV o eolico che vende a spot.")
+        bc0, bc1, bc2, bc3 = st.columns(4)
+        with bc0:
+            bcr_tec = st.selectbox("Tecnologia", ["Fotovoltaico", "Eolico"],
+                                   key="bcr159_tec",
+                                   help="Profilo di produzione deterministico usato per il calcolo.")
+            bcr_pot = st.number_input("Potenza (MW)", min_value=0.1, max_value=10000.0,
+                                      value=10.0, step=1.0, key="bcr159_pot")
+        with bc1:
+            bcr_ore = st.number_input("Ore equivalenti/anno", min_value=100.0,
+                                      max_value=8760.0, value=1100.0, step=50.0,
+                                      key="bcr159_ore",
+                                      help="Energia annua = potenza x ore equivalenti.")
+            bcr_deg = st.number_input("Degrado (%/anno)", min_value=0.0, max_value=20.0,
+                                      value=0.5, step=0.1, key="bcr159_deg")
+        with bc2:
+            bcr_cpx = st.number_input("CAPEX (EUR/kW)", min_value=0.0, value=900.0,
+                                      step=50.0, key="bcr159_capex")
+            bcr_opx = st.number_input("OPEX (EUR/kW/anno)", min_value=0.0, value=15.0,
+                                      step=1.0, key="bcr159_opex")
+        with bc3:
+            bcr_tas = st.number_input("Tasso di sconto (%)", min_value=0.0,
+                                      max_value=100.0, value=6.0, step=0.5,
+                                      key="bcr159_tasso")
+            bcr_vit = st.number_input("Vita utile (anni)", min_value=1, max_value=50,
+                                      value=25, step=1, key="bcr159_vita")
+        bcr_tec_cod = "fv" if bcr_tec == "Fotovoltaico" else "eolico"
+        ris_bcr = calcola_business_case_rinnovabile(
+            prezzi, tecnologia=bcr_tec_cod, potenza_mw=float(bcr_pot),
+            ore_equivalenti=float(bcr_ore), degrado_pct=float(bcr_deg),
+            capex_eur_kw=float(bcr_cpx), opex_eur_kw_anno=float(bcr_opx),
+            tasso_pct=float(bcr_tas), vita_anni=int(bcr_vit))
+        if not ris_bcr["valido"]:
+            st.error(ris_bcr["errore"])
+        else:
+            if ris_bcr["npv_eur"] > 0:
+                st.success(f"✅ {ris_bcr['verdetto']}")
+            else:
+                st.error(f"⚠️ {ris_bcr['verdetto']}")
+            k1, k2, k3, k4 = st.columns(4)
+            render_kpi(edu("NPV", "Valore attuale netto: flussi attualizzati meno CAPEX. Positivo = crea valore."), f"{ris_bcr['npv_eur']/1000:,.0f} k€".replace(",", " "), k1)
+            if ris_bcr["irr"] is None:
+                irr_txt = ">500%" if ris_bcr["irr_oltre_500"] else "n/d"
+            else:
+                irr_txt = f"{ris_bcr['irr']*100:.1f} %"
+            render_kpi(edu("IRR", "Tasso interno di rendimento: il tasso che azzera l'NPV."), irr_txt, k2)
+            pb_txt = ("%.1f anni" % ris_bcr["payback_att_anni"]) if ris_bcr["payback_att_anni"] is not None else "mai"
+            render_kpi(edu("Payback attualizzato", "Anni per recuperare il CAPEX con i flussi attualizzati."), pb_txt, k3)
+            sc = ris_bcr["sconto_cattura_pct"]
+            sc_txt = ("%.1f %%" % sc) if sc is not None else "n/d"
+            render_kpi(edu("Prezzo catturato", "Prezzo medio realizzato dall'impianto; lo sconto di cattura e' la distanza dalla media di mercato."), f"{ris_bcr['prezzo_catturato']:,.2f} €/MWh (sconto {sc_txt})", k4)
+
+            st.markdown("**Cash flow cumulato attualizzato**")
+            tab_bcr = ris_bcr["tabella"]
+            fig_bcr = go.Figure()
+            fig_bcr.add_trace(go.Bar(x=tab_bcr["Anno"], y=tab_bcr["CF attualizzato (kEUR)"],
+                                     name="CF attualizzato", marker_color="#38BDF8"))
+            fig_bcr.add_trace(go.Scatter(x=tab_bcr["Anno"], y=tab_bcr["Cumulato att. (kEUR)"],
+                                         mode="lines+markers", name="Cumulato att.",
+                                         line=dict(color="#FBBF24", width=3)))
+            fig_bcr.add_hline(y=0, line_dash="dash", line_color="#94A3B8")
+            fig_bcr.update_layout(xaxis_title="Anno", yaxis_title="k€",
+                                  margin=dict(l=10, r=10, t=10, b=10))
+            st.plotly_chart(fig_bcr, use_container_width=True)
+
+            st.markdown("**Sensibilita' dell'NPV**")
+            s1, s2 = st.columns(2)
+            with s1:
+                st.dataframe(ris_bcr["sens_capex"], use_container_width=True, hide_index=True)
+            with s2:
+                st.dataframe(ris_bcr["sens_prezzo"], use_container_width=True, hide_index=True)
+
+            st.markdown("**Tabella annuale**")
+            st.dataframe(tab_bcr, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta business case (CSV)",
+                tab_bcr.to_csv(index=False, sep=";").encode("utf-8"),
+                file_name="business_case_rinnovabile.csv",
+                mime="text/csv",
+                key="bcr159_csv",
+                help="Una riga per anno: energia, ricavo, OPEX, cash flow e cumulato attualizzato.",
             )
 
 
