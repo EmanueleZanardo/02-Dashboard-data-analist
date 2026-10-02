@@ -40,7 +40,7 @@
 
 ## Stato
 - Dashboard Streamlit "Singularity Quant ETRM", live su https://czpox8o8x6arnxw96txnvt.streamlit.app/.
-- Ultimo commit: da aggiornare dopo il push del ciclo 10:40 (tab151 + fix strutturale).
+- Ultimo commit: 5328516 (QA 02/10 10:40 - STATUS.md tab151 + fix NameError).
 - Test: app.py compila (py_compile OK); test tab144: 41 check, 0 fail; suite test_helpers.py 47/47 verdi; secrets scan: nessun segreto hardcoded. pytest non disponibile in questa VM.
 
 ## Ultimi eventi verificati (02/10/2026)
