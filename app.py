@@ -18784,8 +18784,145 @@ elif workspace == _('ws8'):
             })
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
+def calcola_tornado_sensibilita(prezzi, mw_f1, mw_f2, mw_f3, p_contr_kw,
+                                quota_kw_mese, oneri_eur_mwh, delta_pct=10.0):
+    """Tornado di sensibilita' del costo annuo di fornitura.
+
+    Il costo annuo e' la somma di tre voci (stesso modello delle altre tab
+    di costo): ENERGIA = somma(prezzo_orario x MW_orari), QUOTA POTENZA =
+    kW impegnati x quota EUR/kW/mese x mesi, ONERI = oneri EUR/MWh x MWh
+    totali. I MW orari sono costruiti dal profilo F1/F2/F3 come nelle
+    altre tab.
+
+    Il tornado varia UN driver alla volta di +/-delta_pct e misura di
+    quanto si muove il costo annuo: il driver con l'ampiezza maggiore e'
+    quello su cui il budget e' piu' esposto. Serve a decidere dove
+    concentrare fixing, hedging e demand response.
+
+    Driver: 'Prezzo energia', 'Volumi (MWh)', 'Quota potenza (EUR/kW)',
+    'Potenza impegnata (kW)', 'Oneri (EUR/MWh)'. I costi del periodo sono
+    annualizzati (x 12 / n_mesi).
+
+    NaN-safe: serie vuota / indice non-datetime / < 24 ore / MW tutti a
+    zero / costo base non positivo / potenza <= 0 / quota o oneri negativi /
+    delta fuori (0, 100] -> errore pulito; tz-aware reso naive.
+
+    Ritorna dict con errore/valido/n_ore/n_mesi/mwh_tot/costo_base_annuo/
+    driver_dominante/impatto_max_pos/impatto_max_neg/quota_max_pct/
+    verdetto/tornado (DataFrame ordinato per ampiezza decrescente).
+    """
+    cols = ["Driver", "Impatto + (EUR/a)", "Impatto - (EUR/a)",
+            "Ampiezza (EUR/a)", "Quota sul costo (%)"]
+
+    def _err(msg):
+        return {"errore": msg, "valido": False, "n_ore": 0, "n_mesi": 0,
+                "mwh_tot": 0.0, "costo_base_annuo": 0.0,
+                "driver_dominante": None, "impatto_max_pos": 0.0,
+                "impatto_max_neg": 0.0, "quota_max_pct": 0.0,
+                "verdetto": msg, "tornado": pd.DataFrame(columns=cols)}
+
+    if not isinstance(prezzi, pd.Series):
+        return _err("Input non valido: serve una Series pandas.")
+    try:
+        p_contr = float(p_contr_kw)
+        quota = float(quota_kw_mese)
+        oneri = float(oneri_eur_mwh)
+        d = float(delta_pct)
+    except (TypeError, ValueError):
+        return _err("Parametri non numerici: potenza, quota, oneri e delta devono essere numeri.")
+    if not p_contr > 0:
+        return _err("Potenza contrattuale non valida: inserisci un valore > 0 kW.")
+    if quota < 0:
+        return _err("Quota potenza non valida: non puo' essere negativa.")
+    if oneri < 0:
+        return _err("Oneri non validi: non possono essere negativi.")
+    if not 0.0 < d <= 100.0:
+        return _err("Delta non valido: inserisci una percentuale tra 0 (escluso) e 100.")
+    try:
+        p = pd.to_numeric(prezzi, errors="coerce").dropna()
+        p = p[~p.index.duplicated(keep="first")].sort_index()
+    except Exception:
+        return _err("Input non valido: serie prezzi non leggibile.")
+    if len(p) < 24:
+        return _err("Serie troppo corta: servono almeno 24 ore di prezzi.")
+    if not isinstance(p.index, pd.DatetimeIndex):
+        return _err("Indice non temporale: serve una serie oraria con DatetimeIndex.")
+    mw_map = {"F1": max(0.0, float(mw_f1 or 0.0)),
+              "F2": max(0.0, float(mw_f2 or 0.0)),
+              "F3": max(0.0, float(mw_f3 or 0.0))}
+    if all(m == 0.0 for m in mw_map.values()):
+        return _err("Imposta una potenza maggiore di zero in almeno una fascia.")
+
+    ore = p.index.hour.to_numpy()
+    wd = p.index.weekday.to_numpy()
+    fasce = np.array([_fascia_aeegsi(h, dd) for h, dd in zip(ore, wd)])
+    mw = np.array([mw_map[f] for f in fasce])  # MW orari del profilo
+    pv = p.to_numpy(dtype=float)
+
+    idxn = p.index.tz_localize(None) if p.index.tz is not None else p.index
+    n_mesi = int(idxn.to_period("M").nunique())
+    ann = 12.0 / n_mesi
+    mwh = float(mw.sum())
+    ce = float((pv * mw).sum())        # costo energia del periodo
+    cq = p_contr * quota * n_mesi      # quota potenza del periodo
+    co = oneri * mwh                   # oneri del periodo
+    base = ce + cq + co
+    if not base > 0:
+        return _err("Costo base non positivo: verifica prezzi e profilo di carico.")
+
+    dd = d / 100.0
+    drivers = [
+        ("Prezzo energia",
+         lambda s: float((pv * (1.0 + s) * mw).sum()) + cq + co),
+        ("Volumi (MWh)",
+         lambda s: float((pv * mw * (1.0 + s)).sum()) + cq + oneri * mwh * (1.0 + s)),
+        ("Quota potenza (EUR/kW)",
+         lambda s: ce + p_contr * quota * (1.0 + s) * n_mesi + co),
+        ("Potenza impegnata (kW)",
+         lambda s: ce + p_contr * (1.0 + s) * quota * n_mesi + co),
+        ("Oneri (EUR/MWh)",
+         lambda s: ce + cq + oneri * (1.0 + s) * mwh),
+    ]
+    base_a = base * ann
+    righe = []
+    for nome, fn in drivers:
+        up = (fn(dd) - base) * ann
+        dn = (fn(-dd) - base) * ann
+        amp = max(abs(up), abs(dn))
+        righe.append({"Driver": nome,
+                      "Impatto + (EUR/a)": round(up, 0),
+                      "Impatto - (EUR/a)": round(dn, 0),
+                      "Ampiezza (EUR/a)": round(amp, 0),
+                      "Quota sul costo (%)": round(100.0 * amp / base_a, 2)})
+    tornado = (pd.DataFrame(righe, columns=cols)
+               .sort_values("Ampiezza (EUR/a)", ascending=False, kind="mergesort")
+               .reset_index(drop=True))
+    dom = str(tornado.iloc[0]["Driver"])
+    amp_max = float(tornado.iloc[0]["Ampiezza (EUR/a)"])
+    q_max = float(tornado.iloc[0]["Quota sul costo (%)"])
+    ipos = float(tornado["Impatto + (EUR/a)"].max())
+    ineg = float(tornado["Impatto - (EUR/a)"].min())
+
+    nota = {
+        "Prezzo energia": "Il mercato pesa piu' del contratto: priorita' a fixing e coperture.",
+        "Volumi (MWh)": "Il profilo di consumo pesa piu' del prezzo: priorita' a demand response ed efficienza.",
+        "Quota potenza (EUR/kW)": "La voce di rete domina: rinegozia quota e potenza col distributore.",
+        "Potenza impegnata (kW)": "Il tetto di potenza domina il conto: vedi la tab 'Potenza impegnata' per l'ottimo.",
+        "Oneri (EUR/MWh)": "Gli oneri di sistema dominano: verifica esenzioni e voci in bolletta.",
+    }.get(dom, "")
+    verdetto = (f"Tornado: driver dominante {dom} — uno shock di ±{d:.0f}% muove il costo "
+                f"annuo di {amp_max:,.0f} EUR/anno ({q_max:.1f}% del totale di {base_a:,.0f} EUR/anno). {nota}")
+
+    return {"errore": None, "valido": True, "n_ore": int(len(p)),
+            "n_mesi": n_mesi, "mwh_tot": round(mwh, 1),
+            "costo_base_annuo": round(base_a, 0),
+            "driver_dominante": dom, "impatto_max_pos": round(ipos, 0),
+            "impatto_max_neg": round(ineg, 0), "quota_max_pct": round(q_max, 2),
+            "verdetto": verdetto, "tornado": tornado}
+
+
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -31472,6 +31609,86 @@ with tab149:
             key="csv_hurst",
             help="Una riga per scala: finestra in giorni, R/S medio osservato e valore del fit.",
         )
+
+
+with tab150:
+    titolo_tn = edu("Tornado di sensibilità", "Il TORNADO DI SENSIBILITA' ordina i driver del costo annuo (prezzo energia, volumi, quota potenza, potenza impegnata, oneri) per quanto muovono il conto quando variano di +/-X%. E' un'analisi UNIVARIATA: ogni driver varia da solo, gli altri restano fermi. Il driver in cima e' quello su cui il budget e' piu' esposto: se e' il prezzo, conviene coprirsi con fixing e coperture; se sono i volumi, conviene la demand response; se e' il contratto, conviene rinegoziare col distributore.")
+    st.markdown(f"<h1>\U0001F3AF {titolo_tn}</h1>", unsafe_allow_html=True)
+    st.caption("Quale ipotesi del budget muove di più il costo annuo: il mercato, i volumi o il contratto?")
+    tn1, tn2, tn3 = st.columns(3)
+    with tn1:
+        tn_f1 = st.number_input("Potenza in F1 (MW)", min_value=0.0, value=1.0, step=0.5, key="tn150_f1",
+                                help="Ore di punta: lun–ven 08:00–19:00.")
+    with tn2:
+        tn_f2 = st.number_input("Potenza in F2 (MW)", min_value=0.0, value=1.0, step=0.5, key="tn150_f2",
+                                help="Ore intermedie: lun–ven 07:00–08:00 e 19:00–23:00, sab 07:00–23:00.")
+    with tn3:
+        tn_f3 = st.number_input("Potenza in F3 (MW)", min_value=0.0, value=1.0, step=0.5, key="tn150_f3",
+                                help="Ore fuori punta: notti, domeniche e festivi.")
+    tn4, tn5, tn6 = st.columns(3)
+    with tn4:
+        tn_pc = st.number_input("Potenza impegnata (kW)", min_value=1.0, value=1000.0, step=50.0,
+                                key="tn150_pc",
+                                help="I kW contrattuali in bolletta.")
+    with tn5:
+        tn_quota = st.number_input("Quota potenza (€/kW/mese)", min_value=0.0, value=3.0, step=0.5,
+                                   key="tn150_quota",
+                                   help="Quota fissa mensile per kW impegnato, dai corrispettivi di rete.")
+    with tn6:
+        tn_oneri = st.number_input("Oneri di sistema (€/MWh)", min_value=0.0, value=5.0, step=0.5,
+                                   key="tn150_oneri",
+                                   help="Oneri generali di sistema per MWh consumato.")
+    tn_d = st.slider("Shock dei driver (%)", min_value=1, max_value=50, value=10, step=1,
+                     key="tn150_delta",
+                     help="Di quanto varia ogni driver, in più e in meno, uno alla volta.")
+    tn = calcola_tornado_sensibilita(prezzi, tn_f1, tn_f2, tn_f3, tn_pc, tn_quota, tn_oneri, tn_d)
+    if tn["errore"]:
+        st.error(tn["errore"])
+    else:
+        k1, k2, k3, k4 = st.columns(4)
+        with k1:
+            st.metric("Costo annuo base", f"{tn['costo_base_annuo']:,.0f} €/a")
+        with k2:
+            st.metric("Driver dominante", tn["driver_dominante"])
+        with k3:
+            st.metric(f"Impatto max (+{tn_d}%)", f"{tn['impatto_max_pos']:+,.0f} €/a")
+        with k4:
+            st.metric(f"Impatto max (−{tn_d}%)", f"{tn['impatto_max_neg']:+,.0f} €/a")
+        st.info(tn["verdetto"])
+        st.caption("💡 Analisi univariata: ogni driver varia da solo, gli altri restano fermi. Gli impatti non si sommano.")
+
+        st.markdown("**Tornado: impatti sul costo annuo per driver**")
+        td = tn["tornado"].iloc[::-1]
+        fig_tn = go.Figure()
+        fig_tn.add_trace(go.Bar(y=td["Driver"], x=td["Impatto + (EUR/a)"], orientation="h",
+                                name=f"Shock +{tn_d}%",
+                                marker_color="#f59e0b",
+                                hovertemplate="%{y}: %{x:,.0f} €/a<extra></extra>"))
+        fig_tn.add_trace(go.Bar(y=td["Driver"], x=td["Impatto - (EUR/a)"], orientation="h",
+                                name=f"Shock −{tn_d}%",
+                                marker_color="#38bdf8",
+                                hovertemplate="%{y}: %{x:,.0f} €/a<extra></extra>"))
+        fig_tn.add_vline(x=0, line_color="#6b7280", line_width=1)
+        fig_tn.update_layout(template="plotly_dark", height=140 + 60 * len(td),
+                             barmode="group", xaxis_title="Impatto sul costo annuo (€/a)",
+                             legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                                         xanchor="right", x=1))
+        st.plotly_chart(fig_tn, use_container_width=True)
+
+        st.markdown("**Dettaglio per driver**")
+        st.dataframe(tn["tornado"], use_container_width=True, hide_index=True)
+        d0t, d1t = prezzi.index.min().date(), prezzi.index.max().date()
+        st.download_button(
+            "⬇️ Esporta tornado (CSV)",
+            tn["tornado"].to_csv(index=False, sep=";").encode("utf-8"),
+            file_name=f"tornado_sensibilita_{d0t}_{d1t}.csv",
+            mime="text/csv",
+            key="csv_tornado",
+            help="Una riga per driver: impatti +/−, ampiezza e quota sul costo.",
+        )
+
+
+
 
 
 
