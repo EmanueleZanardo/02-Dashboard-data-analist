@@ -18140,6 +18140,387 @@ def calcola_hurst(prezzi, scala_min_giorni=4, n_scale=12, min_giorni=60):
             "n_scale": int(len(nn)), "scale": df_scale}
 
 
+def calcola_tornado_sensibilita(prezzi, mw_f1, mw_f2, mw_f3, p_contr_kw,
+                                quota_kw_mese, oneri_eur_mwh, delta_pct=10.0):
+    """Tornado di sensibilita' del costo annuo di fornitura.
+
+    Il costo annuo e' la somma di tre voci (stesso modello delle altre tab
+    di costo): ENERGIA = somma(prezzo_orario x MW_orari), QUOTA POTENZA =
+    kW impegnati x quota EUR/kW/mese x mesi, ONERI = oneri EUR/MWh x MWh
+    totali. I MW orari sono costruiti dal profilo F1/F2/F3 come nelle
+    altre tab.
+
+    Il tornado varia UN driver alla volta di +/-delta_pct e misura di
+    quanto si muove il costo annuo: il driver con l'ampiezza maggiore e'
+    quello su cui il budget e' piu' esposto. Serve a decidere dove
+    concentrare fixing, hedging e demand response.
+
+    Driver: 'Prezzo energia', 'Volumi (MWh)', 'Quota potenza (EUR/kW)',
+    'Potenza impegnata (kW)', 'Oneri (EUR/MWh)'. I costi del periodo sono
+    annualizzati (x 12 / n_mesi).
+
+    NaN-safe: serie vuota / indice non-datetime / < 24 ore / MW tutti a
+    zero / costo base non positivo / potenza <= 0 / quota o oneri negativi /
+    delta fuori (0, 100] -> errore pulito; tz-aware reso naive.
+
+    Ritorna dict con errore/valido/n_ore/n_mesi/mwh_tot/costo_base_annuo/
+    driver_dominante/impatto_max_pos/impatto_max_neg/quota_max_pct/
+    verdetto/tornado (DataFrame ordinato per ampiezza decrescente).
+    """
+    cols = ["Driver", "Impatto + (EUR/a)", "Impatto - (EUR/a)",
+            "Ampiezza (EUR/a)", "Quota sul costo (%)"]
+
+    def _err(msg):
+        return {"errore": msg, "valido": False, "n_ore": 0, "n_mesi": 0,
+                "mwh_tot": 0.0, "costo_base_annuo": 0.0,
+                "driver_dominante": None, "impatto_max_pos": 0.0,
+                "impatto_max_neg": 0.0, "quota_max_pct": 0.0,
+                "verdetto": msg, "tornado": pd.DataFrame(columns=cols)}
+
+    if not isinstance(prezzi, pd.Series):
+        return _err("Input non valido: serve una Series pandas.")
+    try:
+        p_contr = float(p_contr_kw)
+        quota = float(quota_kw_mese)
+        oneri = float(oneri_eur_mwh)
+        d = float(delta_pct)
+    except (TypeError, ValueError):
+        return _err("Parametri non numerici: potenza, quota, oneri e delta devono essere numeri.")
+    if not p_contr > 0:
+        return _err("Potenza contrattuale non valida: inserisci un valore > 0 kW.")
+    if quota < 0:
+        return _err("Quota potenza non valida: non puo' essere negativa.")
+    if oneri < 0:
+        return _err("Oneri non validi: non possono essere negativi.")
+    if not 0.0 < d <= 100.0:
+        return _err("Delta non valido: inserisci una percentuale tra 0 (escluso) e 100.")
+    try:
+        p = pd.to_numeric(prezzi, errors="coerce").dropna()
+        p = p[~p.index.duplicated(keep="first")].sort_index()
+    except Exception:
+        return _err("Input non valido: serie prezzi non leggibile.")
+    if len(p) < 24:
+        return _err("Serie troppo corta: servono almeno 24 ore di prezzi.")
+    if not isinstance(p.index, pd.DatetimeIndex):
+        return _err("Indice non temporale: serve una serie oraria con DatetimeIndex.")
+    mw_map = {"F1": max(0.0, float(mw_f1 or 0.0)),
+              "F2": max(0.0, float(mw_f2 or 0.0)),
+              "F3": max(0.0, float(mw_f3 or 0.0))}
+    if all(m == 0.0 for m in mw_map.values()):
+        return _err("Imposta una potenza maggiore di zero in almeno una fascia.")
+
+    ore = p.index.hour.to_numpy()
+    wd = p.index.weekday.to_numpy()
+    fasce = np.array([_fascia_aeegsi(h, dd) for h, dd in zip(ore, wd)])
+    mw = np.array([mw_map[f] for f in fasce])  # MW orari del profilo
+    pv = p.to_numpy(dtype=float)
+
+    idxn = p.index.tz_localize(None) if p.index.tz is not None else p.index
+    n_mesi = int(idxn.to_period("M").nunique())
+    ann = 12.0 / n_mesi
+    mwh = float(mw.sum())
+    ce = float((pv * mw).sum())        # costo energia del periodo
+    cq = p_contr * quota * n_mesi      # quota potenza del periodo
+    co = oneri * mwh                   # oneri del periodo
+    base = ce + cq + co
+    if not base > 0:
+        return _err("Costo base non positivo: verifica prezzi e profilo di carico.")
+
+    dd = d / 100.0
+    drivers = [
+        ("Prezzo energia",
+         lambda s: float((pv * (1.0 + s) * mw).sum()) + cq + co),
+        ("Volumi (MWh)",
+         lambda s: float((pv * mw * (1.0 + s)).sum()) + cq + oneri * mwh * (1.0 + s)),
+        ("Quota potenza (EUR/kW)",
+         lambda s: ce + p_contr * quota * (1.0 + s) * n_mesi + co),
+        ("Potenza impegnata (kW)",
+         lambda s: ce + p_contr * (1.0 + s) * quota * n_mesi + co),
+        ("Oneri (EUR/MWh)",
+         lambda s: ce + cq + oneri * (1.0 + s) * mwh),
+    ]
+    base_a = base * ann
+    righe = []
+    for nome, fn in drivers:
+        up = (fn(dd) - base) * ann
+        dn = (fn(-dd) - base) * ann
+        amp = max(abs(up), abs(dn))
+        righe.append({"Driver": nome,
+                      "Impatto + (EUR/a)": round(up, 0),
+                      "Impatto - (EUR/a)": round(dn, 0),
+                      "Ampiezza (EUR/a)": round(amp, 0),
+                      "Quota sul costo (%)": round(100.0 * amp / base_a, 2)})
+    tornado = (pd.DataFrame(righe, columns=cols)
+               .sort_values("Ampiezza (EUR/a)", ascending=False, kind="mergesort")
+               .reset_index(drop=True))
+    dom = str(tornado.iloc[0]["Driver"])
+    amp_max = float(tornado.iloc[0]["Ampiezza (EUR/a)"])
+    q_max = float(tornado.iloc[0]["Quota sul costo (%)"])
+    ipos = float(tornado["Impatto + (EUR/a)"].max())
+    ineg = float(tornado["Impatto - (EUR/a)"].min())
+
+    nota = {
+        "Prezzo energia": "Il mercato pesa piu' del contratto: priorita' a fixing e coperture.",
+        "Volumi (MWh)": "Il profilo di consumo pesa piu' del prezzo: priorita' a demand response ed efficienza.",
+        "Quota potenza (EUR/kW)": "La voce di rete domina: rinegozia quota e potenza col distributore.",
+        "Potenza impegnata (kW)": "Il tetto di potenza domina il conto: vedi la tab 'Potenza impegnata' per l'ottimo.",
+        "Oneri (EUR/MWh)": "Gli oneri di sistema dominano: verifica esenzioni e voci in bolletta.",
+    }.get(dom, "")
+    verdetto = (f"Tornado: driver dominante {dom} — uno shock di ±{d:.0f}% muove il costo "
+                f"annuo di {amp_max:,.0f} EUR/anno ({q_max:.1f}% del totale di {base_a:,.0f} EUR/anno). {nota}")
+
+    return {"errore": None, "valido": True, "n_ore": int(len(p)),
+            "n_mesi": n_mesi, "mwh_tot": round(mwh, 1),
+            "costo_base_annuo": round(base_a, 0),
+            "driver_dominante": dom, "impatto_max_pos": round(ipos, 0),
+            "impatto_max_neg": round(ineg, 0), "quota_max_pct": round(q_max, 2),
+            "verdetto": verdetto, "tornado": tornado}
+def calcola_segnali_tecnici(prezzi, rsi_period=14, macd_fast=12, macd_slow=26,
+                           macd_signal=9, sma_breve=20, sma_lunga=50,
+                           bb_period=20, bb_mult=2.0, orizzonte_gg=5):
+    """Segnali tecnici sul prezzo: RSI, MACD, incroci di medie mobili, Bande di Bollinger.
+
+    Lavora sulle medie GIORNALIERE dei prezzi orari (gli indicatori tecnici
+    sullo spot orario sono rumore). Per ogni indicatore genera segnali
+    BUY/SELL sugli eventi classici:
+      - Medie mobili: golden cross (media breve sopra la lunga) = BUY,
+        death cross = SELL;
+      - MACD: istogramma che attraversa lo zero verso l'alto = BUY, verso il
+        basso = SELL;
+      - RSI (Wilder): scende sotto 30 = BUY (ipervenduto), sale sopra 70 =
+        SELL (ipercomprato);
+      - Bollinger: chiusura che rompe la banda inferiore = BUY (mean
+        reversion), che rompe la superiore = SELL.
+    Ogni segnale e' backtestato sull'orizzonte scelto: esito = variazione
+    del prezzo nei giorni successivi (segno invertito per i SELL, cosi' un
+    esito positivo = "il segnale aveva ragione"). Hit rate = quota di
+    segnali con esito positivo.
+
+    NaN-safe: serie vuota / indice non-datetime / troppo corta / parametri
+    non validi -> errore pulito; tz-aware reso naive; prezzi <= 0 saltati
+    nel backtest (rendimenti non definiti); deterministico.
+
+    Ritorna dict con errore/valido/n_giorni/giorni_richiesti/ultimo
+    (prezzo/rsi/macd/macd_signal/hist/sma_breve/sma_lunga/bb_pos_pct)/
+    stance (sma/rsi/macd/bb)/punteggio/verdetto/n_segnali/hit_rate_tot/
+    esito_medio_tot/segnali (DataFrame)/riepilogo (DataFrame)/serie
+    (DataFrame giornaliero con gli indicatori).
+    """
+    col_s = ["Data", "Indicatore", "Segnale", "Prezzo (EUR/MWh)",
+             "Esito orizzonte (%)", "Esito valido"]
+    col_r = ["Indicatore", "N. segnali", "Hit rate (%)", "Esito medio (%)"]
+
+    def _err(msg):
+        return {"errore": msg, "valido": False, "n_giorni": 0,
+                "giorni_richiesti": 0, "ultimo": {}, "stance": {},
+                "punteggio": 0, "verdetto": msg, "n_segnali": 0,
+                "hit_rate_tot": float("nan"), "esito_medio_tot": float("nan"),
+                "segnali": pd.DataFrame(columns=col_s),
+                "riepilogo": pd.DataFrame(columns=col_r),
+                "serie": pd.DataFrame()}
+
+    if not isinstance(prezzi, pd.Series):
+        return _err("Input non valido: serve una Series pandas.")
+    try:
+        rp = int(rsi_period); mf = int(macd_fast); ms = int(macd_slow)
+        mgs = int(macd_signal); sb = int(sma_breve); sl = int(sma_lunga)
+        bp = int(bb_period); bm = float(bb_mult); hz = int(orizzonte_gg)
+    except (TypeError, ValueError):
+        return _err("Parametri non numerici: periodi e orizzonte devono essere numeri.")
+    if not 2 <= rp <= 100:
+        return _err("Periodo RSI non valido: inserisci un intero tra 2 e 100.")
+    if not (2 <= mf < ms <= 200):
+        return _err("Parametri MACD non validi: serve 2 <= fast < slow <= 200.")
+    if not 2 <= mgs <= 100:
+        return _err("Periodo segnale MACD non valido: inserisci un intero tra 2 e 100.")
+    if not (2 <= sb < sl <= 300):
+        return _err("Medie mobili non valide: serve 2 <= breve < lunga <= 300.")
+    if not 2 <= bp <= 200:
+        return _err("Periodo Bollinger non valido: inserisci un intero tra 2 e 200.")
+    if not 0.5 <= bm <= 5.0:
+        return _err("Moltiplicatore Bollinger non valido: inserisci un valore tra 0,5 e 5.")
+    if not 1 <= hz <= 60:
+        return _err("Orizzonte non valido: inserisci un intero tra 1 e 60 giorni.")
+    try:
+        p = pd.to_numeric(prezzi, errors="coerce").dropna()
+        p = p[~p.index.duplicated(keep="first")].sort_index()
+    except Exception:
+        return _err("Input non valido: serie prezzi non leggibile.")
+    if not isinstance(p.index, pd.DatetimeIndex):
+        return _err("Indice non temporale: serve una serie oraria con DatetimeIndex.")
+    if p.index.tz is not None:
+        p.index = p.index.tz_localize(None)
+    if len(p) == 0:
+        return _err("Serie vuota: nessun prezzo valido.")
+
+    richiesti = max(sl, ms + mgs, bp, rp + 1, hz + 2)
+    s = p.resample("D").mean().dropna()
+    n = len(s)
+    if n < richiesti:
+        return _err("Serie troppo corta: servono almeno %d giorni di prezzi (ne hai %d)."
+                    % (richiesti, n))
+
+    idx = s.index
+    px = s.to_numpy(dtype=float)
+
+    # --- RSI di Wilder ---
+    delta = s.diff()
+    gain = delta.clip(lower=0.0)
+    loss = -delta.clip(upper=0.0)
+    ag = gain.ewm(alpha=1.0 / rp, min_periods=rp, adjust=False).mean()
+    al = loss.ewm(alpha=1.0 / rp, min_periods=rp, adjust=False).mean()
+    rsi = 100.0 - 100.0 / (1.0 + ag / al)
+    rsi = rsi.mask((ag == 0) & (al == 0), 50.0)  # serie piatta -> RSI neutro
+
+    # --- MACD ---
+    ema_f = s.ewm(span=mf, adjust=False).mean()
+    ema_s = s.ewm(span=ms, adjust=False).mean()
+    macd = ema_f - ema_s
+    macd_sig = macd.ewm(span=mgs, adjust=False).mean()
+    hist = macd - macd_sig
+
+    # --- Medie mobili ---
+    sma_b = s.rolling(sb, min_periods=sb).mean()
+    sma_l = s.rolling(sl, min_periods=sl).mean()
+
+    # --- Bande di Bollinger ---
+    mid = s.rolling(bp, min_periods=bp).mean()
+    sd = s.rolling(bp, min_periods=bp).std(ddof=1)
+    up = mid + bm * sd
+    lo = mid - bm * sd
+    up_v = up.to_numpy(dtype=float)
+    lo_v = lo.to_numpy(dtype=float)
+    rng = up_v - lo_v
+    pos = np.where(rng > 0, (px - lo_v) / rng * 100.0, 50.0)
+
+    rsi_v = rsi.to_numpy(dtype=float)
+    hist_v = hist.to_numpy(dtype=float)
+    sb_v = sma_b.to_numpy(dtype=float)
+    sl_v = sma_l.to_numpy(dtype=float)
+
+    def _ok(*vals):
+        return all(v is not None and not (isinstance(v, float) and np.isnan(v))
+                   for v in vals)
+
+    segnali = []
+    for i in range(1, n):
+        d = idx[i]
+        pr = px[i]
+        if _ok(sb_v[i - 1], sl_v[i - 1], sb_v[i], sl_v[i]):
+            if sb_v[i - 1] <= sl_v[i - 1] and sb_v[i] > sl_v[i]:
+                segnali.append((d, "Medie mobili", "BUY", pr,
+                                "Golden cross: media breve sopra la lunga"))
+            elif sb_v[i - 1] >= sl_v[i - 1] and sb_v[i] < sl_v[i]:
+                segnali.append((d, "Medie mobili", "SELL", pr,
+                                "Death cross: media breve sotto la lunga"))
+        if _ok(hist_v[i - 1], hist_v[i]):
+            if hist_v[i - 1] <= 0 < hist_v[i]:
+                segnali.append((d, "MACD", "BUY", pr, "Istogramma sopra lo zero"))
+            elif hist_v[i - 1] >= 0 > hist_v[i]:
+                segnali.append((d, "MACD", "SELL", pr, "Istogramma sotto lo zero"))
+        if _ok(rsi_v[i - 1], rsi_v[i]):
+            if rsi_v[i - 1] >= 30.0 and rsi_v[i] < 30.0:
+                segnali.append((d, "RSI", "BUY", pr, "RSI sotto 30: ipervenduto"))
+            elif rsi_v[i - 1] <= 70.0 and rsi_v[i] > 70.0:
+                segnali.append((d, "RSI", "SELL", pr, "RSI sopra 70: ipercomprato"))
+        if _ok(lo_v[i - 1], lo_v[i], up_v[i - 1], up_v[i]):
+            if px[i - 1] >= lo_v[i - 1] and pr < lo_v[i]:
+                segnali.append((d, "Bollinger", "BUY", pr,
+                                "Chiusura sotto la banda inferiore"))
+            elif px[i - 1] <= up_v[i - 1] and pr > up_v[i]:
+                segnali.append((d, "Bollinger", "SELL", pr,
+                                "Chiusura sopra la banda superiore"))
+
+    # --- Backtest dei segnali sull'orizzonte ---
+    righe = []
+    for (d, ind, tipo, pr, motivo) in segnali:
+        i = int(idx.get_loc(d))
+        esito = float("nan")
+        valido_e = False
+        j = i + hz
+        if j < n and pr > 0 and px[j] > 0:
+            ret = (px[j] - pr) / pr * 100.0
+            esito = ret if tipo == "BUY" else -ret
+            valido_e = True
+        righe.append({"Data": d.date(), "Indicatore": ind, "Segnale": tipo,
+                      "Prezzo (EUR/MWh)": round(float(pr), 2),
+                      "Esito orizzonte (%)": round(float(esito), 2) if valido_e else float("nan"),
+                      "Esito valido": valido_e, "_motivo": motivo})
+    df_seg = pd.DataFrame(righe, columns=col_s + ["_motivo"])
+
+    riepilogo = []
+    for ind in ["Medie mobili", "MACD", "RSI", "Bollinger"]:
+        sub = df_seg[(df_seg["Indicatore"] == ind) & (df_seg["Esito valido"])]
+        nn = len(sub)
+        if nn:
+            hit = float((sub["Esito orizzonte (%)"] > 0).mean() * 100.0)
+            avg = float(sub["Esito orizzonte (%)"].mean())
+        else:
+            hit, avg = float("nan"), float("nan")
+        riepilogo.append({"Indicatore": ind, "N. segnali": nn,
+                          "Hit rate (%)": round(hit, 1) if nn else float("nan"),
+                          "Esito medio (%)": round(avg, 2) if nn else float("nan")})
+    df_riep = pd.DataFrame(riepilogo, columns=col_r)
+    sub_all = df_seg[df_seg["Esito valido"]]
+    if len(sub_all):
+        hit_tot = round(float((sub_all["Esito orizzonte (%)"] > 0).mean() * 100.0), 1)
+        avg_tot = round(float(sub_all["Esito orizzonte (%)"].mean()), 2)
+    else:
+        hit_tot, avg_tot = float("nan"), float("nan")
+
+    # --- Lettura dell'ultimo giorno ---
+    macd_v = macd.to_numpy(dtype=float)
+    msg_v = macd_sig.to_numpy(dtype=float)
+    ultimo = {"prezzo": round(float(px[-1]), 2),
+              "rsi": round(float(rsi_v[-1]), 1) if _ok(rsi_v[-1]) else float("nan"),
+              "macd": round(float(macd_v[-1]), 2),
+              "macd_signal": round(float(msg_v[-1]), 2),
+              "hist": round(float(hist_v[-1]), 2),
+              "sma_breve": round(float(sb_v[-1]), 2),
+              "sma_lunga": round(float(sl_v[-1]), 2),
+              "bb_pos_pct": round(float(pos[-1]), 1)}
+    st_sma = (1 if _ok(sb_v[-1], sl_v[-1]) and sb_v[-1] > sl_v[-1]
+              else (-1 if _ok(sb_v[-1], sl_v[-1]) and sb_v[-1] < sl_v[-1] else 0))
+    st_rsi = (1 if _ok(rsi_v[-1]) and rsi_v[-1] < 30
+              else (-1 if _ok(rsi_v[-1]) and rsi_v[-1] > 70 else 0))
+    st_macd = (1 if _ok(hist_v[-1]) and hist_v[-1] > 0
+               else (-1 if _ok(hist_v[-1]) and hist_v[-1] < 0 else 0))
+    st_bb = 1 if pos[-1] < 20 else (-1 if pos[-1] > 80 else 0)
+    stance = {"sma": st_sma, "rsi": st_rsi, "macd": st_macd, "bb": st_bb}
+    punteggio = st_sma + st_rsi + st_macd + st_bb
+    if punteggio >= 2:
+        verdetto = ("Segnale composito RIALZISTA (+%d): la maggioranza degli indicatori "
+                    "punta verso l'alto — il mercato spot e' in fase di forza." % punteggio)
+    elif punteggio <= -2:
+        verdetto = ("Segnale composito RIBASSISTA (%d): la maggioranza degli indicatori "
+                    "punta verso il basso — il mercato spot e' in fase di debolezza." % punteggio)
+    else:
+        verdetto = ("Segnale composito NEUTRO (%+d): gli indicatori sono discordi — "
+                    "nessuna direzione prevalente, meglio attendere conferme." % punteggio)
+    verdetto += (" Gli indicatori tecnici sullo spot elettrico sono un ausilio di timing, "
+                 "non una previsione: usali insieme a fondamentali e coperture.")
+
+    serie = pd.DataFrame({"prezzo": s, "sma_breve": sma_b, "sma_lunga": sma_l,
+                          "bb_mid": mid, "bb_up": up, "bb_lo": lo,
+                          "rsi": rsi, "macd": macd, "macd_signal": macd_sig,
+                          "hist": hist})
+
+    return {"errore": None, "valido": True, "n_giorni": n,
+            "giorni_richiesti": richiesti, "ultimo": ultimo, "stance": stance,
+            "punteggio": punteggio, "verdetto": verdetto,
+            "n_segnali": len(df_seg), "hit_rate_tot": hit_tot,
+            "esito_medio_tot": avg_tot,
+            "segnali": df_seg.drop(columns=["_motivo"]),
+            "riepilogo": df_riep, "serie": serie}
+
+
+
+
+
+
+
+
+
 
 
 # ==========================================
@@ -18784,145 +19165,9 @@ elif workspace == _('ws8'):
             })
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
-def calcola_tornado_sensibilita(prezzi, mw_f1, mw_f2, mw_f3, p_contr_kw,
-                                quota_kw_mese, oneri_eur_mwh, delta_pct=10.0):
-    """Tornado di sensibilita' del costo annuo di fornitura.
-
-    Il costo annuo e' la somma di tre voci (stesso modello delle altre tab
-    di costo): ENERGIA = somma(prezzo_orario x MW_orari), QUOTA POTENZA =
-    kW impegnati x quota EUR/kW/mese x mesi, ONERI = oneri EUR/MWh x MWh
-    totali. I MW orari sono costruiti dal profilo F1/F2/F3 come nelle
-    altre tab.
-
-    Il tornado varia UN driver alla volta di +/-delta_pct e misura di
-    quanto si muove il costo annuo: il driver con l'ampiezza maggiore e'
-    quello su cui il budget e' piu' esposto. Serve a decidere dove
-    concentrare fixing, hedging e demand response.
-
-    Driver: 'Prezzo energia', 'Volumi (MWh)', 'Quota potenza (EUR/kW)',
-    'Potenza impegnata (kW)', 'Oneri (EUR/MWh)'. I costi del periodo sono
-    annualizzati (x 12 / n_mesi).
-
-    NaN-safe: serie vuota / indice non-datetime / < 24 ore / MW tutti a
-    zero / costo base non positivo / potenza <= 0 / quota o oneri negativi /
-    delta fuori (0, 100] -> errore pulito; tz-aware reso naive.
-
-    Ritorna dict con errore/valido/n_ore/n_mesi/mwh_tot/costo_base_annuo/
-    driver_dominante/impatto_max_pos/impatto_max_neg/quota_max_pct/
-    verdetto/tornado (DataFrame ordinato per ampiezza decrescente).
-    """
-    cols = ["Driver", "Impatto + (EUR/a)", "Impatto - (EUR/a)",
-            "Ampiezza (EUR/a)", "Quota sul costo (%)"]
-
-    def _err(msg):
-        return {"errore": msg, "valido": False, "n_ore": 0, "n_mesi": 0,
-                "mwh_tot": 0.0, "costo_base_annuo": 0.0,
-                "driver_dominante": None, "impatto_max_pos": 0.0,
-                "impatto_max_neg": 0.0, "quota_max_pct": 0.0,
-                "verdetto": msg, "tornado": pd.DataFrame(columns=cols)}
-
-    if not isinstance(prezzi, pd.Series):
-        return _err("Input non valido: serve una Series pandas.")
-    try:
-        p_contr = float(p_contr_kw)
-        quota = float(quota_kw_mese)
-        oneri = float(oneri_eur_mwh)
-        d = float(delta_pct)
-    except (TypeError, ValueError):
-        return _err("Parametri non numerici: potenza, quota, oneri e delta devono essere numeri.")
-    if not p_contr > 0:
-        return _err("Potenza contrattuale non valida: inserisci un valore > 0 kW.")
-    if quota < 0:
-        return _err("Quota potenza non valida: non puo' essere negativa.")
-    if oneri < 0:
-        return _err("Oneri non validi: non possono essere negativi.")
-    if not 0.0 < d <= 100.0:
-        return _err("Delta non valido: inserisci una percentuale tra 0 (escluso) e 100.")
-    try:
-        p = pd.to_numeric(prezzi, errors="coerce").dropna()
-        p = p[~p.index.duplicated(keep="first")].sort_index()
-    except Exception:
-        return _err("Input non valido: serie prezzi non leggibile.")
-    if len(p) < 24:
-        return _err("Serie troppo corta: servono almeno 24 ore di prezzi.")
-    if not isinstance(p.index, pd.DatetimeIndex):
-        return _err("Indice non temporale: serve una serie oraria con DatetimeIndex.")
-    mw_map = {"F1": max(0.0, float(mw_f1 or 0.0)),
-              "F2": max(0.0, float(mw_f2 or 0.0)),
-              "F3": max(0.0, float(mw_f3 or 0.0))}
-    if all(m == 0.0 for m in mw_map.values()):
-        return _err("Imposta una potenza maggiore di zero in almeno una fascia.")
-
-    ore = p.index.hour.to_numpy()
-    wd = p.index.weekday.to_numpy()
-    fasce = np.array([_fascia_aeegsi(h, dd) for h, dd in zip(ore, wd)])
-    mw = np.array([mw_map[f] for f in fasce])  # MW orari del profilo
-    pv = p.to_numpy(dtype=float)
-
-    idxn = p.index.tz_localize(None) if p.index.tz is not None else p.index
-    n_mesi = int(idxn.to_period("M").nunique())
-    ann = 12.0 / n_mesi
-    mwh = float(mw.sum())
-    ce = float((pv * mw).sum())        # costo energia del periodo
-    cq = p_contr * quota * n_mesi      # quota potenza del periodo
-    co = oneri * mwh                   # oneri del periodo
-    base = ce + cq + co
-    if not base > 0:
-        return _err("Costo base non positivo: verifica prezzi e profilo di carico.")
-
-    dd = d / 100.0
-    drivers = [
-        ("Prezzo energia",
-         lambda s: float((pv * (1.0 + s) * mw).sum()) + cq + co),
-        ("Volumi (MWh)",
-         lambda s: float((pv * mw * (1.0 + s)).sum()) + cq + oneri * mwh * (1.0 + s)),
-        ("Quota potenza (EUR/kW)",
-         lambda s: ce + p_contr * quota * (1.0 + s) * n_mesi + co),
-        ("Potenza impegnata (kW)",
-         lambda s: ce + p_contr * (1.0 + s) * quota * n_mesi + co),
-        ("Oneri (EUR/MWh)",
-         lambda s: ce + cq + oneri * (1.0 + s) * mwh),
-    ]
-    base_a = base * ann
-    righe = []
-    for nome, fn in drivers:
-        up = (fn(dd) - base) * ann
-        dn = (fn(-dd) - base) * ann
-        amp = max(abs(up), abs(dn))
-        righe.append({"Driver": nome,
-                      "Impatto + (EUR/a)": round(up, 0),
-                      "Impatto - (EUR/a)": round(dn, 0),
-                      "Ampiezza (EUR/a)": round(amp, 0),
-                      "Quota sul costo (%)": round(100.0 * amp / base_a, 2)})
-    tornado = (pd.DataFrame(righe, columns=cols)
-               .sort_values("Ampiezza (EUR/a)", ascending=False, kind="mergesort")
-               .reset_index(drop=True))
-    dom = str(tornado.iloc[0]["Driver"])
-    amp_max = float(tornado.iloc[0]["Ampiezza (EUR/a)"])
-    q_max = float(tornado.iloc[0]["Quota sul costo (%)"])
-    ipos = float(tornado["Impatto + (EUR/a)"].max())
-    ineg = float(tornado["Impatto - (EUR/a)"].min())
-
-    nota = {
-        "Prezzo energia": "Il mercato pesa piu' del contratto: priorita' a fixing e coperture.",
-        "Volumi (MWh)": "Il profilo di consumo pesa piu' del prezzo: priorita' a demand response ed efficienza.",
-        "Quota potenza (EUR/kW)": "La voce di rete domina: rinegozia quota e potenza col distributore.",
-        "Potenza impegnata (kW)": "Il tetto di potenza domina il conto: vedi la tab 'Potenza impegnata' per l'ottimo.",
-        "Oneri (EUR/MWh)": "Gli oneri di sistema dominano: verifica esenzioni e voci in bolletta.",
-    }.get(dom, "")
-    verdetto = (f"Tornado: driver dominante {dom} — uno shock di ±{d:.0f}% muove il costo "
-                f"annuo di {amp_max:,.0f} EUR/anno ({q_max:.1f}% del totale di {base_a:,.0f} EUR/anno). {nota}")
-
-    return {"errore": None, "valido": True, "n_ore": int(len(p)),
-            "n_mesi": n_mesi, "mwh_tot": round(mwh, 1),
-            "costo_base_annuo": round(base_a, 0),
-            "driver_dominante": dom, "impatto_max_pos": round(ipos, 0),
-            "impatto_max_neg": round(ineg, 0), "quota_max_pct": round(q_max, 2),
-            "verdetto": verdetto, "tornado": tornado}
-
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -30992,703 +31237,844 @@ def calcola_tornado_sensibilita(prezzi, mw_f1, mw_f2, mw_f3, p_contr_kw,
                 help="Una riga per giorno: SSI, classe e punti per componente (la somma fa l'SSI).",
             )
 
-with tab143:
-        titolo_ef = edu("Efficienza del fixing", "L'EFFICIENZA DEL FIXING misura ex-post quanto e' stato buono il prezzo che hai fissato (€/MWh) contro il mercato del periodo: la % di ORE BATTUTE dice in quante ore il mercato e' stato uguale o piu' caro del tuo fixing (100% = l'hai sempre battuto); il SOVRACOSTO vs media dice quanto hai pagato in piu' (o in meno) per MWh rispetto al prezzo medio di periodo; la distanza dal MINIMO e' il costo opportunita' del timing perfetto. La tabella mensile mostra in quali mesi il fixing ha reso di piu' o di meno, utile per il debriefing col fornitore.")
-        st.markdown(f"<h1>📊 {titolo_ef}</h1>", unsafe_allow_html=True)
-        st.caption("Quanto è stato buono il tuo prezzo fissato contro il mercato del periodo.")
+    with tab143:
+            titolo_ef = edu("Efficienza del fixing", "L'EFFICIENZA DEL FIXING misura ex-post quanto e' stato buono il prezzo che hai fissato (€/MWh) contro il mercato del periodo: la % di ORE BATTUTE dice in quante ore il mercato e' stato uguale o piu' caro del tuo fixing (100% = l'hai sempre battuto); il SOVRACOSTO vs media dice quanto hai pagato in piu' (o in meno) per MWh rispetto al prezzo medio di periodo; la distanza dal MINIMO e' il costo opportunita' del timing perfetto. La tabella mensile mostra in quali mesi il fixing ha reso di piu' o di meno, utile per il debriefing col fornitore.")
+            st.markdown(f"<h1>📊 {titolo_ef}</h1>", unsafe_allow_html=True)
+            st.caption("Quanto è stato buono il tuo prezzo fissato contro il mercato del periodo.")
 
-        ef_default = round(float(prezzi.mean()), 1) if len(prezzi) else 100.0
-        ef_prezzo = st.number_input("Prezzo medio fissato (€/MWh)", min_value=0.01,
-                                    value=ef_default, step=1.0, format="%.2f",
-                                    key="ef143_prezzo",
-                                    help="Il prezzo medio a cui hai fissato le tue forniture nel periodo.")
-        ef = calcola_efficienza_fixing(prezzi, float(ef_prezzo))
-        if ef["errore"]:
-            st.error(ef["errore"])
-        else:
-            if ef["pct_battuto"] >= 70.0:
-                st.success(f"✅ {ef['verdetto']}")
-            elif ef["pct_battuto"] >= 50.0:
-                st.info(f"➖ {ef['verdetto']}")
+            ef_default = round(float(prezzi.mean()), 1) if len(prezzi) else 100.0
+            ef_prezzo = st.number_input("Prezzo medio fissato (€/MWh)", min_value=0.01,
+                                        value=ef_default, step=1.0, format="%.2f",
+                                        key="ef143_prezzo",
+                                        help="Il prezzo medio a cui hai fissato le tue forniture nel periodo.")
+            ef = calcola_efficienza_fixing(prezzi, float(ef_prezzo))
+            if ef["errore"]:
+                st.error(ef["errore"])
             else:
-                st.error(f"⚠️ {ef['verdetto']}")
-            k1, k2, k3, k4 = st.columns(4)
-            with k1:
-                st.metric("Ore battute dal fixing", f"{ef['pct_battuto']:.1f}%")
-            with k2:
-                st.metric("Sovracosto vs media", f"{ef['sovracosto_eur']:+.2f} €/MWh",
-                          f"{ef['sovracosto_pct']:+.1f}%")
-            with k3:
-                st.metric("Distanza dal minimo", f"{ef['dist_min']:.2f} €/MWh",
-                          "costo opportunità")
-            with k4:
-                st.metric("Distanza dal massimo", f"{ef['dist_max']:.2f} €/MWh")
+                if ef["pct_battuto"] >= 70.0:
+                    st.success(f"✅ {ef['verdetto']}")
+                elif ef["pct_battuto"] >= 50.0:
+                    st.info(f"➖ {ef['verdetto']}")
+                else:
+                    st.error(f"⚠️ {ef['verdetto']}")
+                k1, k2, k3, k4 = st.columns(4)
+                with k1:
+                    st.metric("Ore battute dal fixing", f"{ef['pct_battuto']:.1f}%")
+                with k2:
+                    st.metric("Sovracosto vs media", f"{ef['sovracosto_eur']:+.2f} €/MWh",
+                              f"{ef['sovracosto_pct']:+.1f}%")
+                with k3:
+                    st.metric("Distanza dal minimo", f"{ef['dist_min']:.2f} €/MWh",
+                              "costo opportunità")
+                with k4:
+                    st.metric("Distanza dal massimo", f"{ef['dist_max']:.2f} €/MWh")
 
-            st.markdown("**Distribuzione dei prezzi orari vs il tuo fixing**")
-            v_ef = pd.to_numeric(prezzi, errors="coerce").dropna().to_numpy()
-            conteggi_ef, bordi_ef = np.histogram(v_ef, bins=50)
-            centri_ef = (bordi_ef[:-1] + bordi_ef[1:]) / 2.0
-            fig_ef = go.Figure()
-            fig_ef.add_trace(go.Bar(x=centri_ef, y=conteggi_ef, name="Ore",
-                                    marker_color="#38bdf8",
-                                    hovertemplate="€%{x:.1f}/MWh: %{y} ore<extra></extra>"))
-            fig_ef.add_vline(x=ef["prezzo_fissato"], line_dash="solid", line_color="#ef4444",
-                             annotation_text=f"Fixing {ef['prezzo_fissato']:.1f}",
-                             annotation_font_color="#ef4444")
-            fig_ef.add_vline(x=ef["media"], line_dash="dash", line_color="#a78bfa",
-                             annotation_text=f"Media {ef['media']:.1f}",
-                             annotation_font_color="#a78bfa")
-            for pv_ef, txt_ef in [(ef["p10"], "P10"), (ef["p90"], "P90")]:
-                fig_ef.add_vline(x=pv_ef, line_dash="dot", line_color="#94a3b8",
-                                 annotation_text=f"{txt_ef} {pv_ef:.1f}",
-                                 annotation_font_color="#94a3b8")
-            fig_ef.update_layout(template="plotly_dark", height=360, xaxis_title="€/MWh",
-                                 yaxis_title="Ore")
-            st.plotly_chart(fig_ef, use_container_width=True)
+                st.markdown("**Distribuzione dei prezzi orari vs il tuo fixing**")
+                v_ef = pd.to_numeric(prezzi, errors="coerce").dropna().to_numpy()
+                conteggi_ef, bordi_ef = np.histogram(v_ef, bins=50)
+                centri_ef = (bordi_ef[:-1] + bordi_ef[1:]) / 2.0
+                fig_ef = go.Figure()
+                fig_ef.add_trace(go.Bar(x=centri_ef, y=conteggi_ef, name="Ore",
+                                        marker_color="#38bdf8",
+                                        hovertemplate="€%{x:.1f}/MWh: %{y} ore<extra></extra>"))
+                fig_ef.add_vline(x=ef["prezzo_fissato"], line_dash="solid", line_color="#ef4444",
+                                 annotation_text=f"Fixing {ef['prezzo_fissato']:.1f}",
+                                 annotation_font_color="#ef4444")
+                fig_ef.add_vline(x=ef["media"], line_dash="dash", line_color="#a78bfa",
+                                 annotation_text=f"Media {ef['media']:.1f}",
+                                 annotation_font_color="#a78bfa")
+                for pv_ef, txt_ef in [(ef["p10"], "P10"), (ef["p90"], "P90")]:
+                    fig_ef.add_vline(x=pv_ef, line_dash="dot", line_color="#94a3b8",
+                                     annotation_text=f"{txt_ef} {pv_ef:.1f}",
+                                     annotation_font_color="#94a3b8")
+                fig_ef.update_layout(template="plotly_dark", height=360, xaxis_title="€/MWh",
+                                     yaxis_title="Ore")
+                st.plotly_chart(fig_ef, use_container_width=True)
 
-            st.markdown("**Mese per mese: il tuo fixing contro il mercato**")
-            st.dataframe(ef["mensile"], use_container_width=True, hide_index=True)
-            d0e, d1e = prezzi.index.min().date(), prezzi.index.max().date()
-            st.download_button(
-                "⬇️ Esporta efficienza fixing (CSV)",
-                ef["mensile"].to_csv(index=False, sep=";").encode("utf-8"),
-                file_name=f"efficienza_fixing_{d0e}_{d1e}.csv",
-                mime="text/csv",
-                key="csv_efficienza_fixing",
-                help="Una riga per mese: media di mercato, scarto vs il tuo fixing e % di ore battute.",
-            )
+                st.markdown("**Mese per mese: il tuo fixing contro il mercato**")
+                st.dataframe(ef["mensile"], use_container_width=True, hide_index=True)
+                d0e, d1e = prezzi.index.min().date(), prezzi.index.max().date()
+                st.download_button(
+                    "⬇️ Esporta efficienza fixing (CSV)",
+                    ef["mensile"].to_csv(index=False, sep=";").encode("utf-8"),
+                    file_name=f"efficienza_fixing_{d0e}_{d1e}.csv",
+                    mime="text/csv",
+                    key="csv_efficienza_fixing",
+                    help="Una riga per mese: media di mercato, scarto vs il tuo fixing e % di ore battute.",
+                )
 
-with tab144:
-        titolo_bc = edu("Baricentro del costo", "Il BARICENTRO DEL COSTO e' l'ora media del giorno in cui si concentra la tua spesa, calcolata come media CIRCOLARE ponderata sui costi orari (prezzo spot x MW della fascia F1/F2/F3). La media circolare serve perche' le ore 0 e 23 sono vicine: con una media aritmetica banale un costo concentrato a mezzanotte darebbe un falso 'mezzogiorno'. La DISPERSIONE (±h) dice quanto la spesa e' sparsa attorno al baricentro; la QUOTA ±2h dice quanta spesa sta davvero vicino. Le ore con costo negativo (prezzi negativi) sono escluse dai pesi e conteggiate a parte. La tabella mensile mostra se il baricentro si e' SPSTATO nel tempo (es. da 18:00 a 14:00 dopo uno shifting del carico): la verifica ex-post che la demand response ha funzionato.")
-        st.markdown(f"<h1>⏳ {titolo_bc}</h1>", unsafe_allow_html=True)
-        st.caption("L'ora del giorno attorno a cui ruota la tua bolletta, con dispersione e spostamento mensile.")
+    with tab144:
+            titolo_bc = edu("Baricentro del costo", "Il BARICENTRO DEL COSTO e' l'ora media del giorno in cui si concentra la tua spesa, calcolata come media CIRCOLARE ponderata sui costi orari (prezzo spot x MW della fascia F1/F2/F3). La media circolare serve perche' le ore 0 e 23 sono vicine: con una media aritmetica banale un costo concentrato a mezzanotte darebbe un falso 'mezzogiorno'. La DISPERSIONE (±h) dice quanto la spesa e' sparsa attorno al baricentro; la QUOTA ±2h dice quanta spesa sta davvero vicino. Le ore con costo negativo (prezzi negativi) sono escluse dai pesi e conteggiate a parte. La tabella mensile mostra se il baricentro si e' SPSTATO nel tempo (es. da 18:00 a 14:00 dopo uno shifting del carico): la verifica ex-post che la demand response ha funzionato.")
+            st.markdown(f"<h1>⏳ {titolo_bc}</h1>", unsafe_allow_html=True)
+            st.caption("L'ora del giorno attorno a cui ruota la tua bolletta, con dispersione e spostamento mensile.")
 
-        bc1, bc2, bc3 = st.columns(3)
-        with bc1:
-            bc_f1 = st.number_input("Potenza in F1 (MW)", min_value=0.0, value=1.0, step=0.5, key="bc144_f1",
-                                    help="Ore di punta: lun–ven 08:00–19:00.")
-        with bc2:
-            bc_f2 = st.number_input("Potenza in F2 (MW)", min_value=0.0, value=1.0, step=0.5, key="bc144_f2",
-                                    help="Ore intermedie: lun–ven 07:00–08:00 e 19:00–23:00, sab 07:00–23:00.")
-        with bc3:
-            bc_f3 = st.number_input("Potenza in F3 (MW)", min_value=0.0, value=1.0, step=0.5, key="bc144_f3",
-                                    help="Ore fuori punta: notti, domeniche e festivi.")
-        bc = calcola_baricentro_costo(prezzi, bc_f1, bc_f2, bc_f3)
-        if bc["errore"]:
-            st.error(bc["errore"])
-        else:
-            k1, k2, k3, k4 = st.columns(4)
-            with k1:
-                st.metric("Baricentro del costo", bc["baricentro_txt"],
-                          "media circolare ponderata")
-            with k2:
-                st.metric("Dispersione", f"±{bc['dispersione_ore']:.1f} h",
-                          "deviazione standard circolare")
-            with k3:
-                st.metric("Costo entro ±2h", f"{bc['quota_centro_pct']:.1f}%",
-                          "quota vicino al baricentro")
-            with k4:
-                st.metric("Ore a costo negativo", f"{bc['ore_negative']:,}",
-                          f"{bc['quota_neg_pct']:.1f}% delle ore, escluse dai pesi")
-
-            st.markdown("**Costo per ora del giorno e baricentro**")
-            fig_bc = go.Figure()
-            fig_bc.add_trace(go.Bar(x=bc["per_ora"]["Ora"], y=bc["per_ora"]["Costo (€)"],
-                                    name="Costo", marker_color="#38bdf8",
-                                    hovertemplate="%{x}: %{y:,.0f} €<extra></extra>"))
-            bh_bc = bc["baricentro_ore"]
-            etic_bc = bc["per_ora"]["Ora"].iloc[int(round(bh_bc)) % 24]
-            fig_bc.add_vline(x=etic_bc, line_dash="solid", line_color="#ef4444",
-                             annotation_text=f"Baricentro {bc['baricentro_txt']}",
-                             annotation_font_color="#ef4444")
-            fig_bc.update_layout(template="plotly_dark", height=360, xaxis_title="Ora",
-                                 yaxis_title="€")
-            st.plotly_chart(fig_bc, use_container_width=True)
-            st.caption(f"💡 Profilo: F1 {bc_f1} MW, F2 {bc_f2} MW, F3 {bc_f3} MW — "
-                       f"{bc['costo_tot']:,.0f} € totali su {bc['mwh_tot']:,.0f} MWh ({bc['n_ore']:,} ore). "
-                       "Sposta il carico verso ore lontane dal baricentro per abbassarlo.")
-
-            st.markdown("**Mese per mese: il baricentro si è spostato?**")
-            st.dataframe(bc["mensile"], use_container_width=True, hide_index=True)
-            d0b, d1b = prezzi.index.min().date(), prezzi.index.max().date()
-            st.download_button(
-                "⬇️ Esporta baricentro mensile (CSV)",
-                bc["mensile"].to_csv(index=False, sep=";").encode("utf-8"),
-                file_name=f"baricentro_costo_{d0b}_{d1b}.csv",
-                mime="text/csv",
-                key="csv_baricentro_costo",
-                help="Una riga per mese: baricentro, dispersione, quota di costo entro ±2h e costo totale.",
-            )
-
-
-with tab145:
-        titolo_er = edu("Energia reattiva", "L'ENERGIA REATTIVA (kvarh) e' l'energia che i carichi induttivi (motori, trasformatori) 'prendono e restituiscono' senza trasformarla in lavoro utile. Il distributore la PENALIZZA in bolletta quando supera una soglia dell'energia attiva (in Italia, stile ARERA: oltre il 33% scaglione 1, oltre il 75% scaglione 2, tariffe diverse per livello di tensione). Il FATTORE DI POTENZA cos(phi) misura quanto sei rifasato: 1.0 = perfetto, 0.7 = mal rifasato. Il RIFASAMENTO (batterie di condensatori) costa poco una tantum ed elimina le penali per anni: questa tab quantifica la penale che paghi oggi e il risparmio se rifasi a 0.95.")
-        st.markdown(f"<h1>⚡ {titolo_er}</h1>", unsafe_allow_html=True)
-        st.caption("Quanto ti costa il basso cos(phi): penali mensili per la reattiva e risparmio del rifasamento.")
-        st.caption("💡 Usa pratico: se il risparmio del rifasamento supera il costo di un rifasatore (qualche centinaio di €/kvar installato), l'investimento si ripaga in mesi — le tariffe cambiano per tensione/anno, aggiornale dai tuoi corrispettivi di rete.")
-        er1, er2, er3 = st.columns(3)
-        with er1:
-            er_f1 = st.number_input("Potenza in F1 (MW)", min_value=0.0, value=1.0, step=0.5, key="er145_f1",
-                                    help="Ore di punta: lun–ven 08:00–19:00.")
-        with er2:
-            er_f2 = st.number_input("Potenza in F2 (MW)", min_value=0.0, value=1.0, step=0.5, key="er145_f2",
-                                    help="Ore intermedie: lun–ven 07:00–08:00 e 19:00–23:00, sab 07:00–23:00.")
-        with er3:
-            er_f3 = st.number_input("Potenza in F3 (MW)", min_value=0.0, value=1.0, step=0.5, key="er145_f3",
-                                    help="Ore fuori punta: notti, domeniche e festivi.")
-        er4, er5, er6 = st.columns(3)
-        with er4:
-            er_cos = st.slider("cos(phi) attuale", min_value=0.50, max_value=0.999, value=0.85, step=0.005,
-                               key="er145_cos",
-                               help="Fattore di potenza del tuo impianto (0.7-0.8 = mal rifasato, 0.95+ = ok).")
-        with er5:
-            er_t1 = st.number_input("Tariffa scaglione 1 (€/kvarh)", min_value=0.0, value=0.008, step=0.001,
-                                    format="%.4f", key="er145_t1",
-                                    help="Penale per reattiva oltre il 33% e fino al 75% dell'attiva.")
-        with er6:
-            er_t2 = st.number_input("Tariffa scaglione 2 (€/kvarh)", min_value=0.0, value=0.012, step=0.001,
-                                    format="%.4f", key="er145_t2",
-                                    help="Penale per reattiva oltre il 75% dell'attiva.")
-        er = calcola_penalita_reattiva(prezzi, er_f1, er_f2, er_f3, er_cos, er_t1, er_t2)
-        if er["errore"]:
-            st.error(er["errore"])
-        else:
-            k1, k2, k3, k4 = st.columns(4)
-            with k1:
-                st.metric("Penale totale reattiva", f"{er['penale_tot']:,.0f} €",
-                          f"{er['mesi_con_penale']} mesi con penale")
-            with k2:
-                st.metric("Risparmio rifasando a 0.95", f"{er['risparmio_rifasamento']:,.0f} €",
-                          f"penale residua {er['penale_rifasata']:,.0f} €")
-            with k3:
-                st.metric("Rapporto reattiva/attiva", f"{er['rapporto_medio_pct']:.1f}%",
-                          f"tan(phi) = {er['tan_phi']}")
-            with k4:
-                peg_txt = er["peggior_mese"] if er["peggior_mese"] else "—"
-                st.metric("Peggior mese", peg_txt, f"{er['penale_peggiore']:,.0f} €")
-            if er["risparmio_rifasamento"] > 0:
-                st.success(f"✅ Rifasando a cos(phi) 0.95 risparmieresti {er['risparmio_rifasamento']:,.0f} € sul periodo.")
-            elif er["penale_tot"] == 0:
-                st.success("✅ Nessuna penale: il tuo profilo e' gia' ben rifasato per queste soglie.")
+            bc1, bc2, bc3 = st.columns(3)
+            with bc1:
+                bc_f1 = st.number_input("Potenza in F1 (MW)", min_value=0.0, value=1.0, step=0.5, key="bc144_f1",
+                                        help="Ore di punta: lun–ven 08:00–19:00.")
+            with bc2:
+                bc_f2 = st.number_input("Potenza in F2 (MW)", min_value=0.0, value=1.0, step=0.5, key="bc144_f2",
+                                        help="Ore intermedie: lun–ven 07:00–08:00 e 19:00–23:00, sab 07:00–23:00.")
+            with bc3:
+                bc_f3 = st.number_input("Potenza in F3 (MW)", min_value=0.0, value=1.0, step=0.5, key="bc144_f3",
+                                        help="Ore fuori punta: notti, domeniche e festivi.")
+            bc = calcola_baricentro_costo(prezzi, bc_f1, bc_f2, bc_f3)
+            if bc["errore"]:
+                st.error(bc["errore"])
             else:
-                st.info("➖ Il rifasamento a 0.95 non riduce ulteriormente le penali con queste soglie.")
+                k1, k2, k3, k4 = st.columns(4)
+                with k1:
+                    st.metric("Baricentro del costo", bc["baricentro_txt"],
+                              "media circolare ponderata")
+                with k2:
+                    st.metric("Dispersione", f"±{bc['dispersione_ore']:.1f} h",
+                              "deviazione standard circolare")
+                with k3:
+                    st.metric("Costo entro ±2h", f"{bc['quota_centro_pct']:.1f}%",
+                              "quota vicino al baricentro")
+                with k4:
+                    st.metric("Ore a costo negativo", f"{bc['ore_negative']:,}",
+                              f"{bc['quota_neg_pct']:.1f}% delle ore, escluse dai pesi")
 
-            st.markdown("**Rapporto reattiva/attiva per mese vs soglie di penale**")
-            fig_er = go.Figure()
-            fig_er.add_trace(go.Bar(x=er["mensile"]["Mese"], y=er["mensile"]["Rapporto %"],
-                                    name="Rapporto %", marker_color="#38bdf8",
-                                    hovertemplate="%{x}: %{y:.1f}%<extra></extra>"))
-            fig_er.add_hline(y=33.0, line_dash="dash", line_color="#f59e0b",
-                             annotation_text="Soglia t1 33%", annotation_font_color="#f59e0b")
-            fig_er.add_hline(y=75.0, line_dash="dash", line_color="#ef4444",
-                             annotation_text="Soglia t2 75%", annotation_font_color="#ef4444")
-            fig_er.update_layout(template="plotly_dark", height=360, xaxis_title="Mese",
-                                 yaxis_title="%")
-            st.plotly_chart(fig_er, use_container_width=True)
+                st.markdown("**Costo per ora del giorno e baricentro**")
+                fig_bc = go.Figure()
+                fig_bc.add_trace(go.Bar(x=bc["per_ora"]["Ora"], y=bc["per_ora"]["Costo (€)"],
+                                        name="Costo", marker_color="#38bdf8",
+                                        hovertemplate="%{x}: %{y:,.0f} €<extra></extra>"))
+                bh_bc = bc["baricentro_ore"]
+                etic_bc = bc["per_ora"]["Ora"].iloc[int(round(bh_bc)) % 24]
+                fig_bc.add_vline(x=etic_bc, line_dash="solid", line_color="#ef4444",
+                                 annotation_text=f"Baricentro {bc['baricentro_txt']}",
+                                 annotation_font_color="#ef4444")
+                fig_bc.update_layout(template="plotly_dark", height=360, xaxis_title="Ora",
+                                     yaxis_title="€")
+                st.plotly_chart(fig_bc, use_container_width=True)
+                st.caption(f"💡 Profilo: F1 {bc_f1} MW, F2 {bc_f2} MW, F3 {bc_f3} MW — "
+                           f"{bc['costo_tot']:,.0f} € totali su {bc['mwh_tot']:,.0f} MWh ({bc['n_ore']:,} ore). "
+                           "Sposta il carico verso ore lontane dal baricentro per abbassarlo.")
 
-            st.markdown("**Penale mensile (€)**")
-            fig_er2 = go.Figure()
-            fig_er2.add_trace(go.Bar(x=er["mensile"]["Mese"], y=er["mensile"]["Penale (€)"],
-                                     name="Penale €", marker_color="#ef4444",
-                                     hovertemplate="%{x}: %{y:,.0f} €<extra></extra>"))
-            fig_er2.update_layout(template="plotly_dark", height=300, xaxis_title="Mese",
-                                  yaxis_title="€")
-            st.plotly_chart(fig_er2, use_container_width=True)
+                st.markdown("**Mese per mese: il baricentro si è spostato?**")
+                st.dataframe(bc["mensile"], use_container_width=True, hide_index=True)
+                d0b, d1b = prezzi.index.min().date(), prezzi.index.max().date()
+                st.download_button(
+                    "⬇️ Esporta baricentro mensile (CSV)",
+                    bc["mensile"].to_csv(index=False, sep=";").encode("utf-8"),
+                    file_name=f"baricentro_costo_{d0b}_{d1b}.csv",
+                    mime="text/csv",
+                    key="csv_baricentro_costo",
+                    help="Una riga per mese: baricentro, dispersione, quota di costo entro ±2h e costo totale.",
+                )
 
-            st.markdown("**Dettaglio mensile**")
-            st.dataframe(er["mensile"], use_container_width=True, hide_index=True)
-            st.caption(f"💡 Profilo: F1 {er_f1} MW, F2 {er_f2} MW, F3 {er_f3} MW — "
-                       f"{er['mwh_tot']:,.0f} MWh attivi e {er['kvarh_tot']:,.0f} kvarh reattivi "
-                       f"su {er['n_ore']:,} ore. Indipendente dal prezzo spot: e' una voce di rete.")
-            d0r, d1r = prezzi.index.min().date(), prezzi.index.max().date()
-            st.download_button(
-                "⬇️ Esporta penali reattive (CSV)",
-                er["mensile"].to_csv(index=False, sep=";").encode("utf-8"),
-                file_name=f"penali_reattive_{d0r}_{d1r}.csv",
-                mime="text/csv",
-                key="csv_penali_reattive",
-                help="Una riga per mese: attiva, reattiva, rapporto %, eccedenze per scaglione e penale.",
-            )
-with tab146:
-        titolo_pi = edu("Potenza impegnata", "La POTENZA IMPEGNATA (kW contrattuali) e' il 'tetto' di potenza che dichiari al distributore: paghi ogni mese una QUOTA FISSA proporzionale ai kW impegnati, ma se il tuo picco reale supera il tetto paghi una PENALE sui kW di superamento. Troppa potenza impegnata = quota fissa sprecata ogni mese; troppo poca = penali ricorrenti. Questa tab confronta quota fissa e penali sul tuo profilo F1/F2/F3 e trova la potenza impegnata che minimizza il costo totale — il picco mensile e' stimato dal profilo orario (il fattore di picco approssima il quarto-orario usato dalla misura reale).")
-        st.markdown(f"<h1>⚡ {titolo_pi}</h1>", unsafe_allow_html=True)
-        st.caption("Quanto ti costa il tetto di potenza: quota fissa vs penali di superamento, e la potenza impegnata ottimale.")
-        st.caption("💡 Usa pratico: se l'ottimo e' sotto la tua impegnata, chiedi la riduzione al distributore (la quota fissa scende dal mese successivo); se e' sopra, ogni superamento evitato vale la penale — confronta il risparmio col costo di eventuali interventi di peak-shaving.")
-        pi1, pi2, pi3 = st.columns(3)
-        with pi1:
-            pi_f1 = st.number_input("Potenza in F1 (MW)", min_value=0.0, value=1.0, step=0.5, key="pimp146_f1",
-                                    help="Ore di punta: lun–ven 08:00–19:00.")
-        with pi2:
-            pi_f2 = st.number_input("Potenza in F2 (MW)", min_value=0.0, value=1.0, step=0.5, key="pimp146_f2",
-                                    help="Ore intermedie: lun–ven 07:00–08:00 e 19:00–23:00, sab 07:00–23:00.")
-        with pi3:
-            pi_f3 = st.number_input("Potenza in F3 (MW)", min_value=0.0, value=1.0, step=0.5, key="pimp146_f3",
-                                    help="Ore fuori punta: notti, domeniche e festivi.")
-        pi4, pi5, pi6 = st.columns(3)
-        with pi4:
-            pi_pc = st.number_input("Potenza impegnata attuale (kW)", min_value=1.0, value=1000.0, step=50.0,
-                                    key="pimp146_pc",
-                                    help="I kW contrattuali in bolletta (voce 'potenza impegnata/disponibile').")
-        with pi5:
-            pi_quota = st.number_input("Quota potenza (€/kW/mese)", min_value=0.0, value=3.0, step=0.5,
-                                       key="pimp146_quota",
-                                       help="Quota fissa mensile per kW impegnato, dai corrispettivi di rete.")
-        with pi6:
-            pi_pen = st.number_input("Penale superamento (€/kW)", min_value=0.0, value=10.0, step=1.0,
-                                     key="pimp146_pen",
-                                     help="Penale per kW di superamento del picco, per mese.")
-        pi_fp = st.slider("Fattore di picco quarto-orario", min_value=1.00, max_value=1.20, value=1.05,
-                          step=0.01, key="pimp146_fp",
-                          help="Il picco orario del profilo x questo fattore approssima il picco quarto-orario della misura reale.")
-        pi = calcola_ottimizza_potenza(prezzi, pi_f1, pi_f2, pi_f3, pi_pc, pi_quota, pi_pen, pi_fp)
-        if pi["errore"]:
-            st.error(pi["errore"])
-        else:
-            if pi["categoria"] == "sovradimensionata":
-                st.warning(pi["verdetto"])
-            elif pi["categoria"] == "sottodimensionata":
-                st.error(pi["verdetto"])
+
+    with tab145:
+            titolo_er = edu("Energia reattiva", "L'ENERGIA REATTIVA (kvarh) e' l'energia che i carichi induttivi (motori, trasformatori) 'prendono e restituiscono' senza trasformarla in lavoro utile. Il distributore la PENALIZZA in bolletta quando supera una soglia dell'energia attiva (in Italia, stile ARERA: oltre il 33% scaglione 1, oltre il 75% scaglione 2, tariffe diverse per livello di tensione). Il FATTORE DI POTENZA cos(phi) misura quanto sei rifasato: 1.0 = perfetto, 0.7 = mal rifasato. Il RIFASAMENTO (batterie di condensatori) costa poco una tantum ed elimina le penali per anni: questa tab quantifica la penale che paghi oggi e il risparmio se rifasi a 0.95.")
+            st.markdown(f"<h1>⚡ {titolo_er}</h1>", unsafe_allow_html=True)
+            st.caption("Quanto ti costa il basso cos(phi): penali mensili per la reattiva e risparmio del rifasamento.")
+            st.caption("💡 Usa pratico: se il risparmio del rifasamento supera il costo di un rifasatore (qualche centinaio di €/kvar installato), l'investimento si ripaga in mesi — le tariffe cambiano per tensione/anno, aggiornale dai tuoi corrispettivi di rete.")
+            er1, er2, er3 = st.columns(3)
+            with er1:
+                er_f1 = st.number_input("Potenza in F1 (MW)", min_value=0.0, value=1.0, step=0.5, key="er145_f1",
+                                        help="Ore di punta: lun–ven 08:00–19:00.")
+            with er2:
+                er_f2 = st.number_input("Potenza in F2 (MW)", min_value=0.0, value=1.0, step=0.5, key="er145_f2",
+                                        help="Ore intermedie: lun–ven 07:00–08:00 e 19:00–23:00, sab 07:00–23:00.")
+            with er3:
+                er_f3 = st.number_input("Potenza in F3 (MW)", min_value=0.0, value=1.0, step=0.5, key="er145_f3",
+                                        help="Ore fuori punta: notti, domeniche e festivi.")
+            er4, er5, er6 = st.columns(3)
+            with er4:
+                er_cos = st.slider("cos(phi) attuale", min_value=0.50, max_value=0.999, value=0.85, step=0.005,
+                                   key="er145_cos",
+                                   help="Fattore di potenza del tuo impianto (0.7-0.8 = mal rifasato, 0.95+ = ok).")
+            with er5:
+                er_t1 = st.number_input("Tariffa scaglione 1 (€/kvarh)", min_value=0.0, value=0.008, step=0.001,
+                                        format="%.4f", key="er145_t1",
+                                        help="Penale per reattiva oltre il 33% e fino al 75% dell'attiva.")
+            with er6:
+                er_t2 = st.number_input("Tariffa scaglione 2 (€/kvarh)", min_value=0.0, value=0.012, step=0.001,
+                                        format="%.4f", key="er145_t2",
+                                        help="Penale per reattiva oltre il 75% dell'attiva.")
+            er = calcola_penalita_reattiva(prezzi, er_f1, er_f2, er_f3, er_cos, er_t1, er_t2)
+            if er["errore"]:
+                st.error(er["errore"])
             else:
-                st.success(pi["verdetto"])
-            k1, k2, k3, k4 = st.columns(4)
-            with k1:
-                st.metric("Potenza impegnata ottimale", f"{pi['potenza_ottima_kw']:,.0f} kW",
-                          f"attuale {pi['p_contr_kw']:,.0f} kW")
-            with k2:
-                st.metric("Risparmio annuo", f"{pi['risparmio_annuo']:,.0f} €",
-                          f"{pi['n_mesi']} mesi analizzati")
-            with k3:
-                st.metric("Mesi con superamento", f"{pi['mesi_superamento']}",
-                          f"picco max {pi['picco_max_kw']:,.0f} kW")
-            with k4:
-                st.metric("Costo totale attuale", f"{pi['costo_attuale']:,.0f} €",
-                          f"ottimo {pi['costo_ottimo']:,.0f} €")
+                k1, k2, k3, k4 = st.columns(4)
+                with k1:
+                    st.metric("Penale totale reattiva", f"{er['penale_tot']:,.0f} €",
+                              f"{er['mesi_con_penale']} mesi con penale")
+                with k2:
+                    st.metric("Risparmio rifasando a 0.95", f"{er['risparmio_rifasamento']:,.0f} €",
+                              f"penale residua {er['penale_rifasata']:,.0f} €")
+                with k3:
+                    st.metric("Rapporto reattiva/attiva", f"{er['rapporto_medio_pct']:.1f}%",
+                              f"tan(phi) = {er['tan_phi']}")
+                with k4:
+                    peg_txt = er["peggior_mese"] if er["peggior_mese"] else "—"
+                    st.metric("Peggior mese", peg_txt, f"{er['penale_peggiore']:,.0f} €")
+                if er["risparmio_rifasamento"] > 0:
+                    st.success(f"✅ Rifasando a cos(phi) 0.95 risparmieresti {er['risparmio_rifasamento']:,.0f} € sul periodo.")
+                elif er["penale_tot"] == 0:
+                    st.success("✅ Nessuna penale: il tuo profilo e' gia' ben rifasato per queste soglie.")
+                else:
+                    st.info("➖ Il rifasamento a 0.95 non riduce ulteriormente le penali con queste soglie.")
 
-            st.markdown("**Costo totale (quota fissa + penali) in funzione della potenza impegnata**")
-            fig_pi = go.Figure()
-            sc = pi["scansione"]
-            fig_pi.add_trace(go.Scatter(x=sc["Potenza (kW)"], y=sc["Totale (€)"],
-                                        mode="lines", name="Costo totale €",
-                                        line=dict(color="#38bdf8", width=2),
-                                        hovertemplate="%{x:,.0f} kW: %{y:,.0f} €<extra></extra>"))
-            fig_pi.add_trace(go.Scatter(x=sc["Potenza (kW)"], y=sc["Quota fissa (€)"],
-                                        mode="lines", name="Quota fissa €",
-                                        line=dict(color="#a8a29e", width=1, dash="dot"),
-                                        hovertemplate="%{x:,.0f} kW: %{y:,.0f} €<extra></extra>"))
-            fig_pi.add_trace(go.Scatter(x=sc["Potenza (kW)"], y=sc["Penali (€)"],
-                                        mode="lines", name="Penali €",
-                                        line=dict(color="#ef4444", width=1, dash="dot"),
-                                        hovertemplate="%{x:,.0f} kW: %{y:,.0f} €<extra></extra>"))
-            fig_pi.add_vline(x=pi["p_contr_kw"], line_dash="dash", line_color="#f59e0b",
-                             annotation_text=f"Attuale {pi['p_contr_kw']:,.0f} kW",
-                             annotation_font_color="#f59e0b")
-            fig_pi.add_vline(x=pi["potenza_ottima_kw"], line_dash="solid", line_color="#22c55e",
-                             annotation_text=f"Ottimo {pi['potenza_ottima_kw']:,.0f} kW",
-                             annotation_font_color="#22c55e")
-            fig_pi.update_layout(template="plotly_dark", height=380, xaxis_title="Potenza impegnata (kW)",
-                                 yaxis_title="€ sul periodo", legend=dict(orientation="h", y=1.08))
-            st.plotly_chart(fig_pi, use_container_width=True)
+                st.markdown("**Rapporto reattiva/attiva per mese vs soglie di penale**")
+                fig_er = go.Figure()
+                fig_er.add_trace(go.Bar(x=er["mensile"]["Mese"], y=er["mensile"]["Rapporto %"],
+                                        name="Rapporto %", marker_color="#38bdf8",
+                                        hovertemplate="%{x}: %{y:.1f}%<extra></extra>"))
+                fig_er.add_hline(y=33.0, line_dash="dash", line_color="#f59e0b",
+                                 annotation_text="Soglia t1 33%", annotation_font_color="#f59e0b")
+                fig_er.add_hline(y=75.0, line_dash="dash", line_color="#ef4444",
+                                 annotation_text="Soglia t2 75%", annotation_font_color="#ef4444")
+                fig_er.update_layout(template="plotly_dark", height=360, xaxis_title="Mese",
+                                     yaxis_title="%")
+                st.plotly_chart(fig_er, use_container_width=True)
 
-            st.markdown("**Picco mensile vs potenza impegnata**")
-            fig_pi2 = go.Figure()
-            fig_pi2.add_trace(go.Bar(x=pi["mensile"]["Mese"], y=pi["mensile"]["Picco (kW)"],
-                                     name="Picco kW", marker_color="#38bdf8",
-                                     hovertemplate="%{x}: %{y:,.0f} kW<extra></extra>"))
-            fig_pi2.add_hline(y=pi["p_contr_kw"], line_dash="dash", line_color="#f59e0b",
-                              annotation_text=f"Impegnata {pi['p_contr_kw']:,.0f} kW",
-                              annotation_font_color="#f59e0b")
-            fig_pi2.update_layout(template="plotly_dark", height=300, xaxis_title="Mese",
-                                  yaxis_title="kW")
-            st.plotly_chart(fig_pi2, use_container_width=True)
-
-            st.markdown("**Dettaglio mensile**")
-            st.dataframe(pi["mensile"], use_container_width=True, hide_index=True)
-            st.caption(f"💡 Profilo: F1 {pi_f1} MW, F2 {pi_f2} MW, F3 {pi_f3} MW — "
-                       f"{pi['mwh_tot']:,.0f} MWh su {pi['n_ore']:,} ore. Il picco e' stimato dal profilo orario "
-                       f"x fattore {pi_fp:.2f} (approssimazione del quarto-orario): per la decisione finale usa i picchi "
-                       f"quart-orari reali dalla curva di misura.")
-            d0r, d1r = prezzi.index.min().date(), prezzi.index.max().date()
-            st.download_button(
-                "⬇️ Esporta potenza impegnata (CSV)",
-                pi["mensile"].to_csv(index=False, sep=";").encode("utf-8"),
-                file_name=f"potenza_impegnata_{d0r}_{d1r}.csv",
-                mime="text/csv",
-                key="csv_potenza_impegnata",
-                help="Una riga per mese: picco stimato, quota fissa, penale e totale con la potenza attuale.",
-            )
-
-
-with tab147:
-        titolo_rc = edu("Rollover coperture", "Il ROLLOVER e' l'operazione con cui il desk, a ogni scadenza, chiude la copertura forward sul mese in consegna e apre quella sul mese successivo. La differenza tra i due prezzi pagati e' il COSTO DI ROLLING: se la curva dei prezzi e' in CONTANGO (i mesi lontani costano piu' dei vicini) ogni roll ti costa soldi; se e' in BACKWARDATION (i mesi lontani costano meno) il roll ti paga. Questa tab fa il backtest del rolling mensile continuo sullo storico: il forward 'pagato' e' approssimato con lo strip base implicito del mese di acquisto (proxy, non la vera curva forward quotata). Diversa dal tab Struttura a termine (la pendenza fotografata oggi): qui si misura quanto il rolling e' costato/guadagnato davvero, mese per mese, in euro.")
-        st.markdown(f"<h1>🔄 {titolo_rc}</h1>", unsafe_allow_html=True)
-        st.caption("Quanto ti costa (o ti rende) rinnovare ogni mese la copertura forward: backtest del rolling mensile sullo storico.")
-        st.caption("💡 Usa pratico: se il costo annuo stimato e' alto e la curva resta in contango, valuta coperture trimestrali/annuali (meno roll) o acquisti a pronti nei mesi di contango estremo; se sei in backwardation, il rolling mensile ti paga — mantienilo.")
-        rc1, rc2, rc3 = st.columns(3)
-        with rc1:
-            rc_mw = st.number_input("Potenza coperta (MW)", min_value=0.1, value=1.0, step=0.5, key="roll147_mw",
-                                    help="Potenza del carico coperto dalla strategia rolling.")
-        with rc2:
-            rc_quota = st.slider("Quota di copertura (%)", min_value=0, max_value=100, value=50, step=5,
-                                 key="roll147_quota",
-                                 help="Percentuale del carico coperta a termine (il resto resta a spot).")
-        with rc3:
-            rc_ant = st.slider("Anticipo di acquisto (mesi)", min_value=1, max_value=3, value=1, step=1,
-                               key="roll147_ant",
-                               help="Quanti mesi prima della consegna compri la copertura: con 1 compri a fine mese la consegna del mese dopo.")
-        rc_soglia = st.slider("Soglia regime contango/backwardation (%)", min_value=0.5, max_value=5.0, value=1.5,
-                              step=0.5, key="roll147_soglia",
-                              help="Un mese e' in contango/backwardation se il roll yield supera questa soglia in valore assoluto.")
-        rc = calcola_rollover_coperture(prezzi, rc_mw, rc_quota, rc_ant, rc_soglia)
-        if rc["errore"]:
-            st.error(rc["errore"])
-        else:
-            if rc["categoria"] == "costo":
-                st.warning(rc["verdetto"])
-            elif rc["categoria"] == "guadagno":
-                st.success(rc["verdetto"])
-            else:
-                st.info(rc["verdetto"])
-            k1, k2, k3, k4 = st.columns(4)
-            with k1:
-                st.metric("Costo totale rolling", f"{rc['totale_eur']:,.0f} €",
-                          f"{rc['n_roll']} mesi analizzati")
-            with k2:
-                st.metric("Roll medio", f"{rc['roll_medio_eur_mwh']:+.2f} €/MWh/mese",
-                          f"yield {rc['yield_medio_pct']:+.2f} %")
-            with k3:
-                st.metric("Costo annuo stimato", f"{rc['costo_annuo_stimato']:,.0f} €",
-                          f"quota {rc['quota_copertura_pct']:.0f} %")
-            with k4:
-                st.metric("Mesi contango/backw.", f"{rc['mesi_contango']}/{rc['mesi_backwardation']}",
-                          f"incidenza {rc['incidenza_pct']:.2f} % sul costo fornitura")
-
-            st.markdown("**Costo di roll mensile (€/MWh): rosso = contango (paghi), verde = backwardation (guadagni)**")
-            fig_rc = go.Figure()
-            col_rc = {"contango": "#ef4444", "backwardation": "#22c55e", "piatto": "#a8a29e"}
-            mens = rc["mensile"]
-            fig_rc.add_trace(go.Bar(x=mens["Mese"], y=mens["Roll (€/MWh)"],
-                                    marker_color=[col_rc[r] for r in mens["Regime"]],
-                                    name="Roll €/MWh",
-                                    hovertemplate="%{x}: %{y:+.2f} €/MWh (%{customdata})<extra></extra>",
-                                    customdata=mens["Regime"]))
-            fig_rc.add_hline(y=0, line_color="#6b7280", line_width=1)
-            fig_rc.update_layout(template="plotly_dark", height=360, xaxis_title="Mese di consegna",
-                                 yaxis_title="Roll (€/MWh)", showlegend=False)
-            st.plotly_chart(fig_rc, use_container_width=True)
-
-            st.markdown("**Costo cumulato del rolling (€)**")
-            fig_rc2 = go.Figure()
-            cum = mens["Costo roll (€)"].cumsum()
-            fig_rc2.add_trace(go.Scatter(x=mens["Mese"], y=cum, mode="lines+markers",
-                                         name="Cumulato €", line=dict(color="#38bdf8", width=2),
+                st.markdown("**Penale mensile (€)**")
+                fig_er2 = go.Figure()
+                fig_er2.add_trace(go.Bar(x=er["mensile"]["Mese"], y=er["mensile"]["Penale (€)"],
+                                         name="Penale €", marker_color="#ef4444",
                                          hovertemplate="%{x}: %{y:,.0f} €<extra></extra>"))
-            fig_rc2.add_hline(y=0, line_color="#6b7280", line_width=1)
-            fig_rc2.update_layout(template="plotly_dark", height=320, xaxis_title="Mese di consegna",
-                                  yaxis_title="€ cumulati")
-            st.plotly_chart(fig_rc2, use_container_width=True)
+                fig_er2.update_layout(template="plotly_dark", height=300, xaxis_title="Mese",
+                                      yaxis_title="€")
+                st.plotly_chart(fig_er2, use_container_width=True)
 
-            st.markdown("**Sensibilità: costo annuo stimato in funzione della quota di copertura**")
-            fig_rc3 = go.Figure()
-            sens = rc["sensibilita"]
-            fig_rc3.add_trace(go.Scatter(x=sens["Quota copertura (%)"], y=sens["Costo annuo stimato (€)"],
-                                         mode="lines+markers", name="Costo annuo €",
-                                         line=dict(color="#f59e0b", width=2),
-                                         hovertemplate="quota %{x:.0f} %: %{y:,.0f} €<extra></extra>"))
-            fig_rc3.add_vline(x=rc["quota_copertura_pct"], line_dash="dash", line_color="#f59e0b",
-                              annotation_text=f"Attuale {rc['quota_copertura_pct']:.0f} %",
-                              annotation_font_color="#f59e0b")
-            fig_rc3.update_layout(template="plotly_dark", height=300, xaxis_title="Quota di copertura (%)",
-                                  yaxis_title="Costo annuo stimato (€)")
-            st.plotly_chart(fig_rc3, use_container_width=True)
+                st.markdown("**Dettaglio mensile**")
+                st.dataframe(er["mensile"], use_container_width=True, hide_index=True)
+                st.caption(f"💡 Profilo: F1 {er_f1} MW, F2 {er_f2} MW, F3 {er_f3} MW — "
+                           f"{er['mwh_tot']:,.0f} MWh attivi e {er['kvarh_tot']:,.0f} kvarh reattivi "
+                           f"su {er['n_ore']:,} ore. Indipendente dal prezzo spot: e' una voce di rete.")
+                d0r, d1r = prezzi.index.min().date(), prezzi.index.max().date()
+                st.download_button(
+                    "⬇️ Esporta penali reattive (CSV)",
+                    er["mensile"].to_csv(index=False, sep=";").encode("utf-8"),
+                    file_name=f"penali_reattive_{d0r}_{d1r}.csv",
+                    mime="text/csv",
+                    key="csv_penali_reattive",
+                    help="Una riga per mese: attiva, reattiva, rapporto %, eccedenze per scaglione e penale.",
+                )
+    with tab146:
+            titolo_pi = edu("Potenza impegnata", "La POTENZA IMPEGNATA (kW contrattuali) e' il 'tetto' di potenza che dichiari al distributore: paghi ogni mese una QUOTA FISSA proporzionale ai kW impegnati, ma se il tuo picco reale supera il tetto paghi una PENALE sui kW di superamento. Troppa potenza impegnata = quota fissa sprecata ogni mese; troppo poca = penali ricorrenti. Questa tab confronta quota fissa e penali sul tuo profilo F1/F2/F3 e trova la potenza impegnata che minimizza il costo totale — il picco mensile e' stimato dal profilo orario (il fattore di picco approssima il quarto-orario usato dalla misura reale).")
+            st.markdown(f"<h1>⚡ {titolo_pi}</h1>", unsafe_allow_html=True)
+            st.caption("Quanto ti costa il tetto di potenza: quota fissa vs penali di superamento, e la potenza impegnata ottimale.")
+            st.caption("💡 Usa pratico: se l'ottimo e' sotto la tua impegnata, chiedi la riduzione al distributore (la quota fissa scende dal mese successivo); se e' sopra, ogni superamento evitato vale la penale — confronta il risparmio col costo di eventuali interventi di peak-shaving.")
+            pi1, pi2, pi3 = st.columns(3)
+            with pi1:
+                pi_f1 = st.number_input("Potenza in F1 (MW)", min_value=0.0, value=1.0, step=0.5, key="pimp146_f1",
+                                        help="Ore di punta: lun–ven 08:00–19:00.")
+            with pi2:
+                pi_f2 = st.number_input("Potenza in F2 (MW)", min_value=0.0, value=1.0, step=0.5, key="pimp146_f2",
+                                        help="Ore intermedie: lun–ven 07:00–08:00 e 19:00–23:00, sab 07:00–23:00.")
+            with pi3:
+                pi_f3 = st.number_input("Potenza in F3 (MW)", min_value=0.0, value=1.0, step=0.5, key="pimp146_f3",
+                                        help="Ore fuori punta: notti, domeniche e festivi.")
+            pi4, pi5, pi6 = st.columns(3)
+            with pi4:
+                pi_pc = st.number_input("Potenza impegnata attuale (kW)", min_value=1.0, value=1000.0, step=50.0,
+                                        key="pimp146_pc",
+                                        help="I kW contrattuali in bolletta (voce 'potenza impegnata/disponibile').")
+            with pi5:
+                pi_quota = st.number_input("Quota potenza (€/kW/mese)", min_value=0.0, value=3.0, step=0.5,
+                                           key="pimp146_quota",
+                                           help="Quota fissa mensile per kW impegnato, dai corrispettivi di rete.")
+            with pi6:
+                pi_pen = st.number_input("Penale superamento (€/kW)", min_value=0.0, value=10.0, step=1.0,
+                                         key="pimp146_pen",
+                                         help="Penale per kW di superamento del picco, per mese.")
+            pi_fp = st.slider("Fattore di picco quarto-orario", min_value=1.00, max_value=1.20, value=1.05,
+                              step=0.01, key="pimp146_fp",
+                              help="Il picco orario del profilo x questo fattore approssima il picco quarto-orario della misura reale.")
+            pi = calcola_ottimizza_potenza(prezzi, pi_f1, pi_f2, pi_f3, pi_pc, pi_quota, pi_pen, pi_fp)
+            if pi["errore"]:
+                st.error(pi["errore"])
+            else:
+                if pi["categoria"] == "sovradimensionata":
+                    st.warning(pi["verdetto"])
+                elif pi["categoria"] == "sottodimensionata":
+                    st.error(pi["verdetto"])
+                else:
+                    st.success(pi["verdetto"])
+                k1, k2, k3, k4 = st.columns(4)
+                with k1:
+                    st.metric("Potenza impegnata ottimale", f"{pi['potenza_ottima_kw']:,.0f} kW",
+                              f"attuale {pi['p_contr_kw']:,.0f} kW")
+                with k2:
+                    st.metric("Risparmio annuo", f"{pi['risparmio_annuo']:,.0f} €",
+                              f"{pi['n_mesi']} mesi analizzati")
+                with k3:
+                    st.metric("Mesi con superamento", f"{pi['mesi_superamento']}",
+                              f"picco max {pi['picco_max_kw']:,.0f} kW")
+                with k4:
+                    st.metric("Costo totale attuale", f"{pi['costo_attuale']:,.0f} €",
+                              f"ottimo {pi['costo_ottimo']:,.0f} €")
 
-            st.markdown("**Dettaglio mensile del rolling**")
-            st.dataframe(mens, use_container_width=True)
-            csv_rc = mens.to_csv(index=False).encode("utf-8")
-            st.download_button("⬇️ Esporta dettaglio rolling (CSV)", data=csv_rc,
-                               file_name="rollover_coperture.csv", mime="text/csv", key="roll147_csv")
+                st.markdown("**Costo totale (quota fissa + penali) in funzione della potenza impegnata**")
+                fig_pi = go.Figure()
+                sc = pi["scansione"]
+                fig_pi.add_trace(go.Scatter(x=sc["Potenza (kW)"], y=sc["Totale (€)"],
+                                            mode="lines", name="Costo totale €",
+                                            line=dict(color="#38bdf8", width=2),
+                                            hovertemplate="%{x:,.0f} kW: %{y:,.0f} €<extra></extra>"))
+                fig_pi.add_trace(go.Scatter(x=sc["Potenza (kW)"], y=sc["Quota fissa (€)"],
+                                            mode="lines", name="Quota fissa €",
+                                            line=dict(color="#a8a29e", width=1, dash="dot"),
+                                            hovertemplate="%{x:,.0f} kW: %{y:,.0f} €<extra></extra>"))
+                fig_pi.add_trace(go.Scatter(x=sc["Potenza (kW)"], y=sc["Penali (€)"],
+                                            mode="lines", name="Penali €",
+                                            line=dict(color="#ef4444", width=1, dash="dot"),
+                                            hovertemplate="%{x:,.0f} kW: %{y:,.0f} €<extra></extra>"))
+                fig_pi.add_vline(x=pi["p_contr_kw"], line_dash="dash", line_color="#f59e0b",
+                                 annotation_text=f"Attuale {pi['p_contr_kw']:,.0f} kW",
+                                 annotation_font_color="#f59e0b")
+                fig_pi.add_vline(x=pi["potenza_ottima_kw"], line_dash="solid", line_color="#22c55e",
+                                 annotation_text=f"Ottimo {pi['potenza_ottima_kw']:,.0f} kW",
+                                 annotation_font_color="#22c55e")
+                fig_pi.update_layout(template="plotly_dark", height=380, xaxis_title="Potenza impegnata (kW)",
+                                     yaxis_title="€ sul periodo", legend=dict(orientation="h", y=1.08))
+                st.plotly_chart(fig_pi, use_container_width=True)
+
+                st.markdown("**Picco mensile vs potenza impegnata**")
+                fig_pi2 = go.Figure()
+                fig_pi2.add_trace(go.Bar(x=pi["mensile"]["Mese"], y=pi["mensile"]["Picco (kW)"],
+                                         name="Picco kW", marker_color="#38bdf8",
+                                         hovertemplate="%{x}: %{y:,.0f} kW<extra></extra>"))
+                fig_pi2.add_hline(y=pi["p_contr_kw"], line_dash="dash", line_color="#f59e0b",
+                                  annotation_text=f"Impegnata {pi['p_contr_kw']:,.0f} kW",
+                                  annotation_font_color="#f59e0b")
+                fig_pi2.update_layout(template="plotly_dark", height=300, xaxis_title="Mese",
+                                      yaxis_title="kW")
+                st.plotly_chart(fig_pi2, use_container_width=True)
+
+                st.markdown("**Dettaglio mensile**")
+                st.dataframe(pi["mensile"], use_container_width=True, hide_index=True)
+                st.caption(f"💡 Profilo: F1 {pi_f1} MW, F2 {pi_f2} MW, F3 {pi_f3} MW — "
+                           f"{pi['mwh_tot']:,.0f} MWh su {pi['n_ore']:,} ore. Il picco e' stimato dal profilo orario "
+                           f"x fattore {pi_fp:.2f} (approssimazione del quarto-orario): per la decisione finale usa i picchi "
+                           f"quart-orari reali dalla curva di misura.")
+                d0r, d1r = prezzi.index.min().date(), prezzi.index.max().date()
+                st.download_button(
+                    "⬇️ Esporta potenza impegnata (CSV)",
+                    pi["mensile"].to_csv(index=False, sep=";").encode("utf-8"),
+                    file_name=f"potenza_impegnata_{d0r}_{d1r}.csv",
+                    mime="text/csv",
+                    key="csv_potenza_impegnata",
+                    help="Una riga per mese: picco stimato, quota fissa, penale e totale con la potenza attuale.",
+                )
 
 
-with tab148:
-        titolo_ps = edu("Peak shaving", "Il PEAK SHAVING taglia i picchi di prelievo con una batteria: la batteria si SCARICA nelle ore di carico piu' alto per tenere il prelievo sotto una soglia e si RICARICA nelle ore piu' economiche. Meno picco = meno POTENZA IMPEGNATA da contrattare (quota fissa EUR/kW/mese, vedi tab 'Potenza impegnata') e meno energia comprata nelle ore care. Questa tab simula giorno per giorno la gestione della batteria, spazza diverse soglie di taglio e trova quella che massimizza il beneficio netto annuo = risparmio sulla quota di potenza - costo/perdite di energia - degrado della batteria. Il risparmio sulla quota e' accreditato solo per la riduzione SOTTO il livello gia' ottenibile senza batteria (min tra impegnata attuale e picco lordo).")
-        st.markdown(f"<h1>\U0001F50B {titolo_ps}</h1>", unsafe_allow_html=True)
-        st.caption("Batteria per tagliare i picchi: meno potenza impegnata, meno energia cara. Trova la soglia di taglio ottimale.")
-        st.caption("\U0001F4A1 Usa pratico: inserisci il CAPEX della batteria per avere il payback; se la soglia ottima resta vicina al picco lordo, la batteria serve a poco — prima ottimizza la potenza impegnata nel tab dedicato, poi rivaluta.")
-        ps1, ps2, ps3 = st.columns(3)
-        with ps1:
-            ps_f1 = st.number_input("Potenza in F1 (MW)", min_value=0.0, value=1.0, step=0.5, key="ps148_f1",
-                                    help="Ore di punta: lun–ven 08:00–19:00.")
-        with ps2:
-            ps_f2 = st.number_input("Potenza in F2 (MW)", min_value=0.0, value=1.0, step=0.5, key="ps148_f2",
-                                    help="Ore intermedie: lun–ven 07:00–08:00 e 19:00–23:00, sab 07:00–23:00.")
-        with ps3:
-            ps_f3 = st.number_input("Potenza in F3 (MW)", min_value=0.0, value=0.5, step=0.5, key="ps148_f3",
-                                    help="Ore fuori punta: notti, domeniche e festivi.")
-        ps4, ps5, ps6 = st.columns(3)
-        with ps4:
-            ps_cap = st.number_input("Capacita' batteria (MWh)", min_value=0.1, value=2.0, step=0.5, key="ps148_cap",
-                                     help="Energia utile della batteria.")
-        with ps5:
-            ps_pot = st.number_input("Potenza batteria (MW)", min_value=0.1, value=1.0, step=0.25, key="ps148_pot",
-                                     help="Potenza max di carica/scarica.")
-        with ps6:
-            ps_eff = st.slider("Rendimento round-trip (%)", min_value=50.0, max_value=100.0, value=85.0, step=1.0,
-                               key="ps148_eff",
-                               help="Efficienza di andata e ritorno (radice quadrata per lato).")
-        ps7, ps8, ps9 = st.columns(3)
-        with ps7:
-            ps_quota = st.number_input("Quota potenza (\u20ac/kW/mese)", min_value=0.0, value=2.5, step=0.1,
-                                       key="ps148_quota",
-                                       help="Quota fissa mensile per kW di potenza impegnata.")
-        with ps8:
-            ps_att = st.number_input("Potenza impegnata attuale (kW)", min_value=1.0, value=1000.0, step=50.0,
-                                     key="ps148_att",
-                                     help="kW contrattuali attuali col distributore.")
-        with ps9:
-            ps_degr = st.number_input("Costo degrado (\u20ac/MWh scaricato)", min_value=0.0, value=8.0, step=1.0,
-                                      key="ps148_degr",
-                                      help="Costo di usura per ogni MWh scaricato.")
-        ps_capex = st.number_input("CAPEX batteria (\u20ac, 0 = nessun payback)", min_value=0.0, value=0.0,
-                                   step=10000.0, key="ps148_capex",
-                                   help="Costo chiavi in mano della batteria, solo per il payback.")
-        ps = calcola_peak_shaving(prezzi, ps_f1, ps_f2, ps_f3, ps_cap, ps_pot, ps_eff,
-                                  ps_quota, ps_att, ps_degr, ps_capex)
-        if ps["errore"]:
-            st.error(ps["errore"])
+    with tab147:
+            titolo_rc = edu("Rollover coperture", "Il ROLLOVER e' l'operazione con cui il desk, a ogni scadenza, chiude la copertura forward sul mese in consegna e apre quella sul mese successivo. La differenza tra i due prezzi pagati e' il COSTO DI ROLLING: se la curva dei prezzi e' in CONTANGO (i mesi lontani costano piu' dei vicini) ogni roll ti costa soldi; se e' in BACKWARDATION (i mesi lontani costano meno) il roll ti paga. Questa tab fa il backtest del rolling mensile continuo sullo storico: il forward 'pagato' e' approssimato con lo strip base implicito del mese di acquisto (proxy, non la vera curva forward quotata). Diversa dal tab Struttura a termine (la pendenza fotografata oggi): qui si misura quanto il rolling e' costato/guadagnato davvero, mese per mese, in euro.")
+            st.markdown(f"<h1>🔄 {titolo_rc}</h1>", unsafe_allow_html=True)
+            st.caption("Quanto ti costa (o ti rende) rinnovare ogni mese la copertura forward: backtest del rolling mensile sullo storico.")
+            st.caption("💡 Usa pratico: se il costo annuo stimato e' alto e la curva resta in contango, valuta coperture trimestrali/annuali (meno roll) o acquisti a pronti nei mesi di contango estremo; se sei in backwardation, il rolling mensile ti paga — mantienilo.")
+            rc1, rc2, rc3 = st.columns(3)
+            with rc1:
+                rc_mw = st.number_input("Potenza coperta (MW)", min_value=0.1, value=1.0, step=0.5, key="roll147_mw",
+                                        help="Potenza del carico coperto dalla strategia rolling.")
+            with rc2:
+                rc_quota = st.slider("Quota di copertura (%)", min_value=0, max_value=100, value=50, step=5,
+                                     key="roll147_quota",
+                                     help="Percentuale del carico coperta a termine (il resto resta a spot).")
+            with rc3:
+                rc_ant = st.slider("Anticipo di acquisto (mesi)", min_value=1, max_value=3, value=1, step=1,
+                                   key="roll147_ant",
+                                   help="Quanti mesi prima della consegna compri la copertura: con 1 compri a fine mese la consegna del mese dopo.")
+            rc_soglia = st.slider("Soglia regime contango/backwardation (%)", min_value=0.5, max_value=5.0, value=1.5,
+                                  step=0.5, key="roll147_soglia",
+                                  help="Un mese e' in contango/backwardation se il roll yield supera questa soglia in valore assoluto.")
+            rc = calcola_rollover_coperture(prezzi, rc_mw, rc_quota, rc_ant, rc_soglia)
+            if rc["errore"]:
+                st.error(rc["errore"])
+            else:
+                if rc["categoria"] == "costo":
+                    st.warning(rc["verdetto"])
+                elif rc["categoria"] == "guadagno":
+                    st.success(rc["verdetto"])
+                else:
+                    st.info(rc["verdetto"])
+                k1, k2, k3, k4 = st.columns(4)
+                with k1:
+                    st.metric("Costo totale rolling", f"{rc['totale_eur']:,.0f} €",
+                              f"{rc['n_roll']} mesi analizzati")
+                with k2:
+                    st.metric("Roll medio", f"{rc['roll_medio_eur_mwh']:+.2f} €/MWh/mese",
+                              f"yield {rc['yield_medio_pct']:+.2f} %")
+                with k3:
+                    st.metric("Costo annuo stimato", f"{rc['costo_annuo_stimato']:,.0f} €",
+                              f"quota {rc['quota_copertura_pct']:.0f} %")
+                with k4:
+                    st.metric("Mesi contango/backw.", f"{rc['mesi_contango']}/{rc['mesi_backwardation']}",
+                              f"incidenza {rc['incidenza_pct']:.2f} % sul costo fornitura")
+
+                st.markdown("**Costo di roll mensile (€/MWh): rosso = contango (paghi), verde = backwardation (guadagni)**")
+                fig_rc = go.Figure()
+                col_rc = {"contango": "#ef4444", "backwardation": "#22c55e", "piatto": "#a8a29e"}
+                mens = rc["mensile"]
+                fig_rc.add_trace(go.Bar(x=mens["Mese"], y=mens["Roll (€/MWh)"],
+                                        marker_color=[col_rc[r] for r in mens["Regime"]],
+                                        name="Roll €/MWh",
+                                        hovertemplate="%{x}: %{y:+.2f} €/MWh (%{customdata})<extra></extra>",
+                                        customdata=mens["Regime"]))
+                fig_rc.add_hline(y=0, line_color="#6b7280", line_width=1)
+                fig_rc.update_layout(template="plotly_dark", height=360, xaxis_title="Mese di consegna",
+                                     yaxis_title="Roll (€/MWh)", showlegend=False)
+                st.plotly_chart(fig_rc, use_container_width=True)
+
+                st.markdown("**Costo cumulato del rolling (€)**")
+                fig_rc2 = go.Figure()
+                cum = mens["Costo roll (€)"].cumsum()
+                fig_rc2.add_trace(go.Scatter(x=mens["Mese"], y=cum, mode="lines+markers",
+                                             name="Cumulato €", line=dict(color="#38bdf8", width=2),
+                                             hovertemplate="%{x}: %{y:,.0f} €<extra></extra>"))
+                fig_rc2.add_hline(y=0, line_color="#6b7280", line_width=1)
+                fig_rc2.update_layout(template="plotly_dark", height=320, xaxis_title="Mese di consegna",
+                                      yaxis_title="€ cumulati")
+                st.plotly_chart(fig_rc2, use_container_width=True)
+
+                st.markdown("**Sensibilità: costo annuo stimato in funzione della quota di copertura**")
+                fig_rc3 = go.Figure()
+                sens = rc["sensibilita"]
+                fig_rc3.add_trace(go.Scatter(x=sens["Quota copertura (%)"], y=sens["Costo annuo stimato (€)"],
+                                             mode="lines+markers", name="Costo annuo €",
+                                             line=dict(color="#f59e0b", width=2),
+                                             hovertemplate="quota %{x:.0f} %: %{y:,.0f} €<extra></extra>"))
+                fig_rc3.add_vline(x=rc["quota_copertura_pct"], line_dash="dash", line_color="#f59e0b",
+                                  annotation_text=f"Attuale {rc['quota_copertura_pct']:.0f} %",
+                                  annotation_font_color="#f59e0b")
+                fig_rc3.update_layout(template="plotly_dark", height=300, xaxis_title="Quota di copertura (%)",
+                                      yaxis_title="Costo annuo stimato (€)")
+                st.plotly_chart(fig_rc3, use_container_width=True)
+
+                st.markdown("**Dettaglio mensile del rolling**")
+                st.dataframe(mens, use_container_width=True)
+                csv_rc = mens.to_csv(index=False).encode("utf-8")
+                st.download_button("⬇️ Esporta dettaglio rolling (CSV)", data=csv_rc,
+                                   file_name="rollover_coperture.csv", mime="text/csv", key="roll147_csv")
+
+
+    with tab148:
+            titolo_ps = edu("Peak shaving", "Il PEAK SHAVING taglia i picchi di prelievo con una batteria: la batteria si SCARICA nelle ore di carico piu' alto per tenere il prelievo sotto una soglia e si RICARICA nelle ore piu' economiche. Meno picco = meno POTENZA IMPEGNATA da contrattare (quota fissa EUR/kW/mese, vedi tab 'Potenza impegnata') e meno energia comprata nelle ore care. Questa tab simula giorno per giorno la gestione della batteria, spazza diverse soglie di taglio e trova quella che massimizza il beneficio netto annuo = risparmio sulla quota di potenza - costo/perdite di energia - degrado della batteria. Il risparmio sulla quota e' accreditato solo per la riduzione SOTTO il livello gia' ottenibile senza batteria (min tra impegnata attuale e picco lordo).")
+            st.markdown(f"<h1>\U0001F50B {titolo_ps}</h1>", unsafe_allow_html=True)
+            st.caption("Batteria per tagliare i picchi: meno potenza impegnata, meno energia cara. Trova la soglia di taglio ottimale.")
+            st.caption("\U0001F4A1 Usa pratico: inserisci il CAPEX della batteria per avere il payback; se la soglia ottima resta vicina al picco lordo, la batteria serve a poco — prima ottimizza la potenza impegnata nel tab dedicato, poi rivaluta.")
+            ps1, ps2, ps3 = st.columns(3)
+            with ps1:
+                ps_f1 = st.number_input("Potenza in F1 (MW)", min_value=0.0, value=1.0, step=0.5, key="ps148_f1",
+                                        help="Ore di punta: lun–ven 08:00–19:00.")
+            with ps2:
+                ps_f2 = st.number_input("Potenza in F2 (MW)", min_value=0.0, value=1.0, step=0.5, key="ps148_f2",
+                                        help="Ore intermedie: lun–ven 07:00–08:00 e 19:00–23:00, sab 07:00–23:00.")
+            with ps3:
+                ps_f3 = st.number_input("Potenza in F3 (MW)", min_value=0.0, value=0.5, step=0.5, key="ps148_f3",
+                                        help="Ore fuori punta: notti, domeniche e festivi.")
+            ps4, ps5, ps6 = st.columns(3)
+            with ps4:
+                ps_cap = st.number_input("Capacita' batteria (MWh)", min_value=0.1, value=2.0, step=0.5, key="ps148_cap",
+                                         help="Energia utile della batteria.")
+            with ps5:
+                ps_pot = st.number_input("Potenza batteria (MW)", min_value=0.1, value=1.0, step=0.25, key="ps148_pot",
+                                         help="Potenza max di carica/scarica.")
+            with ps6:
+                ps_eff = st.slider("Rendimento round-trip (%)", min_value=50.0, max_value=100.0, value=85.0, step=1.0,
+                                   key="ps148_eff",
+                                   help="Efficienza di andata e ritorno (radice quadrata per lato).")
+            ps7, ps8, ps9 = st.columns(3)
+            with ps7:
+                ps_quota = st.number_input("Quota potenza (\u20ac/kW/mese)", min_value=0.0, value=2.5, step=0.1,
+                                           key="ps148_quota",
+                                           help="Quota fissa mensile per kW di potenza impegnata.")
+            with ps8:
+                ps_att = st.number_input("Potenza impegnata attuale (kW)", min_value=1.0, value=1000.0, step=50.0,
+                                         key="ps148_att",
+                                         help="kW contrattuali attuali col distributore.")
+            with ps9:
+                ps_degr = st.number_input("Costo degrado (\u20ac/MWh scaricato)", min_value=0.0, value=8.0, step=1.0,
+                                          key="ps148_degr",
+                                          help="Costo di usura per ogni MWh scaricato.")
+            ps_capex = st.number_input("CAPEX batteria (\u20ac, 0 = nessun payback)", min_value=0.0, value=0.0,
+                                       step=10000.0, key="ps148_capex",
+                                       help="Costo chiavi in mano della batteria, solo per il payback.")
+            ps = calcola_peak_shaving(prezzi, ps_f1, ps_f2, ps_f3, ps_cap, ps_pot, ps_eff,
+                                      ps_quota, ps_att, ps_degr, ps_capex)
+            if ps["errore"]:
+                st.error(ps["errore"])
+            else:
+                k1, k2, k3, k4 = st.columns(4)
+                with k1:
+                    st.metric("Potenza ottimale", f"{ps['potenza_ottimale_kw']:,.0f} kW",
+                              f"soglia {ps['soglia_ottima_kw']:,.0f} kW")
+                with k2:
+                    st.metric("Risparmio annuo netto", f"{ps['risparmio_annuo_netto']:,.0f} \u20ac",
+                              f"quota {ps['quota_annua']:,.0f} \u20ac/anno")
+                with k3:
+                    pb_txt = f"{ps['payback_anni']:.1f} anni" if ps["payback_anni"] is not None else "—"
+                    st.metric("Payback", pb_txt,
+                              f"{ps['mwh_scaricati_annui']:,.0f} MWh/anno scaricati")
+                with k4:
+                    st.metric("Riduzione picco", f"{ps['riduzione_picco_pct']:.1f} %",
+                              f"lordo {ps['picco_lordo_kw']:,.0f} kW")
+                if ps["categoria"] == "conviene":
+                    st.success(ps["verdetto"])
+                elif ps["categoria"] == "inutile":
+                    st.info(ps["verdetto"])
+                else:
+                    st.warning(ps["verdetto"])
+
+                st.markdown("**Beneficio netto annuo in funzione della soglia di taglio**")
+                fig_ps = go.Figure()
+                sw = ps["sweep"]
+                fig_ps.add_trace(go.Scatter(x=sw["Soglia (kW)"], y=sw["Risparmio annuo netto (\u20ac)"],
+                                            mode="lines+markers", name="Beneficio netto \u20ac/anno",
+                                            line=dict(color="#22c55e", width=2),
+                                            hovertemplate="soglia %{x:,.0f} kW: %{y:,.0f} \u20ac/anno<extra></extra>"))
+                fig_ps.add_vline(x=ps["soglia_ottima_kw"], line_dash="dash", line_color="#22c55e",
+                                 annotation_text=f"Ottimo {ps['soglia_ottima_kw']:,.0f} kW",
+                                 annotation_font_color="#22c55e")
+                fig_ps.add_hline(y=0, line_color="#6b7280", line_width=1)
+                fig_ps.update_layout(template="plotly_dark", height=320, xaxis_title="Soglia di taglio (kW)",
+                                     yaxis_title="\u20ac/anno")
+                st.plotly_chart(fig_ps, use_container_width=True)
+
+                st.markdown("**Picchi mensili: lordo vs netto (soglia ottima)**")
+                fig_ps2 = go.Figure()
+                me = ps["mensile"]
+                fig_ps2.add_trace(go.Bar(x=me["Mese"], y=me["Picco lordo (kW)"], name="Picco lordo",
+                                         marker_color="#f59e0b",
+                                         hovertemplate="%{x}: %{y:,.0f} kW<extra></extra>"))
+                fig_ps2.add_trace(go.Bar(x=me["Mese"], y=me["Picco netto (kW)"], name="Picco netto",
+                                         marker_color="#38bdf8",
+                                         hovertemplate="%{x}: %{y:,.0f} kW<extra></extra>"))
+                fig_ps2.update_layout(template="plotly_dark", height=320, xaxis_title="Mese",
+                                      yaxis_title="kW", barmode="group")
+                st.plotly_chart(fig_ps2, use_container_width=True)
+
+                st.markdown("**Dettaglio mensile (soglia ottima)**")
+                st.dataframe(me, use_container_width=True, hide_index=True)
+                st.caption(f"\U0001F4A1 Profilo: F1 {ps_f1} MW, F2 {ps_f2} MW, F3 {ps_f3} MW — "
+                           f"picco lordo {ps['picco_lordo_kw']:,.0f} kW su {ps['n_ore']:,} ore "
+                           f"({ps['n_mesi']} mesi). Delta energia {ps['delta_energia_annuo']:+,.0f} \u20ac/anno "
+                           f"(negativo = risparmio), degrado {ps['degrado_annuo']:,.0f} \u20ac/anno.")
+                d0s, d1s = prezzi.index.min().date(), prezzi.index.max().date()
+                st.download_button(
+                    "\u2B07\uFE0F Esporta peak shaving (CSV)",
+                    me.to_csv(index=False, sep=";").encode("utf-8"),
+                    file_name=f"peak_shaving_{d0s}_{d1s}.csv",
+                    mime="text/csv",
+                    key="csv_peak_shaving",
+                    help="Una riga per mese: picco lordo, picco netto e risparmio sulla quota di potenza.",
+                )
+
+    with tab149:
+        titolo_hu = edu("Esponente di Hurst", "L'ESPONENTE DI HURST (H) misura la memoria di LUNGO periodo del prezzo: H sotto 0.45 = la serie tende a RIENTRARE dopo ogni movimento (mean-reverting, conviene comprare sui cali); H sopra 0.55 = i movimenti tendono a PROSEGUIRE (persistente, conviene seguire il trend); H attorno a 0.5 = RANDOM WALK, nessuna memoria sfruttabile e il timing non paga. Si stima con l'analisi R/S (rescaled range): per finestre di n giorni si calcola il rapporto tra escursione massima e deviazione standard, e H e' la pendenza della retta di log(R/S) contro log(n). Il RUNS TEST verifica in piu' se i segni delle variazioni giornaliere sono casuali (forma debole dell'efficienza di mercato). Differenza col tab 'Mean reversion': quello misura la memoria di BREVE periodo (ore, half-life degli shock); qui la memoria su settimane e mesi, la scala delle decisioni di fixing e di budget.")
+        st.markdown(f"<h1>\U0001F300 {titolo_hu}</h1>", unsafe_allow_html=True)
+        st.caption("Memoria di lungo periodo del prezzo: la serie rientra, prosegue o cammina a caso?")
+        hu1, hu2 = st.columns(2)
+        with hu1:
+            hu_nmin = st.slider("Finestra minima (giorni)", min_value=2, max_value=30, value=4, step=1,
+                                key="hu149_nmin",
+                                help="La scala piu' piccola dell'analisi R/S. Piu' bassa = piu' scale, ma finestre corte rumorose.")
+        with hu2:
+            hu_nsc = st.slider("Numero di scale", min_value=6, max_value=20, value=12, step=1,
+                               key="hu149_nsc",
+                               help="Quante finestre log-spaziate usare per la retta di regressione.")
+        hu = calcola_hurst(prezzi, hu_nmin, hu_nsc)
+        if hu["errore"]:
+            st.error(hu["errore"])
         else:
             k1, k2, k3, k4 = st.columns(4)
             with k1:
-                st.metric("Potenza ottimale", f"{ps['potenza_ottimale_kw']:,.0f} kW",
-                          f"soglia {ps['soglia_ottima_kw']:,.0f} kW")
+                st.metric("Esponente di Hurst", f"{hu['hurst']:.3f}",
+                          hu["classe"].replace("-", " "))
             with k2:
-                st.metric("Risparmio annuo netto", f"{ps['risparmio_annuo_netto']:,.0f} \u20ac",
-                          f"quota {ps['quota_annua']:,.0f} \u20ac/anno")
+                st.metric("R² del fit log-log", f"{hu['r2_fit']:.3f}",
+                          f"{hu['n_scale']} scale, {hu['n_giorni']} giorni")
             with k3:
-                pb_txt = f"{ps['payback_anni']:.1f} anni" if ps["payback_anni"] is not None else "—"
-                st.metric("Payback", pb_txt,
-                          f"{ps['mwh_scaricati_annui']:,.0f} MWh/anno scaricati")
+                zp = f"p = {hu['runs_p']:.3f}" if hu["runs_p"] is not None else "—"
+                st.metric("Runs test (efficienza debole)", zp,
+                          f"z = {hu['runs_z']}" if hu["runs_z"] is not None else "n/d")
             with k4:
-                st.metric("Riduzione picco", f"{ps['riduzione_picco_pct']:.1f} %",
-                          f"lordo {ps['picco_lordo_kw']:,.0f} kW")
-            if ps["categoria"] == "conviene":
-                st.success(ps["verdetto"])
-            elif ps["categoria"] == "inutile":
-                st.info(ps["verdetto"])
+                rp = f"{hu['runs_osservati']} vs {hu['runs_attesi']:.0f} attesi" \
+                    if hu["runs_osservati"] is not None else "—"
+                st.metric("Runs osservati", rp, f"su {hu['runs_n']} variazioni")
+            if hu["classe"] == "mean-reverting":
+                st.success(hu["verdetto"])
+            elif hu["classe"] == "persistente":
+                st.warning(hu["verdetto"])
             else:
-                st.warning(ps["verdetto"])
+                st.info(hu["verdetto"])
+            st.caption(f"\U0001F4A1 {hu['runs_verdetto']}")
 
-            st.markdown("**Beneficio netto annuo in funzione della soglia di taglio**")
-            fig_ps = go.Figure()
-            sw = ps["sweep"]
-            fig_ps.add_trace(go.Scatter(x=sw["Soglia (kW)"], y=sw["Risparmio annuo netto (\u20ac)"],
-                                        mode="lines+markers", name="Beneficio netto \u20ac/anno",
-                                        line=dict(color="#22c55e", width=2),
-                                        hovertemplate="soglia %{x:,.0f} kW: %{y:,.0f} \u20ac/anno<extra></extra>"))
-            fig_ps.add_vline(x=ps["soglia_ottima_kw"], line_dash="dash", line_color="#22c55e",
-                             annotation_text=f"Ottimo {ps['soglia_ottima_kw']:,.0f} kW",
-                             annotation_font_color="#22c55e")
-            fig_ps.add_hline(y=0, line_color="#6b7280", line_width=1)
-            fig_ps.update_layout(template="plotly_dark", height=320, xaxis_title="Soglia di taglio (kW)",
-                                 yaxis_title="\u20ac/anno")
-            st.plotly_chart(fig_ps, use_container_width=True)
+            st.markdown("**R/S in funzione della finestra (scala log-log): la pendenza e' H**")
+            fig_hu = go.Figure()
+            sc = hu["scale"]
+            fig_hu.add_trace(go.Scatter(x=sc["Finestra (giorni)"], y=sc["R/S medio"],
+                                        mode="markers", name="R/S osservato",
+                                        marker=dict(color="#38bdf8", size=8),
+                                        hovertemplate="n=%{x} gg: R/S %{y:.3f}<extra></extra>"))
+            fig_hu.add_trace(go.Scatter(x=sc["Finestra (giorni)"], y=sc["Fit R/S"],
+                                        mode="lines", name=f"Fit (H={hu['hurst']:.3f})",
+                                        line=dict(color="#22c55e", width=2, dash="dash"),
+                                        hovertemplate="n=%{x} gg: fit %{y:.3f}<extra></extra>"))
+            fig_hu.update_layout(template="plotly_dark", height=320,
+                                 xaxis_title="Finestra (giorni, scala log)",
+                                 yaxis_title="R/S medio (scala log)",
+                                 xaxis_type="log", yaxis_type="log")
+            st.plotly_chart(fig_hu, use_container_width=True)
 
-            st.markdown("**Picchi mensili: lordo vs netto (soglia ottima)**")
-            fig_ps2 = go.Figure()
-            me = ps["mensile"]
-            fig_ps2.add_trace(go.Bar(x=me["Mese"], y=me["Picco lordo (kW)"], name="Picco lordo",
-                                     marker_color="#f59e0b",
-                                     hovertemplate="%{x}: %{y:,.0f} kW<extra></extra>"))
-            fig_ps2.add_trace(go.Bar(x=me["Mese"], y=me["Picco netto (kW)"], name="Picco netto",
+            st.markdown("**Dove cade H: zone di regime**")
+            fig_hu2 = go.Figure()
+            fig_hu2.add_trace(go.Bar(x=[0.45], y=["H"], orientation="h", name="Mean-reverting (< 0.45)",
                                      marker_color="#38bdf8",
-                                     hovertemplate="%{x}: %{y:,.0f} kW<extra></extra>"))
-            fig_ps2.update_layout(template="plotly_dark", height=320, xaxis_title="Mese",
-                                  yaxis_title="kW", barmode="group")
-            st.plotly_chart(fig_ps2, use_container_width=True)
+                                     hovertemplate="Mean-reverting: H < 0.45<extra></extra>"))
+            fig_hu2.add_trace(go.Bar(x=[0.10], y=["H"], orientation="h", name="Random walk (0.45–0.55)",
+                                     marker_color="#6b7280",
+                                     hovertemplate="Random walk: 0.45–0.55<extra></extra>"))
+            fig_hu2.add_trace(go.Bar(x=[0.45], y=["H"], orientation="h", name="Persistente (> 0.55)",
+                                     marker_color="#f59e0b",
+                                     hovertemplate="Persistente: H > 0.55<extra></extra>"))
+            fig_hu2.add_vline(x=hu["hurst"], line_dash="solid", line_color="#22c55e", line_width=3,
+                              annotation_text=f"H = {hu['hurst']:.3f}",
+                              annotation_font_color="#22c55e")
+            fig_hu2.update_layout(template="plotly_dark", height=200, barmode="stack",
+                                  xaxis_title="Esponente di Hurst", xaxis_range=[0, 1],
+                                  showlegend=True,
+                                  legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                                              xanchor="right", x=1))
+            st.plotly_chart(fig_hu2, use_container_width=True)
 
-            st.markdown("**Dettaglio mensile (soglia ottima)**")
-            st.dataframe(me, use_container_width=True, hide_index=True)
-            st.caption(f"\U0001F4A1 Profilo: F1 {ps_f1} MW, F2 {ps_f2} MW, F3 {ps_f3} MW — "
-                       f"picco lordo {ps['picco_lordo_kw']:,.0f} kW su {ps['n_ore']:,} ore "
-                       f"({ps['n_mesi']} mesi). Delta energia {ps['delta_energia_annuo']:+,.0f} \u20ac/anno "
-                       f"(negativo = risparmio), degrado {ps['degrado_annuo']:,.0f} \u20ac/anno.")
+            st.markdown("**Dettaglio per scala**")
+            st.dataframe(sc, use_container_width=True, hide_index=True)
+            d0h, d1h = prezzi.index.min().date(), prezzi.index.max().date()
+            st.download_button(
+                "\u2B07\uFE0F Esporta Hurst R/S (CSV)",
+                sc.to_csv(index=False, sep=";").encode("utf-8"),
+                file_name=f"hurst_rs_{d0h}_{d1h}.csv",
+                mime="text/csv",
+                key="csv_hurst",
+                help="Una riga per scala: finestra in giorni, R/S medio osservato e valore del fit.",
+            )
+
+
+    with tab150:
+        titolo_tn = edu("Tornado di sensibilità", "Il TORNADO DI SENSIBILITA' ordina i driver del costo annuo (prezzo energia, volumi, quota potenza, potenza impegnata, oneri) per quanto muovono il conto quando variano di +/-X%. E' un'analisi UNIVARIATA: ogni driver varia da solo, gli altri restano fermi. Il driver in cima e' quello su cui il budget e' piu' esposto: se e' il prezzo, conviene coprirsi con fixing e coperture; se sono i volumi, conviene la demand response; se e' il contratto, conviene rinegoziare col distributore.")
+        st.markdown(f"<h1>\U0001F3AF {titolo_tn}</h1>", unsafe_allow_html=True)
+        st.caption("Quale ipotesi del budget muove di più il costo annuo: il mercato, i volumi o il contratto?")
+        tn1, tn2, tn3 = st.columns(3)
+        with tn1:
+            tn_f1 = st.number_input("Potenza in F1 (MW)", min_value=0.0, value=1.0, step=0.5, key="tn150_f1",
+                                    help="Ore di punta: lun–ven 08:00–19:00.")
+        with tn2:
+            tn_f2 = st.number_input("Potenza in F2 (MW)", min_value=0.0, value=1.0, step=0.5, key="tn150_f2",
+                                    help="Ore intermedie: lun–ven 07:00–08:00 e 19:00–23:00, sab 07:00–23:00.")
+        with tn3:
+            tn_f3 = st.number_input("Potenza in F3 (MW)", min_value=0.0, value=1.0, step=0.5, key="tn150_f3",
+                                    help="Ore fuori punta: notti, domeniche e festivi.")
+        tn4, tn5, tn6 = st.columns(3)
+        with tn4:
+            tn_pc = st.number_input("Potenza impegnata (kW)", min_value=1.0, value=1000.0, step=50.0,
+                                    key="tn150_pc",
+                                    help="I kW contrattuali in bolletta.")
+        with tn5:
+            tn_quota = st.number_input("Quota potenza (€/kW/mese)", min_value=0.0, value=3.0, step=0.5,
+                                       key="tn150_quota",
+                                       help="Quota fissa mensile per kW impegnato, dai corrispettivi di rete.")
+        with tn6:
+            tn_oneri = st.number_input("Oneri di sistema (€/MWh)", min_value=0.0, value=5.0, step=0.5,
+                                       key="tn150_oneri",
+                                       help="Oneri generali di sistema per MWh consumato.")
+        tn_d = st.slider("Shock dei driver (%)", min_value=1, max_value=50, value=10, step=1,
+                         key="tn150_delta",
+                         help="Di quanto varia ogni driver, in più e in meno, uno alla volta.")
+        tn = calcola_tornado_sensibilita(prezzi, tn_f1, tn_f2, tn_f3, tn_pc, tn_quota, tn_oneri, tn_d)
+        if tn["errore"]:
+            st.error(tn["errore"])
+        else:
+            k1, k2, k3, k4 = st.columns(4)
+            with k1:
+                st.metric("Costo annuo base", f"{tn['costo_base_annuo']:,.0f} €/a")
+            with k2:
+                st.metric("Driver dominante", tn["driver_dominante"])
+            with k3:
+                st.metric(f"Impatto max (+{tn_d}%)", f"{tn['impatto_max_pos']:+,.0f} €/a")
+            with k4:
+                st.metric(f"Impatto max (−{tn_d}%)", f"{tn['impatto_max_neg']:+,.0f} €/a")
+            st.info(tn["verdetto"])
+            st.caption("💡 Analisi univariata: ogni driver varia da solo, gli altri restano fermi. Gli impatti non si sommano.")
+
+            st.markdown("**Tornado: impatti sul costo annuo per driver**")
+            td = tn["tornado"].iloc[::-1]
+            fig_tn = go.Figure()
+            fig_tn.add_trace(go.Bar(y=td["Driver"], x=td["Impatto + (EUR/a)"], orientation="h",
+                                    name=f"Shock +{tn_d}%",
+                                    marker_color="#f59e0b",
+                                    hovertemplate="%{y}: %{x:,.0f} €/a<extra></extra>"))
+            fig_tn.add_trace(go.Bar(y=td["Driver"], x=td["Impatto - (EUR/a)"], orientation="h",
+                                    name=f"Shock −{tn_d}%",
+                                    marker_color="#38bdf8",
+                                    hovertemplate="%{y}: %{x:,.0f} €/a<extra></extra>"))
+            fig_tn.add_vline(x=0, line_color="#6b7280", line_width=1)
+            fig_tn.update_layout(template="plotly_dark", height=140 + 60 * len(td),
+                                 barmode="group", xaxis_title="Impatto sul costo annuo (€/a)",
+                                 legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                                             xanchor="right", x=1))
+            st.plotly_chart(fig_tn, use_container_width=True)
+
+            st.markdown("**Dettaglio per driver**")
+            st.dataframe(tn["tornado"], use_container_width=True, hide_index=True)
+            d0t, d1t = prezzi.index.min().date(), prezzi.index.max().date()
+            st.download_button(
+                "⬇️ Esporta tornado (CSV)",
+                tn["tornado"].to_csv(index=False, sep=";").encode("utf-8"),
+                file_name=f"tornado_sensibilita_{d0t}_{d1t}.csv",
+                mime="text/csv",
+                key="csv_tornado",
+                help="Una riga per driver: impatti +/−, ampiezza e quota sul costo.",
+            )
+
+
+
+
+
+
+
+    with tab151:
+        titolo_sg = edu("Segnali tecnici", "I SEGNALI TECNICI leggono il momentum del prezzo spot con quattro indicatori classici calcolati sulle medie GIORNALIERE (sullo spot orario sarebbero rumore): RSI (sopra 70 = ipercomprato, sotto 30 = ipervenduto), MACD (istogramma sopra/sotto lo zero), incroci delle medie mobili (golden cross = forza, death cross = debolezza) e Bande di Bollinger (la chiusura che esce dalle bande tende a rientrare = mean reversion). Ogni segnale e' BACKTESTATO: l'esito misura di quanto si e' mosso il prezzo nei giorni successivi — per i SELL il segno e' invertito, cosi' un esito positivo vuol dire 'il segnale aveva ragione'. L'hit rate dice quanti segnali hanno avuto ragione nel periodo: se e' sotto il 50% in modo persistente, l'indicatore su questo mercato non sta funzionando. Attenzione: sullo spot elettrico questi strumenti sono un ausilio di TIMING, non una previsione — usali insieme a fondamentali, stagionalita' e coperture.")
+        st.markdown(f"<h1>📈 {titolo_sg}</h1>", unsafe_allow_html=True)
+        st.caption("RSI, MACD, medie mobili e Bollinger sul prezzo giornaliero — con backtest dei segnali.")
+        sg1, sg2, sg3, sg4 = st.columns(4)
+        with sg1:
+            sg_rsi = st.slider("Periodo RSI", min_value=2, max_value=30, value=14, step=1,
+                               key="sg151_rsi",
+                               help="Giorni per l'RSI di Wilder. 14 e' lo standard.")
+        with sg2:
+            sg_mf = st.slider("MACD fast", min_value=2, max_value=24, value=12, step=1,
+                              key="sg151_mf", help="Periodo della media veloce del MACD.")
+        with sg3:
+            sg_ms = st.slider("MACD slow", min_value=13, max_value=60, value=26, step=1,
+                              key="sg151_ms", help="Periodo della media lenta del MACD.")
+        with sg4:
+            sg_mgs = st.slider("MACD signal", min_value=2, max_value=30, value=9, step=1,
+                               key="sg151_mgs", help="Periodo della signal line del MACD.")
+        sg5, sg6, sg7, sg8 = st.columns(4)
+        with sg5:
+            sg_sb = st.slider("Media breve (gg)", min_value=2, max_value=60, value=20, step=1,
+                              key="sg151_sb", help="Media mobile breve per i cross.")
+        with sg6:
+            sg_sl = st.slider("Media lunga (gg)", min_value=21, max_value=200, value=50, step=1,
+                              key="sg151_sl", help="Media mobile lunga per i cross.")
+        with sg7:
+            sg_bb = st.slider("Periodo Bollinger", min_value=2, max_value=60, value=20, step=1,
+                              key="sg151_bb", help="Giorni della media centrale di Bollinger.")
+        with sg8:
+            sg_hz = st.slider("Orizzonte backtest (gg)", min_value=1, max_value=30, value=5, step=1,
+                              key="sg151_hz",
+                              help="Dopo quanti giorni si misura l'esito di ogni segnale.")
+        sg9, _ = st.columns(2)
+        with sg9:
+            sg_bbm = st.slider("Moltiplicatore Bollinger", min_value=0.5, max_value=5.0,
+                               value=2.0, step=0.5, key="sg151_bbm",
+                               help="Larghezza delle bande in deviazioni standard. 2 e' lo standard.")
+        sg = calcola_segnali_tecnici(prezzi, rsi_period=sg_rsi, macd_fast=sg_mf,
+                                     macd_slow=sg_ms, macd_signal=sg_mgs,
+                                     sma_breve=sg_sb, sma_lunga=sg_sl,
+                                     bb_period=sg_bb, bb_mult=sg_bbm, orizzonte_gg=sg_hz)
+        if sg["errore"]:
+            st.error(sg["errore"])
+        else:
+            u = sg["ultimo"]
+            k1, k2, k3, k4 = st.columns(4)
+            with k1:
+                st.metric("RSI (ultimo giorno)", f"{u['rsi']:.1f}")
+            with k2:
+                st.metric("MACD istogramma", f"{u['hist']:+.2f} €/MWh")
+            with k3:
+                st.metric("Posizione Bollinger", f"{u['bb_pos_pct']:.0f}%",
+                          help="0% = banda inferiore, 50% = media, 100% = banda superiore.")
+            with k4:
+                st.metric("Segnale composito", f"{sg['punteggio']:+d} / 4",
+                          help="Somma dei 4 stance (+1 rialzista, -1 ribassista, 0 neutro).")
+            st.info(sg["verdetto"])
+            st.caption(f"💡 {sg['n_segnali']} segnali nel periodo — hit rate complessiva {sg['hit_rate_tot']:.0f}% "
+                       f"su {sg_hz} giorni di orizzonte. Sotto il 50% l'indicatore non sta funzionando.")
+
+            st.markdown("**Prezzo giornaliero, medie mobili e Bande di Bollinger**")
+            serie = sg["serie"]
+            fig_sg = go.Figure()
+            fig_sg.add_trace(go.Scatter(x=serie.index, y=serie["prezzo"], mode="lines",
+                                        name="Prezzo medio giornaliero",
+                                        line=dict(color="#38bdf8", width=1.5)))
+            fig_sg.add_trace(go.Scatter(x=serie.index, y=serie["sma_breve"], mode="lines",
+                                        name=f"SMA {sg_sb}gg",
+                                        line=dict(color="#f59e0b", width=1.2)))
+            fig_sg.add_trace(go.Scatter(x=serie.index, y=serie["sma_lunga"], mode="lines",
+                                        name=f"SMA {sg_sl}gg",
+                                        line=dict(color="#a78bfa", width=1.2)))
+            fig_sg.add_trace(go.Scatter(x=serie.index, y=serie["bb_up"], mode="lines",
+                                        name="Banda superiore",
+                                        line=dict(color="#6b7280", width=1, dash="dot")))
+            fig_sg.add_trace(go.Scatter(x=serie.index, y=serie["bb_lo"], mode="lines",
+                                        name="Banda inferiore",
+                                        line=dict(color="#6b7280", width=1, dash="dot"),
+                                        fill="tonexty", fillcolor="rgba(107,114,128,0.08)"))
+            dfb = sg["segnali"][sg["segnali"]["Segnale"] == "BUY"]
+            dfs = sg["segnali"][sg["segnali"]["Segnale"] == "SELL"]
+            if len(dfb):
+                fig_sg.add_trace(go.Scatter(
+                    x=pd.to_datetime(dfb["Data"]), y=dfb["Prezzo (EUR/MWh)"] * 0.97,
+                    mode="markers", name="BUY",
+                    marker=dict(color="#22c55e", size=9, symbol="triangle-up")))
+            if len(dfs):
+                fig_sg.add_trace(go.Scatter(
+                    x=pd.to_datetime(dfs["Data"]), y=dfs["Prezzo (EUR/MWh)"] * 1.03,
+                    mode="markers", name="SELL",
+                    marker=dict(color="#ef4444", size=9, symbol="triangle-down")))
+            fig_sg.update_layout(template="plotly_dark", height=420, yaxis_title="€/MWh",
+                                 legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                                             xanchor="right", x=1))
+            st.plotly_chart(fig_sg, use_container_width=True)
+
+            st.markdown("**RSI**")
+            fig_rsi = go.Figure()
+            fig_rsi.add_trace(go.Scatter(x=serie.index, y=serie["rsi"], mode="lines",
+                                         name="RSI", line=dict(color="#eab308", width=1.5)))
+            fig_rsi.add_hline(y=70, line_dash="dash", line_color="#ef4444",
+                              annotation_text="Ipercomprato 70")
+            fig_rsi.add_hline(y=30, line_dash="dash", line_color="#22c55e",
+                              annotation_text="Ipervenduto 30")
+            fig_rsi.add_hline(y=50, line_dash="dot", line_color="#6b7280")
+            fig_rsi.update_layout(template="plotly_dark", height=240, yaxis_title="RSI",
+                                  yaxis_range=[0, 100], showlegend=False)
+            st.plotly_chart(fig_rsi, use_container_width=True)
+
+            st.markdown("**MACD**")
+            fig_m = go.Figure()
+            fig_m.add_trace(go.Bar(x=serie.index, y=serie["hist"], name="Istogramma",
+                                   marker_color="#38bdf8", opacity=0.6))
+            fig_m.add_trace(go.Scatter(x=serie.index, y=serie["macd"], mode="lines",
+                                       name="MACD", line=dict(color="#f59e0b", width=1.5)))
+            fig_m.add_trace(go.Scatter(x=serie.index, y=serie["macd_signal"], mode="lines",
+                                       name="Signal", line=dict(color="#a78bfa", width=1.2)))
+            fig_m.add_hline(y=0, line_color="#6b7280", line_width=1)
+            fig_m.update_layout(template="plotly_dark", height=260, yaxis_title="€/MWh",
+                                legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                                            xanchor="right", x=1))
+            st.plotly_chart(fig_m, use_container_width=True)
+
+            st.markdown("**Riepilogo per indicatore (backtest)**")
+            st.dataframe(sg["riepilogo"], use_container_width=True, hide_index=True)
+
+            st.markdown("**Tutti i segnali**")
+            st.dataframe(sg["segnali"], use_container_width=True, hide_index=True)
             d0s, d1s = prezzi.index.min().date(), prezzi.index.max().date()
             st.download_button(
-                "\u2B07\uFE0F Esporta peak shaving (CSV)",
-                me.to_csv(index=False, sep=";").encode("utf-8"),
-                file_name=f"peak_shaving_{d0s}_{d1s}.csv",
+                "⬇️ Esporta segnali (CSV)",
+                sg["segnali"].to_csv(index=False, sep=";").encode("utf-8"),
+                file_name=f"segnali_tecnici_{d0s}_{d1s}.csv",
                 mime="text/csv",
-                key="csv_peak_shaving",
-                help="Una riga per mese: picco lordo, picco netto e risparmio sulla quota di potenza.",
+                key="csv_segnali",
+                help="Una riga per segnale: data, indicatore, BUY/SELL, prezzo ed esito sul periodo.",
             )
-
-with tab149:
-    titolo_hu = edu("Esponente di Hurst", "L'ESPONENTE DI HURST (H) misura la memoria di LUNGO periodo del prezzo: H sotto 0.45 = la serie tende a RIENTRARE dopo ogni movimento (mean-reverting, conviene comprare sui cali); H sopra 0.55 = i movimenti tendono a PROSEGUIRE (persistente, conviene seguire il trend); H attorno a 0.5 = RANDOM WALK, nessuna memoria sfruttabile e il timing non paga. Si stima con l'analisi R/S (rescaled range): per finestre di n giorni si calcola il rapporto tra escursione massima e deviazione standard, e H e' la pendenza della retta di log(R/S) contro log(n). Il RUNS TEST verifica in piu' se i segni delle variazioni giornaliere sono casuali (forma debole dell'efficienza di mercato). Differenza col tab 'Mean reversion': quello misura la memoria di BREVE periodo (ore, half-life degli shock); qui la memoria su settimane e mesi, la scala delle decisioni di fixing e di budget.")
-    st.markdown(f"<h1>\U0001F300 {titolo_hu}</h1>", unsafe_allow_html=True)
-    st.caption("Memoria di lungo periodo del prezzo: la serie rientra, prosegue o cammina a caso?")
-    hu1, hu2 = st.columns(2)
-    with hu1:
-        hu_nmin = st.slider("Finestra minima (giorni)", min_value=2, max_value=30, value=4, step=1,
-                            key="hu149_nmin",
-                            help="La scala piu' piccola dell'analisi R/S. Piu' bassa = piu' scale, ma finestre corte rumorose.")
-    with hu2:
-        hu_nsc = st.slider("Numero di scale", min_value=6, max_value=20, value=12, step=1,
-                           key="hu149_nsc",
-                           help="Quante finestre log-spaziate usare per la retta di regressione.")
-    hu = calcola_hurst(prezzi, hu_nmin, hu_nsc)
-    if hu["errore"]:
-        st.error(hu["errore"])
-    else:
-        k1, k2, k3, k4 = st.columns(4)
-        with k1:
-            st.metric("Esponente di Hurst", f"{hu['hurst']:.3f}",
-                      hu["classe"].replace("-", " "))
-        with k2:
-            st.metric("R² del fit log-log", f"{hu['r2_fit']:.3f}",
-                      f"{hu['n_scale']} scale, {hu['n_giorni']} giorni")
-        with k3:
-            zp = f"p = {hu['runs_p']:.3f}" if hu["runs_p"] is not None else "—"
-            st.metric("Runs test (efficienza debole)", zp,
-                      f"z = {hu['runs_z']}" if hu["runs_z"] is not None else "n/d")
-        with k4:
-            rp = f"{hu['runs_osservati']} vs {hu['runs_attesi']:.0f} attesi" \
-                if hu["runs_osservati"] is not None else "—"
-            st.metric("Runs osservati", rp, f"su {hu['runs_n']} variazioni")
-        if hu["classe"] == "mean-reverting":
-            st.success(hu["verdetto"])
-        elif hu["classe"] == "persistente":
-            st.warning(hu["verdetto"])
-        else:
-            st.info(hu["verdetto"])
-        st.caption(f"\U0001F4A1 {hu['runs_verdetto']}")
-
-        st.markdown("**R/S in funzione della finestra (scala log-log): la pendenza e' H**")
-        fig_hu = go.Figure()
-        sc = hu["scale"]
-        fig_hu.add_trace(go.Scatter(x=sc["Finestra (giorni)"], y=sc["R/S medio"],
-                                    mode="markers", name="R/S osservato",
-                                    marker=dict(color="#38bdf8", size=8),
-                                    hovertemplate="n=%{x} gg: R/S %{y:.3f}<extra></extra>"))
-        fig_hu.add_trace(go.Scatter(x=sc["Finestra (giorni)"], y=sc["Fit R/S"],
-                                    mode="lines", name=f"Fit (H={hu['hurst']:.3f})",
-                                    line=dict(color="#22c55e", width=2, dash="dash"),
-                                    hovertemplate="n=%{x} gg: fit %{y:.3f}<extra></extra>"))
-        fig_hu.update_layout(template="plotly_dark", height=320,
-                             xaxis_title="Finestra (giorni, scala log)",
-                             yaxis_title="R/S medio (scala log)",
-                             xaxis_type="log", yaxis_type="log")
-        st.plotly_chart(fig_hu, use_container_width=True)
-
-        st.markdown("**Dove cade H: zone di regime**")
-        fig_hu2 = go.Figure()
-        fig_hu2.add_trace(go.Bar(x=[0.45], y=["H"], orientation="h", name="Mean-reverting (< 0.45)",
-                                 marker_color="#38bdf8",
-                                 hovertemplate="Mean-reverting: H < 0.45<extra></extra>"))
-        fig_hu2.add_trace(go.Bar(x=[0.10], y=["H"], orientation="h", name="Random walk (0.45–0.55)",
-                                 marker_color="#6b7280",
-                                 hovertemplate="Random walk: 0.45–0.55<extra></extra>"))
-        fig_hu2.add_trace(go.Bar(x=[0.45], y=["H"], orientation="h", name="Persistente (> 0.55)",
-                                 marker_color="#f59e0b",
-                                 hovertemplate="Persistente: H > 0.55<extra></extra>"))
-        fig_hu2.add_vline(x=hu["hurst"], line_dash="solid", line_color="#22c55e", line_width=3,
-                          annotation_text=f"H = {hu['hurst']:.3f}",
-                          annotation_font_color="#22c55e")
-        fig_hu2.update_layout(template="plotly_dark", height=200, barmode="stack",
-                              xaxis_title="Esponente di Hurst", xaxis_range=[0, 1],
-                              showlegend=True,
-                              legend=dict(orientation="h", yanchor="bottom", y=1.02,
-                                          xanchor="right", x=1))
-        st.plotly_chart(fig_hu2, use_container_width=True)
-
-        st.markdown("**Dettaglio per scala**")
-        st.dataframe(sc, use_container_width=True, hide_index=True)
-        d0h, d1h = prezzi.index.min().date(), prezzi.index.max().date()
-        st.download_button(
-            "\u2B07\uFE0F Esporta Hurst R/S (CSV)",
-            sc.to_csv(index=False, sep=";").encode("utf-8"),
-            file_name=f"hurst_rs_{d0h}_{d1h}.csv",
-            mime="text/csv",
-            key="csv_hurst",
-            help="Una riga per scala: finestra in giorni, R/S medio osservato e valore del fit.",
-        )
-
-
-with tab150:
-    titolo_tn = edu("Tornado di sensibilità", "Il TORNADO DI SENSIBILITA' ordina i driver del costo annuo (prezzo energia, volumi, quota potenza, potenza impegnata, oneri) per quanto muovono il conto quando variano di +/-X%. E' un'analisi UNIVARIATA: ogni driver varia da solo, gli altri restano fermi. Il driver in cima e' quello su cui il budget e' piu' esposto: se e' il prezzo, conviene coprirsi con fixing e coperture; se sono i volumi, conviene la demand response; se e' il contratto, conviene rinegoziare col distributore.")
-    st.markdown(f"<h1>\U0001F3AF {titolo_tn}</h1>", unsafe_allow_html=True)
-    st.caption("Quale ipotesi del budget muove di più il costo annuo: il mercato, i volumi o il contratto?")
-    tn1, tn2, tn3 = st.columns(3)
-    with tn1:
-        tn_f1 = st.number_input("Potenza in F1 (MW)", min_value=0.0, value=1.0, step=0.5, key="tn150_f1",
-                                help="Ore di punta: lun–ven 08:00–19:00.")
-    with tn2:
-        tn_f2 = st.number_input("Potenza in F2 (MW)", min_value=0.0, value=1.0, step=0.5, key="tn150_f2",
-                                help="Ore intermedie: lun–ven 07:00–08:00 e 19:00–23:00, sab 07:00–23:00.")
-    with tn3:
-        tn_f3 = st.number_input("Potenza in F3 (MW)", min_value=0.0, value=1.0, step=0.5, key="tn150_f3",
-                                help="Ore fuori punta: notti, domeniche e festivi.")
-    tn4, tn5, tn6 = st.columns(3)
-    with tn4:
-        tn_pc = st.number_input("Potenza impegnata (kW)", min_value=1.0, value=1000.0, step=50.0,
-                                key="tn150_pc",
-                                help="I kW contrattuali in bolletta.")
-    with tn5:
-        tn_quota = st.number_input("Quota potenza (€/kW/mese)", min_value=0.0, value=3.0, step=0.5,
-                                   key="tn150_quota",
-                                   help="Quota fissa mensile per kW impegnato, dai corrispettivi di rete.")
-    with tn6:
-        tn_oneri = st.number_input("Oneri di sistema (€/MWh)", min_value=0.0, value=5.0, step=0.5,
-                                   key="tn150_oneri",
-                                   help="Oneri generali di sistema per MWh consumato.")
-    tn_d = st.slider("Shock dei driver (%)", min_value=1, max_value=50, value=10, step=1,
-                     key="tn150_delta",
-                     help="Di quanto varia ogni driver, in più e in meno, uno alla volta.")
-    tn = calcola_tornado_sensibilita(prezzi, tn_f1, tn_f2, tn_f3, tn_pc, tn_quota, tn_oneri, tn_d)
-    if tn["errore"]:
-        st.error(tn["errore"])
-    else:
-        k1, k2, k3, k4 = st.columns(4)
-        with k1:
-            st.metric("Costo annuo base", f"{tn['costo_base_annuo']:,.0f} €/a")
-        with k2:
-            st.metric("Driver dominante", tn["driver_dominante"])
-        with k3:
-            st.metric(f"Impatto max (+{tn_d}%)", f"{tn['impatto_max_pos']:+,.0f} €/a")
-        with k4:
-            st.metric(f"Impatto max (−{tn_d}%)", f"{tn['impatto_max_neg']:+,.0f} €/a")
-        st.info(tn["verdetto"])
-        st.caption("💡 Analisi univariata: ogni driver varia da solo, gli altri restano fermi. Gli impatti non si sommano.")
-
-        st.markdown("**Tornado: impatti sul costo annuo per driver**")
-        td = tn["tornado"].iloc[::-1]
-        fig_tn = go.Figure()
-        fig_tn.add_trace(go.Bar(y=td["Driver"], x=td["Impatto + (EUR/a)"], orientation="h",
-                                name=f"Shock +{tn_d}%",
-                                marker_color="#f59e0b",
-                                hovertemplate="%{y}: %{x:,.0f} €/a<extra></extra>"))
-        fig_tn.add_trace(go.Bar(y=td["Driver"], x=td["Impatto - (EUR/a)"], orientation="h",
-                                name=f"Shock −{tn_d}%",
-                                marker_color="#38bdf8",
-                                hovertemplate="%{y}: %{x:,.0f} €/a<extra></extra>"))
-        fig_tn.add_vline(x=0, line_color="#6b7280", line_width=1)
-        fig_tn.update_layout(template="plotly_dark", height=140 + 60 * len(td),
-                             barmode="group", xaxis_title="Impatto sul costo annuo (€/a)",
-                             legend=dict(orientation="h", yanchor="bottom", y=1.02,
-                                         xanchor="right", x=1))
-        st.plotly_chart(fig_tn, use_container_width=True)
-
-        st.markdown("**Dettaglio per driver**")
-        st.dataframe(tn["tornado"], use_container_width=True, hide_index=True)
-        d0t, d1t = prezzi.index.min().date(), prezzi.index.max().date()
-        st.download_button(
-            "⬇️ Esporta tornado (CSV)",
-            tn["tornado"].to_csv(index=False, sep=";").encode("utf-8"),
-            file_name=f"tornado_sensibilita_{d0t}_{d1t}.csv",
-            mime="text/csv",
-            key="csv_tornado",
-            help="Una riga per driver: impatti +/−, ampiezza e quota sul costo.",
-        )
-
-
-
 
 
 
