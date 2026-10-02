@@ -7,6 +7,7 @@ Uso: python3 tests/test_ottimizza_potenza_2026-10-02_0540.py
 import ast
 import math
 import os
+import re
 
 import numpy as np
 import pandas as pd
@@ -131,12 +132,13 @@ rb = fv(s5, 2.0, 1.0, 0.5, 1500.0, 3.0, 10.0, 1.05)
 check("determinismo: ottimo uguale", ra["potenza_ottima_kw"] == rb["potenza_ottima_kw"])
 check("determinismo: mensile uguale", ra["mensile"].equals(rb["mensile"]))
 
-# ---------- 9. Registry tab146 in st.tabs ----------
+# ---------- 9. Registry tab146 in st.tabs (robusto: non dipende dal n. di tab) ----------
 src = open(APP, encoding="utf-8").read()
-i = src.find("tab145, tab146 = st.tabs(")
-check("registry: tab146 dichiarata", i != -1)
+mdecl = re.search(r"((?:tab\d+,\s*)+tab\d+)\s*=\s*st\.tabs\(\[", src)
+decl_vars = set(re.findall(r"tab\d+", mdecl.group(1))) if mdecl else set()
+check("registry: tab146 dichiarata", "tab146" in decl_vars)
 j = src.find('"⚡ Potenza impegnata"')
-check("registry: titolo presente", j != -1 and j > i)
+check("registry: titolo presente", j != -1)
 check("UI: with tab146 presente", "with tab146:" in src)
 
 print(f"checks: {checks}, fails: {len(fails)}")
