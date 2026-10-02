@@ -17622,6 +17622,274 @@ def calcola_rollover_coperture(prezzi, mw=1.0, quota_copertura_pct=50.0,
             "sensibilita": pd.DataFrame(sens_righe, columns=cols_s)}
 
 
+def calcola_peak_shaving(prezzi, mw_f1, mw_f2, mw_f3, cap_mwh, pot_mw,
+                         eff_pct=85.0, quota_eur_kw_mese=2.5,
+                         potenza_attuale_kw=1000.0, degrado_eur_mwh=0.0,
+                         capex_batteria_eur=0.0, n_soglie=21):
+    """Peak shaving con batteria: taglia i picchi per abbassare la potenza impegnata.
+
+    Domanda operativa: 'conviene una batteria per ridurre la quota fissa di
+    potenza (EUR/kW/mese)?' Complemento operativo del tab 'Potenza impegnata'
+    (tab146), che ottimizza la potenza contrattuale sul profilo esistente:
+    qui si simula l'INTERVENTO fisico che abbassa i picchi mensili.
+
+    Metodo (tutto deterministico a parita' di input, euristica giornaliera):
+    - carico orario (kW) dal profilo MW per fascia F1/F2/F3 (via _fascia_aeegsi);
+    - per ogni giorno e per ogni soglia T la batteria SCARICA nelle ore di
+      carico piu' alto per portare il prelievo netto verso T (priorita' ai
+      picchi, limiti di potenza e di energia, rendimento sqrt(eff) per lato),
+      poi RICARICA nelle ore piu' economiche senza mai superare T (la
+      ricarica non deve creare un nuovo picco: T e' il tetto contrattuale);
+    - il SOC si propaga da un giorno all'altro (parte da batteria piena):
+      se T e' troppo bassa rispetto al carico notturno la batteria non
+      riesce a ricaricarsi, si esaurisce nei primi giorni e i picchi
+      tornano al lordo: lo sweep penalizza onestamente queste soglie.
+    Sweep di n_soglie soglie tra il 55% e il 100% del picco lordo massimo.
+    Per ogni soglia:
+      picchi netti mensili -> nuova potenza impegnata ottimale;
+      risparmio quota = max(0, min(attuale, picco_lordo) - ottimale)
+                        x quota x n_mesi  (alla batteria e' accreditata solo
+                        la riduzione SOTTO il livello gia' ottenibile senza
+                        batteria: senza batteria contratteresti il picco lordo);
+      delta_energia = somma((netto - lordo)/1000 x prezzo_orario)
+                      (negativo = risparmio: scarichi nelle ore care);
+      degrado = MWh scaricati x degrado_eur_mwh;
+      beneficio netto = risparmio quota - delta_energia - degrado,
+      annualizzato x 12/n_mesi. Ottimo = soglia col massimo beneficio.
+
+    NaN-safe: serie vuota / indice non datetime / MW tutti a zero /
+    cap_mwh o pot_mw <= 0 / eff fuori (0, 100] / potenza attuale <= 0 ->
+    errore pulito, DataFrame con le colonne giuste vuoti.
+
+    Ritorna dict con 'errore', 'valido', 'n_ore', 'n_mesi', 'picco_lordo_kw',
+    'soglia_ottima_kw', 'potenza_ottimale_kw', 'risparmio_annuo_netto',
+    'quota_annua', 'delta_energia_annuo', 'degrado_annuo',
+    'mwh_scaricati_annui', 'payback_anni' (None se capex <= 0 o
+    beneficio <= 0), 'riduzione_picco_pct', 'categoria'
+    ('conviene'/'non-conviene'/'inutile'), 'verdetto', 'sweep' (DataFrame)
+    e 'mensile' (DataFrame alla soglia ottima).
+    """
+    cols_s = ["Soglia (kW)", "Risparmio annuo netto (\u20ac)",
+              "Potenza ottimale (kW)", "Quota domanda (\u20ac/anno)",
+              "Delta costo energia (\u20ac/anno)", "Degrado (\u20ac/anno)"]
+    cols_m = ["Mese", "Picco lordo (kW)", "Picco netto (kW)", "Risparmio quota (\u20ac)"]
+    vuoto = {"errore": "Dati insufficienti: nessuna ora valida nel periodo.",
+             "valido": False, "n_ore": 0, "n_mesi": 0, "picco_lordo_kw": 0.0,
+             "soglia_ottima_kw": None, "potenza_ottimale_kw": None,
+             "risparmio_annuo_netto": 0.0, "quota_annua": 0.0,
+             "delta_energia_annuo": 0.0, "degrado_annuo": 0.0,
+             "mwh_scaricati_annui": 0.0, "payback_anni": None,
+             "riduzione_picco_pct": 0.0, "categoria": "non-conviene",
+             "verdetto": "",
+             "sweep": pd.DataFrame(columns=cols_s),
+             "mensile": pd.DataFrame(columns=cols_m)}
+
+    def _err(msg):
+        out = dict(vuoto)
+        out["errore"] = msg
+        return out
+
+    try:
+        p = pd.to_numeric(prezzi, errors="coerce").dropna()
+        p = p[~p.index.duplicated(keep="first")].sort_index()
+    except Exception:
+        return _err("Dati insufficienti: nessuna ora valida nel periodo.")
+    if len(p) == 0 or not isinstance(p.index, pd.DatetimeIndex):
+        return _err("Dati insufficienti: nessuna ora valida nel periodo.")
+    idx = p.index.tz_localize(None) if p.index.tz is not None else p.index
+    mw_map = {"F1": max(0.0, float(mw_f1 or 0.0)),
+              "F2": max(0.0, float(mw_f2 or 0.0)),
+              "F3": max(0.0, float(mw_f3 or 0.0))}
+    if all(m == 0.0 for m in mw_map.values()):
+        return _err("Imposta una potenza maggiore di zero in almeno una fascia.")
+    try:
+        cap_kwh = float(cap_mwh) * 1000.0
+        pot_kw = float(pot_mw) * 1000.0
+    except Exception:
+        return _err("Capacita' e potenza della batteria devono essere numeri positivi.")
+    if not (cap_kwh > 0.0 and pot_kw > 0.0):
+        return _err("Capacita' e potenza della batteria devono essere maggiori di zero.")
+    try:
+        eff = float(eff_pct) / 100.0
+    except Exception:
+        eff = float("nan")
+    if not (0.0 < eff <= 1.0):
+        return _err("Il rendimento deve essere compreso tra 0 e 100% (escluso lo 0).")
+    eff_side = float(np.sqrt(eff))
+    quota = max(0.0, float(quota_eur_kw_mese or 0.0))
+    try:
+        p_att = float(potenza_attuale_kw)
+    except Exception:
+        p_att = float("nan")
+    if not (p_att > 0.0):
+        return _err("La potenza impegnata attuale deve essere maggiore di zero.")
+    degr = max(0.0, float(degrado_eur_mwh or 0.0))
+    try:
+        capex = max(0.0, float(capex_batteria_eur or 0.0))
+    except Exception:
+        capex = 0.0
+    try:
+        n_thr = int(n_soglie)
+    except Exception:
+        n_thr = 21
+    n_thr = max(5, min(61, n_thr))
+
+    ore = idx.hour.to_numpy()
+    wd = idx.weekday.to_numpy()
+    fasce = np.array([_fascia_aeegsi(h, d) for h, d in zip(ore, wd)])
+    load_kw = np.array([mw_map[f] * 1000.0 for f in fasce])
+    price = p.to_numpy(dtype=float)
+    picco_lordo = float(load_kw.max())
+    if picco_lordo <= 0.0:
+        return _err("Imposta una potenza maggiore di zero in almeno una fascia.")
+
+    giorni = idx.to_period("D").to_numpy()
+    _, inv = np.unique(giorni, return_inverse=True)
+    pos_giorni = [np.flatnonzero(inv == i) for i in range(int(inv.max()) + 1)]
+    mesi = idx.to_period("M")
+    n_mesi = int(mesi.nunique())
+    ann = 12.0 / n_mesi if n_mesi > 0 else 1.0
+    # picchi lordi mensili (una sola volta: non dipendono dalla soglia)
+    s_load = pd.Series(load_kw, index=idx)
+    picchi_lordi_m = s_load.groupby(mesi).max()
+
+    def _simula(T):
+        """Simula un anno di gestione giornaliera con soglia T (kW).
+
+        Ritorna (net_kw, mwh_scaricati): serie del prelievo netto e MWh
+        scaricati (energia erogata alla rete)."""
+        soc = cap_kwh  # parte da batteria piena
+        net = load_kw.copy()
+        scar_kwh = 0.0
+        car_kwh = 0.0
+        for pos in pos_giorni:
+            ld = load_kw[pos]
+            pr = price[pos]
+            # --- scarica: prima le ore di carico piu' alto ---
+            need = np.minimum(np.maximum(ld - T, 0.0), pot_kw)
+            if need.sum() > 0.0 and soc > 0.0:
+                order = np.argsort(-ld, kind="stable")
+                e_need = need[order] / eff_side  # energia da prelevare dalla batteria
+                cum = np.cumsum(e_need)
+                mask_full = cum <= soc + 1e-9
+                take = np.zeros_like(e_need)
+                take[mask_full] = need[order][mask_full]
+                usato = float(cum[mask_full][-1]) if mask_full.any() else 0.0
+                resto = soc - usato
+                idx_p = np.flatnonzero(~mask_full)
+                if idx_p.size and resto > 1e-9:
+                    j = int(idx_p[0])
+                    take[j] = min(float(need[order][j]), resto * eff_side)
+                d = np.zeros_like(need)
+                d[order] = take
+                net[pos] = ld - d
+                soc = max(0.0, min(cap_kwh, soc - float((d / eff_side).sum())))
+                scar_kwh += float(d.sum())
+            # --- ricarica: ore piu' economiche senza superare T ---
+            room = cap_kwh - soc
+            if room > 1e-9:
+                nd = net[pos]
+                cand = np.minimum(np.maximum(T - nd, 0.0), pot_kw)
+                if cand.sum() > 0.0:
+                    order_c = np.argsort(pr, kind="stable")
+                    e_in = cand[order_c] * eff_side  # energia che entrerebbe in batteria
+                    cum_c = np.cumsum(e_in)
+                    mask_f = cum_c <= room + 1e-9
+                    take_c = np.zeros_like(e_in)
+                    take_c[mask_f] = cand[order_c][mask_f]
+                    usato_c = float(cum_c[mask_f][-1]) if mask_f.any() else 0.0
+                    resto_c = room - usato_c
+                    idx_pc = np.flatnonzero(~mask_f)
+                    if idx_pc.size and resto_c > 1e-9:
+                        j = int(idx_pc[0])
+                        take_c[j] = min(float(cand[order_c][j]), resto_c / eff_side)
+                    c = np.zeros_like(cand)
+                    c[order_c] = take_c
+                    net[pos] = nd + c
+                    soc = max(0.0, min(cap_kwh, soc + float((c * eff_side).sum())))
+                    car_kwh += float(c.sum())
+        return net, scar_kwh / 1000.0, car_kwh / 1000.0
+
+    baseline_kw = min(p_att, picco_lordo)  # livello gia' ottenibile senza batteria
+    righe = []
+    dettaglio = {}
+    for T in np.linspace(0.55 * picco_lordo, picco_lordo, n_thr):
+        T = float(T)
+        net, mwh_scar, _ = _simula(T)
+        delta_eur = float((((net - load_kw) / 1000.0) * price).sum())
+        degr_eur = mwh_scar * degr
+        s_net = pd.Series(net, index=idx)
+        picchi_net = s_net.groupby(mesi).max()
+        pot_ott = float(picchi_net.max())
+        risparmio_quota = max(0.0, baseline_kw - pot_ott) * quota * n_mesi
+        beneficio = risparmio_quota - delta_eur - degr_eur
+        righe.append({"Soglia (kW)": round(T, 1),
+                      "Risparmio annuo netto (\u20ac)": round(beneficio * ann, 0),
+                      "Potenza ottimale (kW)": round(pot_ott, 1),
+                      "Quota domanda (\u20ac/anno)": round(risparmio_quota * ann, 0),
+                      "Delta costo energia (\u20ac/anno)": round(delta_eur * ann, 0),
+                      "Degrado (\u20ac/anno)": round(degr_eur * ann, 0)})
+        dettaglio[T] = (net, mwh_scar, delta_eur, degr_eur, risparmio_quota,
+                        pot_ott, picchi_net, beneficio)
+
+    sweep = pd.DataFrame(righe, columns=cols_s)
+    i_best = int(sweep["Risparmio annuo netto (\u20ac)"].idxmax())
+    T_best = float(sweep.loc[i_best, "Soglia (kW)"])
+    # ritrova la chiave esatta del dettaglio (arrotondamento a 1 decimale)
+    T_key = min(dettaglio.keys(), key=lambda k: abs(k - T_best))
+    net_b, mwh_scar_b, delta_b, degr_b, quota_b, pot_ott_b, picchi_net_b, ben_b = dettaglio[T_key]
+
+    righe_m = []
+    for per, pl in picchi_lordi_m.items():
+        pn = float(picchi_net_b[per])
+        rq = max(0.0, baseline_kw - pn) * quota
+        righe_m.append({"Mese": per.strftime("%Y-%m"),
+                        "Picco lordo (kW)": round(float(pl), 1),
+                        "Picco netto (kW)": round(pn, 1),
+                        "Risparmio quota (\u20ac)": round(rq, 0)})
+    mensile = pd.DataFrame(righe_m, columns=cols_m)
+
+    risparmio_annuo = float(sweep.loc[i_best, "Risparmio annuo netto (\u20ac)"])
+    quota_annua = float(sweep.loc[i_best, "Quota domanda (\u20ac/anno)"])
+    delta_annuo = float(sweep.loc[i_best, "Delta costo energia (\u20ac/anno)"])
+    degr_annuo = float(sweep.loc[i_best, "Degrado (\u20ac/anno)"])
+    payback = round(capex / risparmio_annuo, 1) if (capex > 0.0 and risparmio_annuo > 0.0) else None
+    rid_picco = (1.0 - pot_ott_b / picco_lordo) * 100.0 if picco_lordo > 0 else 0.0
+
+    if risparmio_annuo <= 0.0:
+        categoria = "non-conviene"
+        verdetto = (f"Con questi parametri il peak shaving non si ripaga "
+                    f"({risparmio_annuo:,.0f} \u20ac/anno): la batteria costa piu' "
+                    f"di quanto fa risparmiare su quota di potenza ed energia.")
+    elif quota_annua <= 0.0:
+        categoria = "inutile"
+        verdetto = (f"La batteria porta un beneficio energetico ({risparmio_annuo:,.0f} "
+                    f"\u20ac/anno) ma non riduce la potenza impegnata sotto il livello "
+                    f"gia' ottenibile senza batteria ({baseline_kw:,.0f} kW): per la "
+                    f"quota di potenza e' inutile, valuta il solo arbitraggio.")
+    else:
+        categoria = "conviene"
+        verdetto = (f"Conviene: soglia ottima {T_best:,.0f} kW, potenza impegnata "
+                    f"riducibile a {pot_ott_b:,.0f} kW con un beneficio netto di "
+                    f"{risparmio_annuo:,.0f} \u20ac/anno.")
+
+    return {"errore": None, "valido": True, "n_ore": int(len(p)), "n_mesi": n_mesi,
+            "picco_lordo_kw": round(picco_lordo, 1),
+            "soglia_ottima_kw": round(T_best, 1),
+            "potenza_ottimale_kw": round(pot_ott_b, 1),
+            "risparmio_annuo_netto": risparmio_annuo,
+            "quota_annua": quota_annua,
+            "delta_energia_annuo": delta_annuo,
+            "degrado_annuo": degr_annuo,
+            "mwh_scaricati_annui": round(mwh_scar_b * ann, 1),
+            "payback_anni": payback,
+            "riduzione_picco_pct": round(rid_picco, 1),
+            "categoria": categoria, "verdetto": verdetto,
+            "sweep": sweep, "mensile": mensile}
+
+
+
+
 # ==========================================
 # WORKSPACE 1: SIMULATORE STRATEGICO
 # ==========================================
@@ -18265,7 +18533,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -30749,6 +31017,121 @@ with tab147:
             csv_rc = mens.to_csv(index=False).encode("utf-8")
             st.download_button("⬇️ Esporta dettaglio rolling (CSV)", data=csv_rc,
                                file_name="rollover_coperture.csv", mime="text/csv", key="roll147_csv")
+
+
+with tab148:
+        titolo_ps = edu("Peak shaving", "Il PEAK SHAVING taglia i picchi di prelievo con una batteria: la batteria si SCARICA nelle ore di carico piu' alto per tenere il prelievo sotto una soglia e si RICARICA nelle ore piu' economiche. Meno picco = meno POTENZA IMPEGNATA da contrattare (quota fissa EUR/kW/mese, vedi tab 'Potenza impegnata') e meno energia comprata nelle ore care. Questa tab simula giorno per giorno la gestione della batteria, spazza diverse soglie di taglio e trova quella che massimizza il beneficio netto annuo = risparmio sulla quota di potenza - costo/perdite di energia - degrado della batteria. Il risparmio sulla quota e' accreditato solo per la riduzione SOTTO il livello gia' ottenibile senza batteria (min tra impegnata attuale e picco lordo).")
+        st.markdown(f"<h1>\U0001F50B {titolo_ps}</h1>", unsafe_allow_html=True)
+        st.caption("Batteria per tagliare i picchi: meno potenza impegnata, meno energia cara. Trova la soglia di taglio ottimale.")
+        st.caption("\U0001F4A1 Usa pratico: inserisci il CAPEX della batteria per avere il payback; se la soglia ottima resta vicina al picco lordo, la batteria serve a poco — prima ottimizza la potenza impegnata nel tab dedicato, poi rivaluta.")
+        ps1, ps2, ps3 = st.columns(3)
+        with ps1:
+            ps_f1 = st.number_input("Potenza in F1 (MW)", min_value=0.0, value=1.0, step=0.5, key="ps148_f1",
+                                    help="Ore di punta: lun–ven 08:00–19:00.")
+        with ps2:
+            ps_f2 = st.number_input("Potenza in F2 (MW)", min_value=0.0, value=1.0, step=0.5, key="ps148_f2",
+                                    help="Ore intermedie: lun–ven 07:00–08:00 e 19:00–23:00, sab 07:00–23:00.")
+        with ps3:
+            ps_f3 = st.number_input("Potenza in F3 (MW)", min_value=0.0, value=0.5, step=0.5, key="ps148_f3",
+                                    help="Ore fuori punta: notti, domeniche e festivi.")
+        ps4, ps5, ps6 = st.columns(3)
+        with ps4:
+            ps_cap = st.number_input("Capacita' batteria (MWh)", min_value=0.1, value=2.0, step=0.5, key="ps148_cap",
+                                     help="Energia utile della batteria.")
+        with ps5:
+            ps_pot = st.number_input("Potenza batteria (MW)", min_value=0.1, value=1.0, step=0.25, key="ps148_pot",
+                                     help="Potenza max di carica/scarica.")
+        with ps6:
+            ps_eff = st.slider("Rendimento round-trip (%)", min_value=50.0, max_value=100.0, value=85.0, step=1.0,
+                               key="ps148_eff",
+                               help="Efficienza di andata e ritorno (radice quadrata per lato).")
+        ps7, ps8, ps9 = st.columns(3)
+        with ps7:
+            ps_quota = st.number_input("Quota potenza (\u20ac/kW/mese)", min_value=0.0, value=2.5, step=0.1,
+                                       key="ps148_quota",
+                                       help="Quota fissa mensile per kW di potenza impegnata.")
+        with ps8:
+            ps_att = st.number_input("Potenza impegnata attuale (kW)", min_value=1.0, value=1000.0, step=50.0,
+                                     key="ps148_att",
+                                     help="kW contrattuali attuali col distributore.")
+        with ps9:
+            ps_degr = st.number_input("Costo degrado (\u20ac/MWh scaricato)", min_value=0.0, value=8.0, step=1.0,
+                                      key="ps148_degr",
+                                      help="Costo di usura per ogni MWh scaricato.")
+        ps_capex = st.number_input("CAPEX batteria (\u20ac, 0 = nessun payback)", min_value=0.0, value=0.0,
+                                   step=10000.0, key="ps148_capex",
+                                   help="Costo chiavi in mano della batteria, solo per il payback.")
+        ps = calcola_peak_shaving(prezzi, ps_f1, ps_f2, ps_f3, ps_cap, ps_pot, ps_eff,
+                                  ps_quota, ps_att, ps_degr, ps_capex)
+        if ps["errore"]:
+            st.error(ps["errore"])
+        else:
+            k1, k2, k3, k4 = st.columns(4)
+            with k1:
+                st.metric("Potenza ottimale", f"{ps['potenza_ottimale_kw']:,.0f} kW",
+                          f"soglia {ps['soglia_ottima_kw']:,.0f} kW")
+            with k2:
+                st.metric("Risparmio annuo netto", f"{ps['risparmio_annuo_netto']:,.0f} \u20ac",
+                          f"quota {ps['quota_annua']:,.0f} \u20ac/anno")
+            with k3:
+                pb_txt = f"{ps['payback_anni']:.1f} anni" if ps["payback_anni"] is not None else "—"
+                st.metric("Payback", pb_txt,
+                          f"{ps['mwh_scaricati_annui']:,.0f} MWh/anno scaricati")
+            with k4:
+                st.metric("Riduzione picco", f"{ps['riduzione_picco_pct']:.1f} %",
+                          f"lordo {ps['picco_lordo_kw']:,.0f} kW")
+            if ps["categoria"] == "conviene":
+                st.success(ps["verdetto"])
+            elif ps["categoria"] == "inutile":
+                st.info(ps["verdetto"])
+            else:
+                st.warning(ps["verdetto"])
+
+            st.markdown("**Beneficio netto annuo in funzione della soglia di taglio**")
+            fig_ps = go.Figure()
+            sw = ps["sweep"]
+            fig_ps.add_trace(go.Scatter(x=sw["Soglia (kW)"], y=sw["Risparmio annuo netto (\u20ac)"],
+                                        mode="lines+markers", name="Beneficio netto \u20ac/anno",
+                                        line=dict(color="#22c55e", width=2),
+                                        hovertemplate="soglia %{x:,.0f} kW: %{y:,.0f} \u20ac/anno<extra></extra>"))
+            fig_ps.add_vline(x=ps["soglia_ottima_kw"], line_dash="dash", line_color="#22c55e",
+                             annotation_text=f"Ottimo {ps['soglia_ottima_kw']:,.0f} kW",
+                             annotation_font_color="#22c55e")
+            fig_ps.add_hline(y=0, line_color="#6b7280", line_width=1)
+            fig_ps.update_layout(template="plotly_dark", height=320, xaxis_title="Soglia di taglio (kW)",
+                                 yaxis_title="\u20ac/anno")
+            st.plotly_chart(fig_ps, use_container_width=True)
+
+            st.markdown("**Picchi mensili: lordo vs netto (soglia ottima)**")
+            fig_ps2 = go.Figure()
+            me = ps["mensile"]
+            fig_ps2.add_trace(go.Bar(x=me["Mese"], y=me["Picco lordo (kW)"], name="Picco lordo",
+                                     marker_color="#f59e0b",
+                                     hovertemplate="%{x}: %{y:,.0f} kW<extra></extra>"))
+            fig_ps2.add_trace(go.Bar(x=me["Mese"], y=me["Picco netto (kW)"], name="Picco netto",
+                                     marker_color="#38bdf8",
+                                     hovertemplate="%{x}: %{y:,.0f} kW<extra></extra>"))
+            fig_ps2.update_layout(template="plotly_dark", height=320, xaxis_title="Mese",
+                                  yaxis_title="kW", barmode="group")
+            st.plotly_chart(fig_ps2, use_container_width=True)
+
+            st.markdown("**Dettaglio mensile (soglia ottima)**")
+            st.dataframe(me, use_container_width=True, hide_index=True)
+            st.caption(f"\U0001F4A1 Profilo: F1 {ps_f1} MW, F2 {ps_f2} MW, F3 {ps_f3} MW — "
+                       f"picco lordo {ps['picco_lordo_kw']:,.0f} kW su {ps['n_ore']:,} ore "
+                       f"({ps['n_mesi']} mesi). Delta energia {ps['delta_energia_annuo']:+,.0f} \u20ac/anno "
+                       f"(negativo = risparmio), degrado {ps['degrado_annuo']:,.0f} \u20ac/anno.")
+            d0s, d1s = prezzi.index.min().date(), prezzi.index.max().date()
+            st.download_button(
+                "\u2B07\uFE0F Esporta peak shaving (CSV)",
+                me.to_csv(index=False, sep=";").encode("utf-8"),
+                file_name=f"peak_shaving_{d0s}_{d1s}.csv",
+                mime="text/csv",
+                key="csv_peak_shaving",
+                help="Una riga per mese: picco lordo, picco netto e risparmio sulla quota di potenza.",
+            )
+
+
 
 
 # Footer
