@@ -16941,6 +16941,133 @@ def calcola_indice_stress(prezzi_orari, soglia=70.0, pesi=None):
             "verdetto": verdetto}
 
 
+def _fascia_aeegsi(h, wd):
+    """Fascia AEEGSI F1/F2/F3 da ora (0-23) e weekday (0=lun..6=dom)."""
+    if wd == 6:
+        return "F3"
+    if wd == 5:
+        return "F2" if 7 <= h < 23 else "F3"
+    if 8 <= h < 19:
+        return "F1"
+    if (7 <= h < 8) or (19 <= h < 23):
+        return "F2"
+    return "F3"
+
+
+def _stat_circolari(ore, pesi):
+    """Media e dispersione circolari su 24h. Ritorna (baricentro_ore, dispersione_ore, quota_centro_pct)."""
+    theta = 2.0 * np.pi * np.asarray(ore, dtype=float) / 24.0
+    w = np.asarray(pesi, dtype=float)
+    sw = float(w.sum())
+    if sw <= 0.0:
+        return None, None, None
+    s = float((w * np.sin(theta)).sum())
+    c = float((w * np.cos(theta)).sum())
+    ang = np.arctan2(s, c)
+    bary = float((ang / (2.0 * np.pi) * 24.0) % 24.0)
+    rl = float(np.hypot(s, c) / sw)  # lunghezza risultante 0..1
+    disp = float(np.sqrt(max(0.0, -2.0 * np.log(min(rl, 1.0)))) * 24.0 / (2.0 * np.pi)) if rl > 0 else None
+    d = np.minimum(np.abs(np.asarray(ore, dtype=float) - bary), 24.0 - np.abs(np.asarray(ore, dtype=float) - bary))
+    quota = float(w[d <= 2.0].sum() / sw * 100.0)
+    return bary, disp, quota
+
+
+def calcola_baricentro_costo(prezzi, mw_f1, mw_f2, mw_f3):
+    """Baricentro del costo: l'ora del giorno in cui si concentra la spesa.
+
+    Il costo orario e' prezzo spot x MW della fascia F1/F2/F3 (stessa logica
+    della tab Top ore di costo). Il baricentro e' la media ponderata
+    CIRCOLARE delle ore 0-23 (pesi = costi orari non negativi): con una media
+    aritmetica banale le ore 0 e 23 falserebbero il risultato, con quella
+    circolare no. La dispersione e' la deviazione standard circolare in ore;
+    la quota entro ±2h dice quanta spesa sta davvero vicino al baricentro.
+
+    Differenza dagli altri tab: Top ore di costo classifica le ore piu' care
+    GIA' accadute (le prime 10 possono cadere tutte nello stesso giorno);
+    Ora di punta prende l'ora piu' costosa di OGNI giorno; qui la domanda e'
+    'attorno a che ora ruota mediamente la mia bolletta?' — un unico numero
+    (es. 17:36) + dispersione, utile per la demand response ricorrente e per
+    verificare se il profilo si e' spostato (baricentro mensile).
+
+    Le ore con costo negativo (prezzi negativi) sono escluse dai pesi e
+    conteggiate a parte; se il costo totale non positivo non si calcola nulla.
+
+    NaN-safe: serie vuota / indice non datetime / tutti i MW a zero / nessun
+    costo positivo -> errore pulito, DataFrame con le colonne giuste vuoti.
+
+    Ritorna dict con 'errore', 'valido', 'n_ore', 'mwh_tot', 'costo_tot',
+    'baricentro_ore', 'baricentro_txt' ('HH:MM'), 'dispersione_ore',
+    'quota_centro_pct' (quota di costo entro ±2h dal baricentro),
+    'ore_negative' / 'quota_neg_pct' (ore a costo negativo escluse dai pesi),
+    'per_ora' (DataFrame 24 righe: Ora, Ore osservate, Costo (€), Quota %) e
+    'mensile' (DataFrame: Mese, Baricentro, Dispersione (±h), Quota ±2h (%), Costo (€))."""
+    cols_o = ["Ora", "Ore osservate", "Costo (€)", "Quota %"]
+    cols_m = ["Mese", "Baricentro", "Dispersione (±h)", "Quota ±2h (%)", "Costo (€)"]
+    vuoto = {"errore": "Dati insufficienti: nessuna ora valida nel periodo.",
+             "valido": False, "n_ore": 0, "mwh_tot": 0.0, "costo_tot": None,
+             "baricentro_ore": None, "baricentro_txt": None,
+             "dispersione_ore": None, "quota_centro_pct": None,
+             "ore_negative": 0, "quota_neg_pct": 0.0,
+             "per_ora": pd.DataFrame(columns=cols_o),
+             "mensile": pd.DataFrame(columns=cols_m)}
+    try:
+        p = pd.to_numeric(prezzi, errors="coerce").dropna()
+        p = p[~p.index.duplicated(keep="first")].sort_index()
+    except Exception:
+        return dict(vuoto)
+    if len(p) == 0 or not isinstance(p.index, pd.DatetimeIndex):
+        return dict(vuoto)
+    mw_map = {"F1": max(0.0, float(mw_f1 or 0.0)), "F2": max(0.0, float(mw_f2 or 0.0)),
+              "F3": max(0.0, float(mw_f3 or 0.0))}
+    if all(m == 0.0 for m in mw_map.values()):
+        out = dict(vuoto)
+        out["errore"] = "Imposta una potenza maggiore di zero in almeno una fascia."
+        return out
+    ore = p.index.hour.to_numpy()
+    wd = p.index.weekday.to_numpy()
+    fasce = np.array([_fascia_aeegsi(h, d) for h, d in zip(ore, wd)])
+    mw = np.array([mw_map[f] for f in fasce])
+    costo = p.to_numpy(dtype=float) * mw
+    w = np.maximum(costo, 0.0)
+    if w.sum() <= 0.0:
+        out = dict(vuoto)
+        out["errore"] = "Costo totale non positivo: baricentro non calcolabile."
+        return out
+    bary, disp, quota_c = _stat_circolari(ore, w)
+    n_ore = len(p)
+    costo_tot = float(costo.sum())
+    mwh_tot = float(mw.sum())
+    neg = int((costo < 0.0).sum())
+    ore_24, costo_24, n_24 = np.arange(24), np.zeros(24), np.zeros(24, dtype=int)
+    for h in range(24):
+        m = ore == h
+        n_24[h] = int(m.sum())
+        costo_24[h] = float(costo[m].sum())
+    q24 = np.where(costo_tot > 0, np.maximum(costo_24, 0.0) / max(w.sum(), 1e-12) * 100.0, 0.0)
+    per_ora = pd.DataFrame({"Ora": [f"{h:02d}:00" for h in ore_24],
+                            "Ore osservate": n_24,
+                            "Costo (€)": np.round(costo_24, 2),
+                            "Quota %": np.round(q24, 2)})
+    righe = []
+    mesi = (p.index.tz_localize(None) if p.index.tz is not None else p.index).to_period("M")
+    for mese, grp in pd.DataFrame({"c": costo, "o": ore}).groupby(mesi):
+        cm, om = grp["c"].to_numpy(), grp["o"].to_numpy()
+        wm = np.maximum(cm, 0.0)
+        if wm.sum() <= 0.0:
+            continue
+        bm, dm, qm = _stat_circolari(om, wm)
+        righe.append({"Mese": str(mese), "Baricentro": f"{int(bm):02d}:{int(round((bm % 1) * 60)):02d}",
+                      "Dispersione (±h)": round(dm, 1) if dm is not None else None,
+                      "Quota ±2h (%)": round(qm, 1), "Costo (€)": round(float(cm.sum()), 0)})
+    bh = int(bary)
+    bt = f"{bh:02d}:{int(round((bary - bh) * 60)):02d}"
+    return {"errore": None, "valido": True, "n_ore": n_ore, "mwh_tot": mwh_tot,
+            "costo_tot": costo_tot, "baricentro_ore": bary, "baricentro_txt": bt,
+            "dispersione_ore": disp, "quota_centro_pct": quota_c,
+            "ore_negative": neg, "quota_neg_pct": round(neg / n_ore * 100.0, 1),
+            "per_ora": per_ora, "mensile": pd.DataFrame(righe, columns=cols_m)}
+
+
 def calcola_efficienza_fixing(prezzi_orari, prezzo_fissato):
     """Efficienza del fixing: quanto e' stato buono il tuo prezzo fissato (€/MWh)
     contro il mercato del periodo.
@@ -17685,7 +17812,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -29819,6 +29946,68 @@ with tab143:
                 mime="text/csv",
                 key="csv_efficienza_fixing",
                 help="Una riga per mese: media di mercato, scarto vs il tuo fixing e % di ore battute.",
+            )
+
+with tab144:
+        titolo_bc = edu("Baricentro del costo", "Il BARICENTRO DEL COSTO e' l'ora media del giorno in cui si concentra la tua spesa, calcolata come media CIRCOLARE ponderata sui costi orari (prezzo spot x MW della fascia F1/F2/F3). La media circolare serve perche' le ore 0 e 23 sono vicine: con una media aritmetica banale un costo concentrato a mezzanotte darebbe un falso 'mezzogiorno'. La DISPERSIONE (±h) dice quanto la spesa e' sparsa attorno al baricentro; la QUOTA ±2h dice quanta spesa sta davvero vicino. Le ore con costo negativo (prezzi negativi) sono escluse dai pesi e conteggiate a parte. La tabella mensile mostra se il baricentro si e' SPSTATO nel tempo (es. da 18:00 a 14:00 dopo uno shifting del carico): la verifica ex-post che la demand response ha funzionato.")
+        st.markdown(f"<h1>⏳ {titolo_bc}</h1>", unsafe_allow_html=True)
+        st.caption("L'ora del giorno attorno a cui ruota la tua bolletta, con dispersione e spostamento mensile.")
+
+        bc1, bc2, bc3 = st.columns(3)
+        with bc1:
+            bc_f1 = st.number_input("Potenza in F1 (MW)", min_value=0.0, value=1.0, step=0.5, key="bc144_f1",
+                                    help="Ore di punta: lun–ven 08:00–19:00.")
+        with bc2:
+            bc_f2 = st.number_input("Potenza in F2 (MW)", min_value=0.0, value=1.0, step=0.5, key="bc144_f2",
+                                    help="Ore intermedie: lun–ven 07:00–08:00 e 19:00–23:00, sab 07:00–23:00.")
+        with bc3:
+            bc_f3 = st.number_input("Potenza in F3 (MW)", min_value=0.0, value=1.0, step=0.5, key="bc144_f3",
+                                    help="Ore fuori punta: notti, domeniche e festivi.")
+        bc = calcola_baricentro_costo(prezzi, bc_f1, bc_f2, bc_f3)
+        if bc["errore"]:
+            st.error(bc["errore"])
+        else:
+            k1, k2, k3, k4 = st.columns(4)
+            with k1:
+                st.metric("Baricentro del costo", bc["baricentro_txt"],
+                          "media circolare ponderata")
+            with k2:
+                st.metric("Dispersione", f"±{bc['dispersione_ore']:.1f} h",
+                          "deviazione standard circolare")
+            with k3:
+                st.metric("Costo entro ±2h", f"{bc['quota_centro_pct']:.1f}%",
+                          "quota vicino al baricentro")
+            with k4:
+                st.metric("Ore a costo negativo", f"{bc['ore_negative']:,}",
+                          f"{bc['quota_neg_pct']:.1f}% delle ore, escluse dai pesi")
+
+            st.markdown("**Costo per ora del giorno e baricentro**")
+            fig_bc = go.Figure()
+            fig_bc.add_trace(go.Bar(x=bc["per_ora"]["Ora"], y=bc["per_ora"]["Costo (€)"],
+                                    name="Costo", marker_color="#38bdf8",
+                                    hovertemplate="%{x}: %{y:,.0f} €<extra></extra>"))
+            bh_bc = bc["baricentro_ore"]
+            etic_bc = bc["per_ora"]["Ora"].iloc[int(round(bh_bc)) % 24]
+            fig_bc.add_vline(x=etic_bc, line_dash="solid", line_color="#ef4444",
+                             annotation_text=f"Baricentro {bc['baricentro_txt']}",
+                             annotation_font_color="#ef4444")
+            fig_bc.update_layout(template="plotly_dark", height=360, xaxis_title="Ora",
+                                 yaxis_title="€")
+            st.plotly_chart(fig_bc, use_container_width=True)
+            st.caption(f"💡 Profilo: F1 {bc_f1} MW, F2 {bc_f2} MW, F3 {bc_f3} MW — "
+                       f"{bc['costo_tot']:,.0f} € totali su {bc['mwh_tot']:,.0f} MWh ({bc['n_ore']:,} ore). "
+                       "Sposta il carico verso ore lontane dal baricentro per abbassarlo.")
+
+            st.markdown("**Mese per mese: il baricentro si è spostato?**")
+            st.dataframe(bc["mensile"], use_container_width=True, hide_index=True)
+            d0b, d1b = prezzi.index.min().date(), prezzi.index.max().date()
+            st.download_button(
+                "⬇️ Esporta baricentro mensile (CSV)",
+                bc["mensile"].to_csv(index=False, sep=";").encode("utf-8"),
+                file_name=f"baricentro_costo_{d0b}_{d1b}.csv",
+                mime="text/csv",
+                key="csv_baricentro_costo",
+                help="Una riga per mese: baricentro, dispersione, quota di costo entro ±2h e costo totale.",
             )
 
 
