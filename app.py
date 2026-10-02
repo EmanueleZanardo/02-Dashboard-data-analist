@@ -19541,6 +19541,123 @@ def calcola_rischio_orario(prezzi, mw_f1=1.0, mw_f2=1.0, mw_f3=1.0, min_giorni=3
 
 
 
+def calcola_event_study(prezzi, data_evento, finestra_gg=30, min_giorni=5):
+    """Event study: l'evento ha spostato il prezzo spot?
+
+    Domanda operativa: "dopo l'evento X (nuova policy, fermo di una centrale,
+    ondata di freddo, cambio di regole di mercato...) il prezzo e' cambiato in
+    modo significativo?" Si lavora sulle MEDIE GIORNALIERE del prezzo orario:
+    finestra pre = [evento - finestra_gg, evento), finestra post =
+    [evento, evento + finestra_gg). Test t di Welch sulla differenza delle
+    medie giornaliere; p-value con approssimazione normale (scipy.stats.norm,
+    gia' dipendenza del progetto).
+
+    NaN-safe: serie vuota / indice non-datetime / data evento non valida o
+    fuori range / finestre con < min_giorni giorni / parametri non validi ->
+    errore pulito; tz-aware reso naive; deterministico.
+    """
+    def _err(msg):
+        return {"errore": msg, "valido": False, "n_pre": 0, "n_post": 0}
+
+    try:
+        fg = int(finestra_gg)
+    except (TypeError, ValueError):
+        return _err("finestra_gg non valida")
+    if fg < 5 or fg > 365:
+        return _err("finestra_gg non valida (5-365 giorni)")
+    try:
+        mg = int(min_giorni)
+    except (TypeError, ValueError):
+        return _err("min_giorni non valido")
+    if mg < 2 or mg > fg:
+        return _err("min_giorni non valido (2 <= min_giorni <= finestra_gg)")
+
+    try:
+        ev = pd.Timestamp(data_evento)
+    except (TypeError, ValueError):
+        return _err("data_evento non valida")
+    if pd.isna(ev):
+        return _err("data_evento non valida")
+    if ev.tz is not None:
+        ev = ev.tz_localize(None)
+    ev = ev.normalize()
+
+    if prezzi is None or len(prezzi) == 0:
+        return _err("serie prezzi vuota")
+    if not isinstance(prezzi.index, pd.DatetimeIndex):
+        return _err("indice non datetime")
+    idxn = prezzi.index.tz_localize(None) if prezzi.index.tz is not None else prezzi.index
+    p = pd.to_numeric(prezzi, errors="coerce")
+    p.index = idxn
+    p = p[~p.index.duplicated(keep="first")].sort_index().dropna()
+    if len(p) == 0:
+        return _err("serie prezzi vuota dopo pulizia NaN")
+
+    g = p.resample("D").mean().dropna()
+    if len(g) == 0:
+        return _err("nessun giorno con prezzo medio valido")
+    d0 = g.index.min().normalize()
+    d1 = g.index.max().normalize()
+    if ev < d0 or ev > d1:
+        return _err("data_evento fuori dal periodo dei dati (%s - %s)"
+                    % (d0.date(), d1.date()))
+
+    pre = g[(g.index >= ev - pd.Timedelta(days=fg)) & (g.index < ev)]
+    post = g[(g.index >= ev) & (g.index < ev + pd.Timedelta(days=fg))]
+    n_pre, n_post = int(len(pre)), int(len(post))
+    if n_pre < mg or n_post < mg:
+        return _err("finestre troppo corte: %d/%d giorni, richiesti %d"
+                    % (n_pre, n_post, mg))
+
+    m_pre, m_post = float(pre.mean()), float(post.mean())
+    s_pre = float(pre.std(ddof=1)) if n_pre > 1 else 0.0
+    s_post = float(post.std(ddof=1)) if n_post > 1 else 0.0
+    delta = m_post - m_pre
+    delta_pct = delta / abs(m_pre) * 100.0 if m_pre != 0 else None
+
+    den = s_pre ** 2 / n_pre + s_post ** 2 / n_post
+    if not np.isfinite(den) or den <= 0:
+        t_stat = 0.0 if delta == 0 else (float("inf") if delta > 0 else float("-inf"))
+    else:
+        t_stat = delta / np.sqrt(den)
+    p_value = 0.0 if np.isinf(t_stat) else float(2.0 * norm.sf(abs(float(t_stat))))
+    p_value = float(min(max(p_value, 0.0), 1.0))
+    significativo = bool(p_value < 0.05)
+    direzione = "rialzo" if delta > 0 else ("ribasso" if delta < 0 else "invariato")
+
+    giorni = pd.concat([pre, post])
+    vals = giorni.to_numpy(dtype=float)
+    tabella = pd.DataFrame({
+        "Giorno": giorni.index.strftime("%Y-%m-%d"),
+        "Periodo": ["Pre" if d < ev else "Post" for d in giorni.index],
+        "Prezzo medio (EUR/MWh)": np.round(vals, 2),
+        "Scostamento da media pre (EUR/MWh)": np.round(vals - m_pre, 2),
+    })
+
+    if significativo:
+        giudizio = "variazione STATISTICAMENTE SIGNIFICATIVA (p=%.3g < 0.05)" % p_value
+    else:
+        giudizio = "variazione NON statisticamente significativa (p=%.3g >= 0.05)" % p_value
+    verdetto = (
+        "Dopo l'evento del %s il prezzo medio giornaliero e' passato da %.2f a "
+        "%.2f EUR/MWh (%s%.2f, %s): %s. Direzione: %s. Nota: significativita' "
+        "statistica non implica causalita' — l'evento puo' coincidere con altri "
+        "driver (meteo, stagionalita', manutenzioni)." %
+        (ev.date(), m_pre, m_post, "+" if delta >= 0 else "", delta,
+         ("%.1f%%" % delta_pct) if delta_pct is not None else "n/d",
+         giudizio, direzione.upper()))
+
+    return {"errore": None, "valido": True,
+            "data_evento": ev.date().isoformat(), "finestra_gg": fg,
+            "n_pre": n_pre, "n_post": n_post,
+            "media_pre": m_pre, "media_post": m_post,
+            "std_pre": s_pre, "std_post": s_post,
+            "delta": delta, "delta_pct": delta_pct,
+            "t_stat": t_stat, "p_value": p_value,
+            "significativo": significativo, "direzione": direzione,
+            "tabella": tabella, "verdetto": verdetto}
+
+
 # ==========================================
 # WORKSPACE 1: SIMULATORE STRATEGICO
 # ==========================================
@@ -20185,7 +20302,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -33651,6 +33768,70 @@ elif workspace == _('ws8'):
                 mime="text/csv",
                 key="co2157_csv",
                 help="Una riga per mese: energia, costo energia, tCO2, costo CO2 valorizzato e quota sul costo.",
+            )
+
+
+    with tab158:
+        titolo_ev = edu("Event study", "EVENT STUDY sul prezzo spot: l'evento (nuova policy, fermo di una centrale, ondata di freddo, cambio di regole di mercato...) ha spostato DAVVERO il prezzo? Confronta la media giornaliera PRIMA e DOPO la data dell'evento con un test t di Welch: p-value sotto 0.05 = variazione statisticamente significativa. Attenzione: significativita' non implica causalita'.")
+        st.markdown(f"<h1>📍 {titolo_ev}</h1>", unsafe_allow_html=True)
+        st.caption("Prima vs dopo l'evento: il prezzo si e' spostato in modo significativo?")
+        ev_d0, ev_d1 = prezzi.index.min().date(), prezzi.index.max().date()
+        ev_def = max(ev_d0, ev_d1 - datetime.timedelta(days=60))
+        evc1, evc2 = st.columns(2)
+        with evc1:
+            ev_data = st.date_input("Data dell'evento", value=ev_def,
+                                    min_value=ev_d0, max_value=ev_d1,
+                                    key="ev158_data",
+                                    help="Il giorno dell'evento: la finestra pre finisce il giorno prima, la post parte da qui.")
+        with evc2:
+            ev_fin = st.slider("Finestra pre/post (giorni)", min_value=5, max_value=120,
+                               value=30, key="ev158_fin",
+                               help="Giorni confrontati prima e dopo l'evento.")
+        ris_ev = calcola_event_study(prezzi, ev_data, finestra_gg=ev_fin)
+        if not ris_ev["valido"]:
+            st.error(ris_ev["errore"])
+        else:
+            st.success(f"✅ {ris_ev['verdetto']}")
+            k1, k2, k3, k4 = st.columns(4)
+            render_kpi(edu("Media pre-evento", "Prezzo medio giornaliero nella finestra prima dell'evento."), f"{ris_ev['media_pre']:,.2f} €/MWh", k1)
+            render_kpi(edu("Media post-evento", "Prezzo medio giornaliero nella finestra dopo l'evento."), f"{ris_ev['media_post']:,.2f} €/MWh", k2)
+            ev_dp = ris_ev["delta_pct"]
+            ev_dp_txt = f"{ev_dp:+,.1f} %" if ev_dp is not None else "n/d"
+            render_kpi(edu("Variazione", "Differenza post - pre in % sulla media pre."), ev_dp_txt, k3)
+            ev_sig = "✅ SÌ" if ris_ev["significativo"] else "❌ NO"
+            render_kpi(edu("Significativa (p<0.05)", "Test t di Welch sulle medie giornaliere, p-value con approssimazione normale."), f"{ev_sig} (p={ris_ev['p_value']:.3g})", k4)
+
+            st.markdown("**Medie giornaliere attorno all'evento**")
+            tab_ev = ris_ev["tabella"]
+            giorni_ev = tab_ev["Giorno"].tolist()
+            medie_ev = tab_ev["Prezzo medio (EUR/MWh)"].tolist()
+            pre_mask = (tab_ev["Periodo"] == "Pre").to_numpy()
+            fig_ev = go.Figure()
+            fig_ev.add_trace(go.Scatter(x=giorni_ev, y=medie_ev, mode="lines+markers",
+                                        name="Media giornaliera", line=dict(color="#38BDF8")))
+            fig_ev.add_trace(go.Scatter(x=[g for g, m in zip(giorni_ev, pre_mask) if m],
+                                        y=[ris_ev["media_pre"]] * int(pre_mask.sum()),
+                                        mode="lines", name="Media pre",
+                                        line=dict(color="#94A3B8", dash="dot")))
+            fig_ev.add_trace(go.Scatter(x=[g for g, m in zip(giorni_ev, pre_mask) if not m],
+                                        y=[ris_ev["media_post"]] * int((~pre_mask).sum()),
+                                        mode="lines", name="Media post",
+                                        line=dict(color="#FBBF24", dash="dot")))
+            fig_ev.add_vline(x=ris_ev["data_evento"], line_dash="dash",
+                             line_color="#EF4444", annotation_text="Evento")
+            fig_ev.update_layout(xaxis_title="Giorno", yaxis_title="€/MWh",
+                                  margin=dict(l=10, r=10, t=10, b=10))
+            st.plotly_chart(fig_ev, use_container_width=True)
+
+            st.markdown("**Tabella giornaliera**")
+            st.dataframe(tab_ev, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta event study (CSV)",
+                tab_ev.to_csv(index=False, sep=";").encode("utf-8"),
+                file_name=f"event_study_{ris_ev['data_evento']}.csv",
+                mime="text/csv",
+                key="ev158_csv",
+                help="Una riga per giorno: periodo pre/post, prezzo medio e scostamento dalla media pre.",
             )
 
 
