@@ -141,8 +141,9 @@ check("determinismo: tornado identici", ra["tornado"].equals(rb["tornado"]))
 check("determinismo: verdetto identico", ra["verdetto"] == rb["verdetto"])
 
 # --- 8. registry tab150 ---
+_decl150 = [l for l in src.splitlines() if "st.tabs(" in l and "tab1," in l]
 check("registry: tab150 dichiarata",
-      "tab150" in src and "tab149, tab150 = st.tabs(" in src)
+      any("tab150" in l.split("= st.tabs(")[0] for l in _decl150))
 check("registry: titolo presente", '"🎯 Tornado sensibilità"' in src)
 check("registry: with tab150 presente", "with tab150:" in src)
 check("registry: helper chiamato nella UI",
