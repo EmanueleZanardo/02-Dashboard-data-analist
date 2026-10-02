@@ -17299,6 +17299,153 @@ def calcola_efficienza_fixing(prezzi_orari, prezzo_fissato):
             "verdetto": verdetto, "mensile": mensile}
 
 
+def calcola_ottimizza_potenza(prezzi, mw_f1, mw_f2, mw_f3, p_contr_kw,
+                              quota_kw_mese, penale_kw, fattore_picco=1.05):
+    """Ottimizzazione della potenza impegnata (potenza contrattuale).
+
+    Il distributore fattura la potenza in due voci: una QUOTA FISSA mensile
+    proporzionale alla potenza impegnata (kW contrattuali x quota €/kW/mese)
+    e una PENALE quando il picco reale supera la potenza impegnata
+    (kW di superamento x penale €/kW, per mese). Troppa potenza impegnata =
+    quota fissa sprecata; troppo poca = penali ricorrenti. Questa tab trova
+    il punto di equilibrio.
+
+    Il picco mensile e' stimato dal profilo orario MW F1/F2/F3 (stessa
+    logica degli altri tab): picco_mese = max(MW orari del mese) x 1000 x
+    fattore_picco. Il fattore_picco (default 1.05) approssima il picco
+    quarto-orario, che la misura reale usa al posto del picco orario:
+    alzalo se il tuo carico ha punte brevi e ripide.
+
+    La scansione prova potenze candidate da 0.5 x picco_max a 1.3 x
+    picco_max: per ogni candidata il costo totale = quota fissa + penali
+    su tutti i mesi. I candidati includono anche i picchi mensili osservati
+    (il costo e' lineare a tratti con spigoli proprio li': l'ottimo cade
+    sempre su uno spigolo o su un estremo). Il risparmio annuo e' il
+    risparmio sul periodo annualizzato (x 12 / n_mesi).
+
+    NaN-safe: serie vuota / indice non-datetime / < 24 ore / MW tutti a
+    zero / potenza contrattuale <= 0 / quota o penale negative /
+    fattore_picco <= 0 -> errore pulito; tz-aware reso naive.
+
+    Ritorna dict con errore/valido/n_ore/n_mesi/mwh_tot/picco_max_kw/
+    p_contr_kw/potenza_ottima_kw/costo_attuale/costo_ottimo/
+    risparmio_periodo/risparmio_annuo/mesi_superamento/categoria/
+    verdetto/mensile/scansione.
+    """
+    cols_m = ["Mese", "Picco (kW)", "Quota fissa (€)", "Penale (€)", "Totale (€)"]
+    cols_s = ["Potenza (kW)", "Quota fissa (€)", "Penali (€)", "Totale (€)"]
+
+    def _err(msg):
+        return {"errore": msg, "valido": False, "n_ore": 0, "n_mesi": 0,
+                "mwh_tot": 0.0, "picco_max_kw": None, "p_contr_kw": None,
+                "potenza_ottima_kw": None, "costo_attuale": None,
+                "costo_ottimo": None, "risparmio_periodo": None,
+                "risparmio_annuo": None, "mesi_superamento": 0,
+                "categoria": None, "verdetto": msg,
+                "mensile": pd.DataFrame(columns=cols_m),
+                "scansione": pd.DataFrame(columns=cols_s)}
+
+    if not isinstance(prezzi, pd.Series):
+        return _err("Input non valido: serve una Series pandas.")
+    try:
+        p_contr = float(p_contr_kw)
+        quota = float(quota_kw_mese)
+        penale = float(penale_kw)
+        fp = float(fattore_picco)
+    except (TypeError, ValueError):
+        return _err("Parametri non numerici: potenza, quota, penale e fattore devono essere numeri.")
+    if not p_contr > 0:
+        return _err("Potenza contrattuale non valida: inserisci un valore > 0 kW.")
+    if quota < 0:
+        return _err("Quota potenza non valida: non puo' essere negativa.")
+    if penale < 0:
+        return _err("Penale di superamento non valida: non puo' essere negativa.")
+    if not fp > 0:
+        return _err("Fattore di picco non valido: inserisci un valore > 0.")
+    try:
+        p = pd.to_numeric(prezzi, errors="coerce").dropna()
+        p = p[~p.index.duplicated(keep="first")].sort_index()
+    except Exception:
+        return _err("Input non valido: serie prezzi non leggibile.")
+    if len(p) < 24:
+        return _err("Serie troppo corta: servono almeno 24 ore di prezzi.")
+    if not isinstance(p.index, pd.DatetimeIndex):
+        return _err("Indice non temporale: serve una serie oraria con DatetimeIndex.")
+    mw_map = {"F1": max(0.0, float(mw_f1 or 0.0)), "F2": max(0.0, float(mw_f2 or 0.0)),
+              "F3": max(0.0, float(mw_f3 or 0.0))}
+    if all(m == 0.0 for m in mw_map.values()):
+        return _err("Imposta una potenza maggiore di zero in almeno una fascia.")
+
+    ore = p.index.hour.to_numpy()
+    wd = p.index.weekday.to_numpy()
+    fasce = np.array([_fascia_aeegsi(h, d) for h, d in zip(ore, wd)])
+    mw = np.array([mw_map[f] for f in fasce])  # MW orari del profilo
+
+    idxn = p.index.tz_localize(None) if p.index.tz is not None else p.index
+    mesi = idxn.to_period("M")
+    dfm = pd.DataFrame({"mw": mw}, index=idxn)
+    picchi = []
+    righe = []
+    for mese, grp in dfm.groupby(mesi):
+        pk = float(grp["mw"].max()) * 1000.0 * fp  # kW
+        picchi.append(pk)
+        qf = p_contr * quota
+        pen = max(0.0, pk - p_contr) * penale
+        righe.append({"Mese": str(mese), "Picco (kW)": round(pk, 0),
+                      "Quota fissa (€)": round(qf, 2), "Penale (€)": round(pen, 2),
+                      "Totale (€)": round(qf + pen, 2)})
+    picchi = np.array(picchi)
+    n_mesi = len(picchi)
+    picco_max = float(picchi.max())
+
+    def _costo_tot(pot):
+        qf = pot * quota * n_mesi
+        pen = float(np.maximum(0.0, picchi - pot).sum()) * penale
+        return qf, pen, qf + pen
+
+    lo, hi = 0.5 * picco_max, 1.3 * picco_max
+    candidati = sorted(set([lo, hi, p_contr, picco_max] +
+                           list(np.linspace(lo, hi, 41)) + list(picchi)))
+    righe_s = []
+    for cand in candidati:
+        qf, pen, tot = _costo_tot(cand)
+        righe_s.append({"Potenza (kW)": round(cand, 0), "Quota fissa (€)": round(qf, 2),
+                        "Penali (€)": round(pen, 2), "Totale (€)": round(tot, 2)})
+    scansione = pd.DataFrame(righe_s, columns=cols_s)
+    i_best = int(np.argmin([r["Totale (€)"] for r in righe_s]))
+    pot_ott = float(righe_s[i_best]["Potenza (kW)"])
+    costo_ott = float(righe_s[i_best]["Totale (€)"])
+    qf_a, pen_a, costo_att = _costo_tot(p_contr)
+    mesi_sup = int((picchi > p_contr).sum())
+    risp = costo_att - costo_ott
+    risp_annuo = risp * 12.0 / n_mesi
+
+    if pot_ott < 0.9 * p_contr:
+        categoria = "sovradimensionata"
+        verdetto = (f"📉 Potenza sovradimensionata: l'ottimo e' {pot_ott:,.0f} kW "
+                    f"contro {p_contr:,.0f} kW impegnati — ridurla taglia la quota "
+                    f"fissa di {risp_annuo:,.0f} €/anno senza penali.")
+    elif pot_ott > 1.1 * p_contr:
+        categoria = "sottodimensionata"
+        verdetto = (f"📈 Potenza sottodimensionata: l'ottimo e' {pot_ott:,.0f} kW "
+                    f"contro {p_contr:,.0f} kW impegnati — con {mesi_sup} mesi di "
+                    f"superamento, alzare l'impegnata risparmia {risp_annuo:,.0f} €/anno.")
+    else:
+        categoria = "adeguata"
+        verdetto = (f"✅ Potenza adeguata: {p_contr:,.0f} kW impegnati contro un ottimo "
+                    f"di {pot_ott:,.0f} kW — margine di miglioramento solo {risp_annuo:,.0f} €/anno.")
+
+    return {"errore": None, "valido": True, "n_ore": int(len(p)),
+            "n_mesi": n_mesi, "mwh_tot": float(mw.sum()),
+            "picco_max_kw": round(picco_max, 0), "p_contr_kw": round(p_contr, 0),
+            "potenza_ottima_kw": round(pot_ott, 0),
+            "costo_attuale": round(costo_att, 2), "costo_ottimo": round(costo_ott, 2),
+            "risparmio_periodo": round(risp, 2), "risparmio_annuo": round(risp_annuo, 2),
+            "mesi_superamento": mesi_sup, "categoria": categoria,
+            "verdetto": verdetto,
+            "mensile": pd.DataFrame(righe, columns=cols_m), "scansione": scansione}
+
+
 # ==========================================
 # WORKSPACE 1: SIMULATORE STRATEGICO
 # ==========================================
@@ -17942,7 +18089,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -30228,6 +30375,113 @@ with tab145:
                 mime="text/csv",
                 key="csv_penali_reattive",
                 help="Una riga per mese: attiva, reattiva, rapporto %, eccedenze per scaglione e penale.",
+            )
+with tab146:
+        titolo_pi = edu("Potenza impegnata", "La POTENZA IMPEGNATA (kW contrattuali) e' il 'tetto' di potenza che dichiari al distributore: paghi ogni mese una QUOTA FISSA proporzionale ai kW impegnati, ma se il tuo picco reale supera il tetto paghi una PENALE sui kW di superamento. Troppa potenza impegnata = quota fissa sprecata ogni mese; troppo poca = penali ricorrenti. Questa tab confronta quota fissa e penali sul tuo profilo F1/F2/F3 e trova la potenza impegnata che minimizza il costo totale — il picco mensile e' stimato dal profilo orario (il fattore di picco approssima il quarto-orario usato dalla misura reale).")
+        st.markdown(f"<h1>⚡ {titolo_pi}</h1>", unsafe_allow_html=True)
+        st.caption("Quanto ti costa il tetto di potenza: quota fissa vs penali di superamento, e la potenza impegnata ottimale.")
+        st.caption("💡 Usa pratico: se l'ottimo e' sotto la tua impegnata, chiedi la riduzione al distributore (la quota fissa scende dal mese successivo); se e' sopra, ogni superamento evitato vale la penale — confronta il risparmio col costo di eventuali interventi di peak-shaving.")
+        pi1, pi2, pi3 = st.columns(3)
+        with pi1:
+            pi_f1 = st.number_input("Potenza in F1 (MW)", min_value=0.0, value=1.0, step=0.5, key="pimp146_f1",
+                                    help="Ore di punta: lun–ven 08:00–19:00.")
+        with pi2:
+            pi_f2 = st.number_input("Potenza in F2 (MW)", min_value=0.0, value=1.0, step=0.5, key="pimp146_f2",
+                                    help="Ore intermedie: lun–ven 07:00–08:00 e 19:00–23:00, sab 07:00–23:00.")
+        with pi3:
+            pi_f3 = st.number_input("Potenza in F3 (MW)", min_value=0.0, value=1.0, step=0.5, key="pimp146_f3",
+                                    help="Ore fuori punta: notti, domeniche e festivi.")
+        pi4, pi5, pi6 = st.columns(3)
+        with pi4:
+            pi_pc = st.number_input("Potenza impegnata attuale (kW)", min_value=1.0, value=1000.0, step=50.0,
+                                    key="pimp146_pc",
+                                    help="I kW contrattuali in bolletta (voce 'potenza impegnata/disponibile').")
+        with pi5:
+            pi_quota = st.number_input("Quota potenza (€/kW/mese)", min_value=0.0, value=3.0, step=0.5,
+                                       key="pimp146_quota",
+                                       help="Quota fissa mensile per kW impegnato, dai corrispettivi di rete.")
+        with pi6:
+            pi_pen = st.number_input("Penale superamento (€/kW)", min_value=0.0, value=10.0, step=1.0,
+                                     key="pimp146_pen",
+                                     help="Penale per kW di superamento del picco, per mese.")
+        pi_fp = st.slider("Fattore di picco quarto-orario", min_value=1.00, max_value=1.20, value=1.05,
+                          step=0.01, key="pimp146_fp",
+                          help="Il picco orario del profilo x questo fattore approssima il picco quarto-orario della misura reale.")
+        pi = calcola_ottimizza_potenza(prezzi, pi_f1, pi_f2, pi_f3, pi_pc, pi_quota, pi_pen, pi_fp)
+        if pi["errore"]:
+            st.error(pi["errore"])
+        else:
+            if pi["categoria"] == "sovradimensionata":
+                st.warning(pi["verdetto"])
+            elif pi["categoria"] == "sottodimensionata":
+                st.error(pi["verdetto"])
+            else:
+                st.success(pi["verdetto"])
+            k1, k2, k3, k4 = st.columns(4)
+            with k1:
+                st.metric("Potenza impegnata ottimale", f"{pi['potenza_ottima_kw']:,.0f} kW",
+                          f"attuale {pi['p_contr_kw']:,.0f} kW")
+            with k2:
+                st.metric("Risparmio annuo", f"{pi['risparmio_annuo']:,.0f} €",
+                          f"{pi['n_mesi']} mesi analizzati")
+            with k3:
+                st.metric("Mesi con superamento", f"{pi['mesi_superamento']}",
+                          f"picco max {pi['picco_max_kw']:,.0f} kW")
+            with k4:
+                st.metric("Costo totale attuale", f"{pi['costo_attuale']:,.0f} €",
+                          f"ottimo {pi['costo_ottimo']:,.0f} €")
+
+            st.markdown("**Costo totale (quota fissa + penali) in funzione della potenza impegnata**")
+            fig_pi = go.Figure()
+            sc = pi["scansione"]
+            fig_pi.add_trace(go.Scatter(x=sc["Potenza (kW)"], y=sc["Totale (€)"],
+                                        mode="lines", name="Costo totale €",
+                                        line=dict(color="#38bdf8", width=2),
+                                        hovertemplate="%{x:,.0f} kW: %{y:,.0f} €<extra></extra>"))
+            fig_pi.add_trace(go.Scatter(x=sc["Potenza (kW)"], y=sc["Quota fissa (€)"],
+                                        mode="lines", name="Quota fissa €",
+                                        line=dict(color="#a8a29e", width=1, dash="dot"),
+                                        hovertemplate="%{x:,.0f} kW: %{y:,.0f} €<extra></extra>"))
+            fig_pi.add_trace(go.Scatter(x=sc["Potenza (kW)"], y=sc["Penali (€)"],
+                                        mode="lines", name="Penali €",
+                                        line=dict(color="#ef4444", width=1, dash="dot"),
+                                        hovertemplate="%{x:,.0f} kW: %{y:,.0f} €<extra></extra>"))
+            fig_pi.add_vline(x=pi["p_contr_kw"], line_dash="dash", line_color="#f59e0b",
+                             annotation_text=f"Attuale {pi['p_contr_kw']:,.0f} kW",
+                             annotation_font_color="#f59e0b")
+            fig_pi.add_vline(x=pi["potenza_ottima_kw"], line_dash="solid", line_color="#22c55e",
+                             annotation_text=f"Ottimo {pi['potenza_ottima_kw']:,.0f} kW",
+                             annotation_font_color="#22c55e")
+            fig_pi.update_layout(template="plotly_dark", height=380, xaxis_title="Potenza impegnata (kW)",
+                                 yaxis_title="€ sul periodo", legend=dict(orientation="h", y=1.08))
+            st.plotly_chart(fig_pi, use_container_width=True)
+
+            st.markdown("**Picco mensile vs potenza impegnata**")
+            fig_pi2 = go.Figure()
+            fig_pi2.add_trace(go.Bar(x=pi["mensile"]["Mese"], y=pi["mensile"]["Picco (kW)"],
+                                     name="Picco kW", marker_color="#38bdf8",
+                                     hovertemplate="%{x}: %{y:,.0f} kW<extra></extra>"))
+            fig_pi2.add_hline(y=pi["p_contr_kw"], line_dash="dash", line_color="#f59e0b",
+                              annotation_text=f"Impegnata {pi['p_contr_kw']:,.0f} kW",
+                              annotation_font_color="#f59e0b")
+            fig_pi2.update_layout(template="plotly_dark", height=300, xaxis_title="Mese",
+                                  yaxis_title="kW")
+            st.plotly_chart(fig_pi2, use_container_width=True)
+
+            st.markdown("**Dettaglio mensile**")
+            st.dataframe(pi["mensile"], use_container_width=True, hide_index=True)
+            st.caption(f"💡 Profilo: F1 {pi_f1} MW, F2 {pi_f2} MW, F3 {pi_f3} MW — "
+                       f"{pi['mwh_tot']:,.0f} MWh su {pi['n_ore']:,} ore. Il picco e' stimato dal profilo orario "
+                       f"x fattore {pi_fp:.2f} (approssimazione del quarto-orario): per la decisione finale usa i picchi "
+                       f"quart-orari reali dalla curva di misura.")
+            d0r, d1r = prezzi.index.min().date(), prezzi.index.max().date()
+            st.download_button(
+                "⬇️ Esporta potenza impegnata (CSV)",
+                pi["mensile"].to_csv(index=False, sep=";").encode("utf-8"),
+                file_name=f"potenza_impegnata_{d0r}_{d1r}.csv",
+                mime="text/csv",
+                key="csv_potenza_impegnata",
+                help="Una riga per mese: picco stimato, quota fissa, penale e totale con la potenza attuale.",
             )
 
 
