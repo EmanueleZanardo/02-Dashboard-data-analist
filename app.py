@@ -20402,6 +20402,231 @@ def calcola_elasticita_domanda(prezzi, carico, shift_pct=10.0, min_ore=168):
     }
 
 
+def calcola_fattore_carico(prezzi, mw_f1, mw_f2, mw_f3, costo_potenza_eur_kw_anno=40.0,
+                          riduzione_picco_pct=10.0, min_ore=24):
+    """Fattore di carico (load factor) del profilo di prelievo + costo della "puntitudine".
+
+    Domanda operativa: "quanto e' piatto il mio profilo?" Il fattore di
+    carico LF = potenza media / potenza di picco (0-100%) misura quanto bene
+    si sfrutta la potenza impegnata: LF alto = prelievo costante (i fornitori
+    quotano meglio e la quota potenza "rende"), LF basso = picchi concentrati
+    (quota potenza cara e margine per appiattire il profilo). Le ore
+    equivalenti a pieno carico (energia / picco) dicono in quante ore "a
+    tutto picco" si consuma l'energia del periodo.
+
+    In piu' si quantifica il "costo della puntitudine": quanto si paga IN PIU'
+    rispetto a un profilo perfettamente piatto con la STESSA energia
+    (premio = costo reale - energia x prezzo medio aritmetico del periodo),
+    e uno scenario what-if che taglia il picco del r%: quanta energia sta
+    sopra la nuova soglia, a che prezzo medio, e quanto vale il taglio in
+    quota potenza (annualizzata sul periodo) + minor costo energia.
+
+    Differenza dagli altri tab: "Potenza di picco" ottimizza la potenza
+    impegnata contrattuale, "Peak shaving" simula la batteria, "Efficienza
+    profilo" misura la smartness rispetto ai prezzi; qui si misura la
+    PIATTEZZA del profilo in se' e il suo costo implicito, senza simulare
+    nessuna azione.
+
+    Metodo (tutto deterministico a parita' di input):
+    - carico orario = MW della fascia di ciascuna ora (via fascia_oraria,
+      stesso profilo piatto per fascia degli altri tab);
+    - LF = media / picco; ore equivalenti = energia / picco;
+    - tabella mensile via groupby su Period M dell'indice reso tz-naive
+      (compatibile pandas 2.1/2.2);
+    - what-if per tagli 5/10/15/20/25/30%: soglia = picco*(1-r/100);
+      energia sopra soglia e prezzo medio delle ore sopra soglia;
+      risparmio quota potenza = (picco-soglia)*1000*costo_potenza,
+      annualizzato sul periodo (x ore_periodo/8760); risparmio energia =
+      energia_sopra * max(0, p_medio_sopra - p_medio_periodo).
+
+    NaN-safe: serie vuota / indice non-datetime / <min_ore ore / MW non
+    numerici, negativi o tutti zero / costo potenza negativo / riduzione
+    fuori [0, 50] -> errore pulito; tz-aware reso naive; duplicati
+    keep-first; deterministico (nessun seed).
+    """
+    def _err(msg):
+        return {"errore": msg, "valido": False}
+
+    # --- parametri ---
+    try:
+        mws = [float(mw_f1), float(mw_f2), float(mw_f3)]
+    except (TypeError, ValueError):
+        return _err("MW per fascia non numerici")
+    if any(m < 0.0 for m in mws):
+        return _err("MW per fascia non possono essere negativi")
+    if all(m == 0.0 for m in mws):
+        return _err("carico nullo: tutti i MW a zero")
+    try:
+        cp = float(costo_potenza_eur_kw_anno)
+    except (TypeError, ValueError):
+        return _err("costo potenza non numerico")
+    if cp < 0.0:
+        return _err("costo potenza non puo' essere negativo")
+    try:
+        rid = float(riduzione_picco_pct)
+    except (TypeError, ValueError):
+        return _err("riduzione picco non numerica")
+    if not (0.0 <= rid <= 50.0):
+        return _err("riduzione picco fuori range [0, 50] %")
+
+    # --- pulizia prezzi ---
+    if prezzi is None or len(prezzi) == 0:
+        return _err("serie prezzi vuota")
+    if not isinstance(prezzi.index, pd.DatetimeIndex):
+        return _err("indice prezzi non datetime")
+    idxn = prezzi.index.tz_localize(None) if prezzi.index.tz is not None else prezzi.index
+    p = pd.to_numeric(prezzi, errors="coerce")
+    p.index = idxn
+    p = p[~p.index.duplicated(keep="first")].sort_index().dropna()
+    n = len(p)
+    if n < int(min_ore):
+        return _err(f"serie troppo corta: {n} ore (minimo {int(min_ore)})")
+
+    def _fascia(ts):
+        # Replica locale di fascia_oraria (AEEGSI F1/F2/F3): la versione
+        # originale vive a livello modulo, ma qui serve una copia
+        # self-contained per l'estrazione via AST nei test (il namespace
+        # dei test non include le altre funzioni di app.py).
+        wd, h = ts.weekday(), ts.hour
+        if wd == 6:
+            return "F3"
+        if wd == 5:
+            return "F2" if 7 <= h < 23 else "F3"
+        if 8 <= h < 19:
+            return "F1"
+        if (7 <= h < 8) or (19 <= h < 23):
+            return "F2"
+        return "F3"
+
+    # --- carico orario dal profilo piatto per fascia ---
+    fasce = p.index.map(_fascia)
+    mw_map = {"F1": mws[0], "F2": mws[1], "F3": mws[2]}
+    q = pd.Series([mw_map[f] for f in fasce], index=p.index, dtype=float)
+
+    energia = float(q.sum())
+    picco = float(q.max())
+    media = float(q.mean())
+    lf = media / picco if picco > 0.0 else 0.0
+    ore_eq = energia / picco if picco > 0.0 else 0.0
+    p_medio = float(p.mean())
+    costo_reale = float((p * q).sum())
+    costo_flat = energia * p_medio
+    premio = costo_reale - costo_flat
+    premio_pct = 100.0 * premio / costo_flat if costo_flat > 0.0 else None
+
+    # --- tabella mensile ---
+    mesi = p.index.to_period("M")
+    righe_m = []
+    for per in sorted(set(mesi)):
+        msk = mesi == per
+        qm, pm = q[msk], p[msk]
+        em = float(qm.sum())
+        pkm = float(qm.max())
+        righe_m.append({
+            "Mese": str(per),
+            "Ore": int(msk.sum()),
+            "Energia (MWh)": round(em, 1),
+            "Picco (MW)": round(pkm, 3),
+            "Fattore di carico (%)": round(100.0 * float(qm.mean()) / pkm, 1) if pkm > 0.0 else 0.0,
+            "Prezzo medio ponderato (EUR/MWh)": round(float((pm * qm).sum() / em), 2) if em > 0.0 else None,
+        })
+    df_m = pd.DataFrame(righe_m)
+
+    # --- what-if: taglio del picco ---
+    def _whatif(r):
+        soglia = picco * (1.0 - r / 100.0)
+        sopra = q > soglia
+        n_sopra = int(sopra.sum())
+        e_sopra = float((q - soglia)[sopra].sum())
+        p_sopra = float(p[sopra].mean()) if n_sopra > 0 else None
+        risp_pot = (picco - soglia) * 1000.0 * cp * (n / 8760.0)
+        risp_en = e_sopra * max(0.0, p_sopra - p_medio) if p_sopra is not None else 0.0
+        return {
+            "soglia": soglia, "n_sopra": n_sopra, "e_sopra": e_sopra,
+            "p_sopra": p_sopra, "risp_pot": risp_pot, "risp_en": risp_en,
+        }
+
+    righe_w = []
+    for r in (5, 10, 15, 20, 25, 30):
+        w = _whatif(r)
+        righe_w.append({
+            "Taglio picco (%)": r,
+            "Nuova soglia (MW)": round(w["soglia"], 3),
+            "Ore sopra soglia": w["n_sopra"],
+            "Energia sopra soglia (MWh)": round(w["e_sopra"], 1),
+            "Prezzo medio ore sopra (EUR/MWh)": round(w["p_sopra"], 2) if w["p_sopra"] is not None else None,
+            "Risparmio quota potenza (EUR/anno)": round(w["risp_pot"], 0),
+            "Risparmio energia stimato (EUR)": round(w["risp_en"], 0),
+            "Risparmio totale stimato (EUR)": round(w["risp_pot"] + w["risp_en"], 0),
+        })
+    df_w = pd.DataFrame(righe_w)
+    wk = _whatif(rid)
+
+    premio_pct_txt = f"{premio_pct:.1f}%" if premio_pct is not None else "n/d"
+    if lf >= 0.8:
+        giudizio = "ECCELLENTE"
+        verdetto = (f"✅ Profilo quasi piatto (LF {lf:.1%}): sfrutti bene la "
+                    f"potenza impegnata ({ore_eq:,.0f} ore equivalenti a pieno "
+                    f"carico). ".replace(",", " ") +
+                    f"La 'puntitudine' ti costa {premio:,.0f} € in piu' "
+                    f"rispetto a un profilo piatto a pari energia."
+                    .replace(",", " "))
+    elif lf >= 0.6:
+        giudizio = "BUONO"
+        verdetto = (f"ℹ️ Profilo abbastanza piatto (LF {lf:.1%}): la potenza "
+                    f"impegnata rende ({ore_eq:,.0f} ore equivalenti). "
+                    .replace(",", " ") +
+                    f"Costo della puntitudine: {premio:,.0f} € sul periodo "
+                    f"({premio_pct_txt} del costo piatto). Tagliare il picco "
+                    f"del {rid:.0f}% varrebbe ~{wk['risp_pot'] + wk['risp_en']:,.0f} €/anno."
+                    .replace(",", " "))
+    elif lf >= 0.4:
+        giudizio = "MEDIO"
+        verdetto = (f"⚠️ Profilo con picchi marcati (LF {lf:.1%}): stai pagando "
+                    f"potenza che usi poche ore ({ore_eq:,.0f} ore equivalenti "
+                    f"su {n} ore). ".replace(",", " ") +
+                    f"Costo della puntitudine: {premio:,.0f} € "
+                    f"({premio_pct_txt} in piu' del piatto). Leva: appiattire "
+                    f"il profilo o ridurre la potenza impegnata — tagliare il "
+                    f"picco del {rid:.0f}% vale ~{wk['risp_pot'] + wk['risp_en']:,.0f} €/anno."
+                    .replace(",", " "))
+    else:
+        giudizio = "BASSO"
+        verdetto = (f"🚨 Profilo molto appuntito (LF {lf:.1%}): il picco di "
+                    f"{picco:.2f} MW domina su una media di {media:.2f} MW "
+                    f"({ore_eq:,.0f} ore equivalenti). ".replace(",", " ") +
+                    f"Paghi {premio:,.0f} € in piu' rispetto a un profilo "
+                    f"piatto a pari energia ({premio_pct_txt}). Priorita': "
+                    f"shifting dei carichi, accumulo o potenza modulata — il "
+                    f"taglio del {rid:.0f}% del picco vale "
+                    f"~{wk['risp_pot'] + wk['risp_en']:,.0f} €/anno."
+                    .replace(",", " "))
+    if premio_pct is None:
+        verdetto += " (Premio % non calcolabile: costo piatto non positivo.)"
+
+    return {
+        "errore": None,
+        "valido": True,
+        "lf": lf,
+        "lf_pct": 100.0 * lf,
+        "ore_equivalenti": ore_eq,
+        "energia_mwh": energia,
+        "picco_mw": picco,
+        "potenza_media_mw": media,
+        "n_ore": n,
+        "prezzo_medio": p_medio,
+        "costo_reale": costo_reale,
+        "costo_flat": costo_flat,
+        "premio_eur": premio,
+        "premio_pct": premio_pct,
+        "tabella_mensile": df_m,
+        "tabella_whatif": df_w,
+        "whatif_kpi": wk,
+        "giudizio": giudizio,
+        "verdetto": verdetto,
+    }
+
+
 def calcola_prezzo_fisso_equo(prezzi, carico_base_mw=5.0, forma_carico="diurno",
                               premio_rischio_pct=5.0, margine_eur_mwh=3.0,
                               adder_volume_eur_mwh=1.0):
@@ -21368,7 +21593,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -35395,6 +35620,86 @@ elif workspace == _('ws8'):
                     mime="text/csv",
                     key="el164_csv_w",
                     help="Una riga per quota spostata: energia spostata e risparmio stimato.",
+                )
+    with tab165:
+        titolo_fc = edu("Fattore di carico", "FATTORE DI CARICO (load factor) = potenza media / potenza di picco: dice quanto e' 'piatto' il tuo profilo di prelievo. 100% = consumo sempre uguale; valori bassi = picchi concentrati in poche ore. Un LF basso significa che paghi potenza impegnata che usi poco e che i fornitori ti quotano peggio: la leva e' appiattire il profilo (shifting, accumulo) o ridurre la potenza impegnata.")
+        st.markdown(f"<h1>📊 {titolo_fc}</h1>", unsafe_allow_html=True)
+        st.caption("Quanto è 'piatto' il tuo profilo + quanto ti costa la 'puntitudine' rispetto a un profilo piatto a pari energia.")
+        c0, c1, c2 = st.columns(3)
+        with c0:
+            mw_fc1 = st.number_input("MW in F1", min_value=0.0, max_value=10000.0,
+                                     value=10.0, step=0.5, key="fc165_mw1")
+        with c1:
+            mw_fc2 = st.number_input("MW in F2", min_value=0.0, max_value=10000.0,
+                                     value=6.0, step=0.5, key="fc165_mw2")
+        with c2:
+            mw_fc3 = st.number_input("MW in F3", min_value=0.0, max_value=10000.0,
+                                     value=4.0, step=0.5, key="fc165_mw3")
+        c3, c4 = st.columns(2)
+        with c3:
+            cp_fc = st.number_input("Quota potenza (EUR/kW/anno)", min_value=0.0,
+                                    max_value=500.0, value=40.0, step=1.0,
+                                    key="fc165_cp",
+                                    help="Costo annuo per kW di potenza impegnata (quota potenza di trasporto/oneri).")
+        with c4:
+            rid_fc = st.slider("Taglio picco what-if (%)", min_value=0, max_value=30,
+                               value=10, key="fc165_rid",
+                               help="Scenario: riduci il picco di questa % (a pari energia) — quanto risparmi in quota potenza + minor costo energia?")
+        ris_fc = calcola_fattore_carico(prezzi, mw_fc1, mw_fc2, mw_fc3,
+                                        costo_potenza_eur_kw_anno=float(cp_fc),
+                                        riduzione_picco_pct=float(rid_fc))
+        if not ris_fc["valido"]:
+            st.error(ris_fc["errore"])
+        else:
+            if ris_fc["giudizio"] == "ECCELLENTE":
+                st.success(f"✅ {ris_fc['verdetto']}")
+            elif ris_fc["giudizio"] == "BASSO":
+                st.error(f"🚨 {ris_fc['verdetto']}")
+            else:
+                st.warning(f"ℹ️ {ris_fc['verdetto']}")
+            k1, k2, k3, k4 = st.columns(4)
+            render_kpi(edu("Fattore di carico", "Potenza media / potenza di picco. Benchmark indicativi: uffici ~35-40%, industriale 2 turni ~55-65%, continuo 24/7 ~85-95%."), f"{ris_fc['lf_pct']:.1f} %", k1)
+            render_kpi(edu("Ore equivalenti", "Energia del periodo / picco: in quante ore 'a tutto picco' consumeresti la stessa energia. Poche ore = profilo appuntito."), f"{ris_fc['ore_equivalenti']:,.0f} h".replace(",", " "), k2)
+            prem_txt = f"{ris_fc['premio_eur']:,.0f} €".replace(",", " ")
+            if ris_fc["premio_pct"] is not None:
+                prem_txt += f" ({ris_fc['premio_pct']:+.1f}%)"
+            render_kpi(edu("Costo della puntitudine", "Quanto paghi IN PIÙ rispetto a un profilo perfettamente piatto con la stessa energia (stesso prezzo medio del periodo)."), prem_txt, k3)
+            wk = ris_fc["whatif_kpi"]
+            render_kpi(edu(f"Risparmio taglio {int(rid_fc)}%", f"Tagliando il picco del {int(rid_fc)}% (soglia {wk['soglia']:.2f} MW): risparmio quota potenza annualizzato + minor costo energia stimato."), f"{wk['risp_pot'] + wk['risp_en']:,.0f} €/anno".replace(",", " "), k4)
+
+            st.markdown("**Fattore di carico mensile**")
+            fig_fc = go.Figure()
+            fig_fc.add_trace(go.Bar(x=ris_fc["tabella_mensile"]["Mese"],
+                                    y=ris_fc["tabella_mensile"]["Fattore di carico (%)"],
+                                    name="LF mensile", marker_color="#38BDF8"))
+            fig_fc.add_hline(y=ris_fc["lf_pct"], line_dash="dash", line_color="#F87171",
+                             annotation_text=f"Media periodo {ris_fc['lf_pct']:.1f}%")
+            fig_fc.update_layout(yaxis_title="Fattore di carico (%)",
+                                 margin=dict(l=10, r=10, t=10, b=10))
+            st.plotly_chart(fig_fc, use_container_width=True)
+            st.dataframe(ris_fc["tabella_mensile"], use_container_width=True, hide_index=True)
+
+            st.markdown("**What-if: tagliare il picco**")
+            st.caption(f"Energia sopra la soglia {wk['soglia']:.2f} MW: {wk['e_sopra']:,.1f} MWh in {wk['n_sopra']} ore — è l'energia da spostare o tagliare per sostenere il nuovo picco.".replace(",", " "))
+            st.dataframe(ris_fc["tabella_whatif"], use_container_width=True, hide_index=True)
+            d1, d2 = st.columns(2)
+            with d1:
+                st.download_button(
+                    "⬇️ Esporta fattore di carico mensile (CSV)",
+                    ris_fc["tabella_mensile"].to_csv(index=False, sep=";").encode("utf-8"),
+                    file_name="fattore_carico_mensile.csv",
+                    mime="text/csv",
+                    key="fc165_csv_m",
+                    help="Una riga per mese: energia, picco, fattore di carico e prezzo medio ponderato.",
+                )
+            with d2:
+                st.download_button(
+                    "⬇️ Esporta scenario taglio picco (CSV)",
+                    ris_fc["tabella_whatif"].to_csv(index=False, sep=";").encode("utf-8"),
+                    file_name="fattore_carico_whatif.csv",
+                    mime="text/csv",
+                    key="fc165_csv_w",
+                    help="Una riga per % di taglio del picco: soglia, energia sopra soglia e risparmi stimati.",
                 )
 
 
