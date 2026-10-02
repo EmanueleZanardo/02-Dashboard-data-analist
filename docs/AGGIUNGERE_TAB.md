@@ -1,7 +1,7 @@
 # Come aggiungere una tab (workspace Price Analytics — Swissix)
 
 Convenzione attuale (verificata il 01/10/2026 su `app.py`): le tab dello
-Swissix sono **150**, dichiarate in un'unica chiamata `st.tabs()`.
+Swissix sono **151**, dichiarate in un'unica chiamata `st.tabs()`.
 
 ## 1. Funzione di calcolo pura — `calcola_*`
 
