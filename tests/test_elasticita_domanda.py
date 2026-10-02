@@ -207,9 +207,10 @@ class TestRegistry:
         src = open("app.py", encoding="utf-8").read()
         m = re.search(r"tab1, tab2, .*? = st\.tabs\(\[", src, re.S)
         dvars = re.findall(r"tab\d+", m.group(0))
-        assert len(dvars) == 164 and dvars[-1] == "tab164"
+        assert "tab164" in dvars  # robusto all'aggiunta di tab successive (era conteggio esatto 164)
         withs = re.findall(r"^    with (tab\d+):", src, re.M)
-        assert withs == ["tab%d" % i for i in range(1, 165)]
+        assert withs == ["tab%d" % i for i in range(1, len(withs) + 1)]
+        assert len(dvars) == len(withs)
         assert '"⚡ Elasticità domanda"' in src
         keys = re.findall(r'key="(el164_[^"]+)"', src)
         fkeys = re.findall(r'key=f"(el164_[^"]+)"', src)
