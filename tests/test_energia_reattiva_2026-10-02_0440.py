@@ -130,7 +130,8 @@ check("tz-aware: penale = naive", math.isclose(r["penale_tot"], pen_att, rel_tol
 
 # --- 7. Registrazione UI ---
 src = open(APP, encoding="utf-8").read()
-check("st.tabs: tab145 dichiarato", "tab143, tab144, tab145 = st.tabs([" in src)
+decl = [l for l in src.splitlines() if "= st.tabs(" in l]
+check("st.tabs: tab145 dichiarato", any("tab145" in l.split("= st.tabs(")[0] for l in decl), decl[:1])
 check("st.tabs: titolo Energia reattiva", '"⚡ Energia reattiva"' in src)
 check("blocco with tab145 presente", "with tab145:" in src)
 check("helper chiamato in UI", "calcola_penalita_reattiva(prezzi," in src)
