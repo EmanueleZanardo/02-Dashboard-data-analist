@@ -21,7 +21,7 @@
 
 ## Stato
 - Dashboard Streamlit "Singularity Quant ETRM", live su https://czpox8o8x6arnxw96txnvt.streamlit.app/.
-- Ultimo commit: 67ea857 (QA 02/10 03:39 - tab144 Baricentro del costo).
+- Ultimo commit: c43b63d (QA 02/10 05:40 - tab146 Potenza impegnata).
 - Test: app.py compila (py_compile OK); test tab144: 41 check, 0 fail; suite test_helpers.py 47/47 verdi; secrets scan: nessun segreto hardcoded. pytest non disponibile in questa VM.
 
 ## Ultimi eventi verificati (02/10/2026)
