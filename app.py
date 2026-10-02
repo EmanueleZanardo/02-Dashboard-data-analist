@@ -19879,6 +19879,158 @@ def calcola_business_case_rinnovabile(prezzi, tecnologia="fv", potenza_mw=10.0,
             "sens_prezzo": sens_prezzo, "verdetto": verdetto}
 
 
+def calcola_rischio_volume(prezzi, carico_base_mw=5.0, forma_carico="diurno",
+                           quota_coperta_pct=70.0, prezzo_coperto_eur_mwh=100.0,
+                           variazione_carico_pct=10.0):
+    """Rischio volume di un portafoglio di carico con quota coperta a prezzo fisso.
+
+    Domanda operativa: "se il carico reale si discosta da quello atteso,
+    quanto varia il costo di fornitura?" Si modella un profilo di carico orario
+    deterministico (piatto o diurno, normalizzato sulla potenza media base) e un
+    blocco coperto a prezzo fisso (flat, in MW): ogni ora il carico sotto la
+    copertura e' pagato a prezzo fisso, l'eccesso va a spot, e l'eventuale
+    copertura in eccesso (long) viene rivenduta a spot. Si calcolano:
+    - costo totale = energia coperta x prezzo fisso + energia aperta x spot
+      - energia long x spot (rivendita dell'eccesso di copertura)
+    - quota coperta effettiva = energia coperta / energia totale
+    - costo tutto-a-spot (benchmark senza coperture)
+    - scenari di carico x(1-v), x1, x(1+v) a copertura fissa: il range
+      max-min del costo e' il RISCHIO VOLUME, e la tabella scenari mostra
+      dove il costo si sposta.
+
+    NaN-safe: serie vuota / indice non-datetime / parametri non numerici o
+    fuori range / serie < 24h -> errore pulito; tz-aware reso naive;
+    duplicati keep-first; deterministico.
+    """
+    PESI_FORME = {
+        "piatto": [1.0] * 24,
+        "diurno": [0.625, 0.625, 0.625, 0.625, 0.625, 0.625, 0.625,
+                   1.25, 1.25, 1.25, 1.25, 1.25, 1.25, 1.25, 1.25, 1.25,
+                   1.25, 1.25, 1.25, 1.25, 1.25, 0.625, 0.625, 0.625],
+    }
+
+    def _err(msg):
+        return {"errore": msg, "valido": False}
+
+    try:
+        base = float(carico_base_mw)
+    except (TypeError, ValueError):
+        return _err("carico_base_mw non valido")
+    if not (base > 0):
+        return _err("carico_base_mw deve essere > 0")
+    forma = str(forma_carico).lower()
+    if forma not in PESI_FORME:
+        return _err("forma_carico non valida: usare 'piatto' o 'diurno'")
+    try:
+        quota = float(quota_coperta_pct)
+    except (TypeError, ValueError):
+        return _err("quota_coperta_pct non valida")
+    if not (0.0 <= quota <= 100.0):
+        return _err("quota_coperta_pct deve essere tra 0 e 100")
+    try:
+        p_cop = float(prezzo_coperto_eur_mwh)
+    except (TypeError, ValueError):
+        return _err("prezzo_coperto_eur_mwh non valido")
+    try:
+        var = float(variazione_carico_pct)
+    except (TypeError, ValueError):
+        return _err("variazione_carico_pct non valida")
+    if not (0.0 < var <= 50.0):
+        return _err("variazione_carico_pct deve essere in (0, 50]")
+
+    if prezzi is None or len(prezzi) == 0:
+        return _err("serie prezzi vuota")
+    if not isinstance(prezzi.index, pd.DatetimeIndex):
+        return _err("indice non datetime")
+    idxn = prezzi.index.tz_localize(None) if prezzi.index.tz is not None else prezzi.index
+    p = pd.to_numeric(prezzi, errors="coerce")
+    p.index = idxn
+    p = p[~p.index.duplicated(keep="first")].sort_index().dropna()
+    if len(p) < 24:
+        return _err("serie prezzi troppo corta: servono almeno 24 ore valide")
+
+    pesi = np.asarray(PESI_FORME[forma], dtype=float)
+    pesi = pesi / pesi.mean()
+    ore_giorno = p.index.hour.to_numpy()
+    carico = base * pesi[ore_giorno]
+    spot = p.to_numpy()
+    hedge_mw = base * quota / 100.0
+
+    def _costo(carico_h):
+        coperto = np.minimum(carico_h, hedge_mw)
+        aperto = carico_h - coperto
+        lungo = np.maximum(hedge_mw - carico_h, 0.0)
+        costo = (float(np.sum(coperto)) * p_cop
+                 + float(np.sum(aperto * spot))
+                 - float(np.sum(lungo * spot)))
+        return (costo, float(np.sum(coperto)), float(np.sum(aperto)),
+                float(np.sum(lungo)))
+
+    costo_tot, en_cop, en_open, en_long = _costo(carico)
+    energia_tot = float(np.sum(carico))
+    costo_spot = float(np.sum(carico * spot))
+    quota_eff = en_cop / energia_tot * 100.0 if energia_tot > 0 else 0.0
+    risparmio = costo_spot - costo_tot
+
+    fattori = [1.0 - var / 100.0, 1.0, 1.0 + var / 100.0]
+    righe = []
+    for f in fattori:
+        c, ec, eo, el = _costo(carico * f)
+        if f < 1:
+            nome = "base -%.0f %%" % var
+        elif f == 1:
+            nome = "base"
+        else:
+            nome = "base +%.0f %%" % var
+        righe.append({
+            "Scenario carico": nome,
+            "Energia (MWh)": round(energia_tot * f, 1),
+            "Coperta (MWh)": round(ec, 1),
+            "Aperta (MWh)": round(eo, 1),
+            "Long (MWh)": round(el, 1),
+            "Costo totale (EUR)": round(c, 0),
+        })
+    tabella = pd.DataFrame(righe)
+    costi_scen = [r["Costo totale (EUR)"] for r in righe]
+    rischio = max(costi_scen) - min(costi_scen)
+    rischio_pct = rischio / costi_scen[1] * 100.0 if costi_scen[1] > 0 else None
+
+    if rischio_pct is not None and rischio_pct > 15.0:
+        giudizio = "ALTO"
+        nota = ("il costo oscilla del %.1f %% tra gli scenari -/+" % rischio_pct
+                + "%.0f %% di carico: aumenta la quota coperta per stabilizzarlo." % var)
+    elif rischio_pct is not None and rischio_pct > 5.0:
+        giudizio = "MEDIO"
+        nota = ("il costo oscilla del %.1f %% tra gli scenari: esposizione gestibile, " % rischio_pct
+                + "monitorare la quota coperta effettiva.")
+    else:
+        giudizio = "BASSO"
+        nota = ("il costo oscilla solo del %s tra gli scenari: la copertura "
+                % ("%.1f %%" % rischio_pct if rischio_pct is not None else "n/d")
+                + "stabilizza bene il portafoglio.")
+
+    return {
+        "valido": True, "errore": None,
+        "n_ore": len(p),
+        "forma_carico": forma,
+        "hedge_mw": hedge_mw,
+        "energia_totale_mwh": energia_tot,
+        "energia_coperta_mwh": en_cop,
+        "energia_aperta_mwh": en_open,
+        "energia_long_mwh": en_long,
+        "quota_coperta_effettiva_pct": quota_eff,
+        "costo_totale_eur": costo_tot,
+        "costo_spot_eur": costo_spot,
+        "risparmio_vs_spot_eur": risparmio,
+        "tabella_scenari": tabella,
+        "rischio_volume_eur": rischio,
+        "rischio_volume_pct": rischio_pct,
+        "variazione_carico_pct": var,
+        "giudizio": giudizio,
+        "verdetto": "RISCHIO VOLUME %s: %s" % (giudizio, nota),
+    }
+
+
 def calcola_idrogeno_verde(prezzi, potenza_mw=10.0, capex_eur_kw=1500.0,
                            opex_eur_kw_anno=40.0, efficienza_pct=65.0,
                            prezzo_h2_eur_kg=6.0, tasso_pct=6.0, vita_anni=20):
@@ -20702,7 +20854,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -34397,6 +34549,79 @@ elif workspace == _('ws8'):
                 key="h2160_csv",
                 help="Una riga per soglia candidata: soglia, ore/anno e margine lordo annuo.",
             )
+
+
+    with tab161:
+        titolo_rv = edu("Rischio volume", "Quanto varia il COSTO di fornitura se il carico reale si discosta da quello atteso? Con un profilo di carico deterministico (piatto o diurno) e un blocco coperto a prezzo fisso, calcola energia coperta/aperta/long per ora (l'eccesso di copertura e' rivenduto a spot), il costo totale contro il benchmark tutto-a-spot, e il RISCHIO VOLUME: il range del costo tra gli scenari di carico -/+ la tua variazione. Coperture alte = costo stabile.")
+        st.markdown(f"<h1>📦 {titolo_rv}</h1>", unsafe_allow_html=True)
+        st.caption("Copertura fissa vs carico variabile: dove finisce il costo.")
+        rv0, rv1, rv2 = st.columns(3)
+        with rv0:
+            rv_base = st.number_input("Carico medio (MW)", min_value=0.1,
+                                      max_value=10000.0, value=5.0, step=0.5,
+                                      key="rv161_base")
+            rv_quota = st.slider("Quota coperta a fisso (%)", min_value=0,
+                                 max_value=100, value=70, step=5,
+                                 key="rv161_quota")
+        with rv1:
+            rv_forma = st.selectbox("Forma del carico", ["Diurno", "Piatto"],
+                                    key="rv161_forma",
+                                    help="Diurno = piu' carico di giorno (7-20), meno di notte; normalizzato sulla potenza media.")
+            rv_pcop = st.number_input("Prezzo fisso copertura (EUR/MWh)",
+                                      min_value=0.0, value=100.0, step=1.0,
+                                      key="rv161_pcop")
+        with rv2:
+            rv_var = st.number_input("Variazione carico scenari (%)",
+                                     min_value=1.0, max_value=50.0,
+                                     value=10.0, step=1.0,
+                                     key="rv161_var",
+                                     help="Scenari di carico: base -/base/base + questa %.")
+        ris_rv = calcola_rischio_volume(
+            prezzi, carico_base_mw=float(rv_base),
+            forma_carico="diurno" if rv_forma == "Diurno" else "piatto",
+            quota_coperta_pct=float(rv_quota),
+            prezzo_coperto_eur_mwh=float(rv_pcop),
+            variazione_carico_pct=float(rv_var))
+        if not ris_rv["valido"]:
+            st.error(ris_rv["errore"])
+        else:
+            if ris_rv["giudizio"] == "ALTO":
+                st.error(f"⚠️ {ris_rv['verdetto']}")
+            elif ris_rv["giudizio"] == "MEDIO":
+                st.warning(f"ℹ️ {ris_rv['verdetto']}")
+            else:
+                st.success(f"✅ {ris_rv['verdetto']}")
+            k1, k2, k3, k4 = st.columns(4)
+            render_kpi(edu("Costo totale", "Energia coperta a prezzo fisso + aperta a spot - long rivenduto a spot."), f"{ris_rv['costo_totale_eur']:,.0f} €".replace(",", " "), k1)
+            render_kpi(edu("Quota coperta effettiva", "Energia pagata a prezzo fisso / energia totale del periodo."), f"{ris_rv['quota_coperta_effettiva_pct']:.1f} %", k2)
+            render_kpi(edu("Tutto a spot", "Costo benchmark senza alcuna copertura."), f"{ris_rv['costo_spot_eur']:,.0f} €".replace(",", " "), k3)
+            rp = ris_rv["rischio_volume_pct"]
+            rp_txt = "%.1f %%" % rp if rp is not None else "n/d"
+            render_kpi(edu("Rischio volume", "Range del costo tra gli scenari di carico -/+ variazione: quanto puo' muoversi il costo se il carico cambia."), f"{ris_rv['rischio_volume_eur']:,.0f} € ({rp_txt})".replace(",", " "), k4)
+
+            st.markdown("**Costo per scenario di carico**")
+            tab_rv = ris_rv["tabella_scenari"]
+            fig_rv = go.Figure()
+            fig_rv.add_trace(go.Bar(x=tab_rv["Scenario carico"],
+                                    y=tab_rv["Costo totale (EUR)"],
+                                    marker_color="#38BDF8",
+                                    text=tab_rv["Costo totale (EUR)"],
+                                    textposition="outside"))
+            fig_rv.update_layout(xaxis_title="Scenario", yaxis_title="EUR",
+                                 margin=dict(l=10, r=10, t=10, b=10))
+            st.plotly_chart(fig_rv, use_container_width=True)
+
+            st.markdown("**Tabella scenari**")
+            st.dataframe(tab_rv, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta scenari rischio volume (CSV)",
+                tab_rv.to_csv(index=False, sep=";").encode("utf-8"),
+                file_name="rischio_volume_scenari.csv",
+                mime="text/csv",
+                key="rv161_csv",
+                help="Una riga per scenario: energia totale/coperta/aperta/long e costo totale.",
+            )
+
 
 
 # Footer
