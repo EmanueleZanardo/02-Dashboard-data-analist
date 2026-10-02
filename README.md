@@ -15,7 +15,7 @@ Dashboard Streamlit per analisi quantitativa del mercato elettrico svizzero
 5. 📈 Exotics & Structuring
 6. 🏛️ Enterprise Risk & XVA
 7. 📈 Metodo STAR & Ottimizzazione
-8. 📊 Price Analytics (Swissix) — 144 tab analitiche
+8. 📊 Price Analytics (Swissix) — 145 tab analitiche
 
 ### Price Analytics (Swissix)
 
@@ -30,7 +30,7 @@ opzioni energetiche (Black-76, spark spread, swing, tolling, asiatiche…),
 stoccaggio gas, PPA, idroelettrico, power-to-heat.
 
 <details>
-<summary>Elenco completo delle 144 tab dello Swissix</summary>
+<summary>Elenco completo delle 145 tab dello Swissix</summary>
 
 1. ⏱️ Profilo giornaliero
 2. 🔥 Heatmap oraria
@@ -176,6 +176,7 @@ stoccaggio gas, PPA, idroelettrico, power-to-heat.
 142. 🚨 Indice di stress di mercato
 143. 📊 Efficienza del fixing
 144. ⏳ Baricentro del costo
+145. ⚡ Energia reattiva
 </details>
 
 ## Avvio locale
@@ -246,7 +247,7 @@ python3 tests/test_helpers.py      # esempio di file legacy: N check, 0 fail att
 ## Struttura
 
 - `app.py` — tutta la dashboard (funzioni pure `calcola_*`/`profilo_*` +
-  8 workspace Streamlit; lo Swissix ha 144 tab)
+  8 workspace Streamlit; lo Swissix ha 145 tab)
 - `requirements.txt` — dipendenze pinnate
 - `tests/` — test delle funzioni di calcolo (`appfuncs.py`, `conftest.py`,
   `run_all.py`, file `test_*.py`)
