@@ -20031,6 +20031,149 @@ def calcola_rischio_volume(prezzi, carico_base_mw=5.0, forma_carico="diurno",
     }
 
 
+def calcola_prezzo_fisso_equo(prezzi, carico_base_mw=5.0, forma_carico="diurno",
+                              premio_rischio_pct=5.0, margine_eur_mwh=3.0,
+                              adder_volume_eur_mwh=1.0):
+    """Prezzo fisso equo per un contratto di fornitura (fornitore che quota
+    un prezzo fisso a un cliente finale).
+
+    Domanda operativa: "a quale prezzo fisso posso vendere il MWh senza
+    rimetterci, dato il profilo di carico del cliente?" Si costruisce il
+    profilo di carico orario deterministico (piatto o diurno, normalizzato
+    sulla potenza media base) e si calcola il prezzo medio ponderato sul
+    profilo (PWP) dalla serie dei prezzi; il prezzo fisso equo aggiunge:
+    - premio di rischio prezzo (forward risk premium, % sul PWP): copre il
+      fatto che il prezzo futuro e' incerto;
+    - margine commerciale (EUR/MWh): costi di struttura + utile;
+    - adder volume (EUR/MWh): margine di sicurezza per lo scostamento del
+      carico reale da quello atteso.
+    Il risultato e' il prezzo fisso minimo sostenibile; la tabella di
+    sensibilita' mostra come si muove al variare di premio e margine.
+
+    NaN-safe: serie vuota / indice non-datetime / parametri non numerici o
+    fuori range / serie < 24h -> errore pulito; tz-aware reso naive;
+    duplicati keep-first; deterministico.
+    """
+    PESI_FORME = {
+        "piatto": [1.0] * 24,
+        "diurno": [0.625, 0.625, 0.625, 0.625, 0.625, 0.625, 0.625,
+                   1.25, 1.25, 1.25, 1.25, 1.25, 1.25, 1.25, 1.25,
+                   1.25, 1.25, 1.25, 1.25, 1.25, 1.25, 0.625, 0.625,
+                   0.625],
+    }
+
+    def _err(msg):
+        return {"errore": msg, "valido": False}
+
+    try:
+        base = float(carico_base_mw)
+    except (TypeError, ValueError):
+        return _err("carico_base_mw non valido")
+    if not (base > 0):
+        return _err("carico_base_mw deve essere > 0")
+    forma = str(forma_carico).lower()
+    if forma not in PESI_FORME:
+        return _err("forma_carico non valida: usare 'piatto' o 'diurno'")
+    try:
+        premio = float(premio_rischio_pct)
+    except (TypeError, ValueError):
+        return _err("premio_rischio_pct non valido")
+    if not (0.0 <= premio <= 100.0):
+        return _err("premio_rischio_pct deve essere tra 0 e 100")
+    try:
+        marg = float(margine_eur_mwh)
+    except (TypeError, ValueError):
+        return _err("margine_eur_mwh non valido")
+    if not (marg >= 0.0):
+        return _err("margine_eur_mwh deve essere >= 0")
+    try:
+        adder = float(adder_volume_eur_mwh)
+    except (TypeError, ValueError):
+        return _err("adder_volume_eur_mwh non valido")
+    if not (adder >= 0.0):
+        return _err("adder_volume_eur_mwh deve essere >= 0")
+
+    if prezzi is None or len(prezzi) == 0:
+        return _err("serie prezzi vuota")
+    if not isinstance(prezzi.index, pd.DatetimeIndex):
+        return _err("indice non datetime")
+    idxn = prezzi.index.tz_localize(None) if prezzi.index.tz is not None else prezzi.index
+    p = pd.to_numeric(prezzi, errors="coerce")
+    p.index = idxn
+    p = p[~p.index.duplicated(keep="first")].sort_index().dropna()
+    if len(p) < 24:
+        return _err("serie prezzi troppo corta: servono almeno 24 ore valide")
+
+    pesi = np.asarray(PESI_FORME[forma], dtype=float)
+    pesi = pesi / pesi.mean()
+    ore_giorno = p.index.hour.to_numpy()
+    carico = base * pesi[ore_giorno]
+    spot = p.to_numpy()
+
+    energia_tot = float(np.sum(carico))
+    if not (energia_tot > 0):
+        return _err("energia totale nulla")
+    costo_spot = float(np.sum(carico * spot))
+    pwp = costo_spot / energia_tot
+    premio_eur = pwp * premio / 100.0
+    prezzo_equo = pwp + premio_eur + marg + adder
+    addon = premio_eur + marg + adder
+    addon_pct = addon / pwp * 100.0 if pwp > 0 else 0.0
+    costo_equo = prezzo_equo * energia_tot
+
+    if addon_pct > 20.0:
+        giudizio = "ALTO"
+        nota = ("gli add-on superano il 20%% del PWP: prezzo fisso poco "
+                "competitivo, rivedi premio/margine/adder.")
+    elif addon_pct > 10.0:
+        giudizio = "MEDIO"
+        nota = ("gli add-on sono tra il 10%% e il 20%% del PWP: prezzo "
+                "fisso difendibile ma con margine di trattativa.")
+    else:
+        giudizio = "CONTENUTO"
+        nota = ("gli add-on restano sotto il 10%% del PWP: prezzo fisso "
+                "competitivo e comunque sostenibile.")
+
+    scomposizione = pd.DataFrame({
+        "Componente": ["Prezzo medio ponderato (PWP)",
+                       "Premio di rischio prezzo",
+                       "Margine commerciale",
+                       "Adder volume",
+                       "Prezzo fisso equo"],
+        "EUR/MWh": [pwp, premio_eur, marg, adder, prezzo_equo],
+    })
+
+    livelli_premio = sorted({max(0.0, premio - 2.5), premio,
+                             min(100.0, premio + 2.5)})
+    livelli_marg = sorted({max(0.0, marg - 2.0), marg, marg + 2.0})
+    righe = []
+    for m in livelli_marg:
+        riga = {"Margine (EUR/MWh)": m}
+        for pr in livelli_premio:
+            riga["Premio %.1f %%" % pr] = pwp * (1.0 + pr / 100.0) + m + adder
+        righe.append(riga)
+    sensibilita = pd.DataFrame(righe).round(2)
+
+    return {
+        "valido": True, "errore": None,
+        "n_ore": len(p),
+        "forma_carico": forma,
+        "energia_totale_mwh": energia_tot,
+        "pwp_eur_mwh": pwp,
+        "premio_eur_mwh": premio_eur,
+        "margine_eur_mwh": marg,
+        "adder_volume_eur_mwh": adder,
+        "prezzo_fisso_equo_eur_mwh": prezzo_equo,
+        "addon_pct": addon_pct,
+        "costo_equo_eur": costo_equo,
+        "costo_spot_eur": costo_spot,
+        "scomposizione": scomposizione,
+        "sensibilita": sensibilita,
+        "giudizio": giudizio,
+        "verdetto": "ADD-ON %s: %s" % (giudizio, nota),
+    }
+
+
 def calcola_idrogeno_verde(prezzi, potenza_mw=10.0, capex_eur_kw=1500.0,
                            opex_eur_kw_anno=40.0, efficienza_pct=65.0,
                            prezzo_h2_eur_kg=6.0, tasso_pct=6.0, vita_anni=20):
@@ -20854,7 +20997,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -34620,6 +34763,87 @@ elif workspace == _('ws8'):
                 mime="text/csv",
                 key="rv161_csv",
                 help="Una riga per scenario: energia totale/coperta/aperta/long e costo totale.",
+            )
+
+    with tab162:
+        titolo_pf = edu("Prezzo fisso equo", "A quale PREZZO FISSO puoi vendere il MWh senza rimetterci? Parte dal prezzo medio ponderato sul profilo di carico (PWP) e aggiunge: premio di rischio prezzo (il futuro e' incerto), margine commerciale (struttura + utile) e adder volume (il carico reale si scosta da quello atteso). Il risultato e' il prezzo fisso minimo sostenibile; la tabella di sensibilita' mostra come si muove al variare di premio e margine.")
+        st.markdown(f"<h1>💰 {titolo_pf}</h1>", unsafe_allow_html=True)
+        st.caption("Quanto il MWh: PWP + premio rischio + margine + adder volume.")
+        pf0, pf1, pf2 = st.columns(3)
+        with pf0:
+            pf_base = st.number_input("Carico medio (MW)", min_value=0.1,
+                                      max_value=10000.0, value=5.0, step=0.5,
+                                      key="pf162_base")
+            pf_premio = st.number_input("Premio di rischio prezzo (%)",
+                                        min_value=0.0, max_value=100.0,
+                                        value=5.0, step=0.5, key="pf162_premio",
+                                        help="Forward risk premium: margine di sicurezza sul PWP contro l'incertezza del prezzo futuro.")
+        with pf1:
+            pf_forma = st.selectbox("Forma del carico", ["Diurno", "Piatto"],
+                                    key="pf162_forma",
+                                    help="Diurno = piu' carico di giorno (7-20), meno di notte; normalizzato sulla potenza media.")
+            pf_marg = st.number_input("Margine commerciale (EUR/MWh)",
+                                      min_value=0.0, value=3.0, step=0.5,
+                                      key="pf162_marg",
+                                      help="Costi di struttura + utile del fornitore.")
+        with pf2:
+            pf_adder = st.number_input("Adder volume (EUR/MWh)",
+                                       min_value=0.0, value=1.0, step=0.5,
+                                       key="pf162_adder",
+                                       help="Margine di sicurezza per lo scostamento del carico reale da quello atteso.")
+            pf_off = st.number_input("Prezzo offerto al cliente (EUR/MWh, 0 = n/d)",
+                                     min_value=0.0, value=0.0, step=1.0,
+                                     key="pf162_off",
+                                     help="Se hai gia' un'offerta sul tavolo, la confronta con il prezzo equo.")
+        ris_pf = calcola_prezzo_fisso_equo(
+            prezzi, carico_base_mw=float(pf_base),
+            forma_carico="diurno" if pf_forma == "Diurno" else "piatto",
+            premio_rischio_pct=float(pf_premio),
+            margine_eur_mwh=float(pf_marg),
+            adder_volume_eur_mwh=float(pf_adder))
+        if not ris_pf["valido"]:
+            st.error(ris_pf["errore"])
+        else:
+            if ris_pf["giudizio"] == "ALTO":
+                st.error(f"⚠️ {ris_pf['verdetto']}")
+            elif ris_pf["giudizio"] == "MEDIO":
+                st.warning(f"ℹ️ {ris_pf['verdetto']}")
+            else:
+                st.success(f"✅ {ris_pf['verdetto']}")
+            k1, k2, k3, k4 = st.columns(4)
+            render_kpi(edu("Prezzo fisso equo", "Prezzo fisso minimo sostenibile: PWP + premio di rischio + margine + adder volume."), f"{ris_pf['prezzo_fisso_equo_eur_mwh']:.2f} €/MWh", k1)
+            render_kpi(edu("PWP", "Prezzo medio ponderato sul profilo di carico: quanto costa in media il MWh per questo cliente."), f"{ris_pf['pwp_eur_mwh']:.2f} €/MWh", k2)
+            render_kpi(edu("Costo totale periodo", "Prezzo fisso equo x energia totale del periodo."), f"{ris_pf['costo_equo_eur']:,.0f} €".replace(",", " "), k3)
+            if pf_off > 0:
+                marg_off = (float(pf_off) - ris_pf["prezzo_fisso_equo_eur_mwh"]) * ris_pf["energia_totale_mwh"]
+                render_kpi(edu("Margine sull'offerta", "Differenza tra prezzo offerto e prezzo equo, sull'energia totale: positivo = guadagni, negativo = rimetti."), f"{marg_off:+,.0f} €".replace(",", " "), k4)
+            else:
+                render_kpi(edu("Add-on totali", "Premio di rischio + margine + adder volume, in % sul PWP."), f"{ris_pf['addon_pct']:.1f} %", k4)
+
+            st.markdown("**Scomposizione del prezzo fisso equo**")
+            sc = ris_pf["scomposizione"]
+            fig_pf = go.Figure(go.Waterfall(
+                x=sc["Componente"][:-1].tolist() + ["Prezzo fisso equo"],
+                measure=["absolute"] + ["relative"] * 3 + ["total"],
+                y=[sc["EUR/MWh"].iloc[0]] + sc["EUR/MWh"].iloc[1:4].tolist() + [0],
+                text=[f"{v:.2f}" for v in sc["EUR/MWh"].tolist()],
+                textposition="outside",
+                connector={"line": {"color": "#9CA3AF"}},
+            ))
+            fig_pf.update_layout(yaxis_title="EUR/MWh",
+                                 margin=dict(l=10, r=10, t=10, b=10))
+            st.plotly_chart(fig_pf, use_container_width=True)
+
+            st.markdown("**Sensibilità: prezzo equo al variare di premio e margine**")
+            sens_pf = ris_pf["sensibilita"]
+            st.dataframe(sens_pf, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta prezzo fisso equo (CSV)",
+                sens_pf.to_csv(index=False, sep=";").encode("utf-8"),
+                file_name="prezzo_fisso_equo_sensibilita.csv",
+                mime="text/csv",
+                key="pf162_csv",
+                help="Prezzo fisso equo (EUR/MWh) per combinazione di premio di rischio e margine.",
             )
 
 
