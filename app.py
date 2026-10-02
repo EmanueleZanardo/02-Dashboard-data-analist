@@ -20031,6 +20031,160 @@ def calcola_rischio_volume(prezzi, carico_base_mw=5.0, forma_carico="diurno",
     }
 
 
+def calcola_costo_per_sito(prezzi, carichi):
+    """Ripartizione del costo di fornitura su piu' siti/impianti (multi-sito).
+
+    Domanda operativa: "quanto del costo totale dell'energia spetta a ciascun
+    sito, e quale sito paga il MWh piu' caro per il suo profilo di consumo?"
+    Il costo di ogni sito e' calcolato per causazione esatta
+    (somma su ogni ora di prezzo_orario x carico_orario del sito), non con una
+    ripartizione a forfait sull'energia: due siti con la stessa energia ma
+    profili diversi pagano prezzi medi diversi perche' consumano in ore
+    diverse (es. un sito notturno vs uno diurno).
+
+    Parametri
+    ---------
+    prezzi : pd.Series — prezzi orari EUR/MWh, indice datetime.
+    carichi : dict {nome_sito: pd.Series} oppure pd.DataFrame con una colonna
+        per sito — carichi orari in MW, indice datetime (allineato per
+        intersezione con l'indice dei prezzi).
+
+    Ritorna dict con: valido, errore, tabella (pd.DataFrame, una riga per
+    sito), energia_totale_mwh, costo_totale_eur,
+    prezzo_medio_portafoglio_eur_mwh, n_ore, sito_piu_caro, sito_piu_economico,
+    spread_eur_mwh, spread_pct, verdetto, giudizio.
+
+    NaN-safe: serie prezzi vuota / indice non-datetime / <24h -> errore
+    pulito; tz-aware reso naive; duplicati keep-first; carichi NaN -> 0
+    (lettura mancante = sito fermo quell'ora, documentato); carichi negativi
+    -> errore pulito; sito con energia nulla -> errore pulito; nomi
+    vuoti/duplicati -> errore pulito; <24 ore in comune tra prezzi e carichi
+    -> errore pulito; deterministico.
+    """
+    def _err(msg):
+        return {"errore": msg, "valido": False}
+
+    # --- prezzi: pulizia standard ---
+    if prezzi is None or len(prezzi) == 0:
+        return _err("serie prezzi vuota")
+    if not isinstance(prezzi.index, pd.DatetimeIndex):
+        return _err("indice prezzi non datetime")
+    idxn = prezzi.index.tz_localize(None) if prezzi.index.tz is not None else prezzi.index
+    p = pd.to_numeric(prezzi, errors="coerce")
+    p.index = idxn
+    p = p[~p.index.duplicated(keep="first")].sort_index().dropna()
+    if len(p) < 24:
+        return _err("serie prezzi troppo corta: servono almeno 24 ore valide")
+
+    # --- carichi: dict {nome: serie} o DataFrame ---
+    if carichi is None:
+        return _err("carichi non forniti")
+    if isinstance(carichi, dict):
+        nomi_raw = list(carichi.keys())
+        serie_raw = list(carichi.values())
+    elif isinstance(carichi, pd.DataFrame):
+        nomi_raw = list(carichi.columns)
+        serie_raw = [carichi[c] for c in nomi_raw]
+    else:
+        return _err("carichi deve essere dict {nome: serie} o DataFrame")
+    if len(nomi_raw) == 0:
+        return _err("nessun sito fornito")
+    nomi = [str(n).strip() for n in nomi_raw]
+    if any(n == "" for n in nomi):
+        return _err("nome sito vuoto non ammesso")
+    if len(set(nomi)) != len(nomi):
+        return _err("nomi sito duplicati")
+
+    pulite = {}
+    for nome, s in zip(nomi, serie_raw):
+        if s is None or len(s) == 0:
+            return _err(f"sito '{nome}': serie carico vuota")
+        if not isinstance(s.index, pd.DatetimeIndex):
+            return _err(f"sito '{nome}': indice carico non datetime")
+        idxs = s.index.tz_localize(None) if s.index.tz is not None else s.index
+        q = pd.to_numeric(s, errors="coerce")
+        q.index = idxs
+        q = q[~q.index.duplicated(keep="first")].sort_index()
+        # lettura mancante = sito fermo quell'ora -> 0 (documentato)
+        pulite[nome] = q.fillna(0.0)
+
+    idx_comune = p.index
+    for q in pulite.values():
+        idx_comune = idx_comune.intersection(q.index)
+    idx_comune = idx_comune.sort_values()
+    if len(idx_comune) < 24:
+        return _err("meno di 24 ore in comune tra prezzi e carichi")
+    pp = p.loc[idx_comune].to_numpy()
+
+    righe = []
+    for nome, q in pulite.items():
+        vals = q.loc[idx_comune].to_numpy(dtype=float)
+        if np.any(vals < 0):
+            return _err(f"sito '{nome}': carichi negativi non ammessi "
+                        "(usare i prelievi assoluti)")
+        energia = float(np.sum(vals))
+        if energia <= 0:
+            return _err(f"sito '{nome}': energia nulla nel periodo")
+        costo = float(np.sum(pp * vals))
+        righe.append({
+            "Sito": nome,
+            "Energia (MWh)": energia,
+            "Costo (EUR)": costo,
+            "Prezzo medio (EUR/MWh)": costo / energia,
+            "Ore attive": int(np.sum(vals > 0)),
+        })
+
+    tab = pd.DataFrame(righe)
+    energia_tot = float(tab["Energia (MWh)"].sum())
+    costo_tot = float(tab["Costo (EUR)"].sum())
+    pmedio = costo_tot / energia_tot if energia_tot > 0 else 0.0
+    tab["Quota costo (%)"] = 100.0 * tab["Costo (EUR)"] / costo_tot if costo_tot > 0 else 0.0
+    tab["Quota energia (%)"] = 100.0 * tab["Energia (MWh)"] / energia_tot
+    tab["Scost. vs medio (EUR/MWh)"] = tab["Prezzo medio (EUR/MWh)"] - pmedio
+    if pmedio != 0:
+        tab["Scost. vs medio (%)"] = 100.0 * tab["Scost. vs medio (EUR/MWh)"] / pmedio
+    else:
+        tab["Scost. vs medio (%)"] = 0.0
+
+    i_max = int(tab["Prezzo medio (EUR/MWh)"].idxmax())
+    i_min = int(tab["Prezzo medio (EUR/MWh)"].idxmin())
+    sito_caro = tab.loc[i_max, "Sito"]
+    sito_eco = tab.loc[i_min, "Sito"]
+    spread = float(tab.loc[i_max, "Prezzo medio (EUR/MWh)"] - tab.loc[i_min, "Prezzo medio (EUR/MWh)"])
+    spread_pct = (100.0 * spread / pmedio) if pmedio != 0 else 0.0
+
+    if spread_pct > 15.0:
+        giudizio = "RILEVANTI"
+        verdetto = (f"⚠️ Differenze RILEVANTI tra siti: '{sito_caro}' paga il MWh "
+                    f"{spread_pct:.1f}% in più di '{sito_eco}' "
+                    f"({spread:.2f} €/MWh di scostamento). Vale la pena rivedere "
+                    f"i profili di consumo o la struttura di acquisto per sito.")
+    elif spread_pct > 5.0:
+        giudizio = "MODERATE"
+        verdetto = (f"ℹ️ Differenze moderate tra siti: '{sito_caro}' paga il MWh "
+                    f"{spread_pct:.1f}% in più di '{sito_eco}'.")
+    else:
+        giudizio = "OMOGENEE"
+        verdetto = (f"✅ Costi omogenei tra siti: scostamento massimo del prezzo "
+                    f"medio del {spread_pct:.1f}%.")
+
+    return {
+        "errore": None,
+        "valido": True,
+        "tabella": tab,
+        "n_ore": len(idx_comune),
+        "energia_totale_mwh": energia_tot,
+        "costo_totale_eur": costo_tot,
+        "prezzo_medio_portafoglio_eur_mwh": pmedio,
+        "sito_piu_caro": sito_caro,
+        "sito_piu_economico": sito_eco,
+        "spread_eur_mwh": spread,
+        "spread_pct": spread_pct,
+        "giudizio": giudizio,
+        "verdetto": verdetto,
+    }
+
+
 def calcola_prezzo_fisso_equo(prezzi, carico_base_mw=5.0, forma_carico="diurno",
                               premio_rischio_pct=5.0, margine_eur_mwh=3.0,
                               adder_volume_eur_mwh=1.0):
@@ -20997,7 +21151,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -34846,6 +35000,91 @@ elif workspace == _('ws8'):
                 help="Prezzo fisso equo (EUR/MWh) per combinazione di premio di rischio e margine.",
             )
 
+    with tab163:
+        titolo_cs = edu("Costo per sito", "Quanto del COSTO TOTALE dell'energia spetta a ciascun sito o impianto? Il costo di ogni sito e' calcolato per causazione esatta (prezzo orario x carico orario del sito), non a forfait sull'energia: a parita' di energia, un sito che consuma di notte paga un prezzo medio diverso da uno che consuma di giorno. Utile per ripartire la bolletta tra stabilimenti e capire dove intervenire.")
+        st.markdown(f"<h1>🏭 {titolo_cs}</h1>", unsafe_allow_html=True)
+        st.caption("Ripartizione del costo di fornitura tra siti: prezzo medio per sito, quote, scostamento dal medio di portafoglio.")
+        PESI_CS = {
+            "piatto": [1.0] * 24,
+            "diurno": [0.625] * 7 + [1.25] * 14 + [0.625] * 3,
+            "notturno": [1.25] * 7 + [0.625] * 14 + [1.25] * 3,
+            "uffici": [0.3] * 7 + [0.8, 1.1] + [1.3] * 9 + [1.0, 0.7, 0.5, 0.4] + [0.3] * 2,
+        }
+        cs_n = st.slider("Numero di siti", min_value=2, max_value=6, value=3,
+                         key="cs163_n",
+                         help="Quanti siti/impianti ripartire nel costo totale.")
+        mw_default = [5.0, 3.0, 2.0, 1.5, 1.0, 1.0]
+        cols_cs = st.columns(3)
+        nomi_cs, mw_cs, forme_cs = [], [], []
+        for i in range(int(cs_n)):
+            with cols_cs[i % 3]:
+                nomi_cs.append(st.text_input(f"Nome sito {i + 1}", value=f"Sito {i + 1}",
+                                             key=f"cs163_nome{i}"))
+                mw_cs.append(st.number_input(f"Potenza media sito {i + 1} (MW)",
+                                             min_value=0.1, max_value=10000.0,
+                                             value=mw_default[i], step=0.5,
+                                             key=f"cs163_mw{i}"))
+                forme_cs.append(st.selectbox(f"Forma carico sito {i + 1}",
+                                             ["Diurno", "Piatto", "Notturno", "Uffici"],
+                                             key=f"cs163_forma{i}",
+                                             help="Diurno = piu' carico 7-20; Notturno = piu' carico di notte; Uffici = profilo 9-17."))
+        profili_cs = {}
+        ore_cs = prezzi.index.hour.to_numpy()
+        for nm, mwv, fm in zip(nomi_cs, mw_cs, forme_cs):
+            w = np.asarray(PESI_CS[fm.lower()], dtype=float)
+            w = w / w.mean()
+            profili_cs[nm] = pd.Series(float(mwv) * w[ore_cs], index=prezzi.index)
+        ris_cs = calcola_costo_per_sito(prezzi, profili_cs)
+        if not ris_cs["valido"]:
+            st.error(ris_cs["errore"])
+        else:
+            if ris_cs["giudizio"] == "RILEVANTI":
+                st.error(f"⚠️ {ris_cs['verdetto']}")
+            elif ris_cs["giudizio"] == "MODERATE":
+                st.warning(f"ℹ️ {ris_cs['verdetto']}")
+            else:
+                st.success(f"✅ {ris_cs['verdetto']}")
+            c1, c2, c3, c4 = st.columns(4)
+            render_kpi(edu("Costo totale", "Somma dei costi di tutti i siti sul periodo."), f"{ris_cs['costo_totale_eur']:,.0f} €".replace(",", " "), c1)
+            render_kpi(edu("Energia totale", "Somma dell'energia di tutti i siti sul periodo."), f"{ris_cs['energia_totale_mwh']:,.0f} MWh".replace(",", " "), c2)
+            render_kpi(edu("Prezzo medio portafoglio", "Costo totale / energia totale: il prezzo medio del MWh dell'intero portafoglio siti."), f"{ris_cs['prezzo_medio_portafoglio_eur_mwh']:.2f} €/MWh", c3)
+            tab_cs = ris_cs["tabella"]
+            i_caro = int(tab_cs["Prezzo medio (EUR/MWh)"].idxmax())
+            render_kpi(edu("Sito più caro", "Il sito con il prezzo medio piu' alto: il suo profilo consuma nelle ore piu' costose."), f"{tab_cs.loc[i_caro, 'Sito']}: {tab_cs.loc[i_caro, 'Prezzo medio (EUR/MWh)']:.2f} €/MWh", c4)
+
+            st.markdown("**Costo per sito (EUR)**")
+            fig_cs1 = go.Figure(go.Bar(
+                x=tab_cs["Sito"], y=tab_cs["Costo (EUR)"],
+                text=[f"{v:,.0f} €".replace(",", " ") for v in tab_cs["Costo (EUR)"]],
+                textposition="outside",
+            ))
+            fig_cs1.update_layout(yaxis_title="EUR",
+                                  margin=dict(l=10, r=10, t=10, b=10))
+            st.plotly_chart(fig_cs1, use_container_width=True)
+
+            st.markdown("**Prezzo medio per sito (EUR/MWh) vs medio di portafoglio**")
+            fig_cs2 = go.Figure(go.Bar(
+                x=tab_cs["Sito"], y=tab_cs["Prezzo medio (EUR/MWh)"],
+                text=[f"{v:.2f}" for v in tab_cs["Prezzo medio (EUR/MWh)"]],
+                textposition="outside", name="Prezzo medio sito",
+            ))
+            fig_cs2.add_hline(y=ris_cs["prezzo_medio_portafoglio_eur_mwh"],
+                              line_dash="dash", line_color="#9CA3AF",
+                              annotation_text="Medio portafoglio")
+            fig_cs2.update_layout(yaxis_title="EUR/MWh",
+                                  margin=dict(l=10, r=10, t=10, b=10))
+            st.plotly_chart(fig_cs2, use_container_width=True)
+
+            st.markdown("**Dettaglio per sito**")
+            st.dataframe(tab_cs, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta costo per sito (CSV)",
+                tab_cs.to_csv(index=False, sep=";").encode("utf-8"),
+                file_name="costo_per_sito.csv",
+                mime="text/csv",
+                key="cs163_csv",
+                help="Una riga per sito: energia, costo, prezzo medio, quote e scostamento dal medio di portafoglio.",
+            )
 
 
 # Footer
