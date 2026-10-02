@@ -1,6 +1,9 @@
 # STATUS.md — 02-Dashboard-data-analist (Singularity Quant ETRM)
 
-**Ultimo aggiornamento: 02/10/2026 ~04:00 CEST**
+**Ultimo aggiornamento: 02/10/2026 ~04:45 CEST**
+
+## 02/10/2026 ~04:45 CEST — ciclo QA orario
+- Nuova tab145 "⚡ Energia reattiva": penale per basso fattore di potenza — helper calcola_penalita_reattiva (reattiva oraria = attiva × tan(acos(cos phi)) dal profilo MW F1/F2/F3; penali mensili a due scaglioni stile ARERA configurabili: oltre 33% e fino al 75% dell'attiva → tariffa t1, oltre 75% → tariffa t2; scenario rifasamento a cos phi 0.95 con risparmio quantificato; NaN-safe, tz-aware reso naive, serie vuota/indice non-datetime/MW zero/cos phi fuori (0,1) -> errore pulito); UI con input MW per fascia, slider cos phi, tariffe scaglioni editabili, 4 KPI (penale totale/mesi con penale, risparmio rifasamento, rapporto %, peggior mese) + verdetto, barre rapporto mensile vs soglie 33%/75%, barre penale mensile, tabella mensile + export CSV. Testato con 38 check, 0 fail (2 fix del test in sviluppo: arrotondamenti a 1 decimale del rapporto, nessun fix del codice). README 144->145 tab, docs/AGGIUNGERE_TAB.md 144->145. Regressione tab144: 41/41 verdi.
 
 ## 02/10/2026 ~04:00 CEST — ciclo QA orario
 - Nuova tab144 "⏳ Baricentro del costo": ora media CIRCOLARE ponderata del giorno in cui si concentra la spesa (costo orario = prezzo spot x MW fascia F1/F2/F3, pesi = costi non negativi; la media circolare evita il falso "mezzogiorno" quando il costo sta attorno a mezzanotte) — helper calcola_baricentro_costo (baricentro HH:MM + deviazione standard circolare ±h, quota di costo entro ±2h dal baricentro, conteggio ore a costo negativo escluse dai pesi, tabella mensile con baricentro/dispersione/quota/costo per rilevare lo spostamento del profilo ex-post demand response; NaN-safe, tz-aware reso naive, serie vuota/indice non-datetime/MW zero/costo non positivo -> errore pulito); UI con input MW per fascia, 4 KPI, grafico 24h con linea del baricentro, tabella mensile + export CSV. Testato con 41 check, 0 fail. README 143->144 tab, docs/AGGIUNGERE_TAB.md 143->144.
