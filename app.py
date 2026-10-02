@@ -17068,6 +17068,136 @@ def calcola_baricentro_costo(prezzi, mw_f1, mw_f2, mw_f3):
             "per_ora": per_ora, "mensile": pd.DataFrame(righe, columns=cols_m)}
 
 
+def calcola_penalita_reattiva(prezzi, mw_f1, mw_f2, mw_f3, cos_phi,
+                            tariffa_t1=0.008, tariffa_t2=0.012,
+                            soglia_t1=0.33, soglia_t2=0.75, cos_phi_obiettivo=0.95):
+    """Penale per energia reattiva: quanto ti costa il basso fattore di potenza.
+
+    Domanda operativa: 'quanto pago di penali per l'energia reattiva
+    (kvarh) e quanto risparmierei rifasando a 0.95?'
+
+    Logica: dalla potenza attiva oraria (MW della fascia F1/F2/F3, stessa
+    logica della tab Baricentro del costo) e dal cos(phi) dichiarato si
+    ricava l'energia reattiva oraria: Er = Ea * tan(acos(cos_phi)).
+    Aggregazione mensile e penali a due scaglioni stile ARERA (soglie e
+    tariffe configurabili perche' cambiano per livello di tensione e anno):
+      - scaglione 1: reattiva oltre soglia_t1 (default 33%) e fino a
+        soglia_t2 (default 75%) dell'attiva -> tariffa_t1 €/kvarh;
+      - scaglione 2: reattiva oltre soglia_t2 dell'attiva -> tariffa_t2 €/kvarh.
+    In piu' il 'risparmio rifasamento': penale ricalcolata con
+    cos_phi_obiettivo (default 0.95) sullo stesso profilo.
+
+    Differenza dagli altri tab: stima bolletta e riconciliazione fattura
+    valorizzano la componente ENERGIA a spot; qui si misura una voce di
+    costo INDIPENDENTE dal prezzo (dipende solo dal profilo e dal cos phi),
+    che per un'utenza industriale mal rifasata puo' valere migliaia di euro
+    l'anno e si elimina con un rifasatore da qualche centinaio di euro.
+
+    NaN-safe: serie vuota / indice non datetime / tutti i MW a zero /
+    cos_phi fuori (0, 1) -> errore pulito, DataFrame con le colonne giuste vuoti.
+
+    Ritorna dict con 'errore', 'valido', 'n_ore', 'mwh_tot', 'kvarh_tot',
+    'rapporto_medio_pct' (reattiva/attiva pesata sul periodo),
+    'penale_tot' (€), 'penale_rifasata' (€ con cos_phi_obiettivo),
+    'risparmio_rifasamento' (€), 'mesi_con_penale' (int), 'peggior_mese'
+    (str 'YYYY-MM'), 'penale_peggiore' (€), 'tan_phi', 'tan_phi_obiettivo' e
+    'mensile' (DataFrame: Mese, Attiva (kWh), Reattiva (kvarh),
+    Rapporto %, Eccedenza t1 (kvarh), Eccedenza t2 (kvarh), Penale (€))."""
+    cols_m = ["Mese", "Attiva (kWh)", "Reattiva (kvarh)", "Rapporto %",
+              "Eccedenza t1 (kvarh)", "Eccedenza t2 (kvarh)", "Penale (€)"]
+    vuoto = {"errore": "Dati insufficienti: nessuna ora valida nel periodo.",
+             "valido": False, "n_ore": 0, "mwh_tot": 0.0, "kvarh_tot": 0.0,
+             "rapporto_medio_pct": None, "penale_tot": 0.0,
+             "penale_rifasata": 0.0, "risparmio_rifasamento": 0.0,
+             "mesi_con_penale": 0, "peggior_mese": None, "penale_peggiore": 0.0,
+             "tan_phi": None, "tan_phi_obiettivo": None,
+             "mensile": pd.DataFrame(columns=cols_m)}
+    try:
+        cp = float(cos_phi)
+    except Exception:
+        cp = float("nan")
+    if not (0.0 < cp < 1.0):
+        out = dict(vuoto)
+        out["errore"] = "Il cos(phi) deve essere compreso tra 0 e 1 (esclusi)."
+        return out
+    try:
+        p = pd.to_numeric(prezzi, errors="coerce").dropna()
+        p = p[~p.index.duplicated(keep="first")].sort_index()
+    except Exception:
+        return dict(vuoto)
+    if len(p) == 0 or not isinstance(p.index, pd.DatetimeIndex):
+        return dict(vuoto)
+    mw_map = {"F1": max(0.0, float(mw_f1 or 0.0)), "F2": max(0.0, float(mw_f2 or 0.0)),
+              "F3": max(0.0, float(mw_f3 or 0.0))}
+    if all(m == 0.0 for m in mw_map.values()):
+        out = dict(vuoto)
+        out["errore"] = "Imposta una potenza maggiore di zero in almeno una fascia."
+        return out
+    t1 = max(0.0, float(tariffa_t1 or 0.0))
+    t2 = max(0.0, float(tariffa_t2 or 0.0))
+    s1 = min(max(0.0, float(soglia_t1 or 0.0)), 5.0)
+    s2 = min(max(0.0, float(soglia_t2 or 0.0)), 5.0)
+    if s2 < s1:
+        s1, s2 = s2, s1
+    try:
+        co = float(cos_phi_obiettivo)
+    except Exception:
+        co = 0.95
+    co = min(max(co, 0.01), 0.9999)
+    tan_phi = float(np.tan(np.arccos(cp)))
+    tan_ob = float(np.tan(np.arccos(co)))
+    ore = p.index.hour.to_numpy()
+    wd = p.index.weekday.to_numpy()
+    fasce = np.array([_fascia_aeegsi(h, d) for h, d in zip(ore, wd)])
+    mw = np.array([mw_map[f] for f in fasce])
+    ea_oraria = mw * 1000.0          # kWh per ora
+    er_oraria = ea_oraria * tan_phi  # kvarh per ora
+    mesi = (p.index.tz_localize(None) if p.index.tz is not None else p.index).to_period("M")
+
+    def _penale_mese(ea, er):
+        if ea <= 0.0 or er <= 0.0:
+            return 0.0, 0.0, 0.0
+        ecc2 = max(0.0, er - s2 * ea)
+        ecc1 = max(0.0, min(er, s2 * ea) - s1 * ea)
+        return ecc1, ecc2, ecc1 * t1 + ecc2 * t2
+
+    righe = []
+    for mese, idx in pd.DataFrame({"ea": ea_oraria, "er": er_oraria}).groupby(mesi).groups.items():
+        g = pd.DataFrame({"ea": ea_oraria, "er": er_oraria}).iloc[idx]
+        ea_m, er_m = float(g["ea"].sum()), float(g["er"].sum())
+        ecc1, ecc2, pen = _penale_mese(ea_m, er_m)
+        righe.append({"Mese": str(mese), "Attiva (kWh)": round(ea_m, 0),
+                      "Reattiva (kvarh)": round(er_m, 0),
+                      "Rapporto %": round(er_m / ea_m * 100.0, 1) if ea_m > 0 else 0.0,
+                      "Eccedenza t1 (kvarh)": round(ecc1, 0),
+                      "Eccedenza t2 (kvarh)": round(ecc2, 0),
+                      "Penale (€)": round(pen, 2)})
+    mensile = pd.DataFrame(righe, columns=cols_m)
+    ea_tot, er_tot = float(ea_oraria.sum()), float(er_oraria.sum())
+    penale_tot = float(mensile["Penale (€)"].sum()) if len(mensile) else 0.0
+    # scenario rifasamento: stessa attiva, reattiva ridotta a tan(phi_obiettivo)
+    er_ob = ea_oraria * tan_ob
+    pen_ob = 0.0
+    for mese, idx in pd.DataFrame({"ea": ea_oraria, "er": er_ob}).groupby(mesi).groups.items():
+        g = pd.DataFrame({"ea": ea_oraria, "er": er_ob}).iloc[idx]
+        pen_ob += _penale_mese(float(g["ea"].sum()), float(g["er"].sum()))[2]
+    mesi_pen = mensile[mensile["Penale (€)"] > 0.0]
+    peg_m, peg_v = (None, 0.0)
+    if len(mesi_pen):
+        riga = mesi_pen.loc[mesi_pen["Penale (€)"].idxmax()]
+        peg_m, peg_v = str(riga["Mese"]), float(riga["Penale (€)"])
+    return {"errore": None, "valido": True, "n_ore": len(p),
+            "mwh_tot": ea_tot / 1000.0, "kvarh_tot": er_tot,
+            "rapporto_medio_pct": round(er_tot / ea_tot * 100.0, 1) if ea_tot > 0 else 0.0,
+            "penale_tot": round(penale_tot, 2),
+            "penale_rifasata": round(pen_ob, 2),
+            "risparmio_rifasamento": round(penale_tot - pen_ob, 2),
+            "mesi_con_penale": int(len(mesi_pen)),
+            "peggior_mese": peg_m, "penale_peggiore": round(peg_v, 2),
+            "tan_phi": round(tan_phi, 4), "tan_phi_obiettivo": round(tan_ob, 4),
+            "mensile": mensile}
+
+
 def calcola_efficienza_fixing(prezzi_orari, prezzo_fissato):
     """Efficienza del fixing: quanto e' stato buono il tuo prezzo fissato (€/MWh)
     contro il mercato del periodo.
@@ -17812,7 +17942,7 @@ elif workspace == _('ws8'):
         st.dataframe(pd.DataFrame(righe), use_container_width=True, hide_index=True)
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -30008,6 +30138,96 @@ with tab144:
                 mime="text/csv",
                 key="csv_baricentro_costo",
                 help="Una riga per mese: baricentro, dispersione, quota di costo entro ±2h e costo totale.",
+            )
+
+
+with tab145:
+        titolo_er = edu("Energia reattiva", "L'ENERGIA REATTIVA (kvarh) e' l'energia che i carichi induttivi (motori, trasformatori) 'prendono e restituiscono' senza trasformarla in lavoro utile. Il distributore la PENALIZZA in bolletta quando supera una soglia dell'energia attiva (in Italia, stile ARERA: oltre il 33% scaglione 1, oltre il 75% scaglione 2, tariffe diverse per livello di tensione). Il FATTORE DI POTENZA cos(phi) misura quanto sei rifasato: 1.0 = perfetto, 0.7 = mal rifasato. Il RIFASAMENTO (batterie di condensatori) costa poco una tantum ed elimina le penali per anni: questa tab quantifica la penale che paghi oggi e il risparmio se rifasi a 0.95.")
+        st.markdown(f"<h1>⚡ {titolo_er}</h1>", unsafe_allow_html=True)
+        st.caption("Quanto ti costa il basso cos(phi): penali mensili per la reattiva e risparmio del rifasamento.")
+        st.caption("💡 Usa pratico: se il risparmio del rifasamento supera il costo di un rifasatore (qualche centinaio di €/kvar installato), l'investimento si ripaga in mesi — le tariffe cambiano per tensione/anno, aggiornale dai tuoi corrispettivi di rete.")
+        er1, er2, er3 = st.columns(3)
+        with er1:
+            er_f1 = st.number_input("Potenza in F1 (MW)", min_value=0.0, value=1.0, step=0.5, key="er145_f1",
+                                    help="Ore di punta: lun–ven 08:00–19:00.")
+        with er2:
+            er_f2 = st.number_input("Potenza in F2 (MW)", min_value=0.0, value=1.0, step=0.5, key="er145_f2",
+                                    help="Ore intermedie: lun–ven 07:00–08:00 e 19:00–23:00, sab 07:00–23:00.")
+        with er3:
+            er_f3 = st.number_input("Potenza in F3 (MW)", min_value=0.0, value=1.0, step=0.5, key="er145_f3",
+                                    help="Ore fuori punta: notti, domeniche e festivi.")
+        er4, er5, er6 = st.columns(3)
+        with er4:
+            er_cos = st.slider("cos(phi) attuale", min_value=0.50, max_value=0.999, value=0.85, step=0.005,
+                               key="er145_cos",
+                               help="Fattore di potenza del tuo impianto (0.7-0.8 = mal rifasato, 0.95+ = ok).")
+        with er5:
+            er_t1 = st.number_input("Tariffa scaglione 1 (€/kvarh)", min_value=0.0, value=0.008, step=0.001,
+                                    format="%.4f", key="er145_t1",
+                                    help="Penale per reattiva oltre il 33% e fino al 75% dell'attiva.")
+        with er6:
+            er_t2 = st.number_input("Tariffa scaglione 2 (€/kvarh)", min_value=0.0, value=0.012, step=0.001,
+                                    format="%.4f", key="er145_t2",
+                                    help="Penale per reattiva oltre il 75% dell'attiva.")
+        er = calcola_penalita_reattiva(prezzi, er_f1, er_f2, er_f3, er_cos, er_t1, er_t2)
+        if er["errore"]:
+            st.error(er["errore"])
+        else:
+            k1, k2, k3, k4 = st.columns(4)
+            with k1:
+                st.metric("Penale totale reattiva", f"{er['penale_tot']:,.0f} €",
+                          f"{er['mesi_con_penale']} mesi con penale")
+            with k2:
+                st.metric("Risparmio rifasando a 0.95", f"{er['risparmio_rifasamento']:,.0f} €",
+                          f"penale residua {er['penale_rifasata']:,.0f} €")
+            with k3:
+                st.metric("Rapporto reattiva/attiva", f"{er['rapporto_medio_pct']:.1f}%",
+                          f"tan(phi) = {er['tan_phi']}")
+            with k4:
+                peg_txt = er["peggior_mese"] if er["peggior_mese"] else "—"
+                st.metric("Peggior mese", peg_txt, f"{er['penale_peggiore']:,.0f} €")
+            if er["risparmio_rifasamento"] > 0:
+                st.success(f"✅ Rifasando a cos(phi) 0.95 risparmieresti {er['risparmio_rifasamento']:,.0f} € sul periodo.")
+            elif er["penale_tot"] == 0:
+                st.success("✅ Nessuna penale: il tuo profilo e' gia' ben rifasato per queste soglie.")
+            else:
+                st.info("➖ Il rifasamento a 0.95 non riduce ulteriormente le penali con queste soglie.")
+
+            st.markdown("**Rapporto reattiva/attiva per mese vs soglie di penale**")
+            fig_er = go.Figure()
+            fig_er.add_trace(go.Bar(x=er["mensile"]["Mese"], y=er["mensile"]["Rapporto %"],
+                                    name="Rapporto %", marker_color="#38bdf8",
+                                    hovertemplate="%{x}: %{y:.1f}%<extra></extra>"))
+            fig_er.add_hline(y=33.0, line_dash="dash", line_color="#f59e0b",
+                             annotation_text="Soglia t1 33%", annotation_font_color="#f59e0b")
+            fig_er.add_hline(y=75.0, line_dash="dash", line_color="#ef4444",
+                             annotation_text="Soglia t2 75%", annotation_font_color="#ef4444")
+            fig_er.update_layout(template="plotly_dark", height=360, xaxis_title="Mese",
+                                 yaxis_title="%")
+            st.plotly_chart(fig_er, use_container_width=True)
+
+            st.markdown("**Penale mensile (€)**")
+            fig_er2 = go.Figure()
+            fig_er2.add_trace(go.Bar(x=er["mensile"]["Mese"], y=er["mensile"]["Penale (€)"],
+                                     name="Penale €", marker_color="#ef4444",
+                                     hovertemplate="%{x}: %{y:,.0f} €<extra></extra>"))
+            fig_er2.update_layout(template="plotly_dark", height=300, xaxis_title="Mese",
+                                  yaxis_title="€")
+            st.plotly_chart(fig_er2, use_container_width=True)
+
+            st.markdown("**Dettaglio mensile**")
+            st.dataframe(er["mensile"], use_container_width=True, hide_index=True)
+            st.caption(f"💡 Profilo: F1 {er_f1} MW, F2 {er_f2} MW, F3 {er_f3} MW — "
+                       f"{er['mwh_tot']:,.0f} MWh attivi e {er['kvarh_tot']:,.0f} kvarh reattivi "
+                       f"su {er['n_ore']:,} ore. Indipendente dal prezzo spot: e' una voce di rete.")
+            d0r, d1r = prezzi.index.min().date(), prezzi.index.max().date()
+            st.download_button(
+                "⬇️ Esporta penali reattive (CSV)",
+                er["mensile"].to_csv(index=False, sep=";").encode("utf-8"),
+                file_name=f"penali_reattive_{d0r}_{d1r}.csv",
+                mime="text/csv",
+                key="csv_penali_reattive",
+                help="Una riga per mese: attiva, reattiva, rapporto %, eccedenze per scaglione e penale.",
             )
 
 
