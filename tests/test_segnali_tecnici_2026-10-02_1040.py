@@ -158,7 +158,9 @@ check("NaN: tollerati", r["valido"] and r["n_giorni"] == 70)
 
 # --- 11. registry: dichiarazione, UI, chiavi widget ---
 appsrc = open("app.py", encoding="utf-8").read()
-check("registry: tab151 dichiarata", "tab151 = st.tabs(" in appsrc)
+_decl = [l for l in appsrc.splitlines() if "st.tabs(" in l and "tab1," in l]
+check("registry: tab151 dichiarata",
+      any("tab151" in l.split("= st.tabs(")[0] for l in _decl))
 check("registry: titolo presente", '"📈 Segnali tecnici"' in appsrc)
 check("registry: blocco UI presente", "    with tab151:" in appsrc)
 check("registry: helper chiamato nella UI",
