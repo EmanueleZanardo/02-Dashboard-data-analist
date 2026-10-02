@@ -19065,6 +19065,210 @@ def calcola_normalizzazione_climatica(prezzi, mw_f1=1.0, mw_f2=1.0, mw_f3=1.0,
             "hdd": hdd, "cdd": cdd}
 
 
+def calcola_enpi(prezzi, mw_f1=1.0, mw_f2=1.0, mw_f3=1.0, produzione=None,
+                 baseline_mesi=3):
+    """EnPI - consumo specifico di energia per unita' prodotta (stile ISO 50001).
+
+    Domanda operativa: "quanta energia mi costa ogni pezzo che produco, e sto
+    migliorando?" L'EnPI (Energy Performance Indicator) e' il KPI cardine di
+    ISO 50001 e delle diagnosi energetiche: consumo specifico =
+    kWh / unita' prodotta nel mese. Qui si calcola da:
+      - energia mensile (MWh) e costo mensile (EUR) dal profilo orario
+        MW F1/F2/F3 (via fascia_oraria, come gli altri tab di costo);
+      - produzione mensile fornita dall'utente (CSV o tabella: mese, volume).
+
+    Oltre al consumo specifico, il tab stima il MODELLO DI BASELINE con OLS:
+        energia_mese = a + b * produzione_mese
+    da cui: baseload fisso a (MWh/mese indipendenti dalla produzione),
+    consumo marginale b (kWh per unita' aggiuntiva) e R² (quanto la
+    produzione spiega davvero i consumi). La BASELINE EnPI e' la media del
+    consumo specifico dei primi `baseline_mesi` mesi: il miglioramento % dei
+    mesi successivi si misura contro quella.
+
+    Differenza dagli altri tab: 'Costo per turno' e 'Margine per impianto'
+    guardano al costo assoluto; qui costo e consumo sono rapportati
+    all'OUTPUT produttivo, l'unico confronto sensato tra mesi con volumi
+    diversi (ed e' il formato richiesto da ISO 50001 / diagnosi energetiche).
+    'Normalizzazione climatica' toglie l'effetto temperatura; qui si toglie
+    l'effetto volume.
+
+    NaN-safe: prezzi con NaN/duplicati/tz gestiti come negli altri helper
+    (tz reso naive, duplicati: primo tenuto); produzione None/vuota/tutta
+    non positiva/meno di 2 mesi in comune col periodo prezzi -> valido False
+    con errore pulito; mesi duplicati in produzione sommati; baseline_mesi
+    fuori [1, n_mesi] troncato; deterministico.
+
+    Ritorna dict con 'errore', 'valido', 'n_mesi', 'mesi' (YYYY-MM),
+    'energia_mwh', 'costo_eur', 'volumi', 'kwh_unita', 'eur_unita',
+    'r2' (None se <3 mesi o produzione senza varianza), 'base_mwh_mese',
+    'kwh_marginale_unita', 'quota_fissa_pct', 'baseline_kwh_unita',
+    'miglioramento_ultimo_pct' (None se nessun mese oltre la baseline),
+    'tabella', 'verdetto'.
+    """
+
+    colonne = ["Mese", "Produzione", "Energia (MWh)", "Costo (EUR)",
+               "kWh/unita'", "EUR/unita'", "Scost. vs baseline (%)"]
+    vuoto = {"errore": None, "valido": False, "n_mesi": 0, "mesi": [],
+             "energia_mwh": np.array([]), "costo_eur": np.array([]),
+             "volumi": np.array([]), "kwh_unita": np.array([]),
+             "eur_unita": np.array([]), "r2": None, "base_mwh_mese": None,
+             "kwh_marginale_unita": None, "quota_fissa_pct": None,
+             "baseline_kwh_unita": None, "miglioramento_ultimo_pct": None,
+             "tabella": pd.DataFrame(columns=colonne), "verdetto": ""}
+
+    def _ko(msg):
+        r = dict(vuoto)
+        r["errore"] = msg
+        return r
+
+    # --- prezzi: pulizia standard ---
+    try:
+        p = prezzi.astype(float)
+        p = p[~p.index.duplicated(keep="first")].sort_index()
+        if not isinstance(p.index, pd.DatetimeIndex):
+            return _ko("Serie prezzi non valida: serve un indice datetime orario.")
+    except Exception:
+        return _ko("Serie prezzi non valida: serve un indice datetime orario.")
+    if getattr(p.index, "tz", None) is not None:
+        p.index = p.index.tz_localize(None)
+    p = p.dropna()
+    if len(p) == 0:
+        return _ko("Serie prezzi vuota.")
+    try:
+        mw = {"F1": float(mw_f1), "F2": float(mw_f2), "F3": float(mw_f3)}
+    except Exception:
+        return _ko("MW di fascia non validi.")
+    if any(v < 0 for v in mw.values()) or sum(mw.values()) == 0:
+        return _ko("Profilo MW nullo o negativo.")
+
+    fasce = p.index.map(fascia_oraria)
+    ore = pd.DataFrame({"mw": [mw.get(fx, 0.0) for fx in fasce],
+                        "prezzo": p.to_numpy(dtype=float)}, index=p.index)
+    ore["costo"] = ore["prezzo"] * ore["mw"]
+    # groupby su Period M: compatibile pandas 2.1 (locale) e 2.2 (produzione)
+    mens = ore.groupby(ore.index.to_period("M")).agg(
+        energia_mwh=("mw", "sum"), costo_eur=("costo", "sum"))
+
+    # --- produzione: normalizza a Series indicizzata per Period M ---
+    if produzione is None:
+        return _ko("Produzione mancante: carica il CSV (mese, volume) o compila la tabella.")
+    try:
+        if isinstance(produzione, pd.DataFrame):
+            dfp = produzione.copy()
+            mesi_p = pd.to_datetime(dfp.iloc[:, 0], errors="coerce").dt.to_period("M")
+            vol_p = pd.to_numeric(dfp.iloc[:, 1], errors="coerce")
+            prod = pd.Series(vol_p.to_numpy(dtype=float), index=mesi_p)
+        elif isinstance(produzione, pd.Series):
+            idx = produzione.index
+            if isinstance(idx, pd.PeriodIndex):
+                per = idx.asfreq("M")
+            else:
+                per = pd.DatetimeIndex(pd.to_datetime(idx, errors="coerce")).to_period("M")
+            prod = pd.Series(pd.to_numeric(produzione, errors="coerce").to_numpy(dtype=float),
+                             index=per)
+        elif isinstance(produzione, dict):
+            per = pd.DatetimeIndex(
+                pd.to_datetime(list(produzione.keys()), errors="coerce")).to_period("M")
+            prod = pd.Series(
+                np.asarray(pd.to_numeric(list(produzione.values()), errors="coerce"),
+                           dtype=float),
+                index=per)
+        else:
+            return _ko("Formato produzione non riconosciuto (serve Series, DataFrame o dict).")
+    except Exception:
+        return _ko("Produzione non leggibile: servono mese e volume numerico.")
+    prod = prod[prod.index.notna() & prod.notna()]
+    prod = prod[prod > 0]
+    if len(prod) == 0:
+        return _ko("Nessun mese con produzione positiva.")
+    prod = prod.groupby(prod.index).sum()  # mesi duplicati: volumi sommati
+
+    comuni = mens.index.intersection(prod.index).sort_values()
+    if len(comuni) < 2:
+        return _ko("Servono almeno 2 mesi con prezzi e produzione in comune.")
+    energia = mens.loc[comuni, "energia_mwh"].to_numpy(dtype=float)
+    costo = mens.loc[comuni, "costo_eur"].to_numpy(dtype=float)
+    vol = prod.loc[comuni].to_numpy(dtype=float)
+    n = len(comuni)
+
+    kwh_u = energia * 1000.0 / vol
+    eur_u = costo / vol
+
+    # --- modello OLS energia = a + b * produzione ---
+    r2 = None
+    a = None
+    b = None
+    quota_fissa = None
+    if n >= 3 and float(np.var(vol)) > 0 and float(np.var(energia)) > 0:
+        b, a = np.polyfit(vol, energia, 1)  # energia = a + b * vol
+        yhat = a + b * vol
+        ss_res = float(np.sum((energia - yhat) ** 2))
+        ss_tot = float(np.sum((energia - energia.mean()) ** 2))
+        r2 = float(1.0 - ss_res / ss_tot) if ss_tot > 0 else None
+        e_media = float(energia.mean())
+        quota_fissa = float(np.clip(a / e_media * 100.0, 0.0, 100.0)) if e_media > 0 else 0.0
+
+    # --- baseline e miglioramento ---
+    try:
+        nb = int(baseline_mesi)
+    except Exception:
+        nb = 3
+    nb = max(1, min(nb, n))
+    baseline = float(np.mean(kwh_u[:nb]))
+    scost_full = np.full(n, np.nan)
+    if baseline > 0 and n > nb:
+        scost_full[nb:] = (baseline - kwh_u[nb:]) / baseline * 100.0
+    migl_ult = float(scost_full[-1]) if n > nb and np.isfinite(scost_full[-1]) else None
+
+    # --- verdetto ---
+    if r2 is None:
+        giudizio_mod = "modello non stimabile (servono 3+ mesi con volumi diversi)"
+        nota_base = ""
+    elif r2 >= 0.70:
+        giudizio_mod = "modello affidabile (R^2 = %.2f)" % r2
+        nota_base = ("Baseload fisso stimato {:,.0f} MWh/mese ({:.0f}% del consumo medio): "
+                     "questa quota non dipende dai volumi.".format(a, quota_fissa))
+    elif r2 >= 0.40:
+        giudizio_mod = "modello debole (R^2 = %.2f): la produzione spiega solo in parte i consumi" % r2
+        nota_base = ""
+    else:
+        giudizio_mod = ("produzione poco legata ai consumi (R^2 = %.2f): EnPI instabile, "
+                        "il driver e' altrove (clima? turni?)" % r2)
+        nota_base = ""
+    if migl_ult is None:
+        nota_migl = "nessun mese oltre la baseline per il confronto."
+    elif migl_ult >= 5:
+        nota_migl = "ultimo mese %+.1f%% vs baseline: in miglioramento." % migl_ult
+    elif migl_ult <= -5:
+        nota_migl = "ultimo mese %.1f%% vs baseline: in peggioramento, verificare." % migl_ult
+    else:
+        nota_migl = "ultimo mese %+.1f%% vs baseline: stabile." % migl_ult
+    verdetto = ("EnPI medio %.1f kWh/unita' (%.2f EUR/unita'). %s. %s %s"
+                % (float(np.mean(kwh_u)), float(np.mean(eur_u)),
+                   giudizio_mod, nota_base, nota_migl)).replace("  ", " ").strip()
+
+    tabella = pd.DataFrame({
+        "Mese": [str(m) for m in comuni],
+        "Produzione": np.round(vol, 1),
+        "Energia (MWh)": np.round(energia, 1),
+        "Costo (EUR)": np.round(costo, 0),
+        "kWh/unita'": np.round(kwh_u, 1),
+        "EUR/unita'": np.round(eur_u, 2),
+        "Scost. vs baseline (%)": np.round(scost_full, 1),
+    })
+
+    return {"errore": None, "valido": True, "n_mesi": n,
+            "mesi": [str(m) for m in comuni],
+            "energia_mwh": energia, "costo_eur": costo, "volumi": vol,
+            "kwh_unita": kwh_u, "eur_unita": eur_u,
+            "r2": r2, "base_mwh_mese": None if a is None else float(a),
+            "kwh_marginale_unita": None if b is None else float(b * 1000.0),
+            "quota_fissa_pct": quota_fissa,
+            "baseline_kwh_unita": baseline,
+            "miglioramento_ultimo_pct": migl_ult,
+            "tabella": tabella, "verdetto": verdetto}
+
+
 def calcola_rischio_orario(prezzi, mw_f1=1.0, mw_f2=1.0, mw_f3=1.0, min_giorni=30):
     """Scomposizione del rischio del costo giornaliero per ora del giorno.
 
@@ -19846,7 +20050,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -33111,6 +33315,136 @@ elif workspace == _('ws8'):
                     mime="text/csv",
                     key="csv_normalizzazione_climatica",
                     help="Una riga per giorno: carico medio, HDD, CDD e carico normalizzato a parità di clima.",
+                )
+
+
+    with tab156:
+        titolo_enpi = edu("EnPI energetico", "EnPI = Energy Performance Indicator, il KPI cardine di ISO 50001 e delle diagnosi energetiche: il consumo SPECIFICO, cioe' quanta energia ti costa ogni unita' prodotta (kWh/pezzo, kWh/tonnellata, kWh/m2...). Confrontare i MWh assoluti tra mesi con volumi diversi non ha senso; il consumo specifico si'. Il MODELLO DI BASELINE (regressione energia = fisso + variabile x produzione) separa il baseload strutturale dal consumo legato ai volumi: la quota fissa e' quella su cui l'efficienza non dipende dalla produzione. La BASELINE e' la media del consumo specifico dei primi mesi: il miglioramento % si misura contro quella.")
+        st.markdown(f"<h1>📏 {titolo_enpi}</h1>", unsafe_allow_html=True)
+        st.caption("Consumo specifico per unità prodotta (kWh/unità): il KPI ISO 50001 per confrontare mesi con volumi diversi.")
+        enpi1, enpi2, enpi3 = st.columns(3)
+        with enpi1:
+            enpi_mw1 = st.number_input("MW in F1", min_value=0.0, value=1.0, step=0.5,
+                                      key="enpi156_f1",
+                                      help="Potenza nelle ore di punta (lun–ven 08:00–19:00).")
+        with enpi2:
+            enpi_mw2 = st.number_input("MW in F2", min_value=0.0, value=1.0, step=0.5,
+                                      key="enpi156_f2",
+                                      help="Potenza nelle ore intermedie.")
+        with enpi3:
+            enpi_mw3 = st.number_input("MW in F3", min_value=0.0, value=1.0, step=0.5,
+                                      key="enpi156_f3",
+                                      help="Potenza nelle ore fuori punta (notte, weekend).")
+        enpi4, enpi5 = st.columns(2)
+        with enpi4:
+            enpi_unita = st.text_input("Unità di produzione", value="pezzi",
+                                       key="enpi156_unita",
+                                       help="Es. pezzi, tonnellate, m², pasti serviti: compare nelle etichette.")
+        with enpi5:
+            enpi_nb = st.number_input("Mesi di baseline", min_value=1, max_value=12,
+                                      value=3, step=1, key="enpi156_nb",
+                                      help="Primi N mesi del periodo: la loro media di kWh/unità è la baseline del confronto.")
+        up_enpi = st.file_uploader("CSV con mese e produzione (due colonne: mese, volume)",
+                                   type=["csv"], key="enpi156_up",
+                                   help="Es. 2025-01;1250. Se caricato, ha precedenza sulla tabella manuale.")
+        st.markdown("**Produzione mensile** (oppure compila qui sotto)")
+        mesi_edit = pd.period_range(prezzi.index.min().to_period("M"),
+                                    prezzi.index.max().to_period("M"), freq="M")
+        df_edit_enpi = pd.DataFrame({"Mese": [str(m) for m in mesi_edit],
+                                     "Produzione": np.nan})
+        edit_enpi = st.data_editor(df_edit_enpi, num_rows="fixed", key="enpi156_edit",
+                                   help="Una riga per mese nel periodo dei prezzi: inserisci i volumi prodotti.")
+        prod_enpi = None
+        if up_enpi is not None:
+            try:
+                dfu_enpi = pd.read_csv(up_enpi)
+                if dfu_enpi.shape[1] >= 2:
+                    prod_enpi = dfu_enpi
+                else:
+                    st.error("CSV non leggibile: servono due colonne (mese, produzione).")
+            except (TypeError, ValueError):
+                st.error("CSV non leggibile: servono due colonne (mese, produzione).")
+        if prod_enpi is None:
+            try:
+                dfed_enpi = pd.DataFrame(edit_enpi)
+                dfed_enpi["Produzione"] = pd.to_numeric(dfed_enpi["Produzione"],
+                                                       errors="coerce")
+                dfed_enpi = dfed_enpi.dropna(subset=["Produzione"])
+                if len(dfed_enpi) > 0:
+                    prod_enpi = dfed_enpi[["Mese", "Produzione"]]
+            except (TypeError, ValueError, KeyError):
+                prod_enpi = None
+        if prod_enpi is None:
+            st.info("📤 Carica il CSV con la produzione mensile oppure compilala nella tabella qui sopra.")
+        else:
+            ris_enpi = calcola_enpi(prezzi, enpi_mw1, enpi_mw2, enpi_mw3,
+                                    produzione=prod_enpi,
+                                    baseline_mesi=int(enpi_nb))
+            if not ris_enpi["valido"]:
+                st.error(ris_enpi["errore"])
+            else:
+                st.success(f"✅ {ris_enpi['verdetto']}")
+                kwh_u = ris_enpi["kwh_unita"]
+                eur_u = ris_enpi["eur_unita"]
+                r2e = ris_enpi["r2"]
+                migl_e = ris_enpi["miglioramento_ultimo_pct"]
+                un_l = (enpi_unita or "unità").strip() or "unità"
+                k1, k2, k3, k4 = st.columns(4)
+                k1.metric("EnPI medio", f"{float(np.mean(kwh_u)):.1f} kWh/{un_l}",
+                          help="Consumo specifico medio del periodo: kWh per unità prodotta.")
+                k2.metric("Costo specifico medio", f"{float(np.mean(eur_u)):.2f} €/{un_l}",
+                          help="Costo energia medio per unità prodotta.")
+                k3.metric("R² modello", f"{r2e:.2f}" if r2e is not None else "n.d.",
+                          help="Quota di varianza dei consumi mensili spiegata dai volumi di produzione.")
+                k4.metric("Ultimo mese vs baseline",
+                          f"{migl_e:+.1f} %" if migl_e is not None else "n.d.",
+                          help="Miglioramento (+) o peggioramento (−) del consumo specifico rispetto alla baseline.")
+
+                st.markdown("**Consumo specifico mensile vs baseline**")
+                fig_enpi1 = go.Figure()
+                fig_enpi1.add_trace(go.Bar(x=ris_enpi["mesi"], y=np.round(kwh_u, 1),
+                                           name=f"kWh/{un_l}",
+                                           hovertemplate="%{x}<br>%{y:.1f} kWh/" + un_l + "<extra></extra>"))
+                fig_enpi1.add_trace(go.Scatter(x=ris_enpi["mesi"],
+                                               y=[ris_enpi["baseline_kwh_unita"]] * ris_enpi["n_mesi"],
+                                               mode="lines", name="Baseline",
+                                               line=dict(dash="dash", color="orange"),
+                                               hovertemplate="Baseline: %{y:.1f}<extra></extra>"))
+                fig_enpi1.update_layout(template="plotly_dark", height=360,
+                                        yaxis_title=f"kWh / {un_l}",
+                                        legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                                                    xanchor="right", x=1))
+                st.plotly_chart(fig_enpi1, use_container_width=True)
+
+                if r2e is not None:
+                    st.markdown("**Modello di baseline**: energia mensile vs produzione")
+                    vol_e = ris_enpi["volumi"]
+                    ene_e = ris_enpi["energia_mwh"]
+                    xs_e = np.linspace(float(np.min(vol_e)), float(np.max(vol_e)), 50)
+                    a_e = ris_enpi["base_mwh_mese"]
+                    b_e = ris_enpi["kwh_marginale_unita"] / 1000.0
+                    fig_enpi2 = go.Figure()
+                    fig_enpi2.add_trace(go.Scatter(x=vol_e, y=ene_e, mode="markers",
+                                                   name="Mesi",
+                                                   hovertemplate="Prod: %{x:.0f}<br>Energia: %{y:.0f} MWh<extra></extra>"))
+                    fig_enpi2.add_trace(go.Scatter(x=xs_e, y=a_e + b_e * xs_e,
+                                                   mode="lines", name="Fit OLS",
+                                                   hovertemplate="Prod: %{x:.0f}<br>Fit: %{y:.0f} MWh<extra></extra>"))
+                    fig_enpi2.update_layout(template="plotly_dark", height=360,
+                                            xaxis_title=f"Produzione ({un_l}/mese)",
+                                            yaxis_title="Energia (MWh/mese)")
+                    st.plotly_chart(fig_enpi2, use_container_width=True)
+
+                st.markdown("**Tabella mensile**")
+                st.dataframe(ris_enpi["tabella"], use_container_width=True, hide_index=True)
+                d0e, d1e = prezzi.index.min().date(), prezzi.index.max().date()
+                st.download_button(
+                    "⬇️ Esporta EnPI (CSV)",
+                    ris_enpi["tabella"].to_csv(index=False, sep=";").encode("utf-8"),
+                    file_name=f"enpi_{d0e}_{d1e}.csv",
+                    mime="text/csv",
+                    key="csv_enpi",
+                    help="Una riga per mese: produzione, energia, costo, consumo/costo specifico e scostamento vs baseline.",
                 )
 
 
