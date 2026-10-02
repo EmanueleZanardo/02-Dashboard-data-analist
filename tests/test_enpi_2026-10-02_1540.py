@@ -168,10 +168,18 @@ check("deterministico", ra["verdetto"] == rb["verdetto"] and
 import re
 n_with = len(re.findall(r"^\s*with tab156:", src, re.M))
 check("un solo with tab156", n_with == 1)
-m_tabs = re.search(r"tab154, tab155, tab156 = st\.tabs\(\[([^\n]*)\]\)", src)
-check("tab156 dichiarata in st.tabs", m_tabs is not None)
-labels = re.findall(r'"([^"]+)"', m_tabs.group(1)) if m_tabs else []
-check("156 titoli", len(labels) == 156)
+m_tabs = re.search(r"= st\.tabs\(\[\s*\"⏱️ Profilo giornaliero\"", src)
+check("st.tabs trovata", m_tabs is not None)
+if m_tabs is not None:
+    lstart = src.rfind("\n", 0, m_tabs.start()) + 1
+    lend = src.find("\n", m_tabs.end())
+    decl = src[lstart:lend]
+    lhs = re.findall(r"tab\d+", decl.split("= st.tabs", 1)[0])
+    check("tab156 tra le variabili dichiarate", "tab156" in lhs and len(lhs) == 157)
+    labels = re.findall(r'"([^"]+)"', decl.split("st.tabs([", 1)[1])
+else:
+    labels = []
+check("157 titoli", len(labels) == 157)
 check("titolo tab156", "📏 EnPI energetico" in labels)
 check("titolo unico", labels.count("📏 EnPI energetico") == 1)
 vars_decl = re.findall(r"\btab156\b", src)
