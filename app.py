@@ -22603,6 +22603,104 @@ def calcola_matrice_costo_settimana(prezzi, mw_f1, mw_f2, mw_f3, top_n=10):
             "risparmio_spostamento": risparmio_spostamento}
 
 
+def calcola_finestra_fermo_consumo(prezzi, mw_f1, mw_f2, mw_f3, giorni_fermo=3,
+                                 carico_residuo_pct=10.0):
+    """Finestra ottimale di fermo manutenzione per un CONSUMATORE industriale.
+
+    Domanda operativa: la linea deve fermarsi N giorni consecutivi per
+    manutenzione programmata — in quale finestra pianificarla per MASSIMIZZARE
+    il costo energetico evitato? Durante il fermo il carico non va a zero:
+    restano gli ausiliari (carico_residuo_pct % del carico normale).
+
+    Metodo (deterministico a parita' di input):
+    - ore con prezzo NaN scartate; timestamp duplicati: primo tenuto;
+    - carico orario = MW della fascia di ciascuna ora (via fascia_oraria);
+    - costo evitato orario = prezzo_h * MW_h * (1 - residuo);
+    - aggregazione giornaliera; sliding window di N giorni consecutivi:
+      vince la finestra con costo evitato MASSIMO (a parita' vince la prima,
+      mergesort stabile);
+    - la finestra peggiore (minimo) quantifica il costo di una cattiva
+      pianificazione (best - worst).
+
+    E' lo specchio lato consumo del tab "Fermo impianto" (lato generazione,
+    che MINIMIZZA il margine perso: li' la finestra migliore e' la piu'
+    economica, qui e' la piu' cara). Nota: con prezzi negativi fermarsi
+    in quelle ore FA PERDERE soldi (si rinuncia a consumare a prezzo
+    negativo): la finestra ottimale le evita da sola.
+
+    Ritorna dict con valido/errore, df_giorni (Data, Costo evitato EUR,
+    Energia evitata MWh), df_finestre (Inizio, Fine, Costo evitato EUR —
+    tutte le finestre consecutive ordinate per costo evitato decrescente),
+    best/worst (dict inizio/fine/costo_evitato), costo_totale (EUR, periodo),
+    quota_best_pct (% del costo periodo evitata nella finestra migliore),
+    costo_cattiva_pianificazione (EUR = best - worst), giorni, durata_gg,
+    carico_residuo_pct. NaN-safe: serie vuota / parametri non validi ->
+    valido False con errore pulito, mai eccezioni.
+    """
+    cols_g = ["Data", "Costo evitato (EUR)", "Energia evitata (MWh)"]
+    cols_f = ["Inizio", "Fine", "Costo evitato (EUR)"]
+    try:
+        p = prezzi.astype(float).dropna()
+        p = p[~p.index.duplicated(keep="first")].sort_index()
+    except Exception:
+        return {"valido": False, "errore": "Serie prezzi non valida."}
+    if len(p) == 0:
+        return {"valido": False, "errore": "Serie prezzi vuota."}
+    try:
+        mws = [max(0.0, float(x)) for x in (mw_f1, mw_f2, mw_f3)]
+        d = int(float(giorni_fermo))
+        residuo = float(carico_residuo_pct) / 100.0
+    except (TypeError, ValueError):
+        return {"valido": False, "errore": "Parametri non validi (MW, giorni, carico residuo)."}
+    if sum(mws) <= 0:
+        return {"valido": False, "errore": "Carico nullo: imposta MW > 0 in almeno una fascia."}
+    if d < 1:
+        return {"valido": False, "errore": "Durata del fermo non valida (minimo 1 giorno)."}
+    if not (0.0 <= residuo < 1.0):
+        return {"valido": False, "errore": "Carico residuo non valido (0-99%)."}
+    mw_of = {"F1": mws[0], "F2": mws[1], "F3": mws[2]}
+    try:
+        fasce = p.index.map(fascia_oraria)
+    except Exception:
+        return {"valido": False, "errore": "Indice prezzi non valido (serve un DatetimeIndex)."}
+    prezzi_v = p.to_numpy(dtype=float)
+    carico = np.array([mw_of[fx] for fx in fasce], dtype=float)
+    fattore = 1.0 - residuo
+    evitato_h = prezzi_v * carico * fattore
+    evit_g = pd.Series(evitato_h, index=p.index).resample("D").sum()
+    en_g = pd.Series(carico * fattore, index=p.index).resample("D").sum()
+    evit_g.index = pd.to_datetime(evit_g.index.date)
+    n = len(evit_g)
+    if n == 0:
+        return {"valido": False, "errore": "Serie prezzi vuota."}
+    d = min(d, n)
+    roll = evit_g.rolling(d, min_periods=d).sum().dropna()
+    righe = [{"Inizio": (fine - pd.Timedelta(days=d - 1)).date(),
+              "Fine": fine.date(),
+              "Costo evitato (EUR)": float(roll.loc[fine])} for fine in roll.index]
+    df_finestre = (pd.DataFrame(righe, columns=cols_f)
+                     .sort_values("Costo evitato (EUR)", ascending=False, kind="mergesort")
+                     .reset_index(drop=True))
+    df_giorni = pd.DataFrame({"Data": evit_g.index.date,
+                              "Costo evitato (EUR)": evit_g.values,
+                              "Energia evitata (MWh)": en_g.values})
+    costo_tot = float((prezzi_v * carico).sum())
+    b0 = df_finestre.iloc[0]
+    w0 = df_finestre.iloc[-1]
+    best = {"inizio": b0["Inizio"], "fine": b0["Fine"],
+            "costo_evitato": float(b0["Costo evitato (EUR)"])}
+    worst = {"inizio": w0["Inizio"], "fine": w0["Fine"],
+             "costo_evitato": float(w0["Costo evitato (EUR)"])}
+    quota = (best["costo_evitato"] / costo_tot * 100.0) if costo_tot > 0 else 0.0
+    return {"valido": True, "errore": None,
+            "df_giorni": df_giorni, "df_finestre": df_finestre,
+            "best": best, "worst": worst,
+            "costo_totale": costo_tot, "quota_best_pct": float(quota),
+            "costo_cattiva_pianificazione": float(best["costo_evitato"] - worst["costo_evitato"]),
+            "giorni": n, "durata_gg": d,
+            "carico_residuo_pct": float(carico_residuo_pct)}
+
+
 def calcola_scala_copertura(prezzi, mw_f1=2.0, mw_f2=2.0, mw_f3=2.0,
                             tranche=None, target_pct=80.0):
     """Scala di copertura mensile: quanta energia del periodo e' coperta a prezzo fisso.
@@ -23695,7 +23793,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -38986,6 +39084,61 @@ elif workspace == _('ws8'):
             _risp = ris_mc["risparmio_spostamento"](q_mc)
             st.metric("Risparmio stimato", f"{_risp:,.0f} €",
                       f"{(_risp / ris_mc['costo_totale'] * 100.0 if ris_mc['costo_totale'] else 0):.2f}% del costo totale")
+
+
+    with tab176:
+        titolo_fm = edu("Fermo per manutenzione (lato consumo)", "La linea deve fermarsi N giorni consecutivi per manutenzione programmata: in quale finestra farlo per MASSIMIZZARE il costo energetico evitato? Durante il fermo restano gli ausiliari (carico residuo %). E' lo specchio lato consumo del tab Fermo impianto (lato generazione, che minimizza il margine perso).")
+        st.markdown(f"<h1>🛠️ {titolo_fm}</h1>", unsafe_allow_html=True)
+        st.caption("Quando fermare la linea: la finestra di N giorni consecutivi che massimizza il costo energetico evitato.")
+        c1_fm, c2_fm = st.columns(2)
+        with c1_fm:
+            gg_fm = st.number_input("Durata del fermo (giorni consecutivi)", min_value=1, max_value=60, value=3, step=1,
+                                   key="fm176_giorni",
+                                   help="La linea resta ferma per questo numero di giorni di calendario consecutivi.")
+        with c2_fm:
+            res_fm = st.slider("Carico residuo durante il fermo (%)", min_value=0, max_value=50, value=10, step=1,
+                               key="fm176_residuo",
+                               help="Quota del carico normale che resta accesa durante il fermo (ausiliari, servizi).")
+        ris_fm = calcola_finestra_fermo_consumo(prezzi, mw_f1, mw_f2, mw_f3, gg_fm, res_fm)
+        if not ris_fm["valido"]:
+            st.error(ris_fm["errore"])
+        else:
+            _b, _w = ris_fm["best"], ris_fm["worst"]
+            k1, k2, k3, k4 = st.columns(4)
+            with k1:
+                st.metric("Finestra migliore", f"{_b['inizio'].strftime('%d %b')} → {_b['fine'].strftime('%d %b')}",
+                          f"{_b['costo_evitato']:,.0f} € evitati")
+            with k2:
+                st.metric("Quota costo periodo", f"{ris_fm['quota_best_pct']:.1f}%",
+                          f"su {ris_fm['costo_totale']:,.0f} € totali")
+            with k3:
+                st.metric("Finestra peggiore", f"{_w['inizio'].strftime('%d %b')} → {_w['fine'].strftime('%d %b')}",
+                          f"{_w['costo_evitato']:,.0f} € evitati")
+            with k4:
+                st.metric("Costo cattiva pianificazione", f"{ris_fm['costo_cattiva_pianificazione']:,.0f} €",
+                          "best − worst: quanto si perde a pianificare male")
+            st.markdown("**Costo evitato per giorno** (verde = finestra migliore, rosso = peggiore)")
+            _dfg = ris_fm["df_giorni"].copy()
+            _bset = set(pd.date_range(_b["inizio"], _b["fine"]).date)
+            _wset = set(pd.date_range(_w["inizio"], _w["fine"]).date)
+            _dfg["Finestra"] = _dfg["Data"].map(
+                lambda x: "Migliore" if x in _bset else ("Peggiore" if x in _wset else "Altra"))
+            fig_fm = px.bar(_dfg, x="Data", y="Costo evitato (EUR)", color="Finestra",
+                            color_discrete_map={"Migliore": "#16a34a", "Peggiore": "#dc2626", "Altra": "#9ca3af"},
+                            title=f"Costo energetico evitato per giorno di fermo ({ris_fm['durata_gg']} gg, residuo {ris_fm['carico_residuo_pct']:.0f}%)")
+            st.plotly_chart(fig_fm, use_container_width=True)
+            st.markdown(f"**Tutte le finestre di {ris_fm['durata_gg']} giorni** (ordinate per costo evitato, prime 10)")
+            _dff = ris_fm["df_finestre"].head(10).copy()
+            _dff["Costo evitato (EUR)"] = _dff["Costo evitato (EUR)"].round(0)
+            st.dataframe(_dff, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta finestre (CSV)",
+                ris_fm["df_finestre"].to_csv(index=False, sep=";").encode("utf-8"),
+                file_name=f"fermo_manutenzione_{d0}_{d1}.csv",
+                mime="text/csv",
+                key="fm176_csv",
+                help="Una riga per finestra consecutiva: inizio, fine, costo evitato in €.",
+            )
 
 
 # Footer
