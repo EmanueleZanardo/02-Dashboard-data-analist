@@ -208,10 +208,10 @@ class TestRegistry:
         src = open("app.py", encoding="utf-8").read()
         m = re.search(r"tab1, tab2, .*? = st\.tabs\(\[", src, re.S)
         dvars = re.findall(r"tab\d+", m.group(0))
-        assert "tab165" in dvars and dvars[-1] == "tab165"
+        assert "tab165" in dvars  # robusto: appartenenza, non ultima in coda
         withs = re.findall(r"^    with (tab\d+):", src, re.M)
-        assert withs == ["tab%d" % i for i in range(1, len(withs) + 1)]
-        assert len(dvars) == len(withs)
+        assert withs == ["tab%d" % i for i in range(1, len(withs) + 1)]  # sequenza senza buchi
+        assert len(dvars) == len(withs)  # n variabili dichiarate == n blocchi
         assert '"📊 Fattore di carico"' in src
         keys = re.findall(r'key="(fc165_[^"]+)"', src)
         fkeys = re.findall(r'key=f"(fc165_[^"]+)"', src)
