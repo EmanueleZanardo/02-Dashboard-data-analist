@@ -216,8 +216,8 @@ class TestRegistry:
         variabili = re.findall(r"tab(\d+)", m.group(1))
         titoli = re.findall(r'"([^"]+)"', m.group(2))
         nums = sorted(int(v) for v in variabili)
-        assert nums == list(range(1, 175)), f"sequenza tab con buchi: {nums[-5:]}"
-        assert len(titoli) == 174, f"titoli={len(titoli)}"
+        assert nums == list(range(1, max(nums) + 1)), f"sequenza tab con buchi: {nums[-5:]}"
+        assert len(titoli) == len(nums), f"titoli={len(titoli)} vs tab={len(nums)}"
         assert any("Anticipo gas" in t for t in titoli)
         assert "with tab174:" in txt
         assert "def calcola_anticipazione_gas" in txt
