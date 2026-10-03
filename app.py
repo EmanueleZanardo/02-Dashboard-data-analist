@@ -23380,6 +23380,187 @@ def calcola_costo_ritardo_fixing(prezzi, settimane_attesa=4, soglia_eur=5.0):
             "settimane_attesa": k, "soglia_eur": soglia}
 
 
+def calcola_slippage_esecuzione(prezzi, mw, giorni_fornitura=30,
+                                giorni_esecuzione=10, direzione="acquisto",
+                                liquidita_giornaliera_mwh=50000.0,
+                                coeff_impatto=0.5, prezzo_riferimento=None):
+    """Slippage di esecuzione di un ordine di copertura a blocchi.
+
+    Domanda operativa: "devo coprire Q MW baseload per D giorni di fornitura
+    - se eseguo l'ordine in N tranche giornaliere, quanto mi costa l'impatto
+    di mercato e quanto rischio di timing mi prendo?" La serie oraria viene
+    aggregata in medie giornaliere; la finestra di esecuzione sono i primi
+    n = min(giorni_esecuzione, giorni disponibili) giorni del periodo.
+
+      - MWh totali = MW x 24 h x giorni_fornitura; ogni tranche compra/vende
+        totale/n MWh al prezzo medio del giorno.
+      - Impatto di mercato temporaneo (modello a radice quadrata):
+        impatto = coeff x sqrt(MWh_tranche / liquidita_giornaliera).
+        In acquisto il prezzo eseguito e' P x (1 + impatto), in vendita
+        P x (1 - impatto).
+      - Prezzo di arrivo = prezzo_riferimento se dato, altrimenti media del
+        primo giorno di esecuzione; costo "carta" = MWh totali x arrivo.
+      - Slippage = eseguito - carta (acquisto) oppure carta - eseguito
+        (vendita): positivo = l'esecuzione e' costata di piu' del riferimento;
+        negativo = il mercato si e' mosso a favore durante l'esecuzione.
+      - Rischio di timing = std(prezzi giornalieri della finestra, ddof=1)
+        x MWh totali: quanto balla il costo se il prezzo si muove mentre
+        esegui.
+      - Frontiera di esecuzione: per k = 1..min(30, giorni) ricalcola
+        slippage e rischio di timing - piu' tranche = meno impatto ma
+        (in genere) piu' esposizione al movimento dei prezzi.
+
+    Giudizio sullo slippage % del nozionale: TRASCURABILE < 0.5%,
+    MODERATO < 2%, RILEVANTE >= 2% (uno slippage negativo rientra in
+    TRASCURABILE: il mercato si e' mosso a favore).
+
+    Ritorna dict con valido/errore, df_slice (Data, Prezzo medio (EUR/MWh),
+    MWh, Impatto (%), Prezzo eseguito (EUR/MWh), Controvalore (EUR)),
+    df_frontiera (Tranche giornaliere, Slippage (EUR), Slippage (EUR/MWh),
+    Rischio di timing (EUR)), totale_mwh, mwh_tranche, n_tranche, impatto,
+    prezzo_arrivo, costo_carta, costo_eseguito, slippage_eur,
+    slippage_eur_mwh, slippage_pct, rischio_timing_eur, giudizio,
+    n_giorni, direzione, giorni_fornitura.
+    """
+    def _err(msg):
+        return {"valido": False, "errore": msg}
+    # --- validazione parametri ---
+    if isinstance(mw, bool):
+        return _err("mw deve essere un numero > 0.")
+    try:
+        mw_f = float(mw)
+    except (TypeError, ValueError):
+        return _err("mw deve essere un numero > 0.")
+    if not np.isfinite(mw_f) or mw_f <= 0:
+        return _err("mw deve essere un numero > 0.")
+    for _nome, _val, _vmin, _vmax in (("giorni_fornitura", giorni_fornitura, 1, 365),
+                                      ("giorni_esecuzione", giorni_esecuzione, 1, 90)):
+        if isinstance(_val, bool) or not isinstance(_val, (int, np.integer)):
+            return _err(f"{_nome} deve essere un intero tra {_vmin} e {_vmax}.")
+        if not _vmin <= int(_val) <= _vmax:
+            return _err(f"{_nome} deve essere un intero tra {_vmin} e {_vmax}.")
+    gf = int(giorni_fornitura)
+    ge = int(giorni_esecuzione)
+    if direzione not in ("acquisto", "vendita"):
+        return _err("direzione deve essere 'acquisto' o 'vendita'.")
+    if isinstance(liquidita_giornaliera_mwh, bool):
+        return _err("liquidita_giornaliera_mwh deve essere un numero > 0.")
+    try:
+        liq = float(liquidita_giornaliera_mwh)
+    except (TypeError, ValueError):
+        return _err("liquidita_giornaliera_mwh deve essere un numero > 0.")
+    if not np.isfinite(liq) or liq <= 0:
+        return _err("liquidita_giornaliera_mwh deve essere un numero > 0.")
+    if isinstance(coeff_impatto, bool):
+        return _err("coeff_impatto deve essere un numero >= 0.")
+    try:
+        coeff = float(coeff_impatto)
+    except (TypeError, ValueError):
+        return _err("coeff_impatto deve essere un numero >= 0.")
+    if not np.isfinite(coeff) or coeff < 0:
+        return _err("coeff_impatto deve essere un numero >= 0.")
+    if prezzo_riferimento is None:
+        pref = None
+    else:
+        if isinstance(prezzo_riferimento, bool):
+            return _err("prezzo_riferimento deve essere None oppure un numero > 0.")
+        try:
+            pref = float(prezzo_riferimento)
+        except (TypeError, ValueError):
+            return _err("prezzo_riferimento deve essere None oppure un numero > 0.")
+        if not np.isfinite(pref) or pref <= 0:
+            return _err("prezzo_riferimento deve essere None oppure un numero > 0.")
+    # --- pulizia serie ---
+    try:
+        s = pd.Series(prezzi)
+    except Exception:
+        return _err("prezzi: serie non valida.")
+    if s.empty:
+        return _err("prezzi: serie vuota.")
+    try:
+        idx = pd.DatetimeIndex(s.index)
+    except Exception:
+        return _err("prezzi: indice non datetime.")
+    if idx.tz is not None:
+        idx = idx.tz_localize(None)
+    s = pd.Series(pd.to_numeric(s, errors="coerce").to_numpy(), index=idx)
+    s = s[~s.index.isna()].dropna()
+    if s.empty:
+        return _err("prezzi: nessun valore numerico valido.")
+    s = s[~s.index.duplicated(keep="first")].sort_index()
+    # --- medie giornaliere di calendario ---
+    try:
+        gg = s.resample("D").mean().dropna()
+    except Exception as e:
+        return _err(f"aggregazione giornaliera fallita: {e}")
+    n_gg = int(len(gg))
+    if n_gg < 2:
+        return _err("serie troppo corta: servono almeno 2 giorni di calendario.")
+    n = min(ge, n_gg)
+    prezzi_g = gg.iloc[:n].to_numpy(dtype=float)
+    date_g = gg.index[:n]
+    # --- ordine ed esecuzione ---
+    totale_mwh = float(mw_f * 24.0 * gf)
+    q_slice = totale_mwh / n
+    impatto = float(coeff * np.sqrt(q_slice / liq))
+    arrival = float(pref) if pref is not None else float(prezzi_g[0])
+    if direzione == "acquisto":
+        prezzi_exec = prezzi_g * (1.0 + impatto)
+    else:
+        prezzi_exec = prezzi_g * (1.0 - impatto)
+    costo_eseguito = float(q_slice * prezzi_exec.sum())
+    costo_carta = float(totale_mwh * arrival)
+    if direzione == "acquisto":
+        slippage = costo_eseguito - costo_carta
+    else:
+        slippage = costo_carta - costo_eseguito
+    slippage_mwh = slippage / totale_mwh
+    slippage_pct = (slippage / costo_carta * 100.0) if costo_carta != 0 else float("nan")
+    rischio_timing = float(np.std(prezzi_g, ddof=1) * totale_mwh) if n >= 2 else 0.0
+    if not np.isfinite(slippage_pct) or slippage_pct < 0.5:
+        giudizio = "TRASCURABILE"
+    elif slippage_pct < 2.0:
+        giudizio = "MODERATO"
+    else:
+        giudizio = "RILEVANTE"
+    # --- dettaglio tranche ---
+    df_slice = pd.DataFrame({
+        "Data": [d.strftime("%Y-%m-%d") for d in date_g],
+        "Prezzo medio (EUR/MWh)": np.round(prezzi_g, 2),
+        "MWh": np.round(np.full(n, q_slice), 1),
+        "Impatto (%)": np.round(np.full(n, impatto * 100.0), 3),
+        "Prezzo eseguito (EUR/MWh)": np.round(prezzi_exec, 2),
+        "Controvalore (EUR)": np.round(q_slice * prezzi_exec, 2),
+    })
+    # --- frontiera di esecuzione k = 1..min(30, n_gg) ---
+    k_max = min(30, n_gg)
+    righe = []
+    for k in range(1, k_max + 1):
+        qk = totale_mwh / k
+        impk = float(coeff * np.sqrt(qk / liq))
+        pgk = gg.iloc[:k].to_numpy(dtype=float)
+        if direzione == "acquisto":
+            exk = float(qk * (pgk * (1.0 + impk)).sum())
+            slk = exk - costo_carta
+        else:
+            exk = float(qk * (pgk * (1.0 - impk)).sum())
+            slk = costo_carta - exk
+        rtk = float(np.std(pgk, ddof=1) * totale_mwh) if k >= 2 else 0.0
+        righe.append({"Tranche giornaliere": k, "Slippage (EUR)": slk,
+                      "Slippage (EUR/MWh)": slk / totale_mwh,
+                      "Rischio di timing (EUR)": rtk})
+    df_frontiera = pd.DataFrame(righe)
+    return {"valido": True, "errore": None, "df_slice": df_slice,
+            "df_frontiera": df_frontiera, "totale_mwh": totale_mwh,
+            "mwh_tranche": q_slice, "n_tranche": n, "impatto": impatto,
+            "impatto_pct": impatto * 100.0, "prezzo_arrivo": arrival,
+            "costo_carta": costo_carta, "costo_eseguito": costo_eseguito,
+            "slippage_eur": slippage, "slippage_eur_mwh": slippage_mwh,
+            "slippage_pct": slippage_pct, "rischio_timing_eur": rischio_timing,
+            "giudizio": giudizio, "n_giorni": n_gg,
+            "direzione": direzione, "giorni_fornitura": gf}
+
+
 def calcola_scala_copertura(prezzi, mw_f1=2.0, mw_f2=2.0, mw_f3=2.0,
                             tranche=None, target_pct=80.0):
     """Scala di copertura mensile: quanta energia del periodo e' coperta a prezzo fisso.
@@ -24472,7 +24653,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -40260,6 +40441,89 @@ elif workspace == _('ws8'):
                 mime="text/csv",
                 key="rdf182_csv",
                 help="Una riga per settimana: variazione del prezzo medio a k settimane di distanza.",
+            )
+
+    with tab183:
+        titolo_sl = edu("Slippage di esecuzione", "Devi coprire un blocco di energia a termine con un ordine unico? Eseguirlo tutto in una volta muove il prezzo contro di te (market impact), spalmarlo in tranche ti espone al movimento del mercato (rischio di timing). Questa tab stima ENTRAMBI i costi sul tuo periodo: impatto temporaneo con modello a radice quadrata (impatto = coeff x sqrt(MWh tranche / liquidita' giornaliera)) e rischio di timing come volatilita' dei prezzi giornalieri x MWh totali. La frontiera di esecuzione mostra come slippage e rischio di timing cambiano con il numero di tranche: piu' tranche = meno impatto ma piu' esposizione al mercato.")
+        st.markdown(f"<h1>💸 {titolo_sl}</h1>", unsafe_allow_html=True)
+        st.caption("Quanto costa eseguire un ordine di copertura a blocchi? Impatto di mercato + rischio di timing.")
+        c1_sl, c2_sl, c3_sl = st.columns(3)
+        with c1_sl:
+            mw_sl = st.number_input("Taglia ordine (MW baseload)", min_value=0.1, value=10.0, step=1.0,
+                                    key="sl183_mw",
+                                    help="Potenza del blocco da coprire, profilo piatto 24h.")
+            gf_sl = st.number_input("Giorni di fornitura", min_value=1, max_value=365, value=30, step=1,
+                                    key="sl183_gf",
+                                    help="Durata della fornitura coperta: MWh totali = MW x 24 x giorni.")
+        with c2_sl:
+            ge_sl = st.slider("Tranche giornaliere di esecuzione", min_value=1, max_value=30, value=10,
+                              key="sl183_ge",
+                              help="In quante tranche giornaliere uguali spezzi l'ordine (prime N giornate del periodo).")
+            dir_sl = st.selectbox("Direzione", ["acquisto", "vendita"], key="sl183_dir",
+                                  help="Acquisto = copertura di un carico (paghi di piu' con l'impatto); vendita = copertura di una produzione.")
+        with c3_sl:
+            liq_sl = st.number_input("Liquidita' giornaliera tipica (MWh)", min_value=100.0, value=50000.0,
+                                     step=1000.0, key="sl183_liq",
+                                     help="Volume giornaliero tipico scambiato sul prodotto: piu' e' alto, minore e' l'impatto della tua tranche.")
+            coeff_sl = st.slider("Coefficiente di impatto", min_value=0.0, max_value=2.0, value=0.5,
+                                 step=0.05, key="sl183_coeff",
+                                 help="Aggressivita' dell'impatto: 0 = mercato infinitamente liquido, valori alti = mercato sottile.")
+        pref_in_sl = st.number_input("Prezzo di arrivo EUR/MWh (0 = automatico: media del primo giorno)",
+                                     min_value=0.0, value=0.0, step=1.0, key="sl183_pref",
+                                     help="Riferimento 'carta' contro cui si misura lo slippage. 0 = usa la media giornaliera del primo giorno di esecuzione.")
+        pref_sl = None if pref_in_sl <= 0 else float(pref_in_sl)
+        ris_sl = calcola_slippage_esecuzione(prezzi, mw_sl, giorni_fornitura=int(gf_sl),
+                                             giorni_esecuzione=int(ge_sl), direzione=dir_sl,
+                                             liquidita_giornaliera_mwh=liq_sl,
+                                             coeff_impatto=coeff_sl,
+                                             prezzo_riferimento=pref_sl)
+        if not ris_sl["valido"]:
+            st.error(ris_sl["errore"])
+        else:
+            _fmt_eur = lambda x: f"{x:,.0f} €".replace(",", ".")
+            _fmt_mwh = lambda x: f"{x:+,.2f} €/MWh".replace(",", ".")
+            k1, k2, k3, k4 = st.columns(4)
+            with k1:
+                st.metric("Slippage totale", _fmt_eur(ris_sl["slippage_eur"]),
+                          f"{ris_sl['slippage_pct']:+.2f}% del nozionale".replace(",", "."))
+            with k2:
+                st.metric("Slippage per MWh", _fmt_mwh(ris_sl["slippage_eur_mwh"]),
+                          f"impatto per tranche {ris_sl['impatto_pct']:.3f}%".replace(",", "."))
+            with k3:
+                st.metric("Rischio di timing", _fmt_eur(ris_sl["rischio_timing_eur"]),
+                          f"std prezzi x {ris_sl['totale_mwh']:,.0f} MWh".replace(",", "."))
+            with k4:
+                st.metric("Costo eseguito", _fmt_eur(ris_sl["costo_eseguito"]),
+                          f"carta {_fmt_eur(ris_sl['costo_carta'])} @ {ris_sl['prezzo_arrivo']:.1f} €/MWh".replace(",", "."))
+            if ris_sl["giudizio"] == "RILEVANTE":
+                st.warning(f"Slippage RILEVANTE ({ris_sl['slippage_pct']:+.2f}% del nozionale): l'ordine e' grande rispetto alla liquidita' — valuta piu' tranche o un'esecuzione piu' paziente.".replace(",", "."))
+            elif ris_sl["giudizio"] == "MODERATO":
+                st.info(f"Slippage MODERATO ({ris_sl['slippage_pct']:+.2f}% del nozionale): l'impatto e' misurabile ma gestibile con {ris_sl['n_tranche']} tranche.".replace(",", "."))
+            else:
+                st.success(f"Slippage TRASCURABILE ({ris_sl['slippage_pct']:+.2f}% del nozionale): l'esecuzione in {ris_sl['n_tranche']} tranche non muove il mercato in modo rilevante.".replace(",", "."))
+            _fr = ris_sl["df_frontiera"]
+            fig_sl = go.Figure()
+            fig_sl.add_trace(go.Scatter(x=_fr["Tranche giornaliere"].tolist(),
+                                        y=_fr["Slippage (EUR)"].tolist(),
+                                        mode="lines+markers", line=dict(color="#dc2626", width=2),
+                                        name="Slippage (€)"))
+            fig_sl.add_trace(go.Scatter(x=_fr["Tranche giornaliere"].tolist(),
+                                        y=_fr["Rischio di timing (EUR)"].tolist(),
+                                        mode="lines+markers", line=dict(color="#1d4ed8", width=2, dash="dash"),
+                                        name="Rischio di timing (€)"))
+            fig_sl.update_layout(title="Frontiera di esecuzione: slippage vs rischio di timing",
+                                 xaxis_title="Tranche giornaliere", yaxis_title="EUR")
+            st.plotly_chart(fig_sl, use_container_width=True)
+            st.markdown("**Dettaglio tranche di esecuzione**")
+            st.dataframe(ris_sl["df_slice"], use_container_width=True, hide_index=True)
+            st.caption("Limiti del modello: impatto temporaneo a radice quadrata senza impatto permanente; prezzi di esecuzione = medie giornaliere (proxy del VWAP); nessuna correlazione tra tranche; la liquidita' e' un parametro da calibrare sul book reale.")
+            st.download_button(
+                "⬇️ Esporta tranche (CSV)",
+                ris_sl["df_slice"].to_csv(index=False, sep=";").encode("utf-8"),
+                file_name=f"slippage_esecuzione_{d0}_{d1}.csv",
+                mime="text/csv",
+                key="sl183_csv",
+                help="Una riga per tranche: prezzo medio, MWh, impatto %, prezzo eseguito, controvalore.",
             )
 
 
