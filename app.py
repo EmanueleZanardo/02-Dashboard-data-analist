@@ -25155,6 +25155,197 @@ def calcola_comunita_energetica(prezzi, potenza_fv_kwp=100.0, cf_fv=0.13,
             "n_giorni": int(df_giornaliera.shape[0])}
 
 
+def calcola_curtailment(prezzi, potenza_mw=10.0, profilo="solare",
+                        soglia_curtailment=0.0, costo_marginale=2.0, seed=190):
+    """Curtailment economico di un impianto rinnovabile (FV/eolico).
+
+    Domanda operativa: "Ho un impianto rinnovabile da P MW — in quali ore
+    conviene fermarlo invece di vendere a prezzi sotto soglia (es. negativi),
+    quanta energia perdo e quanto risparmio? E come cambia il mio prezzo di
+    cattura?"
+
+    Per ogni ora h l'impianto potrebbe generare g_h = f_h * potenza_mw, dove
+    f_h in [0,1] e' il fattore di capacita' orario del profilo scelto:
+      "solare": campana deterministica 6:00-20:00 con picco alle 13:00;
+      "eolico": profilo sintetico deterministico (random walk smussata, seed);
+      "piatto":  f_h = 1.0 sempre.
+    L'impianto viene fermato (curtailment) nelle ore con spot < soglia.
+
+    Economia (costo_marginale = O&M variabile per MWh prodotto):
+      profitto_senza = Σ (spot_h - costo_marginale) * g_h   (sempre in marcia)
+      profitto_con   = Σ (spot_h - costo_marginale) * g_h   (solo ore non curtailate)
+      beneficio      = profitto_con - profitto_senza
+                     = - Σ_ore_curtailate (spot_h - costo_marginale) * g_h
+    Con soglia == costo_marginale il curtailment e' l'ottimo economico (fermi
+    esattamente le ore in perdita); con soglia > costo_marginale il beneficio
+    puo' essere negativo: stai buttando ricavi positivi.
+
+    Ritorna dict con 'valido'/'errore', ore_curtailment, mwh_potenziali,
+    mwh_curtailed, mwh_consegnati, quota_curtailment_pct, ricavo_senza_eur,
+    ricavo_con_eur, profitto_senza_eur, profitto_con_eur, beneficio_eur,
+    onm_risparmiati_eur, cattura_senza_eur_mwh, cattura_con_eur_mwh,
+    giudizio, verdetto, df_giornaliera, df_mensile, n_ore, profilo, soglia.
+
+    Giudizio:
+    "NON NECESSARIO" (nessuna ora sotto soglia),
+    "CONSIGLIATO" (beneficio > 0 e quota curtailment >= 1%),
+    "MARGINALE" (beneficio > 0 ma quota < 1%: valuta i costi di start/stop),
+    "SOGLIA TROPPO ALTA" (beneficio <= 0 con ore curtailate: la soglia
+    scelta distrugge valore, abbassala verso il costo marginale).
+
+    NaN-safe: serie vuota / non numerica / indice non-datetime, parametri
+    non validi -> errore pulito, mai eccezioni.
+    """
+    def _err(msg):
+        return {"valido": False, "errore": msg}
+
+    # --- pulizia serie prezzi (stesso schema delle altre tab) ---
+    if not isinstance(prezzi, pd.Series):
+        return _err("prezzi deve essere una Series pandas con indice datetime.")
+    s = prezzi.copy()
+    try:
+        s.index = pd.to_datetime(s.index, errors="coerce")
+    except Exception:
+        return _err("prezzi deve avere un indice datetime valido.")
+    if s.index.isna().any():
+        return _err("prezzi deve avere un indice datetime valido.")
+    try:
+        if getattr(s.index, "tz", None) is not None:
+            s.index = s.index.tz_localize(None)
+    except Exception:
+        return _err("prezzi deve avere un indice datetime valido.")
+    s = s[~s.index.duplicated(keep="first")].sort_index()
+    s = pd.to_numeric(s, errors="coerce").dropna()
+    if len(s) == 0:
+        return _err("Serie prezzi vuota: niente da analizzare.")
+    spot = s.to_numpy(dtype=float)
+    n = len(s)
+
+    # --- validazione parametri ---
+    def _num(v, nome, minimo, massimo=None):
+        if isinstance(v, bool):
+            return None, f"{nome} deve essere un numero."
+        try:
+            x = float(v)
+        except (TypeError, ValueError):
+            return None, f"{nome} deve essere un numero."
+        if not np.isfinite(x) or x < minimo:
+            return None, f"{nome} deve essere un numero >= {minimo}."
+        if massimo is not None and x > massimo:
+            return None, f"{nome} deve essere un numero <= {massimo}."
+        return x, None
+
+    pmw, em = _num(potenza_mw, "potenza_mw", 1e-9, 100000.0)
+    if em:
+        return _err(em)
+    if not isinstance(profilo, str) or profilo not in ("solare", "eolico", "piatto"):
+        return _err("profilo deve essere 'solare', 'eolico' o 'piatto'.")
+    soglia, em = _num(soglia_curtailment, "soglia_curtailment", -10000.0, 10000.0)
+    if em:
+        return _err(em)
+    cm, em = _num(costo_marginale, "costo_marginale", 0.0, 10000.0)
+    if em:
+        return _err(em)
+    if isinstance(seed, bool):
+        return _err("seed deve essere un intero.")
+    try:
+        seed_i = int(seed)
+    except (TypeError, ValueError):
+        return _err("seed deve essere un intero.")
+
+    # --- profilo di generazione orario (fattore di capacita' 0..1) ---
+    ore = s.index.hour.to_numpy()
+    if profilo == "piatto":
+        f = np.ones(n)
+    elif profilo == "solare":
+        x = (ore - 6.0) / 14.0
+        f = np.where((ore >= 6) & (ore < 20),
+                     np.sin(np.pi * np.clip(x, 0.0, 1.0)) ** 1.2, 0.0)
+    else:  # eolico: deterministico a parita' di seed
+        rng = np.random.default_rng(seed_i)
+        base = rng.uniform(0.05, 1.0, n)
+        f = pd.Series(base).rolling(6, min_periods=1, center=True).mean().to_numpy()
+        f = np.clip(f, 0.05, 0.95)
+
+    g = f * pmw
+    curt = spot < soglia
+    ore_curt = int(curt.sum())
+
+    mwh_pot = float(g.sum())
+    mwh_curt = float(g[curt].sum())
+    mwh_del = mwh_pot - mwh_curt
+
+    marg_senza = (spot - cm) * g
+    marg_con = np.where(curt, 0.0, marg_senza)
+    ricavo_senza = float((spot * g).sum())
+    ricavo_con = float((spot[~curt] * g[~curt]).sum())
+    profitto_senza = float(marg_senza.sum())
+    profitto_con = float(marg_con.sum())
+    beneficio = profitto_con - profitto_senza
+    onm_risp = cm * mwh_curt
+    quota = 100.0 * mwh_curt / mwh_pot if mwh_pot > 0 else 0.0
+    cattura_senza = ricavo_senza / mwh_pot if mwh_pot > 0 else 0.0
+    cattura_con = ricavo_con / mwh_del if mwh_del > 0 else 0.0
+
+    if ore_curt == 0:
+        giudizio = "NON NECESSARIO"
+        verdetto = ("Nessuna ora con prezzo sotto la soglia di "
+                    f"{soglia:,.2f} EUR/MWh: nessun curtailment da applicare.")
+    elif beneficio > 0 and quota >= 1.0:
+        giudizio = "CONSIGLIATO"
+        verdetto = (f"Curtailment consigliato: fermando l'impianto nelle {ore_curt} "
+                    f"ore sotto soglia risparmi {beneficio:,.0f} EUR "
+                    f"({mwh_curt:,.0f} MWh non prodotti, O&M risparmiati "
+                    f"{onm_risp:,.0f} EUR).")
+    elif beneficio > 0:
+        giudizio = "MARGINALE"
+        verdetto = (f"Beneficio positivo ma modesto ({beneficio:,.0f} EUR su "
+                    f"{mwh_curt:,.1f} MWh curtailati): valuta se i costi di "
+                    f"start/stop lo giustificano.")
+    else:
+        giudizio = "SOGLIA TROPPO ALTA"
+        verdetto = (f"La soglia di {soglia:,.2f} EUR/MWh distrugge valore "
+                    f"({beneficio:,.0f} EUR): stai fermando ore con margine "
+                    f"positivo. Abbassala verso il costo marginale "
+                    f"({cm:,.2f} EUR/MWh).")
+
+    giorni = s.index.floor("D")
+    df_g = pd.DataFrame({
+        "Giorno": giorni,
+        "MWh potenziali": g,
+        "MWh curtailati": np.where(curt, g, 0.0),
+        "Beneficio (EUR)": marg_con - marg_senza,
+    }).groupby("Giorno", as_index=False).sum()
+    df_g["Giorno"] = pd.to_datetime(df_g["Giorno"]).dt.date
+    df_g["Quota curtailment %"] = np.where(
+        df_g["MWh potenziali"] > 0,
+        100.0 * df_g["MWh curtailati"] / df_g["MWh potenziali"], 0.0)
+
+    mesi = s.index.to_period("M").astype(str)
+    df_m = pd.DataFrame({
+        "Mese": mesi,
+        "MWh potenziali": g,
+        "MWh curtailati": np.where(curt, g, 0.0),
+        "Beneficio (EUR)": marg_con - marg_senza,
+    }).groupby("Mese", as_index=False).sum()
+    df_m["Beneficio cumulato (EUR)"] = df_m["Beneficio (EUR)"].cumsum()
+
+    return {
+        "valido": True, "errore": None,
+        "ore_curtailment": ore_curt, "mwh_potenziali": mwh_pot,
+        "mwh_curtailed": mwh_curt, "mwh_consegnati": mwh_del,
+        "quota_curtailment_pct": quota,
+        "ricavo_senza_eur": ricavo_senza, "ricavo_con_eur": ricavo_con,
+        "profitto_senza_eur": profitto_senza, "profitto_con_eur": profitto_con,
+        "beneficio_eur": beneficio, "onm_risparmiati_eur": onm_risp,
+        "cattura_senza_eur_mwh": cattura_senza,
+        "cattura_con_eur_mwh": cattura_con,
+        "giudizio": giudizio, "verdetto": verdetto,
+        "df_giornaliera": df_g, "df_mensile": df_m, "n_ore": n,
+        "profilo": profilo, "soglia": soglia,
+    }
+
+
 def calcola_cogenerazione(prezzi, potenza_mw=1.0, rend_elettrico=0.38,
                           rend_termico=0.45, prezzo_gas=40.0, prezzo_co2=80.0,
                           fattore_emissione=0.202, valore_calore=55.0,
@@ -25983,7 +26174,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -42519,6 +42710,111 @@ elif workspace == _('ws8'):
                                key="chp189_csv",
                                help="Una riga per giorno: MWh elettrici, MWh termici, ore di funzionamento, margine.",
                                )
+
+
+    with tab190:
+        titolo_curt = edu("Curtailment rinnovabile", "Curtailment: fermare volontariamente un impianto rinnovabile nelle ore in cui il prezzo scende sotto una soglia (tipicamente prezzi negativi), per non pagare per produrre. Il beneficio e' la perdita evitata piu' l'O&M risparmiato; il prezzo di cattura migliora perche' togli dal mix le ore peggiori.")
+        st.markdown(f"<h1>⏸️ {titolo_curt}</h1>", unsafe_allow_html=True)
+        st.caption("Impianto FV/eolico: in quali ore conviene fermarlo invece di vendere sotto soglia, quanta energia perdi e quanto risparmi — e come cambia il prezzo di cattura.")
+        c1a_curt, c1b_curt = st.columns(2)
+        with c1a_curt:
+            pmw_curt = st.number_input("Potenza installata (MW)", min_value=0.1,
+                                      value=10.0, step=1.0, key="cur190_pmw",
+                                      help="Taglia dell'impianto rinnovabile.")
+            prof_curt = st.selectbox("Profilo di generazione",
+                                     ["solare", "eolico", "piatto"],
+                                     key="cur190_profilo",
+                                     help="solare: campana 6-20 con picco alle 13; eolico: profilo sintetico deterministico; piatto: fattore di capacita' 100%.")
+        with c1b_curt:
+            soglia_curt = st.number_input("Soglia di curtailment (EUR/MWh)",
+                                         value=0.0, step=5.0,
+                                         key="cur190_soglia",
+                                         help="Ferma l'impianto nelle ore con prezzo sotto questa soglia. 0 = solo prezzi negativi.")
+            cm_curt = st.number_input("Costo marginale (EUR/MWh)",
+                                      min_value=0.0, value=2.0, step=0.5,
+                                      key="cur190_cm",
+                                      help="O&M variabile per MWh prodotto: fermando l'impianto lo risparmi.")
+
+        ris_curt = calcola_curtailment(
+            prezzi, potenza_mw=pmw_curt, profilo=prof_curt,
+            soglia_curtailment=soglia_curt, costo_marginale=cm_curt)
+        if not ris_curt["valido"]:
+            st.error(ris_curt["errore"])
+        else:
+            k1_curt, k2_curt, k3_curt, k4_curt = st.columns(4)
+            with k1_curt:
+                st.metric("Energia curtailata",
+                          f"{ris_curt['mwh_curtailed']:,.0f} MWh",
+                          f"quota {ris_curt['quota_curtailment_pct']:.1f} %")
+            with k2_curt:
+                st.metric("Beneficio netto",
+                          f"{ris_curt['beneficio_eur']:,.0f} EUR",
+                          f"{ris_curt['ore_curtailment']:,} ore fermo")
+            with k3_curt:
+                st.metric("Prezzo di cattura",
+                          f"{ris_curt['cattura_con_eur_mwh']:,.2f} EUR/MWh",
+                          f"{ris_curt['cattura_con_eur_mwh'] - ris_curt['cattura_senza_eur_mwh']:+,.2f} vs senza curt.")
+            with k4_curt:
+                st.metric("Profitto con curtailment",
+                          f"{ris_curt['profitto_con_eur']:,.0f} EUR",
+                          f"{ris_curt['beneficio_eur']:+,.0f} vs senza")
+            giudizio_curt = ris_curt["giudizio"]
+            if giudizio_curt == "CONSIGLIATO":
+                st.success(ris_curt["verdetto"])
+            elif giudizio_curt == "MARGINALE":
+                st.info(ris_curt["verdetto"])
+            elif giudizio_curt == "NON NECESSARIO":
+                st.warning(ris_curt["verdetto"])
+            else:
+                st.error(ris_curt["verdetto"])
+            st.caption(f"Soglia {ris_curt['soglia']:,.2f} EUR/MWh, profilo "
+                       f"\"{ris_curt['profilo']}\", O&M risparmiati "
+                       f"{ris_curt['onm_risparmiati_eur']:,.0f} EUR.")
+
+            df_g_curt = ris_curt["df_giornaliera"].copy()
+            df_g_curt["MWh consegnati"] = (df_g_curt["MWh potenziali"]
+                                          - df_g_curt["MWh curtailati"])
+            fig_curt = go.Figure()
+            fig_curt.add_trace(go.Bar(x=df_g_curt["Giorno"],
+                                     y=df_g_curt["MWh consegnati"],
+                                     name="MWh consegnati",
+                                     marker_color="#10B981"))
+            fig_curt.add_trace(go.Bar(x=df_g_curt["Giorno"],
+                                     y=df_g_curt["MWh curtailati"],
+                                     name="MWh curtailati",
+                                     marker_color="#EF4444"))
+            fig_curt.update_layout(template="plotly_dark", height=320,
+                                   barmode="stack",
+                                   title="Energia giornaliera: consegnata vs curtailata",
+                                   xaxis_title="Giorno", yaxis_title="MWh")
+            st.plotly_chart(fig_curt, use_container_width=True)
+
+            df_m_curt = ris_curt["df_mensile"]
+            fig_cm_curt = go.Figure()
+            fig_cm_curt.add_trace(go.Bar(x=df_m_curt["Mese"],
+                                        y=df_m_curt["Beneficio (EUR)"],
+                                        name="Beneficio mensile",
+                                        marker_color="#8B5CF6"))
+            fig_cm_curt.add_trace(go.Scatter(x=df_m_curt["Mese"],
+                                            y=df_m_curt["Beneficio cumulato (EUR)"],
+                                            mode="lines+markers",
+                                            name="Cumulato",
+                                            marker_color="#10B981"))
+            fig_cm_curt.update_layout(template="plotly_dark", height=320,
+                                      title="Beneficio mensile e cumulato del curtailment",
+                                      xaxis_title="Mese", yaxis_title="EUR")
+            st.plotly_chart(fig_cm_curt, use_container_width=True)
+
+            st.dataframe(df_m_curt, use_container_width=True, hide_index=True)
+            csv_curt = df_g_curt.to_csv(index=False, sep=";").encode("utf-8")
+            st.download_button("Scarica CSV giornaliero",
+                               data=csv_curt,
+                               file_name="curtailment_rinnovabile.csv",
+                               mime="text/csv",
+                               key="cur190_csv",
+                               help="Una riga per giorno: MWh potenziali, curtailati, quota %, beneficio.",
+                               )
+
 
 
 # Footer
