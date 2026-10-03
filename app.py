@@ -21461,6 +21461,236 @@ def calcola_dunkelflaute(prezzi, cap_fv_mw=100.0, cap_eolico_mw=100.0,
             "giudizio": giudizio, "verdetto": verdetto}
 
 
+def calcola_hellbrise(prezzi, cap_fv_mw=100.0, cap_eolico_mw=100.0,
+                      percentile_hb=90.0, soglia_curtail_pct=80.0,
+                      prezzo_curtail=0.0, min_giorni=7):
+    """Giorni di hellbrise: quando sole e vento producono troppo.
+
+    Domanda operativa: "quanto si perde nei giorni di eccesso
+    rinnovabile?" - con alta penetrazione di FV+eolico, i giorni di
+    sole pieno e vento forte saturano l'offerta e i prezzi crollano:
+    questa tab quantifica lo SCONTO DI ECCESSO (cannibalizzazione)
+    speculare alla dunkelflaute.
+
+    Metodo: gli stessi profili sintetici deterministici `profilo_solare` /
+    `profilo_eolico` della tab price capture generano la produzione oraria
+    FV+eolico; fattore rinnovabile giornaliero = energia FV+eolico del
+    giorno / (ore_giorno x capacita' totale). Giorno di hellbrise: fattore
+    sopra il `percentile_hb`-esimo percentile della distribuzione del
+    periodo (default 90: il miglior decile rinnovabile). Ore di potenziale
+    curtailment: ore con fattore orario >= soglia_curtail_pct e prezzo <=
+    prezzo_curtail (default: fattore >= 80% e prezzo <= 0).
+
+    KPI: n giorni HB, quota % sul periodo, prezzo medio nei giorni HB,
+    sconto di eccesso vs media periodo (EUR/MWh e %), tasso di cattura
+    rinnovabile nel periodo e nei giorni HB, ore di potenziale
+    curtailment (n, quota % sulle ore, MWh potenzialmente persi),
+    peggior giorno HB (prezzo minimo), fattore rinnovabile medio nei
+    giorni HB; tabella mensile (giorni totali, giorni HB, quota %,
+    prezzo medio HB, prezzo mese, sconto, tasso di cattura HB);
+    giudizio CANNIBALIZZAZIONE FORTE / MODERATA / CONTENUTA sullo sconto
+    medio; verdetto con nota operativa su stoccaggio, domanda
+    flessibile e struttura dei PPA.
+    E' un'analisi di STRESS su profili sintetici, non una misura: serve a
+    valutare il rischio di cattura dei ricavi rinnovabili, non a
+    prevedere il meteo.
+
+    NaN-safe: serie vuota / indice non datetime / < min_giorni giorni /
+    capacita' <= 0 / percentile fuori (50, 100) / soglia curtailment fuori
+    (0, 100] / min_giorni < 2 -> errore pulito; tz-aware reso naive;
+    duplicati keep-first; prezzi NaN scartati e contati. Deterministico.
+    """
+
+    def _err(msg):
+        return {"errore": msg, "valido": False}
+
+    try:
+        min_giorni = int(min_giorni)
+    except (TypeError, ValueError):
+        return _err("min_giorni non valido.")
+    if min_giorni < 2:
+        return _err("min_giorni deve essere almeno 2.")
+    try:
+        cap_fv = float(cap_fv_mw)
+        cap_eo = float(cap_eolico_mw)
+        perc = float(percentile_hb)
+        soglia_c = float(soglia_curtail_pct)
+        p_curt = float(prezzo_curtail)
+    except (TypeError, ValueError):
+        return _err("Parametri non validi.")
+    for v in (cap_fv, cap_eo):
+        if not np.isfinite(v) or v <= 0:
+            return _err("Le capacita' FV ed eolico devono essere > 0.")
+    if not np.isfinite(perc) or not (50.0 <= perc < 100.0):
+        return _err("Il percentile deve essere tra 50 e 100 (escluso).")
+    if not np.isfinite(soglia_c) or not (0.0 < soglia_c <= 100.0):
+        return _err("La soglia di curtailment deve essere tra 0 e 100.")
+    if not np.isfinite(p_curt):
+        return _err("Il prezzo di curtailment non e' valido.")
+    if not isinstance(prezzi, pd.Series):
+        return _err("Input non valido: serve una Series di prezzi orari.")
+    try:
+        idx = pd.to_datetime(prezzi.index, errors="coerce")
+    except Exception:
+        return _err("Indice non convertibile a datetime.")
+    if idx.isna().all():
+        return _err("Indice non datetime.")
+    vals = pd.to_numeric(prezzi.values, errors="coerce")
+    okm = ~idx.isna()
+    idx, vals = idx[okm], vals[okm]
+    if len(idx) == 0:
+        return _err("Serie prezzi vuota.")
+    n_nan = int(np.isnan(vals).sum())
+    dfp = pd.DataFrame({"prezzo": vals}, index=idx).dropna(subset=["prezzo"])
+    if dfp.index.tz is not None:
+        dfp.index = dfp.index.tz_localize(None)
+    dfp = dfp[~dfp.index.duplicated(keep="first")].sort_index()
+    if len(dfp) == 0:
+        return _err("Serie prezzi vuota dopo la pulizia dei NaN.")
+
+    cap_tot = cap_fv + cap_eo
+    gen_fv = profilo_solare(dfp["prezzo"], cap_fv)
+    gen_eo = profilo_eolico(dfp["prezzo"], cap_eo)
+    if len(gen_fv) == 0 or len(gen_eo) == 0:
+        return _err("Profili di generazione non generati.")
+    gen = (pd.to_numeric(gen_fv, errors="coerce").fillna(0.0)
+           + pd.to_numeric(gen_eo, errors="coerce").fillna(0.0))
+    gen = gen.reindex(dfp.index).fillna(0.0)
+
+    giorni = dfp.index.floor("D")
+    n_ore_g = giorni.value_counts().sort_index()
+    en_g = gen.groupby(giorni).sum()
+    p_g = dfp["prezzo"].groupby(giorni).mean()
+    fattore = en_g / (n_ore_g.reindex(en_g.index) * cap_tot)
+    if len(p_g) < min_giorni:
+        return _err("Servono almeno %d giorni di dati (trovati %d)."
+                    % (min_giorni, len(p_g)))
+
+    lim = float(np.percentile(fattore.values, perc))
+    is_hb = fattore >= lim
+    n_hb = int(is_hb.sum())
+    n_gg = len(p_g)
+    quota = n_hb / n_gg * 100.0 if n_gg else 0.0
+    p_medio = float(p_g.mean())
+    fattore_medio_hb = float(fattore[is_hb].mean()) if n_hb else 0.0
+    if n_hb:
+        p_hb = float(p_g[is_hb].mean())
+        sconto = p_medio - p_hb
+        sconto_pct = sconto / p_medio * 100.0 if p_medio != 0 else None
+        peggior_g = p_g[is_hb].idxmin()
+        peggior_p = float(p_g[is_hb].min())
+    else:
+        p_hb, sconto, sconto_pct, peggior_g, peggior_p = None, None, None, None, None
+
+    # Tasso di cattura rinnovabile: prezzo catturato / prezzo medio base.
+    def _tasso(mask_ore):
+        gsel = gen[mask_ore]
+        psel = dfp["prezzo"][mask_ore]
+        en = float(gsel.sum())
+        if en <= 0:
+            return None
+        catt = float((psel * gsel).sum()) / en
+        base = float(psel.mean())
+        if base == 0 or not np.isfinite(base):
+            return None
+        return catt / base * 100.0
+
+    tasso_per = _tasso(np.ones(len(dfp), dtype=bool))
+    mask_hb = dfp.index.floor("D").isin(p_g[is_hb].index)
+    tasso_hb = _tasso(mask_hb)
+
+    # Ore di potenziale curtailment: tanta rinnovabile e prezzo basso.
+    fattore_ora = gen / cap_tot
+    ore_curt = (fattore_ora >= soglia_c / 100.0) & (dfp["prezzo"] <= p_curt)
+    n_curt = int(ore_curt.sum())
+    n_ore = len(dfp)
+    quota_curt = n_curt / n_ore * 100.0 if n_ore else 0.0
+    mwh_curt = float(gen[ore_curt].sum())
+
+    if n_hb == 0:
+        giudizio = "NESSUN GIORNO"
+        nota_g = ("nessun giorno sopra il percentile scelto: abbassa il "
+                  "percentile per allargare l'analisi.")
+    elif sconto >= 15.0:
+        giudizio = "CANNIBALIZZAZIONE FORTE"
+        nota_g = ("i giorni di eccesso rinnovabile costano in media almeno "
+                  "15 €/MWh meno della media: il rischio di cattura dei "
+                  "ricavi rinnovabili e' materiale, servono stoccaggio, "
+                  "domanda flessibile o coperture sul capture price.")
+    elif sconto >= 5.0:
+        giudizio = "CANNIBALIZZAZIONE MODERATA"
+        nota_g = ("sconto di eccesso contenuto ma visibile: i giorni di "
+                  "hellbrise rendono meno, da valutare nei mesi estivi e "
+                  "nei PPA pay-as-produced.")
+    else:
+        giudizio = "CANNIBALIZZAZIONE CONTENUTA"
+        nota_g = ("sconto di eccesso piccolo o nullo nel periodo: "
+                  "l'hellbrise c'e' ma il mercato non la sconta (o i "
+                  "prezzi dei giorni HB sono addirittura piu' alti).")
+
+    mesi = []
+    for periodo, grp in p_g.groupby(pd.PeriodIndex(p_g.index, freq="M")):
+        ghb = is_hb.loc[grp.index]
+        nh = int(ghb.sum())
+        pm = float(grp.mean())
+        phb = float(grp[ghb].mean()) if nh else None
+        mask_m = dfp.index.floor("D").isin(grp[ghb].index)
+        mesi.append({
+            "Mese": str(periodo),
+            "Giorni totali": len(grp),
+            "Giorni hellbrise": nh,
+            "Quota HB (%)": round(nh / len(grp) * 100.0, 1),
+            "Prezzo medio HB (€/MWh)": round(phb, 2) if phb is not None else None,
+            "Prezzo medio mese (€/MWh)": round(pm, 2),
+            "Sconto HB (€/MWh)": round(pm - phb, 2) if phb is not None else None,
+            "Tasso di cattura HB (%)": round(_tasso(mask_m), 1) if _tasso(mask_m) is not None else None,
+        })
+    tabella_mensile = pd.DataFrame(mesi)
+
+    serie_fattore = fattore.rename("Fattore rinnovabile giornaliero")
+    serie_prezzo_g = p_g.rename("Prezzo medio giornaliero (€/MWh)")
+
+    if n_hb:
+        verdetto = (
+            "%d giorni di hellbrise su %d (%.1f %%, miglior %s-esimo "
+            "percentile del fattore rinnovabile). Prezzo medio nei giorni HB: "
+            "%.2f €/MWh contro %.2f €/MWh di media periodo: sconto di "
+            "eccesso %+.2f €/MWh%s. Tasso di cattura rinnovabile: %s nel "
+            "periodo, %s nei giorni HB. Ore di potenziale curtailment: %d "
+            "(%.1f %%, %.0f MWh). Fattore rinnovabile medio nei giorni "
+            "HB: %.1f %%. Peggior giorno: %s a %.2f €/MWh. %s" % (
+                n_hb, n_gg, quota, ("%g" % perc), p_hb, p_medio, sconto,
+                (" (%+.1f %%)" % sconto_pct) if sconto_pct is not None else "",
+                ("%.1f %%" % tasso_per) if tasso_per is not None else "—",
+                ("%.1f %%" % tasso_hb) if tasso_hb is not None else "—",
+                n_curt, quota_curt, mwh_curt,
+                fattore_medio_hb * 100.0,
+                peggior_g.strftime("%d/%m/%Y"), peggior_p, nota_g))
+    else:
+        verdetto = ("%d giorni di dati, nessun giorno di hellbrise al "
+                    "percentile scelto. %s" % (n_gg, nota_g))
+
+    return {"errore": None, "valido": True,
+            "n_giorni": n_gg, "n_hb": n_hb, "quota_hb_pct": quota,
+            "percentile_hb": perc, "limite_fattore": lim,
+            "cap_fv_mw": cap_fv, "cap_eolico_mw": cap_eo,
+            "cap_tot_mw": cap_tot, "n_nan_prezzi": n_nan,
+            "prezzo_medio": p_medio, "prezzo_medio_hb": p_hb,
+            "sconto_eur_mwh": sconto, "sconto_pct": sconto_pct,
+            "tasso_cattura_periodo": tasso_per,
+            "tasso_cattura_hb": tasso_hb,
+            "fattore_medio_hb": fattore_medio_hb,
+            "peggior_giorno": peggior_g, "peggior_prezzo": peggior_p,
+            "n_ore_curtailment": n_curt,
+            "quota_ore_curtailment_pct": quota_curt,
+            "mwh_curtailment": mwh_curt,
+            "soglia_curtail_pct": soglia_c, "prezzo_curtail": p_curt,
+            "serie_fattore": serie_fattore, "serie_prezzo_g": serie_prezzo_g,
+            "giorni_hb": p_g[is_hb].index,
+            "tabella_mensile": tabella_mensile,
+            "giudizio": giudizio, "verdetto": verdetto}
+
+
 # ==========================================
 # WORKSPACE 1: SIMULATORE STRATEGICO
 # ==========================================
@@ -22105,7 +22335,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -36527,6 +36757,123 @@ elif workspace == _('ws8'):
                     mime="text/csv",
                     key="df168_csv_g",
                     help="Un giorno per riga: fattore rinnovabile e flag dunkelflaute.",
+                )
+
+
+    with tab169:
+        titolo_hb = edu("Hellbrise", "HELLBRISE = 'vento luminoso': giorni in cui sole pieno e vento forte producono tantissimo (tipico delle mezze stagioni e dell'estate con alta penetrazione rinnovabile). L'offerta satura il mercato e i prezzi crollano: lo SCONTO DI ECCESSO è la differenza tra la media del periodo e il prezzo medio dei giorni di hellbrise. È la metrica della CANNIBALIZZAZIONE: quanto un impianto rinnovabile vende davvero (tasso di cattura) rispetto al prezzo medio di mercato.")
+        st.markdown(f"<h1>🌞 {titolo_hb}</h1>", unsafe_allow_html=True)
+        st.caption("Quanto si perde nei giorni di eccesso rinnovabile: sconto di eccesso e cannibalizzazione su profili sintetici deterministici (speculare alla tab Dunkelflaute).")
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            hb_cap_fv = st.slider("Capacità FV (MW)", min_value=10.0, max_value=500.0,
+                                  value=100.0, step=10.0, key="hb169_cap_fv",
+                                  help="Potenza FV installata del sistema sintetico.")
+        with c2:
+            hb_cap_eo = st.slider("Capacità eolica (MW)", min_value=10.0, max_value=500.0,
+                                   value=100.0, step=10.0, key="hb169_cap_wind",
+                                   help="Potenza eolica installata del sistema sintetico.")
+        with c3:
+            hb_perc = st.slider("Percentile di eccesso (%)",
+                                min_value=75.0, max_value=98.0, value=90.0,
+                                step=1.0, key="hb169_perc",
+                                help="Giorno di hellbrise se il fattore rinnovabile FV+eolico è sopra questo percentile della distribuzione del periodo (miglior decile di default).")
+        with c4:
+            hb_soglia = st.slider("Soglia curtailment (% fattore)",
+                                  min_value=50.0, max_value=100.0, value=80.0,
+                                  step=5.0, key="hb169_soglia",
+                                  help="Ora di potenziale curtailment: fattore orario rinnovabile >= soglia E prezzo <= prezzo di curtailment.")
+        ris_hb = calcola_hellbrise(prezzi, hb_cap_fv, hb_cap_eo, hb_perc, hb_soglia)
+        if not ris_hb["valido"]:
+            st.error(ris_hb["errore"])
+        else:
+            g = ris_hb["giudizio"]
+            if g == "CANNIBALIZZAZIONE FORTE":
+                st.error(f"🚨 {ris_hb['verdetto']}")
+            elif g == "CANNIBALIZZAZIONE MODERATA":
+                st.warning(f"ℹ️ {ris_hb['verdetto']}")
+            elif g == "NESSUN GIORNO":
+                st.info(f"ℹ️ {ris_hb['verdetto']}")
+            else:
+                st.success(f"✅ {ris_hb['verdetto']}")
+            sconto = ris_hb["sconto_eur_mwh"]
+            sconto_txt = "—" if sconto is None else f"{sconto:+.2f} €/MWh"
+            tasso = ris_hb["tasso_cattura_hb"]
+            tasso_txt = "—" if tasso is None else f"{tasso:.1f} %"
+            k1, k2, k3, k4 = st.columns(4)
+            render_kpi(edu("Giorni hellbrise", "Giorni con fattore rinnovabile FV+eolico sopra la soglia: sole pieno e vento forte che saturano l'offerta."), f"{ris_hb['n_hb']} ({ris_hb['quota_hb_pct']:.1f} %)", k1)
+            render_kpi(edu("Sconto di eccesso", "Media del periodo meno prezzo medio nei giorni di hellbrise: quanto il mercato sconta l'eccesso di rinnovabili."), sconto_txt, k2)
+            render_kpi(edu("Tasso di cattura in HB", "Prezzo catturato dalla generazione rinnovabile nei giorni di hellbrise diviso prezzo medio: quanto vale davvero l'energia prodotta in quei giorni."), tasso_txt, k3)
+            render_kpi(edu("Ore di potenziale curtailment", "Ore con fattore orario rinnovabile sopra la soglia e prezzo <= 0: energia che il mercato non assorbe a prezzo positivo."), f"{ris_hb['n_ore_curtailment']} ({ris_hb['quota_ore_curtailment_pct']:.1f} %)", k4)
+            st.caption(f"Capacità totale {ris_hb['cap_tot_mw']:.0f} MW (FV {ris_hb['cap_fv_mw']:.0f} + eolico {ris_hb['cap_eolico_mw']:.0f}) · Percentile {ris_hb['percentile_hb']:.0f} (limite fattore {ris_hb['limite_fattore'] * 100:.1f} %) · {ris_hb['n_giorni']} giorni analizzati · Prezzi NaN scartati: {ris_hb['n_nan_prezzi']} · Curtailment: fattore ≥ {ris_hb['soglia_curtail_pct']:.0f} % e prezzo ≤ {ris_hb['prezzo_curtail']:.0f} €/MWh ({ris_hb['mwh_curtailment']:.0f} MWh)")
+            if ris_hb["peggior_giorno"] is not None:
+                st.caption(f"Peggior giorno: {ris_hb['peggior_giorno'].strftime('%d/%m/%Y')} a {ris_hb['peggior_prezzo']:.2f} €/MWh di media")
+
+            st.markdown("**Fattore rinnovabile giornaliero e giorni di hellbrise**")
+            sf = ris_hb["serie_fattore"]
+            fig_hb1 = go.Figure()
+            fig_hb1.add_trace(go.Scatter(x=sf.index, y=sf.values * 100.0, mode="lines",
+                                         name="Fattore rinnovabile %",
+                                         line=dict(color="#FBBF24", width=1.5),
+                                         hovertemplate="Giorno: %{x|%d/%m/%Y}<br>Fattore: %{y:.1f} %<extra></extra>"))
+            fig_hb1.add_hline(y=ris_hb["limite_fattore"] * 100.0, line_dash="dash",
+                              line_color="#F97316",
+                              annotation_text=f"Limite {ris_hb['limite_fattore'] * 100:.1f} %")
+            if ris_hb["n_hb"]:
+                ghb = ris_hb["giorni_hb"]
+                fig_hb1.add_trace(go.Scatter(x=ghb, y=sf.loc[ghb].values * 100.0,
+                                             mode="markers", name="Hellbrise",
+                                             marker=dict(color="#F97316", size=6),
+                                             hovertemplate="Hellbrise: %{x|%d/%m/%Y}<br>Fattore: %{y:.1f} %<extra></extra>"))
+            fig_hb1.update_layout(yaxis_title="% del massimo teorico",
+                                  margin=dict(l=10, r=10, t=10, b=10))
+            st.plotly_chart(fig_hb1, use_container_width=True)
+
+            st.markdown("**Prezzo medio giornaliero: i giorni HB costano di meno?**")
+            sp = ris_hb["serie_prezzo_g"]
+            fig_hb2 = go.Figure()
+            fig_hb2.add_trace(go.Scatter(x=sp.index, y=sp.values, mode="lines",
+                                         name="Prezzo medio giornaliero",
+                                         line=dict(color="#94A3B8", width=1.2),
+                                         hovertemplate="Giorno: %{x|%d/%m/%Y}<br>Prezzo: %{y:.2f} €/MWh<extra></extra>"))
+            if ris_hb["n_hb"]:
+                ghb = ris_hb["giorni_hb"]
+                fig_hb2.add_trace(go.Scatter(x=ghb, y=sp.loc[ghb].values,
+                                             mode="markers", name="Giorni hellbrise",
+                                             marker=dict(color="#F97316", size=7),
+                                             hovertemplate="HB: %{x|%d/%m/%Y}<br>Prezzo: %{y:.2f} €/MWh<extra></extra>"))
+            fig_hb2.add_hline(y=ris_hb["prezzo_medio"], line_dash="dash",
+                              line_color="#10B981",
+                              annotation_text=f"Media periodo {ris_hb['prezzo_medio']:.2f} €/MWh")
+            fig_hb2.update_layout(yaxis_title="€/MWh",
+                                  margin=dict(l=10, r=10, t=10, b=10))
+            st.plotly_chart(fig_hb2, use_container_width=True)
+
+            st.markdown("**Hellbrise per mese**")
+            tm = ris_hb["tabella_mensile"]
+            st.dataframe(tm, use_container_width=True, hide_index=True)
+            e1, e2 = st.columns(2)
+            with e1:
+                st.download_button(
+                    "⬇️ Esporta hellbrise mensile (CSV)",
+                    tm.to_csv(index=False, sep=";").encode("utf-8"),
+                    file_name=f"hellbrise_mensile_{d0}_{d1}.csv",
+                    mime="text/csv",
+                    key="hb169_csv_m",
+                    help="Una riga per mese: giorni totali, giorni HB, quota %, prezzo medio HB e sconto.",
+                )
+            with e2:
+                sg = ris_hb["serie_fattore"]
+                dg = pd.DataFrame({"Giorno": sg.index.strftime("%Y-%m-%d"),
+                                   "Fattore rinnovabile (%)": (sg.values * 100.0).round(2),
+                                   "Hellbrise": sg.index.isin(ris_hb["giorni_hb"])})
+                st.download_button(
+                    "⬇️ Esporta giorni analizzati (CSV)",
+                    dg.to_csv(index=False, sep=";").encode("utf-8"),
+                    file_name=f"hellbrise_giorni_{d0}_{d1}.csv",
+                    mime="text/csv",
+                    key="hb169_csv_g",
+                    help="Un giorno per riga: fattore rinnovabile e flag hellbrise.",
                 )
 
 
