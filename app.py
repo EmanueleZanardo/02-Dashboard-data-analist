@@ -23026,6 +23026,92 @@ def calcola_flessibilita_oraria(prezzi, mw_f1, mw_f2, mw_f3, quota_flessibile_pc
             "quota_flessibile_pct": quota, "raggio_spostamento": raggio}
 
 
+def calcola_quantili_orari(prezzi, q_bassa=10.0, q_alta=90.0):
+    """Quantili orari del prezzo: bande di prezzo per ora del giorno (0-23).
+
+    Domanda operativa: a che ora del giorno il prezzo e' tipicamente basso o
+    alto, e quanto e' ampio l'intervallo realistico? Per ogni ora del giorno
+    (0-23) calcola i quantili del prezzo spot sulle ore di quella fascia nel
+    periodo: P_bassa / P25 / P50 (mediana) / P75 / P_alta, piu' min, max,
+    media e numerosita'. Le bande P25-P75 e P_bassa-P_alta sono la "forchetta"
+    attesa del prezzo ora per ora: servono a piazzare ordini limite, a
+    tarare le soglie degli alert e a valutare se un prezzo fisso offerto e'
+    dentro o fuori la norma per quell'ora.
+
+    Ritorna dict con valido/errore, df_quantili (Ora del giorno, N ore, Min,
+    P_bassa, P25, P50, P75, P_alta, Max, Media, Ampiezza banda), n_ore,
+    ora_mediana_max (ora con mediana piu' alta), ora_mediana_min (ora con
+    mediana piu' bassa), ora_iqr_max (ora con IQR P75-P25 piu' ampio, la piu'
+    volatile), ampiezza_banda_media, q_bassa, q_alta. NaN-safe: serie vuota /
+    indice non datetime / parametri non validi -> valido False con errore
+    pulito, mai eccezioni. Deterministico (quantili pandas, interpolazione
+    lineare).
+    """
+    try:
+        qb = float(q_bassa)
+        qa = float(q_alta)
+    except (TypeError, ValueError):
+        return {"valido": False, "errore": "Percentili di banda non validi.",
+                "df_quantili": pd.DataFrame()}
+    if not (0.0 <= qb < qa <= 100.0):
+        return {"valido": False,
+                "errore": "Percentili non validi: serve 0 <= P_bassa < P_alta <= 100.",
+                "df_quantili": pd.DataFrame()}
+    cols = ["Ora del giorno", "N ore", "Min (EUR/MWh)", f"P{qb:g} (EUR/MWh)",
+            "P25 (EUR/MWh)", "P50 (EUR/MWh)", "P75 (EUR/MWh)",
+            f"P{qa:g} (EUR/MWh)", "Max (EUR/MWh)", "Media (EUR/MWh)",
+            "Ampiezza banda (EUR/MWh)"]
+    vuoto = {"valido": False, "errore": None, "df_quantili": pd.DataFrame(columns=cols)}
+    try:
+        p = prezzi.astype(float).dropna()
+        p = p[~p.index.duplicated(keep="first")].sort_index()
+    except Exception:
+        return dict(vuoto, errore="Serie prezzi non valida.")
+    if len(p) == 0:
+        return dict(vuoto, errore="Serie prezzi vuota.")
+    try:
+        ore = np.array([t.hour for t in p.index])
+    except Exception:
+        return dict(vuoto, errore="Indice prezzi non valido (serve un DatetimeIndex).")
+    vals = p.to_numpy(dtype=float)
+    righe = []
+    for h in range(24):
+        v = vals[ore == h]
+        if len(v) == 0:
+            righe.append({"Ora del giorno": h, "N ore": 0,
+                          "Min (EUR/MWh)": np.nan, f"P{qb:g} (EUR/MWh)": np.nan,
+                          "P25 (EUR/MWh)": np.nan, "P50 (EUR/MWh)": np.nan,
+                          "P75 (EUR/MWh)": np.nan, f"P{qa:g} (EUR/MWh)": np.nan,
+                          "Max (EUR/MWh)": np.nan, "Media (EUR/MWh)": np.nan,
+                          "Ampiezza banda (EUR/MWh)": np.nan})
+            continue
+        q = np.quantile(v, [qb / 100.0, 0.25, 0.5, 0.75, qa / 100.0])
+        righe.append({"Ora del giorno": h, "N ore": int(len(v)),
+                      "Min (EUR/MWh)": float(v.min()),
+                      f"P{qb:g} (EUR/MWh)": float(q[0]),
+                      "P25 (EUR/MWh)": float(q[1]),
+                      "P50 (EUR/MWh)": float(q[2]),
+                      "P75 (EUR/MWh)": float(q[3]),
+                      f"P{qa:g} (EUR/MWh)": float(q[4]),
+                      "Max (EUR/MWh)": float(v.max()),
+                      "Media (EUR/MWh)": float(v.mean()),
+                      "Ampiezza banda (EUR/MWh)": float(q[4] - q[0])})
+    df = pd.DataFrame(righe, columns=cols)
+    med = df["P50 (EUR/MWh)"].to_numpy(dtype=float)
+    iqr = (df["P75 (EUR/MWh)"] - df["P25 (EUR/MWh)"]).to_numpy(dtype=float)
+    if np.all(np.isnan(med)):
+        return dict(vuoto, errore="Serie prezzi vuota.")
+    ora_max = int(df.loc[np.nanargmax(med), "Ora del giorno"])
+    ora_min = int(df.loc[np.nanargmin(med), "Ora del giorno"])
+    ora_iqr = int(df.loc[np.nanargmax(iqr), "Ora del giorno"])
+    return {"valido": True, "errore": None, "df_quantili": df,
+            "n_ore": int(len(p)),
+            "ora_mediana_max": ora_max, "ora_mediana_min": ora_min,
+            "ora_iqr_max": ora_iqr,
+            "ampiezza_banda_media": float(np.nanmean(df["Ampiezza banda (EUR/MWh)"].to_numpy(dtype=float))),
+            "q_bassa": qb, "q_alta": qa}
+
+
 def calcola_scala_copertura(prezzi, mw_f1=2.0, mw_f2=2.0, mw_f3=2.0,
                             tranche=None, target_pct=80.0):
     """Scala di copertura mensile: quanta energia del periodo e' coperta a prezzo fisso.
@@ -24118,7 +24204,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -39668,6 +39754,80 @@ elif workspace == _('ws8'):
                 mime="text/csv",
                 key="op179_csv",
                 help="Una riga per coppia mese/ora: prezzo medio orario del mese (EUR/MWh).",
+            )
+
+
+
+    with tab180:
+        titolo_qo = edu("Quantili orari", "Per ogni ora del giorno (0-23) vedi la distribuzione storica del prezzo: mediana e bande P25-P75 / P10-P90. La forchetta attesa ora per ora serve a piazzare ordini limite, tarare le soglie degli alert e giudicare se un prezzo fisso offerto è dentro o fuori la norma per quell'ora.")
+        st.markdown(f"<h1>📊 {titolo_qo}</h1>", unsafe_allow_html=True)
+        st.caption("Bande di prezzo attese per ora del giorno: mediana e quantili storici.")
+        c1_qo, c2_qo = st.columns(2)
+        with c1_qo:
+            qb_qo = st.slider("Percentile basso della banda", min_value=0.0, max_value=45.0, value=10.0, step=5.0,
+                              key="qo180_bassa",
+                              help="Estremo inferiore della banda esterna (default P10).")
+        with c2_qo:
+            qa_qo = st.slider("Percentile alto della banda", min_value=55.0, max_value=100.0, value=90.0, step=5.0,
+                              key="qo180_alta",
+                              help="Estremo superiore della banda esterna (default P90).")
+        ris_qo = calcola_quantili_orari(prezzi, qb_qo, qa_qo)
+        if not ris_qo["valido"]:
+            st.error(ris_qo["errore"])
+        else:
+            _dfq = ris_qo["df_quantili"]
+            _cb, _ca = f"P{qb_qo:g} (EUR/MWh)", f"P{qa_qo:g} (EUR/MWh)"
+            k1, k2, k3, k4 = st.columns(4)
+            with k1:
+                st.metric("Ora con mediana più alta", f"{ris_qo['ora_mediana_max']:02d}:00",
+                          f"P50 {_dfq['P50 (EUR/MWh)'].max():,.1f} €/MWh".replace(",", "."))
+            with k2:
+                st.metric("Ora con mediana più bassa", f"{ris_qo['ora_mediana_min']:02d}:00",
+                          f"P50 {_dfq['P50 (EUR/MWh)'].min():,.1f} €/MWh".replace(",", "."))
+            with k3:
+                st.metric("Ora più volatile", f"{ris_qo['ora_iqr_max']:02d}:00",
+                          "IQR (P75−P25) massimo")
+            with k4:
+                st.metric("Ampiezza banda media", f"{ris_qo['ampiezza_banda_media']:,.1f} €/MWh".replace(",", "."),
+                          f"banda {_cb.split(' ')[0]}–{_ca.split(' ')[0]} su {ris_qo['n_ore']:,} ore".replace(",", "."))
+            fig_qo = go.Figure()
+            _x = _dfq["Ora del giorno"].tolist()
+            fig_qo.add_trace(go.Scatter(x=_x, y=_dfq[_ca].tolist(), mode="lines",
+                                        line=dict(width=0), showlegend=False, hoverinfo="skip"))
+            fig_qo.add_trace(go.Scatter(x=_x, y=_dfq[_cb].tolist(), mode="lines",
+                                        line=dict(width=0), fill="tonexty",
+                                        fillcolor="rgba(99,102,241,0.15)",
+                                        name=f"Banda {_cb.split(' ')[0]}–{_ca.split(' ')[0]}"))
+            fig_qo.add_trace(go.Scatter(x=_x, y=_dfq["P75 (EUR/MWh)"].tolist(), mode="lines",
+                                        line=dict(width=0), showlegend=False, hoverinfo="skip"))
+            fig_qo.add_trace(go.Scatter(x=_x, y=_dfq["P25 (EUR/MWh)"].tolist(), mode="lines",
+                                        line=dict(width=0), fill="tonexty",
+                                        fillcolor="rgba(99,102,241,0.30)",
+                                        name="Banda P25–P75"))
+            fig_qo.add_trace(go.Scatter(x=_x, y=_dfq["P50 (EUR/MWh)"].tolist(), mode="lines+markers",
+                                        line=dict(color="#1f2937", width=2),
+                                        name="Mediana (P50)"))
+            fig_qo.add_trace(go.Scatter(x=_x, y=_dfq["Media (EUR/MWh)"].tolist(), mode="lines",
+                                        line=dict(color="#ef4444", width=1, dash="dash"),
+                                        name="Media"))
+            fig_qo.update_layout(title="Quantili orari del prezzo (EUR/MWh)",
+                                 xaxis_title="Ora del giorno", yaxis_title="EUR/MWh",
+                                 xaxis=dict(dtick=1))
+            st.plotly_chart(fig_qo, use_container_width=True)
+            st.markdown("**Tabella dei quantili per ora del giorno**")
+            _dfq_show = _dfq.copy()
+            for _cc in ["Min (EUR/MWh)", _cb, "P25 (EUR/MWh)", "P50 (EUR/MWh)",
+                        "P75 (EUR/MWh)", _ca, "Max (EUR/MWh)", "Media (EUR/MWh)",
+                        "Ampiezza banda (EUR/MWh)"]:
+                _dfq_show[_cc] = _dfq_show[_cc].round(1)
+            st.dataframe(_dfq_show, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta quantili (CSV)",
+                _dfq.to_csv(index=False, sep=";").encode("utf-8"),
+                file_name=f"quantili_orari_{d0}_{d1}.csv",
+                mime="text/csv",
+                key="qo180_csv",
+                help="Una riga per ora del giorno (0-23): N ore, min, quantili, max, media, ampiezza banda.",
             )
 
 
