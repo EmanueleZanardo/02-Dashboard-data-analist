@@ -24637,6 +24637,269 @@ def calcola_pompaggio(prezzi, pot_turbina_mw=100.0, pot_pompa_mw=100.0,
             "n_ore": len(s), "n_giorni": n_giorni}
 
 
+def calcola_matching_ppa_orario(prezzi, gen_mw=10.0, mix_solare_pct=50.0,
+                                cf_solare=0.18, cf_eolico=0.40,
+                                carico_mw=8.0, profilo_carico="Piatto",
+                                prezzo_ppa=70.0):
+    """Matching orario di un PPA rinnovabile contro un profilo di carico.
+
+    Domanda operativa: "contratto PPA da G MW su un carico da C MW — quanta
+    energia e' davvero abbinata ora per ora (matching 24/7), quanto deficit
+    compro a spot e quanto surplus vendo a spot?"
+
+    Profili sintetici deterministici costruiti sul calendario della serie
+    prezzi (normalizzati ai capacity factor medi annui inseriti):
+    - solare: campana attorno al mezzogiorno con durata del giorno
+      stagionale (dl = 12 + 4.5*cos(2*pi*(doy-172)/365));
+    - eolico: stagionalita' invernale + lieve profilo notturno + rumore
+      moltiplicativo deterministico (seed 187);
+    - carico: Piatto / Uffici (8-18 lun-ven) / Industriale 3 turni /
+      Residenziale (picco serale); carico_mw = picco MW.
+
+    Economia pay-as-produced: tutta la generazione si paga a prezzo_ppa,
+    il deficit si compra a spot, il surplus si vende a spot.
+      matched_h = min(gen_h, carico_h)
+      surplus_h = gen_h - matched_h ; deficit_h = carico_h - matched_h
+
+    - prezzi: Series oraria EUR/MWh, indice datetime (tz-aware reso naive);
+    - gen_mw: potenza contrattuale PPA (> 0);
+    - mix_solare_pct: quota solare nel mix [0, 100] (resto eolico);
+    - cf_solare / cf_eolico: capacity factor medi annui in (0, 0.9];
+    - carico_mw: picco di carico (> 0);
+    - profilo_carico: uno tra "Piatto", "Uffici (8-18, lun-ven)",
+      "Industriale 3 turni", "Residenziale";
+    - prezzo_ppa: strike pay-as-produced in EUR/MWh (>= 0).
+
+    Ritorna dict con 'valido'/'errore', mwh_gen, mwh_carico, mwh_abbinati,
+    mwh_surplus, mwh_deficit, costo_ppa_eur, ricavo_surplus_eur,
+    costo_deficit_eur, costo_totale_eur, costo_spot_puro_eur, delta_eur,
+    delta_pct, prezzo_effettivo_eur_mwh, copertura_media_pct, ore_100_pct,
+    giudizio, verdetto, df_giornaliera, df_mensile, n_ore, n_giorni.
+
+    Giudizio: "MATCHING ECCELLENTE" se copertura_media >= 85%,
+    "MATCHING BUONO" >= 60%, "MATCHING PARZIALE" >= 35%, altrimenti
+    "MATCHING DEBOLE".
+
+    NaN-safe: serie vuota / non numerica / indice non-datetime, parametri
+    non validi -> errore pulito, mai eccezioni.
+    """
+    def _err(msg):
+        return {"valido": False, "errore": msg}
+
+    # --- pulizia serie prezzi (stesso schema delle altre tab) ---
+    if not isinstance(prezzi, pd.Series):
+        return _err("prezzi deve essere una Series pandas con indice datetime.")
+    s = prezzi.copy()
+    try:
+        s.index = pd.to_datetime(s.index, errors="coerce")
+    except Exception:
+        return _err("prezzi deve avere un indice datetime valido.")
+    if s.index.isna().any():
+        return _err("prezzi deve avere un indice datetime valido.")
+    try:
+        if getattr(s.index, "tz", None) is not None:
+            s.index = s.index.tz_localize(None)
+    except Exception:
+        return _err("prezzi deve avere un indice datetime valido.")
+    s = s[~s.index.duplicated(keep="first")].sort_index()
+    s = pd.to_numeric(s, errors="coerce").dropna()
+    if len(s) == 0:
+        return _err("Serie prezzi vuota: niente da analizzare.")
+    spot = s.to_numpy(dtype=float)
+    n = len(s)
+
+    # --- validazione parametri ---
+    def _num(v, nome, minimo, massimo=None):
+        if isinstance(v, bool):
+            return None, f"{nome} deve essere un numero."
+        try:
+            x = float(v)
+        except (TypeError, ValueError):
+            return None, f"{nome} deve essere un numero."
+        if not np.isfinite(x) or x < minimo:
+            return None, f"{nome} deve essere un numero >= {minimo}."
+        if massimo is not None and x > massimo:
+            return None, f"{nome} deve essere un numero <= {massimo}."
+        return x, None
+
+    gen, em = _num(gen_mw, "gen_mw", 1e-9)
+    if em:
+        return _err(em)
+    mix, em = _num(mix_solare_pct, "mix_solare_pct", 0.0, 100.0)
+    if em:
+        return _err(em)
+    cfs, em = _num(cf_solare, "cf_solare", 1e-9, 0.9)
+    if em:
+        return _err(em)
+    cfw, em = _num(cf_eolico, "cf_eolico", 1e-9, 0.9)
+    if em:
+        return _err(em)
+    car, em = _num(carico_mw, "carico_mw", 1e-9)
+    if em:
+        return _err(em)
+    profili_validi = ("Piatto", "Uffici (8-18, lun-ven)",
+                      "Industriale 3 turni", "Residenziale")
+    if profilo_carico not in profili_validi:
+        return _err("profilo_carico non valido: scegli tra "
+                    + ", ".join(profili_validi) + ".")
+    ppa, em = _num(prezzo_ppa, "prezzo_ppa", 0.0)
+    if em:
+        return _err(em)
+
+    # --- profili sintetici deterministici ---
+    idx = s.index
+    doy = idx.dayofyear.to_numpy(dtype=float)
+    ora = idx.hour.to_numpy(dtype=float)
+    dow = idx.dayofweek.to_numpy()  # 0 = lunedi'
+
+    # Solare: campana sul giorno solare con durata stagionale
+    dl = 12.0 + 4.5 * np.cos(2.0 * np.pi * (doy - 172.0) / 365.0)
+    alba = 12.0 - dl / 2.0
+    fraz = np.clip((ora - alba) / dl, 0.0, 1.0)
+    raw_sol = np.sin(np.pi * fraz)
+    media_sol = float(raw_sol.mean())
+    cf_sol_h = raw_sol / media_sol * cfs if media_sol > 0 else np.zeros(n)
+
+    # Eolico: stagionalita' invernale + profilo notturno + rumore det.
+    stag = 1.0 + 0.30 * np.cos(2.0 * np.pi * (doy - 15.0) / 365.0)
+    nott = 1.0 + 0.15 * np.cos(2.0 * np.pi * (ora - 3.0) / 24.0)
+    rng = np.random.RandomState(187)
+    rumore = 0.85 + 0.30 * rng.rand(n)
+    raw_eol = stag * nott * rumore
+    media_eol = float(raw_eol.mean())
+    cf_eol_h = raw_eol / media_eol * cfw if media_eol > 0 else np.zeros(n)
+
+    gen_h = gen * (mix / 100.0 * cf_sol_h + (1.0 - mix / 100.0) * cf_eol_h)
+
+    # Carico: shape 0..1 x picco MW
+    if profilo_carico == "Piatto":
+        shape = np.ones(n)
+    elif profilo_carico == "Uffici (8-18, lun-ven)":
+        lav = (dow < 5) & (ora >= 8.0) & (ora < 18.0)
+        shape = np.where(lav, 1.0, 0.25)
+    elif profilo_carico == "Industriale 3 turni":
+        shape = np.where(dow < 5, 1.0, 0.5)
+    else:  # Residenziale
+        shape = np.full(n, 0.35)
+        shape[(ora >= 7.0) & (ora < 9.0)] = 0.70
+        shape[(ora >= 18.0) & (ora < 22.0)] = 1.0
+    car_h = car * shape
+
+    matched = np.minimum(gen_h, car_h)
+    surplus = gen_h - matched
+    deficit = car_h - matched
+
+    # --- economia pay-as-produced ---
+    mwh_gen = float(gen_h.sum())
+    mwh_carico = float(car_h.sum())
+    mwh_abb = float(matched.sum())
+    mwh_sur = float(surplus.sum())
+    mwh_def = float(deficit.sum())
+    costo_ppa = mwh_gen * ppa
+    ric_sur = float((surplus * spot).sum())
+    cos_def = float((deficit * spot).sum())
+    costo_tot = costo_ppa + cos_def - ric_sur
+    costo_spot = float((car_h * spot).sum())
+    delta = costo_spot - costo_tot
+    delta_pct = delta / costo_spot * 100.0 if costo_spot > 0 else 0.0
+    prezzo_eff = costo_tot / mwh_carico if mwh_carico > 0 else 0.0
+
+    maschera = car_h > 1e-9
+    if maschera.any():
+        copertura_media = float((matched[maschera] / car_h[maschera]).mean()
+                                * 100.0)
+        ore_100 = float((matched[maschera]
+                         >= car_h[maschera] * (1.0 - 1e-9)).mean() * 100.0)
+    else:
+        copertura_media = 0.0
+        ore_100 = 0.0
+
+    if copertura_media >= 85.0:
+        giudizio = "MATCHING ECCELLENTE"
+    elif copertura_media >= 60.0:
+        giudizio = "MATCHING BUONO"
+    elif copertura_media >= 35.0:
+        giudizio = "MATCHING PARZIALE"
+    else:
+        giudizio = "MATCHING DEBOLE"
+    verdetto = (f"{giudizio}: il {copertura_media:.1f}% del carico e' coperto "
+                f"ora per ora dalla generazione PPA ({mwh_abb:,.0f} MWh su "
+                f"{mwh_carico:,.0f} MWh); deficit a spot {mwh_def:,.0f} MWh, "
+                f"surplus venduto {mwh_sur:,.0f} MWh. Delta vs tutto-spot "
+                f"{delta:+,.0f} EUR ({delta_pct:+.1f}%).")
+
+    # --- tabelle ---
+    df_raw = pd.DataFrame({
+        "Ora": idx,
+        "Generazione (MW)": gen_h,
+        "Carico (MW)": car_h,
+        "Abbinati (MWh)": matched,
+        "Surplus (MWh)": surplus,
+        "Deficit (MWh)": deficit,
+        "Prezzo (EUR/MWh)": spot,
+    })
+    df_raw["Costo gen (EUR)"] = df_raw["Generazione (MW)"] * ppa
+    df_raw["Costo def (EUR)"] = df_raw["Deficit (MWh)"] * df_raw["Prezzo (EUR/MWh)"]
+    df_raw["Ric sur (EUR)"] = df_raw["Surplus (MWh)"] * df_raw["Prezzo (EUR/MWh)"]
+    df_raw["Costo carico spot (EUR)"] = (df_raw["Carico (MW)"]
+                                         * df_raw["Prezzo (EUR/MWh)"])
+
+    dfg = df_raw.copy()
+    dfg["Giorno"] = pd.to_datetime(dfg["Ora"]).dt.strftime("%Y-%m-%d")
+    grp = dfg.groupby("Giorno")
+    carico_g = grp["Carico (MW)"].sum().values
+    abb_g = grp["Abbinati (MWh)"].sum().values
+    df_giornaliera = pd.DataFrame({
+        "Giorno": list(grp.groups.keys()),
+        "MWh abbinati": np.round(abb_g, 1),
+        "MWh surplus": np.round(grp["Surplus (MWh)"].sum().values, 1),
+        "MWh deficit": np.round(grp["Deficit (MWh)"].sum().values, 1),
+        "MWh carico": np.round(carico_g, 1),
+        "Copertura %": np.round(np.where(carico_g > 0, abb_g / carico_g * 100.0,
+                                         0.0), 1),
+        "Costo totale (EUR)": np.round(
+            grp["Costo gen (EUR)"].sum().values
+            + grp["Costo def (EUR)"].sum().values
+            - grp["Ric sur (EUR)"].sum().values, 0),
+    })
+
+    dfm = df_raw.copy()
+    dfm["Mese"] = pd.to_datetime(dfm["Ora"]).dt.strftime("%Y-%m")
+    grm = dfm.groupby("Mese")
+    carico_m = grm["Carico (MW)"].sum().values
+    abb_m = grm["Abbinati (MWh)"].sum().values
+    costo_m = (grm["Costo gen (EUR)"].sum().values
+               + grm["Costo def (EUR)"].sum().values
+               - grm["Ric sur (EUR)"].sum().values)
+    df_mensile = pd.DataFrame({
+        "Mese": list(grm.groups.keys()),
+        "MWh carico": np.round(carico_m, 0),
+        "MWh generati": np.round(grm["Generazione (MW)"].sum().values, 0),
+        "MWh abbinati": np.round(abb_m, 0),
+        "Copertura %": np.round(np.where(carico_m > 0, abb_m / carico_m * 100.0,
+                                         0.0), 1),
+        "MWh surplus": np.round(grm["Surplus (MWh)"].sum().values, 0),
+        "MWh deficit": np.round(grm["Deficit (MWh)"].sum().values, 0),
+        "Costo totale (EUR)": np.round(costo_m, 0),
+        "Delta vs spot (EUR)": np.round(
+            grm["Costo carico spot (EUR)"].sum().values - costo_m, 0),
+    })
+
+    return {"valido": True, "errore": None,
+            "mwh_gen": mwh_gen, "mwh_carico": mwh_carico,
+            "mwh_abbinati": mwh_abb, "mwh_surplus": mwh_sur,
+            "mwh_deficit": mwh_def,
+            "costo_ppa_eur": costo_ppa, "ricavo_surplus_eur": ric_sur,
+            "costo_deficit_eur": cos_def, "costo_totale_eur": costo_tot,
+            "costo_spot_puro_eur": costo_spot, "delta_eur": delta,
+            "delta_pct": delta_pct,
+            "prezzo_effettivo_eur_mwh": prezzo_eff,
+            "copertura_media_pct": copertura_media, "ore_100_pct": ore_100,
+            "giudizio": giudizio, "verdetto": verdetto,
+            "df_giornaliera": df_giornaliera, "df_mensile": df_mensile,
+            "n_ore": n, "n_giorni": int(df_giornaliera.shape[0])}
+
+
 # ==========================================
 # WORKSPACE 1: SIMULATORE STRATEGICO
 # ==========================================
@@ -25281,7 +25544,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -41459,6 +41722,121 @@ elif workspace == _('ws8'):
                 mime="text/csv",
                 key="pmp186_csv",
                 help="Una riga per ora: prezzo, azione e livello del bacino.",
+            )
+
+    with tab187:
+        titolo_mpo = edu("Matching orario PPA", "Quanto del carico e' coperto ora per ora dalla generazione rinnovabile del PPA (matching 24/7): il deficit si compra a spot, il surplus si vende a spot. Generazione (solare/eolico) e carico sono profili sintetici deterministici calibrati sui capacity factor medi annui.")
+        st.markdown(f"<h1>🕐 {titolo_mpo}</h1>", unsafe_allow_html=True)
+        st.caption("Matching orario 24/7 di un PPA rinnovabile contro il profilo di carico: energia abbinata, deficit a spot, surplus venduto.")
+        c1a_mpo, c1b_mpo, c1c_mpo = st.columns(3)
+        with c1a_mpo:
+            gen_mpo = st.number_input("Potenza PPA (MW)", min_value=0.1, value=10.0,
+                                      step=1.0, key="mpo187_gen",
+                                      help="Potenza contrattuale dell'impianto rinnovabile.")
+            mix_mpo = st.slider("Quota solare nel mix (%)", min_value=0, max_value=100,
+                                value=50, step=5, key="mpo187_mix",
+                                help="0 = tutto eolico, 100 = tutto solare.")
+            cfs_mpo = st.number_input("Capacity factor solare", min_value=0.01,
+                                      max_value=0.9, value=0.18, step=0.01,
+                                      key="mpo187_cfs")
+            cfw_mpo = st.number_input("Capacity factor eolico", min_value=0.01,
+                                      max_value=0.9, value=0.40, step=0.01,
+                                      key="mpo187_cfw")
+        with c1b_mpo:
+            car_mpo = st.number_input("Picco di carico (MW)", min_value=0.1, value=8.0,
+                                      step=0.5, key="mpo187_car",
+                                      help="Il profilo scelto viene scalato su questo picco.")
+            prof_mpo = st.selectbox("Profilo di carico",
+                                    ["Piatto", "Uffici (8-18, lun-ven)",
+                                     "Industriale 3 turni", "Residenziale"],
+                                    key="mpo187_prof")
+            ppa_mpo = st.number_input("Prezzo PPA (EUR/MWh)", min_value=0.0, value=70.0,
+                                      step=1.0, key="mpo187_ppa",
+                                      help="Pay-as-produced: si paga tutta la generazione.")
+        with c1c_mpo:
+            st.caption(f"Energia media attesa: {(mix_mpo / 100 * cfs_mpo + (1 - mix_mpo / 100) * cfw_mpo) * gen_mpo:.1f} MW "
+                       f"contro un picco di carico di {car_mpo:.1f} MW.")
+            st.caption("Il matching orario premia i mix che seguono il carico: "
+                       "solare per i consumi diurni, eolico per la notte e l'inverno. "
+                       "Sovradimensionare il PPA alza la copertura ma aumenta il surplus.")
+
+        ris_mpo = calcola_matching_ppa_orario(
+            prezzi, gen_mw=gen_mpo, mix_solare_pct=mix_mpo,
+            cf_solare=cfs_mpo, cf_eolico=cfw_mpo,
+            carico_mw=car_mpo, profilo_carico=prof_mpo, prezzo_ppa=ppa_mpo)
+        if not ris_mpo["valido"]:
+            st.error(ris_mpo["errore"])
+        else:
+            k1_mpo, k2_mpo, k3_mpo, k4_mpo = st.columns(4)
+            with k1_mpo:
+                st.metric("Costo totale periodo",
+                          f"{ris_mpo['costo_totale_eur']:,.0f} EUR",
+                          f"{ris_mpo['delta_eur']:+,.0f} EUR vs spot")
+            with k2_mpo:
+                st.metric("Costo effettivo",
+                          f"{ris_mpo['prezzo_effettivo_eur_mwh']:,.1f} EUR/MWh",
+                          f"{ris_mpo['delta_pct']:+.1f} % vs spot")
+            with k3_mpo:
+                st.metric("Copertura oraria media",
+                          f"{ris_mpo['copertura_media_pct']:.1f} %",
+                          f"{ris_mpo['ore_100_pct']:.1f} % ore al 100%")
+            with k4_mpo:
+                st.metric("Energia abbinata",
+                          f"{ris_mpo['mwh_abbinati']:,.0f} MWh",
+                          f"su {ris_mpo['mwh_carico']:,.0f} MWh di carico")
+            giudizio_mpo = ris_mpo["giudizio"]
+            if giudizio_mpo == "MATCHING ECCELLENTE":
+                st.success(ris_mpo["verdetto"])
+            elif giudizio_mpo == "MATCHING BUONO":
+                st.info(ris_mpo["verdetto"])
+            elif giudizio_mpo == "MATCHING PARZIALE":
+                st.warning(ris_mpo["verdetto"])
+            else:
+                st.error(ris_mpo["verdetto"])
+
+            df_g_mpo = ris_mpo["df_giornaliera"]
+            fig_mpo = go.Figure()
+            fig_mpo.add_trace(go.Bar(x=df_g_mpo["Giorno"], y=df_g_mpo["MWh abbinati"],
+                                     name="Abbinati", marker_color="#10B981"))
+            fig_mpo.add_trace(go.Bar(x=df_g_mpo["Giorno"], y=df_g_mpo["MWh deficit"],
+                                     name="Deficit (spot)", marker_color="#F59E0B"))
+            fig_mpo.add_trace(go.Bar(x=df_g_mpo["Giorno"], y=df_g_mpo["MWh surplus"],
+                                     name="Surplus (venduto)", marker_color="#3B82F6"))
+            fig_mpo.update_layout(template="plotly_dark", height=340,
+                                  title="Bilancio giornaliero", barmode="stack",
+                                  xaxis_title="Giorno", yaxis_title="MWh")
+            st.plotly_chart(fig_mpo, use_container_width=True)
+
+            fig_mc = go.Figure()
+            fig_mc.add_trace(go.Scatter(x=df_g_mpo["Giorno"], y=df_g_mpo["Copertura %"],
+                                        mode="lines", name="Copertura giornaliera",
+                                        line=dict(color="#10B981", width=1.5)))
+            fig_mc.add_hline(y=80, line_dash="dash", line_color="#9CA3AF",
+                             annotation_text="Target 80%")
+            fig_mc.update_layout(template="plotly_dark", height=300,
+                                  title="Copertura giornaliera %",
+                                  xaxis_title="Giorno", yaxis_title="%")
+            st.plotly_chart(fig_mc, use_container_width=True)
+
+            st.markdown("**Dettaglio mensile**")
+            st.dataframe(ris_mpo["df_mensile"], use_container_width=True, hide_index=True)
+            st.caption(f"MWh generati: {ris_mpo['mwh_gen']:,.0f} — costo PPA: "
+                       f"{ris_mpo['costo_ppa_eur']:,.0f} EUR — ricavo surplus: "
+                       f"{ris_mpo['ricavo_surplus_eur']:,.0f} EUR — costo deficit: "
+                       f"{ris_mpo['costo_deficit_eur']:,.0f} EUR. Limiti del modello: "
+                       f"profili sintetici (non dati reali di impianto/carico); niente "
+                       f"curtailment ne' costi di sbilanciamento; PPA pay-as-produced puro; "
+                       f"prezzi costanti sui parametri; il surplus si vende sempre a spot "
+                       f"senza limiti di rete.")
+            d0g_mpo = df_g_mpo["Giorno"].min().replace("-", "")
+            d1g_mpo = df_g_mpo["Giorno"].max().replace("-", "")
+            st.download_button(
+                "⬇️ Esporta matching PPA (CSV)",
+                df_g_mpo.to_csv(index=False, sep=";").encode("utf-8"),
+                file_name=f"matching_ppa_{d0g_mpo}_{d1g_mpo}.csv",
+                mime="text/csv",
+                key="mpo187_csv",
+                help="Una riga per giorno: abbinati, surplus, deficit, copertura, costo.",
             )
 
 
