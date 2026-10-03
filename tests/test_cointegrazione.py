@@ -223,13 +223,18 @@ class TestCointegrazione:
                         keys.append(kw.value.value)
         cg_keys = [k for k in keys if str(k).startswith("cg172_")]
         assert len(cg_keys) == len(set(cg_keys)) and len(cg_keys) >= 8
-        # conteggio titoli == variabili
+        # conteggio titoli == variabili (robusto: non dipende dal numero totale)
         import re
-        m = re.search(r"tab171, tab172 = st\.tabs\(\[(.*?)\]\)",
+        m = re.search(r"((?:tab\d+, )+tab\d+) = st\.tabs\(\[(.*?)\]\)",
                       _APP_SRC, re.S)
         assert m, "dichiarazione st.tabs non trovata"
-        n_titoli = len(re.findall(r'"[^"]+"', m.group(1)))
-        assert n_titoli == 172, n_titoli
+        variabili = [v.strip() for v in m.group(1).split(",")]
+        n_titoli = len(re.findall(r'"[^"]+"', m.group(2)))
+        assert n_titoli == len(variabili), (n_titoli, len(variabili))
+        # sequenza senza buchi: tab1..tabN tutte presenti
+        numeri = sorted(int(v[3:]) for v in variabili)
+        assert numeri == list(range(1, numeri[-1] + 1))
+        assert "tab172" in variabili
 
     def test_nessun_segreto(self):
         src_fn = _APP_SRC.split("def calcola_cointegrazione(")[1].split(
