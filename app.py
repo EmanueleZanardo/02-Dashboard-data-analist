@@ -22052,6 +22052,277 @@ def calcola_cointegrazione(prezzi_giorno, gas_giorno, regression="c", lags="auto
             "std_residui": round(std_u, 2), "df_mesi": df_mesi,
             "df_serie": df_serie, "giudizio": giudizio}
 
+def calcola_causalita_granger(prezzi_giorno, gas_giorno, lags="auto",
+                              differenzia=True, min_giorni=60):
+    """Test di causalita' di Granger gas <-> power su serie giornaliere.
+
+    Domanda operativa: il gas TTF ANTICIPA davvero il prezzo elettrico, o le
+    due serie si muovono insieme senza un verso? La causalita' di Granger non
+    e' causalita' economica: X "Granger-causa" Y quando i lag di X migliorano
+    la previsione di Y oltre i soli lag di Y. Per un energy analyst e' il test
+    che dice se il TTF e' un driver anticipatore difendibile nei modelli di
+    prezzo e negli hedge (a valle di beta gas-power tab140 e cointegrazione
+    tab172: la cointegrazione dice "tornano insieme nel lungo periodo", qui si
+    chiede "chi muove chi nel breve").
+
+    VAR(p) bivariato su [power, gas] con costante, stimato per direzione:
+        P_t = c + sum a_i*P_{t-i} + sum b_i*G_{t-i} + e_t   (non ristretta)
+        P_t = c + sum a_i*P_{t-i} + e_t                     (ristretta)
+    H0 "il gas NON Granger-causa il power": b_1 = ... = b_p = 0.
+    Statistica F = ((RSS_r - RSS_u)/p) / (RSS_u/(n-2p-1)) con p-value dalla
+    F(p, n-2p-1); H0 si rifiuta a p-value < 5%. Stesso test nella direzione
+    opposta (power -> gas) per rilevare il feedback.
+
+    Selezione lag: BIC sull'equazione non ristretta del power, p = 1..pmax
+    con pmax = min(12, (T-2)//3) cosi' i gdl residui restano positivi; fit
+    perfetti (RSS ~ 0) danno F = +inf e p-value 0. Su serie I(1) e' buona
+    pratica testare sulle DIFFERENZE PRIME (differenzia=True, default): sui
+    livelli due trend comuni possono dare causalita' spuria (vedi tab171).
+
+    Input: serie GIORNALIERE (la tab costruisce base/peak dalla serie oraria).
+    NaN-safe: serie vuote / indici non datetime / giorni comuni < min_giorni /
+    serie costanti / lags o min_giorni non validi -> errore pulito; tz-aware
+    reso naive; duplicati keep-first; NaN scartati e contati; deterministico.
+    Mai eccezioni.
+
+    Ritorna dict con "valido"/"errore"; "lags", "lags_auto"; "f_gp"/"pval_gp"
+    (gas->power) e "f_pg"/"pval_pg" (power->gas), "crit_5" (uguale per le due
+    direzioni: stessi lag e gdl), "sig_gp"/"sig_pg" (bool al 5%); "verdetto"
+    in {"GAS->POWER", "POWER->GAS", "FEEDBACK", "NESSUNA"}; "r2_u"/"r2_r"
+    (equazione power); "n_giorni", "n_scartate"; "df_dettaglio" (Direzione, F,
+    p-value, Lag, Gdl residui, Critica 5%, Significativa (5%)); "df_coef"
+    (Direzione, Lag, Coeff. propri, Coeff. incrociati); "giudizio".
+    """
+    from scipy.stats import f as _fdist
+    col_det = ["Direzione", "F", "p-value", "Lag", "Gdl residui",
+               "Critica 5%", "Significativa (5%)"]
+    col_coef = ["Direzione", "Lag", "Coeff. propri", "Coeff. incrociati"]
+    vuoto = {"valido": False, "errore": None, "lags": None, "lags_auto": None,
+             "f_gp": None, "pval_gp": None, "f_pg": None, "pval_pg": None,
+             "crit_5": None, "sig_gp": None, "sig_pg": None, "verdetto": None,
+             "r2_u": None, "r2_r": None, "n_giorni": 0, "n_scartate": 0,
+             "df_dettaglio": pd.DataFrame(columns=col_det),
+             "df_coef": pd.DataFrame(columns=col_coef), "giudizio": ""}
+
+    def _err(msg):
+        out = dict(vuoto)
+        out["df_dettaglio"] = pd.DataFrame(columns=col_det)
+        out["df_coef"] = pd.DataFrame(columns=col_coef)
+        out["errore"] = msg
+        return out
+
+    if lags != "auto":
+        try:
+            lf = float(lags)
+        except (TypeError, ValueError):
+            return _err("lags non valido: 'auto' o intero >= 1.")
+        if not lf.is_integer() or lf < 1:
+            return _err("lags non valido: 'auto' o intero >= 1.")
+        lags = int(lf)
+    try:
+        min_giorni = int(min_giorni)
+    except (TypeError, ValueError):
+        return _err("min_giorni non valido: intero >= 30.")
+    if min_giorni < 30:
+        return _err("min_giorni non valido: intero >= 30.")
+    if prezzi_giorno is None or gas_giorno is None:
+        return _err("Serie prezzi o gas mancante.")
+    try:
+        p = pd.Series(prezzi_giorno)
+        g = pd.Series(gas_giorno)
+    except Exception:
+        return _err("Input non interpretabili come serie.")
+    if (not isinstance(p.index, pd.DatetimeIndex)
+            or not isinstance(g.index, pd.DatetimeIndex)):
+        return _err("Gli indici di entrambe le serie devono essere di tipo data/ora.")
+    pv = pd.to_numeric(p.values, errors="coerce")
+    gv = pd.to_numeric(g.values, errors="coerce")
+    if np.isnan(pv).all():
+        return _err("Nessun valore numerico nella serie elettrica.")
+    if np.isnan(gv).all():
+        return _err("Nessun valore numerico nella serie gas.")
+    ip = p.index.tz_localize(None) if p.index.tz is not None else p.index
+    ig = g.index.tz_localize(None) if g.index.tz is not None else g.index
+    s_p = pd.Series(pv, index=ip).dropna()
+    s_g = pd.Series(gv, index=ig).dropna()
+    s_p = s_p[~s_p.index.duplicated(keep="first")]
+    s_g = s_g[~s_g.index.duplicated(keep="first")]
+    df = pd.DataFrame({"gas": s_g.groupby(s_g.index.normalize()).mean(),
+                       "power": s_p.groupby(s_p.index.normalize()).mean()})
+    n_scartate = int(df[["gas", "power"]].isna().any(axis=1).sum())
+    df = df.dropna()
+    if bool(differenzia):
+        df = df.diff().dropna()
+    if len(df) < min_giorni:
+        return _err(f"Dati insufficienti: {len(df)} giorni utili, "
+                    f"servono almeno {min_giorni}.")
+    x = df["gas"].to_numpy()
+    y = df["power"].to_numpy()
+    T = len(df)
+    if float(np.var(x)) <= 0:
+        return _err("Prezzo gas costante sul periodo: test impossibile.")
+    if float(np.var(y)) <= 0:
+        return _err("Prezzo elettrico costante sul periodo: test impossibile.")
+    pmax = min(12, (T - 2) // 3)
+    if pmax < 1:
+        return _err(f"Serie troppo corta per un VAR: {T} giorni utili.")
+
+    def _stima(pv_lag, yv, xv):
+        n = T - pv_lag
+        Y = yv[pv_lag:]
+        Xu = np.column_stack(
+            [np.ones(n)]
+            + [yv[pv_lag - i: T - i] for i in range(1, pv_lag + 1)]
+            + [xv[pv_lag - i: T - i] for i in range(1, pv_lag + 1)])
+        Xr = Xu[:, :pv_lag + 1]
+        try:
+            bu, _, _, _ = np.linalg.lstsq(Xu, Y, rcond=None)
+            br, _, _, _ = np.linalg.lstsq(Xr, Y, rcond=None)
+        except np.linalg.LinAlgError:
+            return None
+        ru = Y - Xu @ bu
+        rr = Y - Xr @ br
+        rss_u = float(ru @ ru)
+        rss_r = float(rr @ rr)
+        if not (np.isfinite(rss_u) and np.isfinite(rss_r)):
+            return None
+        return {"rss_u": rss_u, "rss_r": rss_r, "coef_u": bu, "n": n,
+                "k_u": 2 * pv_lag + 1}
+
+    def _bic(pv_lag):
+        s = _stima(pv_lag, y, x)
+        if s is None:
+            return None
+        n, k = s["n"], s["k_u"]
+        rss = s["rss_u"]
+        scala = max(1.0, float(np.dot(y, y)))
+        if rss <= 1e-24 * scala:
+            return (float("-inf"), s)
+        return (n * np.log(rss / n) + k * np.log(n), s)
+
+    if lags == "auto":
+        best = None
+        for pc in range(1, pmax + 1):
+            b = _bic(pc)
+            if b is None:
+                continue
+            if best is None or b[0] < best[0]:
+                best = (b[0], pc)
+        if best is None:
+            return _err("Stima VAR impossibile sul campione.")
+        p_sel = best[1]
+        lags_auto = True
+    else:
+        p_sel = lags
+        if p_sel > pmax:
+            return _err(f"lags={p_sel} troppo alto per {T} giorni utili "
+                        f"(massimo {pmax}).")
+        lags_auto = False
+
+    def _ftest(yv, xv):
+        s = _stima(p_sel, yv, xv)
+        if s is None:
+            return None
+        n = s["n"]
+        dof_den = n - s["k_u"]
+        if dof_den <= 0:
+            return None
+        rss_u, rss_r = s["rss_u"], s["rss_r"]
+        scala = max(1.0, float(np.dot(yv, yv)))
+        if rss_u <= 1e-24 * scala:
+            fstat = float("inf") if rss_r > rss_u else 0.0
+            pval = 0.0 if rss_r > rss_u else 1.0
+        else:
+            fstat = (max(0.0, rss_r - rss_u) / p_sel) / (rss_u / dof_den)
+            pval = float(_fdist.sf(fstat, p_sel, dof_den))
+            if not np.isfinite(pval):
+                pval = 0.0 if fstat > 0 else 1.0
+        crit = float(_fdist.ppf(0.95, p_sel, dof_den))
+        ys = yv[p_sel:]
+        ss_tot = float(((ys - ys.mean()) ** 2).sum())
+        r2_u = (1.0 - rss_u / ss_tot) if ss_tot > 0 else None
+        r2_r = (1.0 - rss_r / ss_tot) if ss_tot > 0 else None
+        return {"f": fstat, "pval": pval, "crit": crit, "dof_den": dof_den,
+                "r2_u": r2_u, "r2_r": r2_r, "coef_u": s["coef_u"]}
+
+    r_gp = _ftest(y, x)
+    r_pg = _ftest(x, y)
+    if r_gp is None or r_pg is None:
+        return _err("Stima VAR impossibile sul campione.")
+    sig_gp = bool(r_gp["pval"] < 0.05)
+    sig_pg = bool(r_pg["pval"] < 0.05)
+    if sig_gp and sig_pg:
+        verdetto = "FEEDBACK"
+    elif sig_gp:
+        verdetto = "GAS->POWER"
+    elif sig_pg:
+        verdetto = "POWER->GAS"
+    else:
+        verdetto = "NESSUNA"
+    serie_txt = "differenze prime" if bool(differenzia) else "livelli"
+    if verdetto == "GAS->POWER":
+        giudizio = (f"CAUSALITA' GAS->POWER al 5% (F {r_gp['f']:.2f}, p-value "
+                    f"{r_gp['pval']:.4f}, lag {p_sel} su {serie_txt}): il gas "
+                    f"TTF anticipa il prezzo elettrico — includere i lag del "
+                    f"gas nei modelli di prezzo/hedge ha potere predittivo. "
+                    f"Coerente con l'uso del TTF come driver dell'hedge.")
+    elif verdetto == "POWER->GAS":
+        giudizio = (f"CAUSALITA' POWER->GAS al 5% (F {r_pg['f']:.2f}, p-value "
+                    f"{r_pg['pval']:.4f}, lag {p_sel} su {serie_txt}): e' il "
+                    f"prezzo elettrico ad anticipare il gas — pattern anomalo "
+                    f"per il mercato italiano, verificare shock idiosincratici "
+                    f"sul power o errori nei dati.")
+    elif verdetto == "FEEDBACK":
+        giudizio = (f"FEEDBACK BIDIREZIONALE al 5% (gas->power p-value "
+                    f"{r_gp['pval']:.4f}, power->gas p-value {r_pg['pval']:.4f}, "
+                    f"lag {p_sel} su {serie_txt}): i due mercati si trascinano "
+                    f"a vicenda nel breve periodo — l'hedge gas-power va "
+                    f"ricalibrato spesso (beta rolling, tab140).")
+    else:
+        giudizio = (f"NESSUNA causalita' di Granger al 5% (gas->power p-value "
+                    f"{r_gp['pval']:.4f}, power->gas p-value {r_pg['pval']:.4f}, "
+                    f"lag {p_sel} su {serie_txt}): i lag del gas non migliorano "
+                    f"la previsione del power oltre i suoi stessi lag — il TTF "
+                    f"non e' un driver anticipatore su questi dati. Nota: "
+                    f"causalita' di Granger non significa causalita' economica.")
+
+    righe_det = [
+        {"Direzione": "Gas → Power", "F": r_gp["f"], "p-value": r_gp["pval"],
+         "Lag": p_sel, "Gdl residui": r_gp["dof_den"],
+         "Critica 5%": r_gp["crit"],
+         "Significativa (5%)": "SÌ" if sig_gp else "NO"},
+        {"Direzione": "Power → Gas", "F": r_pg["f"], "p-value": r_pg["pval"],
+         "Lag": p_sel, "Gdl residui": r_pg["dof_den"],
+         "Critica 5%": r_pg["crit"],
+         "Significativa (5%)": "SÌ" if sig_pg else "NO"},
+    ]
+    df_dettaglio = pd.DataFrame(righe_det, columns=col_det)
+    righe_coef = []
+    for direzione, rr in (("Gas → Power", r_gp), ("Power → Gas", r_pg)):
+        cu = rr["coef_u"]
+        for i in range(1, p_sel + 1):
+            righe_coef.append({
+                "Direzione": direzione, "Lag": i,
+                "Coeff. propri": round(float(cu[i]), 4),
+                "Coeff. incrociati": round(float(cu[p_sel + i]), 4)})
+    df_coef = pd.DataFrame(righe_coef, columns=col_coef)
+
+    def _r4(v):
+        return round(float(v), 4) if v is not None else None
+
+    return {"valido": True, "errore": None, "lags": p_sel,
+            "lags_auto": lags_auto,
+            "f_gp": (float(r_gp["f"]) if np.isfinite(r_gp["f"]) else float("inf")),
+            "pval_gp": float(r_gp["pval"]), "f_pg": (
+                float(r_pg["f"]) if np.isfinite(r_pg["f"]) else float("inf")),
+            "pval_pg": float(r_pg["pval"]), "crit_5": round(r_gp["crit"], 3),
+            "sig_gp": sig_gp, "sig_pg": sig_pg, "verdetto": verdetto,
+            "r2_u": _r4(r_gp["r2_u"]), "r2_r": _r4(r_gp["r2_r"]),
+            "n_giorni": T, "n_scartate": n_scartate,
+            "df_dettaglio": df_dettaglio, "df_coef": df_coef,
+            "giudizio": giudizio}
+
+
 def calcola_scala_copertura(prezzi, mw_f1=2.0, mw_f2=2.0, mw_f3=2.0,
                             tranche=None, target_pct=80.0):
     """Scala di copertura mensile: quanta energia del periodo e' coperta a prezzo fisso.
@@ -23144,7 +23415,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -38075,6 +38346,181 @@ elif workspace == _('ws8'):
                                 key="cg172_csv_mesi",
                                 help="Una riga per mese: giorni osservati, residuo medio e z-score medio.",
                             )
+
+
+    with tab173:
+        titolo_gr = edu("Causalità di Granger", "X 'Granger-causa' Y quando i lag di X migliorano la previsione di Y oltre i soli lag di Y: non e' causalita' economica, ma potere predittivo nel breve periodo. Il test stima un VAR bivariato e confronta con un F-test l'equazione completa contro quella senza i lag dell'altra serie, in entrambe le direzioni (gas→power e power→gas).")
+        st.markdown(f"<h1>🔀 {titolo_gr}</h1>", unsafe_allow_html=True)
+        st.caption("Il gas anticipa davvero il prezzo elettrico? Test di Granger-causalità gas↔power: F-test nelle due direzioni, lag selezionati con BIC, coefficienti incrociati per lag.")
+        sorg_gr = st.radio("Serie gas TTF", ["🧪 Sintetica (mock TTF)", "📤 Carica CSV reale"],
+                           horizontal=True, key="gr173_sorg",
+                           help="Il mock e' la serie sintetica TTF della dashboard (stagionalita' + spike, seed fisso). Carica un CSV per usare i TTF reali.")
+        s_gas173 = None
+        if sorg_gr.startswith("📤"):
+            up173 = st.file_uploader("CSV prezzi gas TTF (€/MWh termico)", type=["csv"], key="gr173_up",
+                                     help="Colonne riconosciute: data/giorno/date + prezzo/price/ttf. Separatore , ; o tab. La risoluzione superiore al giorno viene mediata.")
+            st.download_button("⬇️ Scarica template", "data,prezzo\n2026-01-01,38.5\n2026-01-02,39.1\n".encode("utf-8"),
+                               file_name="template_gas_ttf.csv", mime="text/csv", key="gr173_tmpl",
+                               help="Esempio di formato atteso: una riga per giorno con data e prezzo.")
+            if up173 is not None:
+                try:
+                    dfu173 = pd.read_csv(up173, sep=None, engine="python")
+                    cols173 = {str(c).strip().lower(): c for c in dfu173.columns}
+                    c_date173 = next((cols173[k] for k in ("data", "date", "giorno", "day", "timestamp", "datetime") if k in cols173),
+                                     dfu173.columns[0])
+                    c_prez173 = next((cols173[k] for k in ("prezzo", "price", "ttf", "eur_mwh", "value", "valore") if k in cols173),
+                                     dfu173.columns[1] if len(dfu173.columns) > 1 else dfu173.columns[0])
+                    dt173 = pd.to_datetime(dfu173[c_date173], errors="coerce")
+                    pv173 = pd.to_numeric(dfu173[c_prez173], errors="coerce")
+                    ok173 = dt173.notna() & pv173.notna()
+                    if int(ok173.sum()) < 10:
+                        st.error("CSV gas non valido: servono almeno 10 righe con data e prezzo numerico.")
+                    else:
+                        s_gas173 = pd.Series(pv173[ok173].to_numpy(), index=pd.DatetimeIndex(dt173[ok173]), name="TTF (€/MWh)")
+                        s_gas173.index = s_gas173.index.tz_localize(None)
+                        st.success(f"✅ {len(s_gas173)} quotazioni gas caricate ({s_gas173.index.min().date()} → {s_gas173.index.max().date()}).")
+                except Exception as e:
+                    st.error(f"CSV gas non leggibile: {e}")
+        else:
+            banner_demo("serie gas TTF sintetica (Mock): stagionalita' + spike con seed fisso — ENTSO-E non pubblica prezzi gas")
+            s_gas173 = generate_mock_gas(d0, d1)
+
+        c173a, c173b, c173c = st.columns(3)
+        with c173a:
+            gr_prof = st.selectbox("Profilo elettrico", ["base", "peak"], key="gr173_prof",
+                                   help="base = media 0-23 di tutti i giorni; peak = media ore 8-20 dei soli lun-ven.")
+        with c173b:
+            gr_diff = st.selectbox("Serie analizzata",
+                                   ["Differenze prime (consigliato)", "Livelli"],
+                                   index=0, key="gr173_diff",
+                                   help="Sui livelli, due trend comuni possono dare causalità spuria: se le serie sono I(1) (tab171) usa le differenze prime.")
+        with c173c:
+            gr_lagmode = st.selectbox("Selezione dei lag",
+                                      ["Auto (BIC)", "Fisso"],
+                                      index=0, key="gr173_lagmode",
+                                      help="Ordine p del VAR bivariato: Auto con BIC (massimo 12, vincolato dai gdl) o valore fisso.")
+        gr_lag = 1
+        if gr_lagmode == "Fisso":
+            gr_lag = int(st.number_input("Numero di lag", min_value=1, max_value=12, value=2, step=1,
+                                         key="gr173_lag",
+                                         help="Ordine p del VAR: quanti giorni di ritardo di ciascuna serie entrano nelle equazioni."))
+
+        if s_gas173 is None:
+            st.info("ℹ️ Seleziona o carica la serie gas per calcolare la causalità di Granger.")
+        else:
+            try:
+                _pv173 = pd.to_numeric(prezzi.values, errors="coerce")
+                _ip173 = prezzi.index.tz_localize(None) if prezzi.index.tz is not None else prezzi.index
+                _sp173 = pd.Series(_pv173, index=_ip173).dropna()
+                _ore173 = _sp173.index.hour
+                _giorni173 = _sp173.index.normalize()
+                if gr_prof == "base":
+                    _pw173 = _sp173.groupby(_giorni173).mean()
+                else:
+                    _dow173 = _sp173.index.dayofweek
+                    _mk173 = (_ore173 >= 8) & (_ore173 < 20) & (_dow173 < 5)
+                    _pw173 = _sp173[_mk173].groupby(_giorni173[_mk173]).mean() if bool(_mk173.any()) else pd.Series(dtype=float)
+            except Exception:
+                _pw173 = pd.Series(dtype=float)
+            if _pw173.empty:
+                st.error("Serie elettrica giornaliera non costruibile (nessun dato valido o nessuna ora peak).")
+            else:
+                ris_gr = calcola_causalita_granger(
+                    _pw173, s_gas173,
+                    lags="auto" if gr_lagmode == "Auto (BIC)" else gr_lag,
+                    differenzia=gr_diff.startswith("Differenze"))
+                if not ris_gr["valido"]:
+                    st.error(ris_gr["errore"])
+                else:
+                    k1, k2, k3, k4 = st.columns(4)
+                    with k1:
+                        st.metric("F gas→power",
+                                  "∞" if not np.isfinite(ris_gr["f_gp"]) else f"{ris_gr['f_gp']:.2f}")
+                    with k2:
+                        st.metric("p-value gas→power", f"{ris_gr['pval_gp']:.4f}")
+                    with k3:
+                        st.metric("p-value power→gas", f"{ris_gr['pval_pg']:.4f}")
+                    with k4:
+                        st.metric("Lag VAR",
+                                  f"{ris_gr['lags']}" + (" (BIC)" if ris_gr["lags_auto"] else ""))
+                    _verd173 = ris_gr["verdetto"]
+                    if _verd173 in ("GAS->POWER", "FEEDBACK"):
+                        st.success(ris_gr["giudizio"])
+                    elif _verd173 == "POWER->GAS":
+                        st.info(ris_gr["giudizio"])
+                    else:
+                        st.warning(ris_gr["giudizio"])
+                    st.caption(f"VAR({ris_gr['lags']}) su {ris_gr['n_giorni']} giorni "
+                               f"({'differenze prime' if gr_diff.startswith('Differenze') else 'livelli'}); "
+                               f"R² equazione power: completa {ris_gr['r2_u']:.3f} vs senza gas {ris_gr['r2_r']:.3f}; "
+                               f"giorni scartati (NaN): {ris_gr['n_scartate']}.")
+
+                    st.markdown("**Statistica F contro la critica al 5%** (barra oltre la linea = rifiuto H0)")
+                    _crit173 = ris_gr["crit_5"]
+                    def _fplot173(v):
+                        return _crit173 * 3 if not np.isfinite(v) else min(float(v), _crit173 * 3)
+                    fig_gr = go.Figure()
+                    fig_gr.add_bar(
+                        y=["Gas → Power", "Power → Gas"],
+                        x=[_fplot173(ris_gr["f_gp"]), _fplot173(ris_gr["f_pg"])],
+                        orientation="h",
+                        marker_color=["#16A34A" if ris_gr["sig_gp"] else "#9CA3AF",
+                                      "#16A34A" if ris_gr["sig_pg"] else "#9CA3AF"])
+                    fig_gr.add_vline(x=_crit173, line_dash="dash", line_color="#DC2626",
+                                     annotation_text="Critica 5%")
+                    fig_gr.update_layout(xaxis_title="F (troncata a 3× la critica per leggibilità)",
+                                         margin=dict(l=10, r=10, t=10, b=10))
+                    st.plotly_chart(fig_gr, use_container_width=True)
+
+                    st.markdown("**p-value per direzione** (sotto la linea = significativo al 5%)")
+                    fig_gr2 = go.Figure()
+                    fig_gr2.add_bar(x=["Gas → Power", "Power → Gas"],
+                                    y=[ris_gr["pval_gp"], ris_gr["pval_pg"]],
+                                    marker_color=["#16A34A" if ris_gr["sig_gp"] else "#9CA3AF",
+                                                  "#16A34A" if ris_gr["sig_pg"] else "#9CA3AF"])
+                    fig_gr2.add_hline(y=0.05, line_dash="dash", line_color="#DC2626",
+                                      annotation_text="Soglia 5%")
+                    fig_gr2.update_layout(yaxis_title="p-value",
+                                          margin=dict(l=10, r=10, t=10, b=10))
+                    st.plotly_chart(fig_gr2, use_container_width=True)
+
+                    df_c173 = ris_gr["df_coef"]
+                    _gp173 = df_c173[df_c173["Direzione"] == "Gas → Power"]
+                    if len(_gp173):
+                        st.markdown("**Coefficienti incrociati gas→power per lag** (a quale ritardo il gas pesa di più)")
+                        fig_gr3 = go.Figure()
+                        fig_gr3.add_bar(x=_gp173["Lag"].astype(str),
+                                        y=_gp173["Coeff. incrociati"],
+                                        marker_color="#2563EB")
+                        fig_gr3.add_hline(y=0, line_color="#6B7280")
+                        fig_gr3.update_layout(xaxis_title="Lag (giorni)",
+                                              yaxis_title="Coeff. del gas nell'equazione del power",
+                                              margin=dict(l=10, r=10, t=10, b=10))
+                        st.plotly_chart(fig_gr3, use_container_width=True)
+
+                    st.markdown("**Dettaglio del test**")
+                    st.dataframe(ris_gr["df_dettaglio"], use_container_width=True, hide_index=True)
+                    st.markdown("**Coefficienti del VAR per lag** (propri = lag della serie dipendente, incrociati = lag dell'altra serie)")
+                    st.dataframe(df_c173, use_container_width=True, hide_index=True)
+                    cexp1, cexp2 = st.columns(2)
+                    with cexp1:
+                        st.download_button(
+                            "⬇️ Esporta dettaglio test (CSV)",
+                            ris_gr["df_dettaglio"].to_csv(index=False, sep=";").encode("utf-8"),
+                            file_name=f"granger_dettaglio_{d0}_{d1}.csv",
+                            mime="text/csv",
+                            key="gr173_csv_det",
+                            help="Una riga per direzione: F, p-value, lag, gdl residui, critica 5%, significatività.",
+                        )
+                    with cexp2:
+                        st.download_button(
+                            "⬇️ Esporta coefficienti VAR (CSV)",
+                            df_c173.to_csv(index=False, sep=";").encode("utf-8"),
+                            file_name=f"granger_coefficienti_{d0}_{d1}.csv",
+                            mime="text/csv",
+                            key="gr173_csv_coef",
+                            help="Coefficienti propri e incrociati del VAR per direzione e lag.",
+                        )
 
 
 # Footer
