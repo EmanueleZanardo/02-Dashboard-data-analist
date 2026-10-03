@@ -24900,6 +24900,261 @@ def calcola_matching_ppa_orario(prezzi, gen_mw=10.0, mix_solare_pct=50.0,
             "n_ore": n, "n_giorni": int(df_giornaliera.shape[0])}
 
 
+def calcola_comunita_energetica(prezzi, potenza_fv_kwp=100.0, cf_fv=0.13,
+                                n_utenze=20, picco_kw=4.0,
+                                profilo_utenze="Mix automatico",
+                                maggiorazione_retail=45.0, premio_cer=0.0):
+    """Autoconsumo collettivo / Comunita' energetica rinnovabile (CER).
+
+    Domanda operativa: "N utenze condividono un impianto FV — quanta energia
+    e' davvero condivisa ora per ora, e quanto vale rispetto al caso in cui
+    ognuno compra da solo e l'impianto vende tutto a spot?"
+
+    Impianto FV condiviso (kWp) con profilo solare sintetico deterministico
+    (campana sul giorno solare a durata stagionale, normalizzato al capacity
+    factor medio annuo cf_fv); N utenze con profili di carico sintetici
+    deterministici (stesse shape della tab matching PPA: Piatto / Uffici
+    (8-18, lun-ven) / Industriale 3 turni / Residenziale), picco per utenza
+    variabile in modo deterministico (seed 188) attorno a picco_kw.
+
+    Energia condivisa (modello CER "virtuale", es. GSE):
+      condivisa_h = min(gen_h, carico_h)
+      surplus_h   = gen_h - condivisa_h   (venduto a spot)
+      deficit_h   = carico_h - condivisa_h (comprato a retail = spot + markup)
+
+    Beneficio della comunita' vs baseline "ognuno per se'":
+      beneficio = mwh_condivisi * (maggiorazione_retail + premio_cer)
+    La maggiorazione retail (oneri di rete/imposte evitati sull'energia
+    condivisa) e' il vero motore economico; il premio CER e' l'eventuale
+    incentivo (es. tariffa incentivante). Il prezzo di scambio interno tra
+    membri si elide a livello di comunita' (puro trasferimento).
+
+    Ritorna dict con 'valido'/'errore', mwh_gen, mwh_carico, mwh_condivisi,
+    mwh_surplus, mwh_deficit, beneficio_eur, beneficio_per_utenza_eur,
+    costo_baseline_eur, costo_comunita_eur, risparmio_pct,
+    quota_condivisa_pct, autoconsumo_collettivo_pct, giudizio, verdetto,
+    df_giornaliera, df_mensile, n_utenze, n_ore, n_giorni.
+
+    Giudizio sulla quota di carico coperta dall'energia condivisa:
+    "COMUNITA' MOLTO EFFICIENTE" >= 50%, "COMUNITA' EFFICIENTE" >= 35%,
+    "COMUNITA' MODERATA" >= 20%, altrimenti "COMUNITA' LIMITATA".
+
+    NaN-safe: serie vuota / non numerica / indice non-datetime, parametri
+    non validi -> errore pulito, mai eccezioni.
+    """
+    def _err(msg):
+        return {"valido": False, "errore": msg}
+
+    # --- pulizia serie prezzi (stesso schema delle altre tab) ---
+    if not isinstance(prezzi, pd.Series):
+        return _err("prezzi deve essere una Series pandas con indice datetime.")
+    s = prezzi.copy()
+    try:
+        s.index = pd.to_datetime(s.index, errors="coerce")
+    except Exception:
+        return _err("prezzi deve avere un indice datetime valido.")
+    if s.index.isna().any():
+        return _err("prezzi deve avere un indice datetime valido.")
+    try:
+        if getattr(s.index, "tz", None) is not None:
+            s.index = s.index.tz_localize(None)
+    except Exception:
+        return _err("prezzi deve avere un indice datetime valido.")
+    s = s[~s.index.duplicated(keep="first")].sort_index()
+    s = pd.to_numeric(s, errors="coerce").dropna()
+    if len(s) == 0:
+        return _err("Serie prezzi vuota: niente da analizzare.")
+    spot = s.to_numpy(dtype=float)
+    n = len(s)
+
+    # --- validazione parametri ---
+    def _num(v, nome, minimo, massimo=None):
+        if isinstance(v, bool):
+            return None, f"{nome} deve essere un numero."
+        try:
+            x = float(v)
+        except (TypeError, ValueError):
+            return None, f"{nome} deve essere un numero."
+        if not np.isfinite(x) or x < minimo:
+            return None, f"{nome} deve essere un numero >= {minimo}."
+        if massimo is not None and x > massimo:
+            return None, f"{nome} deve essere un numero <= {massimo}."
+        return x, None
+
+    fv, em = _num(potenza_fv_kwp, "potenza_fv_kwp", 1e-9)
+    if em:
+        return _err(em)
+    cfv, em = _num(cf_fv, "cf_fv", 1e-9, 0.9)
+    if em:
+        return _err(em)
+    nu, em = _num(n_utenze, "n_utenze", 2.0, 500.0)
+    if em:
+        return _err(em)
+    n_ut = int(round(nu))
+    if n_ut < 2:
+        return _err("n_utenze deve essere un numero >= 2.")
+    pk, em = _num(picco_kw, "picco_kw", 1e-9, 1000.0)
+    if em:
+        return _err(em)
+    profili_validi = ("Piatto", "Uffici (8-18, lun-ven)", "Industriale 3 turni",
+                      "Residenziale", "Mix automatico")
+    if profilo_utenze not in profili_validi:
+        return _err("profilo_utenze non valido: scegli tra "
+                    + ", ".join(profili_validi) + ".")
+    mark, em = _num(maggiorazione_retail, "maggiorazione_retail", 0.0)
+    if em:
+        return _err(em)
+    prem, em = _num(premio_cer, "premio_cer", 0.0)
+    if em:
+        return _err(em)
+
+    # --- profili sintetici deterministici ---
+    idx = s.index
+    doy = idx.dayofyear.to_numpy(dtype=float)
+    ora = idx.hour.to_numpy(dtype=float)
+    dow = idx.dayofweek.to_numpy()  # 0 = lunedi'
+
+    def _shape(nome):
+        if nome == "Piatto":
+            return np.ones(n)
+        if nome == "Uffici (8-18, lun-ven)":
+            lav = (dow < 5) & (ora >= 8.0) & (ora < 18.0)
+            return np.where(lav, 1.0, 0.25)
+        if nome == "Industriale 3 turni":
+            return np.where(dow < 5, 1.0, 0.5)
+        shp = np.full(n, 0.35)  # Residenziale
+        shp[(ora >= 7.0) & (ora < 9.0)] = 0.70
+        shp[(ora >= 18.0) & (ora < 22.0)] = 1.0
+        return shp
+
+    rng = np.random.RandomState(188)
+    if profilo_utenze == "Mix automatico":
+        nomi = rng.permutation(
+            [profili_validi[i % 4] for i in range(n_ut)]).tolist()
+    else:
+        nomi = [profilo_utenze] * n_ut
+    picchi = pk * (0.6 + 0.8 * rng.rand(n_ut))  # kW di picco per utenza
+    car_kw = np.zeros(n)
+    for nome in profili_validi[:4]:
+        m = np.array([x == nome for x in nomi])
+        if m.any():
+            car_kw = car_kw + _shape(nome) * picchi[m].sum()
+
+    # Solare: campana sul giorno solare con durata stagionale, normalizzata
+    # al capacity factor medio annuo cf_fv.
+    dl = 12.0 + 4.5 * np.cos(2.0 * np.pi * (doy - 172.0) / 365.0)
+    alba = 12.0 - dl / 2.0
+    fraz = np.clip((ora - alba) / dl, 0.0, 1.0)
+    raw_sol = np.sin(np.pi * fraz)
+    media_sol = float(raw_sol.mean())
+    cf_sol_h = raw_sol / media_sol * cfv if media_sol > 0 else np.zeros(n)
+    gen_kw = fv * cf_sol_h
+
+    # --- energia condivisa ora per ora (MWh) ---
+    gen = gen_kw / 1000.0
+    car = car_kw / 1000.0
+    condiv = np.minimum(gen, car)
+    surplus = gen - condiv
+    deficit = car - condiv
+
+    mwh_gen = float(gen.sum())
+    mwh_carico = float(car.sum())
+    mwh_con = float(condiv.sum())
+    mwh_sur = float(surplus.sum())
+    mwh_def = float(deficit.sum())
+
+    # --- economia: comunita' vs baseline "ognuno per se'" ---
+    beneficio = mwh_con * (mark + prem)
+    costo_base = float((car * (spot + mark)).sum() - (gen * spot).sum())
+    costo_cer = float((deficit * (spot + mark)).sum()
+                      - (surplus * spot).sum())
+
+    quota = mwh_con / mwh_carico * 100.0 if mwh_carico > 0 else 0.0
+    auto = mwh_con / mwh_gen * 100.0 if mwh_gen > 0 else 0.0
+    ben_ut = beneficio / n_ut
+    risp_pct = beneficio / costo_base * 100.0 if costo_base > 0 else 0.0
+
+    if quota >= 50.0:
+        giudizio = "COMUNITA' MOLTO EFFICIENTE"
+    elif quota >= 35.0:
+        giudizio = "COMUNITA' EFFICIENTE"
+    elif quota >= 20.0:
+        giudizio = "COMUNITA' MODERATA"
+    else:
+        giudizio = "COMUNITA' LIMITATA"
+    verdetto = (f"{giudizio}: {mwh_con:,.0f} MWh condivisi ora per ora "
+                f"({quota:.1f}% del carico di {mwh_carico:,.0f} MWh), "
+                f"autoconsumo collettivo {auto:.1f}%, surplus venduto "
+                f"{mwh_sur:,.0f} MWh, deficit comprato {mwh_def:,.0f} MWh. "
+                f"Beneficio comunita' {beneficio:,.0f} EUR "
+                f"({ben_ut:,.0f} EUR/utenza, {risp_pct:+.1f}% sul costo "
+                f"baseline).")
+
+    # --- tabelle ---
+    df_raw = pd.DataFrame({
+        "Ora": idx,
+        "Generazione (kW)": gen_kw,
+        "Carico (kW)": car_kw,
+        "Condivisi (MWh)": condiv,
+        "Surplus (MWh)": surplus,
+        "Deficit (MWh)": deficit,
+        "Prezzo (EUR/MWh)": spot,
+    })
+    df_raw["Beneficio (EUR)"] = df_raw["Condivisi (MWh)"] * (mark + prem)
+
+    dfg = df_raw.copy()
+    dfg["Giorno"] = pd.to_datetime(dfg["Ora"]).dt.strftime("%Y-%m-%d")
+    grp = dfg.groupby("Giorno")
+    carico_g = grp["Carico (kW)"].sum().values / 1000.0
+    con_g = grp["Condivisi (MWh)"].sum().values
+    df_giornaliera = pd.DataFrame({
+        "Giorno": list(grp.groups.keys()),
+        "MWh generati": np.round(grp["Generazione (kW)"].sum().values
+                                / 1000.0, 2),
+        "MWh carico": np.round(carico_g, 2),
+        "MWh condivisi": np.round(con_g, 2),
+        "MWh surplus": np.round(grp["Surplus (MWh)"].sum().values, 2),
+        "MWh deficit": np.round(grp["Deficit (MWh)"].sum().values, 2),
+        "Quota condivisa %": np.round(np.where(
+            carico_g > 0, con_g / carico_g * 100.0, 0.0), 1),
+        "Beneficio (EUR)": np.round(grp["Beneficio (EUR)"].sum().values, 0),
+    })
+
+    dfm = df_raw.copy()
+    dfm["Mese"] = pd.to_datetime(dfm["Ora"]).dt.strftime("%Y-%m")
+    grm = dfm.groupby("Mese")
+    carico_m = grm["Carico (kW)"].sum().values / 1000.0
+    con_m = grm["Condivisi (MWh)"].sum().values
+    ben_m = grm["Beneficio (EUR)"].sum().values
+    df_mensile = pd.DataFrame({
+        "Mese": list(grm.groups.keys()),
+        "MWh carico": np.round(carico_m, 0),
+        "MWh generati": np.round(grm["Generazione (kW)"].sum().values
+                                / 1000.0, 0),
+        "MWh condivisi": np.round(con_m, 0),
+        "Quota condivisa %": np.round(np.where(
+            carico_m > 0, con_m / carico_m * 100.0, 0.0), 1),
+        "Beneficio (EUR)": np.round(ben_m, 0),
+        "Beneficio cumulato (EUR)": np.round(np.cumsum(ben_m), 0),
+    })
+
+    return {"valido": True, "errore": None,
+            "mwh_gen": mwh_gen, "mwh_carico": mwh_carico,
+            "mwh_condivisi": mwh_con, "mwh_surplus": mwh_sur,
+            "mwh_deficit": mwh_def,
+            "beneficio_eur": beneficio,
+            "beneficio_per_utenza_eur": ben_ut,
+            "costo_baseline_eur": costo_base,
+            "costo_comunita_eur": costo_cer,
+            "risparmio_pct": risp_pct,
+            "quota_condivisa_pct": quota,
+            "autoconsumo_collettivo_pct": auto,
+            "giudizio": giudizio, "verdetto": verdetto,
+            "df_giornaliera": df_giornaliera, "df_mensile": df_mensile,
+            "n_utenze": n_ut, "n_ore": n,
+            "n_giorni": int(df_giornaliera.shape[0])}
+
+
 # ==========================================
 # WORKSPACE 1: SIMULATORE STRATEGICO
 # ==========================================
@@ -25544,7 +25799,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -41837,6 +42092,133 @@ elif workspace == _('ws8'):
                 mime="text/csv",
                 key="mpo187_csv",
                 help="Una riga per giorno: abbinati, surplus, deficit, copertura, costo.",
+            )
+
+    with tab188:
+        titolo_cer = edu("Comunità energetica", "Renewable Energy Community: N utenze condividono virtualmente l'energia di un impianto FV. L'energia condivisa ora per ora (minimo tra generazione e carico) evita gli oneri di rete: e' il vero valore economico della CER.")
+        st.markdown(f"<h1>🤝 {titolo_cer}</h1>", unsafe_allow_html=True)
+        st.caption("Autoconsumo collettivo: N utenze condividono un impianto FV. Energia condivisa = min(generazione, carico) ora per ora; il beneficio e' l'onere retail evitato + l'eventuale premio incentivante.")
+        c1a_cer, c1b_cer, c1c_cer = st.columns(3)
+        with c1a_cer:
+            fv_cer = st.number_input("Potenza FV condivisa (kWp)", min_value=1.0,
+                                    value=100.0, step=10.0, key="cer188_fv",
+                                    help="Potenza dell'impianto condiviso dalla comunita'.")
+            cf_cer = st.number_input("Capacity factor FV", min_value=0.01,
+                                    max_value=0.9, value=0.13, step=0.01,
+                                    key="cer188_cf",
+                                    help="Produzione media annua / potenza installata.")
+            nut_cer = st.number_input("Numero utenze", min_value=2, max_value=500,
+                                      value=20, step=1, key="cer188_n",
+                                      help="Membri della comunita' energetica.")
+        with c1b_cer:
+            pk_cer = st.number_input("Picco medio per utenza (kW)",
+                                    min_value=0.5, value=4.0, step=0.5,
+                                    key="cer188_picco",
+                                    help="Il picco reale varia per utenza (seed 188).")
+            prof_cer = st.selectbox("Profilo utenze",
+                                    ["Mix automatico", "Piatto",
+                                     "Uffici (8-18, lun-ven)",
+                                     "Industriale 3 turni", "Residenziale"],
+                                    key="cer188_prof")
+        with c1c_cer:
+            mark_cer = st.number_input("Maggiorazione retail (EUR/MWh)",
+                                      min_value=0.0, value=45.0, step=5.0,
+                                      key="cer188_markup",
+                                      help="Oneri di rete + imposte evitati sull'energia condivisa.")
+            prem_cer = st.number_input("Premio incentivante CER (EUR/MWh)",
+                                      min_value=0.0, value=0.0, step=5.0,
+                                      key="cer188_premio",
+                                      help="Eventuale tariffa incentivante sull'energia condivisa.")
+            st.caption("Il prezzo di scambio interno tra i membri si elide a "
+                       "livello di comunita': conta solo l'energia condivisa "
+                       "ora per ora.")
+
+        ris_cer = calcola_comunita_energetica(
+            prezzi, potenza_fv_kwp=fv_cer, cf_fv=cf_cer,
+            n_utenze=int(nut_cer), picco_kw=pk_cer, profilo_utenze=prof_cer,
+            maggiorazione_retail=mark_cer, premio_cer=prem_cer)
+        if not ris_cer["valido"]:
+            st.error(ris_cer["errore"])
+        else:
+            k1_cer, k2_cer, k3_cer, k4_cer = st.columns(4)
+            with k1_cer:
+                st.metric("Energia condivisa",
+                          f"{ris_cer['mwh_condivisi']:,.0f} MWh",
+                          f"{ris_cer['quota_condivisa_pct']:.1f} % del carico")
+            with k2_cer:
+                st.metric("Autoconsumo collettivo",
+                          f"{ris_cer['autoconsumo_collettivo_pct']:.1f} %",
+                          f"su {ris_cer['mwh_gen']:,.0f} MWh generati")
+            with k3_cer:
+                st.metric("Beneficio comunita'",
+                          f"{ris_cer['beneficio_eur']:,.0f} EUR",
+                          f"{ris_cer['beneficio_per_utenza_eur']:,.0f} EUR/utenza")
+            with k4_cer:
+                st.metric("Risparmio vs baseline",
+                          f"{ris_cer['risparmio_pct']:+.1f} %",
+                          f"costo {ris_cer['costo_comunita_eur']:,.0f} EUR")
+            giudizio_cer = ris_cer["giudizio"]
+            if giudizio_cer == "COMUNITA' MOLTO EFFICIENTE":
+                st.success(ris_cer["verdetto"])
+            elif giudizio_cer == "COMUNITA' EFFICIENTE":
+                st.info(ris_cer["verdetto"])
+            elif giudizio_cer == "COMUNITA' MODERATA":
+                st.warning(ris_cer["verdetto"])
+            else:
+                st.error(ris_cer["verdetto"])
+
+            df_g_cer = ris_cer["df_giornaliera"]
+            fig_cer = go.Figure()
+            fig_cer.add_trace(go.Bar(x=df_g_cer["Giorno"],
+                                     y=df_g_cer["MWh condivisi"],
+                                     name="Condivisi", marker_color="#10B981"))
+            fig_cer.add_trace(go.Bar(x=df_g_cer["Giorno"],
+                                     y=df_g_cer["MWh deficit"],
+                                     name="Deficit", marker_color="#F59E0B"))
+            fig_cer.add_trace(go.Bar(x=df_g_cer["Giorno"],
+                                     y=df_g_cer["MWh surplus"],
+                                     name="Surplus", marker_color="#6366F1"))
+            fig_cer.update_layout(template="plotly_dark", height=320,
+                                  barmode="stack",
+                                  title="Energia giornaliera: condivisa / deficit / surplus",
+                                  xaxis_title="Giorno", yaxis_title="MWh")
+            st.plotly_chart(fig_cer, use_container_width=True)
+
+            df_m_cer = ris_cer["df_mensile"]
+            fig_cm = go.Figure()
+            fig_cm.add_trace(go.Bar(x=df_m_cer["Mese"],
+                                    y=df_m_cer["Beneficio (EUR)"],
+                                    name="Beneficio mensile",
+                                    marker_color="#10B981"))
+            fig_cm.add_trace(go.Scatter(x=df_m_cer["Mese"],
+                                       y=df_m_cer["Beneficio cumulato (EUR)"],
+                                       mode="lines+markers",
+                                       name="Cumulato",
+                                       line=dict(color="#F59E0B", width=2)))
+            fig_cm.update_layout(template="plotly_dark", height=300,
+                                 title="Beneficio economico mensile e cumulato",
+                                 xaxis_title="Mese", yaxis_title="EUR")
+            st.plotly_chart(fig_cm, use_container_width=True)
+
+            st.markdown("**Dettaglio mensile**")
+            st.dataframe(ris_cer["df_mensile"], use_container_width=True,
+                         hide_index=True)
+            st.caption(f"Baseline senza comunita': "
+                       f"{ris_cer['costo_baseline_eur']:,.0f} EUR — con comunita': "
+                       f"{ris_cer['costo_comunita_eur']:,.0f} EUR. Limiti del modello: "
+                       f"profili sintetici (non dati reali di utenze/impianto); niente "
+                       f"costi di sbilanciamento ne' perdite di rete; la maggiorazione "
+                       f"retail e' costante sul periodo; niente vincoli di potenza "
+                       f"né corrispettivi di misura.")
+            d0g_cer = df_g_cer["Giorno"].min().replace("-", "")
+            d1g_cer = df_g_cer["Giorno"].max().replace("-", "")
+            st.download_button(
+                "⬇️ Esporta comunita' energetica (CSV)",
+                df_g_cer.to_csv(index=False, sep=";").encode("utf-8"),
+                file_name=f"comunita_energetica_{d0g_cer}_{d1g_cer}.csv",
+                mime="text/csv",
+                key="cer188_csv",
+                help="Una riga per giorno: generati, carico, condivisi, surplus, deficit, beneficio.",
             )
 
 
