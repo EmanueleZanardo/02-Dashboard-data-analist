@@ -24009,6 +24009,261 @@ def calcola_hellbrise(prezzi, cap_fv_mw=100.0, cap_eolico_mw=100.0,
             "giudizio": giudizio, "verdetto": verdetto}
 
 
+def calcola_revenue_stacking(prezzi, pot_mw=2.0, cap_mwh=4.0, eff=0.85,
+                             prezzo_fcr=18.0, prezzo_afrr=10.0,
+                             ore_fcr=24.0, ore_afrr=24.0,
+                             modo="ottimale", p_fcr=0.0, p_afrr=0.0,
+                             lock_fcr_h=0.5, lock_afrr_h=1.0):
+    """Revenue stacking batteria: arbitraggio day-ahead + riserva FCR + riserva aFRR.
+
+    Domanda operativa: "ho una batteria da P MW / C MWh - come ripartisco la
+    potenza tra arbitraggio sul day-ahead, riserva primaria FCR e riserva
+    secondaria aFRR per massimizzare il ricavo sul periodo dei prezzi,
+    rispettando i vincoli di potenza e di energia?"
+
+    Modello (deterministico, su prezzi storici):
+      - Arbitraggio: 1 ciclo/giorno, spread netto giornaliero
+        max(0, pmax - pmin/eff); energia per ciclo = min(cap_disp, P_arb x 2h).
+      - FCR: ricavo = P_fcr x prezzo_fcr (EUR/MW/h) x ore_fcr x giorni.
+      - aFRR: ricavo = P_afrr x prezzo_afrr x ore_afrr x giorni.
+      - Vincoli: P_fcr + P_afrr + P_arb <= pot_mw; headroom di energia delle
+        riserve (P_fcr x lock_fcr_h + P_afrr x lock_afrr_h) <= cap_mwh,
+        altrimenti l'allocazione e' non fattibile.
+      - modo "ottimale": griglia 21x21 su (P_fcr, P_afrr), P_arb = resto;
+        tiene il massimo (a parita' il primo in ordine di scansione, cioe'
+        piu' arbitraggio).
+      - modo "manuale": usa p_fcr / p_afrr dati dall'utente.
+
+    Giudizio: "STACKING VINCENTE" se l'ottimo usa >= 2 flussi con > 5% del
+    ricavo ciascuno e batte il miglior flusso singolo; "FLUSSO DOMINANTE: X"
+    se un flusso fa > 90% del ricavo; "MIX BILANCIATO" altrimenti;
+    "NESSUN RICAVO" se il totale e' zero.
+
+    Ritorna dict con valido/errore, modo, p_fcr, p_afrr, p_arb,
+    r_fcr_eur, r_afrr_eur, r_arb_eur, ricavo_totale_eur, ricavo_medio_giorno,
+    ricavo_per_mw_giorno, energia_lock_mwh, cap_residua_mwh, e_ciclo_mwh,
+    quota_fcr_pct, quota_afrr_pct, quota_arb_pct, n_giorni,
+    spread_medio_netto, df_giornaliero, df_griglia (solo modo ottimale),
+    giudizio, verdetto, nome_miglior_singolo, miglior_singolo_eur.
+    """
+    def _err(msg):
+        return {"valido": False, "errore": msg}
+
+    # --- pulizia serie prezzi ---
+    if not isinstance(prezzi, pd.Series):
+        return _err("prezzi deve essere una Series pandas con indice datetime.")
+    s = prezzi.copy()
+    try:
+        s.index = pd.to_datetime(s.index, errors="coerce")
+    except Exception:
+        return _err("prezzi deve avere un indice datetime valido.")
+    if s.index.isna().any():
+        return _err("prezzi deve avere un indice datetime valido.")
+    try:
+        if getattr(s.index, "tz", None) is not None:
+            s.index = s.index.tz_localize(None)
+    except Exception:
+        return _err("prezzi deve avere un indice datetime valido.")
+    s = s[~s.index.duplicated(keep="first")].sort_index()
+    s = pd.to_numeric(s, errors="coerce").dropna()
+    if len(s) == 0:
+        return _err("Serie prezzi vuota: niente da analizzare.")
+
+    # --- validazione parametri ---
+    def _pos(v, nome):
+        if isinstance(v, bool):
+            return None, f"{nome} deve essere un numero > 0."
+        try:
+            x = float(v)
+        except (TypeError, ValueError):
+            return None, f"{nome} deve essere un numero > 0."
+        if not np.isfinite(x) or x <= 0:
+            return None, f"{nome} deve essere un numero > 0."
+        return x, None
+
+    def _nonneg(v, nome):
+        if isinstance(v, bool):
+            return None, f"{nome} deve essere un numero >= 0."
+        try:
+            x = float(v)
+        except (TypeError, ValueError):
+            return None, f"{nome} deve essere un numero >= 0."
+        if not np.isfinite(x) or x < 0:
+            return None, f"{nome} deve essere un numero >= 0."
+        return x, None
+
+    pot_f, em = _pos(pot_mw, "pot_mw")
+    if em:
+        return _err(em)
+    cap_f, em = _pos(cap_mwh, "cap_mwh")
+    if em:
+        return _err(em)
+    eff_f, em = _pos(eff, "eff")
+    if em:
+        return _err(em)
+    if eff_f > 1.0:
+        return _err("eff deve essere tra 0 e 1.")
+    pfcr_p, em = _nonneg(prezzo_fcr, "prezzo_fcr")
+    if em:
+        return _err(em)
+    pafrr_p, em = _nonneg(prezzo_afrr, "prezzo_afrr")
+    if em:
+        return _err(em)
+    for _nome, _v in (("ore_fcr", ore_fcr), ("ore_afrr", ore_afrr)):
+        if isinstance(_v, bool):
+            return _err(f"{_nome} deve essere un numero tra 0 e 24.")
+        try:
+            _x = float(_v)
+        except (TypeError, ValueError):
+            return _err(f"{_nome} deve essere un numero tra 0 e 24.")
+        if not np.isfinite(_x) or not 0.0 <= _x <= 24.0:
+            return _err(f"{_nome} deve essere un numero tra 0 e 24.")
+    ore_fcr_f = float(ore_fcr)
+    ore_afrr_f = float(ore_afrr)
+    lock_f, em = _nonneg(lock_fcr_h, "lock_fcr_h")
+    if em:
+        return _err(em)
+    lock_a, em = _nonneg(lock_afrr_h, "lock_afrr_h")
+    if em:
+        return _err(em)
+    if modo not in ("ottimale", "manuale"):
+        return _err("modo deve essere 'ottimale' o 'manuale'.")
+    pf_m = pa_m = 0.0
+    if modo == "manuale":
+        pf_m, em = _nonneg(p_fcr, "p_fcr")
+        if em:
+            return _err(em)
+        pa_m, em = _nonneg(p_afrr, "p_afrr")
+        if em:
+            return _err(em)
+        if pf_m + pa_m > pot_f + 1e-9:
+            return _err("p_fcr + p_afrr non puo' superare pot_mw.")
+
+    # --- spread netti giornalieri ---
+    giorni = []
+    for giorno, grp in s.groupby(s.index.date):
+        if len(grp) >= 4:
+            giorni.append((giorno, float(grp.min()), float(grp.max())))
+    if not giorni:
+        return _err("Servono giorni con almeno 4 ore di prezzo per lo stacking.")
+    n_giorni = len(giorni)
+    spread_net = np.array([max(0.0, pmax - pmin / eff_f) for _, pmin, pmax in giorni])
+    spread_sum = float(spread_net.sum())
+
+    def _valuta(pf, pa):
+        """Ricavi di un'allocazione; None se non fattibile."""
+        p_arb = pot_f - pf - pa
+        if p_arb < -1e-9:
+            return None
+        p_arb = max(p_arb, 0.0)
+        lock = pf * lock_f + pa * lock_a
+        cap_disp = cap_f - lock
+        if cap_disp < -1e-9:
+            return None
+        cap_disp = max(cap_disp, 0.0)
+        e_ciclo = min(cap_disp, p_arb * 2.0)
+        r_arb = spread_sum * e_ciclo
+        r_fcr = pf * pfcr_p * ore_fcr_f * n_giorni
+        r_afrr = pa * pafrr_p * ore_afrr_f * n_giorni
+        return {"p_arb": p_arb, "lock_mwh": lock, "cap_disp_mwh": cap_disp,
+                "e_ciclo_mwh": e_ciclo, "r_arb": r_arb, "r_fcr": r_fcr,
+                "r_afrr": r_afrr, "totale": r_arb + r_fcr + r_afrr}
+
+    griglia = []
+    best = None
+    if modo == "ottimale":
+        n_step = 20
+        for i in range(n_step + 1):
+            pf = pot_f * i / n_step
+            for j in range(n_step + 1):
+                pa = pot_f * j / n_step
+                if pf + pa > pot_f + 1e-9:
+                    continue
+                v = _valuta(pf, pa)
+                if v is None:
+                    continue
+                griglia.append((round(pf, 6), round(pa, 6), v["totale"]))
+                if best is None or v["totale"] > best["totale"] + 1e-9:
+                    best = {"p_fcr": pf, "p_afrr": pa, **v}
+    else:
+        v = _valuta(pf_m, pa_m)
+        if v is None:
+            return _err("Allocazione non fattibile: l'headroom di energia supera la capacita'.")
+        best = {"p_fcr": pf_m, "p_afrr": pa_m, **v}
+
+    # --- riferimenti a flusso singolo e giudizio ---
+    def _tot(pf, pa):
+        v = _valuta(pf, pa)
+        return v["totale"] if v else 0.0
+
+    singoli = {"FCR": _tot(pot_f, 0.0), "aFRR": _tot(0.0, pot_f),
+               "arbitraggio": _tot(0.0, 0.0)}
+    nome_best_singolo = max(singoli, key=singoli.get)
+    best_singolo = singoli[nome_best_singolo]
+
+    tot = best["totale"]
+    if tot > 0:
+        q_fcr, q_afrr, q_arb = best["r_fcr"] / tot, best["r_afrr"] / tot, best["r_arb"] / tot
+    else:
+        q_fcr = q_afrr = q_arb = 0.0
+    n_attivi = sum(1 for q in (q_fcr, q_afrr, q_arb) if q > 0.05)
+    if tot <= 0:
+        giudizio = "NESSUN RICAVO"
+        verdetto = ("Con questi prezzi nessun flusso genera ricavo: la batteria "
+                    "resta ferma e non si ciclizza.")
+    elif n_attivi >= 2 and tot > best_singolo * 1.001:
+        giudizio = "STACKING VINCENTE"
+        verdetto = (f"Il mix ottimale ({best['p_fcr']:.2f} MW FCR, {best['p_afrr']:.2f} MW aFRR, "
+                    f"{best['p_arb']:.2f} MW arbitraggio) batte il miglior flusso singolo "
+                    f"({nome_best_singolo}, {best_singolo:,.0f} EUR): lo stacking paga.")
+    else:
+        quote = {"FCR": q_fcr, "aFRR": q_afrr, "arbitraggio": q_arb}
+        dom = max(quote, key=quote.get)
+        if quote[dom] > 0.90:
+            giudizio = f"FLUSSO DOMINANTE: {dom.upper()}"
+            verdetto = (f"Il {dom} fa il {quote[dom] * 100:.0f}% del ricavo: dedica tutta la "
+                        f"potenza a questo flusso, lo stacking non aggiunge valore.")
+        else:
+            giudizio = "MIX BILANCIATO"
+            verdetto = ("Piu' flussi contribuiscono in modo simile: il mix ottimale "
+                        "diversifica il ricavo senza un flusso chiaramente superiore.")
+
+    # --- tabelle ---
+    righe_g = []
+    for (giorno, _pmin, _pmax), sn in zip(giorni, spread_net):
+        r_arb_g = sn * best["e_ciclo_mwh"]
+        r_fcr_g = best["p_fcr"] * pfcr_p * ore_fcr_f
+        r_afrr_g = best["p_afrr"] * pafrr_p * ore_afrr_f
+        righe_g.append({"Giorno": giorno, "Spread netto (EUR/MWh)": round(float(sn), 2),
+                        "Ricavo arbitraggio (EUR)": round(r_arb_g, 2),
+                        "Ricavo FCR (EUR)": round(r_fcr_g, 2),
+                        "Ricavo aFRR (EUR)": round(r_afrr_g, 2),
+                        "Ricavo totale (EUR)": round(r_arb_g + r_fcr_g + r_afrr_g, 2)})
+    df_g = pd.DataFrame(righe_g)
+    df_grid = pd.DataFrame(
+        [{"P FCR (MW)": pf, "P aFRR (MW)": pa,
+          "P arbitraggio (MW)": round(pot_f - pf - pa, 2),
+          "Ricavo totale (EUR)": round(t, 2)} for pf, pa, t in griglia])
+
+    return {"valido": True, "errore": None, "modo": modo,
+            "p_fcr": best["p_fcr"], "p_afrr": best["p_afrr"], "p_arb": best["p_arb"],
+            "r_fcr_eur": best["r_fcr"], "r_afrr_eur": best["r_afrr"],
+            "r_arb_eur": best["r_arb"], "ricavo_totale_eur": tot,
+            "ricavo_medio_giorno": tot / n_giorni,
+            "ricavo_per_mw_giorno": tot / (pot_f * n_giorni),
+            "energia_lock_mwh": best["lock_mwh"],
+            "cap_residua_mwh": best["cap_disp_mwh"],
+            "e_ciclo_mwh": best["e_ciclo_mwh"],
+            "quota_fcr_pct": q_fcr * 100.0, "quota_afrr_pct": q_afrr * 100.0,
+            "quota_arb_pct": q_arb * 100.0,
+            "n_giorni": n_giorni, "spread_medio_netto": spread_sum / n_giorni,
+            "df_giornaliero": df_g, "df_griglia": df_grid,
+            "giudizio": giudizio, "verdetto": verdetto,
+            "nome_miglior_singolo": nome_best_singolo,
+            "miglior_singolo_eur": best_singolo,
+            "singoli_eur": singoli}
+
+
 # ==========================================
 # WORKSPACE 1: SIMULATORE STRATEGICO
 # ==========================================
@@ -24653,7 +24908,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -40524,6 +40779,128 @@ elif workspace == _('ws8'):
                 mime="text/csv",
                 key="sl183_csv",
                 help="Una riga per tranche: prezzo medio, MWh, impatto %, prezzo eseguito, controvalore.",
+            )
+
+
+    with tab184:
+        titolo_rs = edu("Revenue stacking", "La stessa batteria puo' vendere piu' servizi: arbitraggio sul day-ahead (compra nelle ore economiche, vende nelle ore di punta), riserva primaria FCR e riserva secondaria aFRR di Swissgrid (potenza pagata a EUR/MW/h). Lo stacking trova l'allocazione di potenza ed energia che massimizza il ricavo sul periodo dei prezzi caricati, rispettando i vincoli: la potenza allocata non supera quella nominale e l'headroom di energia bloccato dalle riserve non supera la capacita' utile.")
+        st.markdown(f"<h1>🪙 {titolo_rs}</h1>", unsafe_allow_html=True)
+        st.caption("Come ripartire potenza ed energia di una batteria tra arbitraggio, FCR e aFRR per massimizzare il ricavo.")
+        r1a_rs, r1b_rs, r1c_rs = st.columns(3)
+        with r1a_rs:
+            pot_rs = st.number_input("Potenza batteria (MW)", min_value=0.1, value=2.0, step=0.5,
+                                     key="rs184_pot",
+                                     help="Potenza di carica/scarica da ripartire tra i tre flussi.")
+            cap_rs = st.number_input("Capacita' utile (MWh)", min_value=0.1, value=4.0, step=0.5,
+                                     key="rs184_cap",
+                                     help="Energia immagazzinabile: le riserve ne bloccano una quota (headroom).")
+        with r1b_rs:
+            eff_rs = st.number_input("Efficienza round-trip (%)", min_value=50.0, max_value=100.0, value=85.0, step=1.0,
+                                     key="rs184_eff",
+                                     help="Perdite di conversione: pesa solo sull'arbitraggio.") / 100.0
+            modo_rs = st.radio("Allocazione", ["ottimale", "manuale"], key="rs184_modo",
+                               help="Ottimale: griglia 21x21 su FCR/aFRR, il resto va in arbitraggio. Manuale: MW fissati da te.")
+        with r1c_rs:
+            pfcr_rs = st.number_input("Prezzo FCR (EUR/MW/h)", min_value=0.0, value=18.0, step=1.0,
+                                      key="rs184_pfcr",
+                                      help="Prezzo di potenza della riserva primaria (aste Swissgrid, si muove ogni settimana).")
+            pafrr_rs = st.number_input("Prezzo aFRR (EUR/MW/h)", min_value=0.0, value=10.0, step=1.0,
+                                       key="rs184_pafrr",
+                                       help="Prezzo di potenza della riserva secondaria.")
+
+        r2a_rs, r2b_rs, r2c_rs = st.columns(3)
+        with r2a_rs:
+            ore_fcr_rs = st.number_input("Ore/giorno FCR", min_value=0.0, max_value=24.0, value=24.0, step=1.0,
+                                         key="rs184_orefcr",
+                                         help="Ore al giorno in cui la potenza FCR e' offerta e pagata.")
+            ore_afrr_rs = st.number_input("Ore/giorno aFRR", min_value=0.0, max_value=24.0, value=24.0, step=1.0,
+                                          key="rs184_oreafrr")
+        with r2b_rs:
+            lock_fcr_rs = st.number_input("Headroom FCR (h)", min_value=0.0, value=0.5, step=0.25,
+                                          key="rs184_lockfcr",
+                                          help="Capacita' bloccata per MW di FCR: riserva simmetrica, attivazione piena 15 min in su e in giu'.")
+            lock_afrr_rs = st.number_input("Headroom aFRR (h)", min_value=0.0, value=1.0, step=0.25,
+                                           key="rs184_lockafrr",
+                                           help="Capacita' bloccata per MW di aFRR.")
+        with r2c_rs:
+            if modo_rs == "manuale":
+                m_fcr_rs = st.slider("MW a FCR", 0.0, float(pot_rs), 0.0, 0.1, key="rs184_mfcr")
+                m_afrr_rs = st.slider("MW a aFRR", 0.0, float(max(0.0, pot_rs - m_fcr_rs)), 0.0, 0.1, key="rs184_mafrr")
+                st.caption(f"MW ad arbitraggio: {pot_rs - m_fcr_rs - m_afrr_rs:.1f}")
+            else:
+                m_fcr_rs, m_afrr_rs = 0.0, 0.0
+                st.caption("La griglia esplora tutte le combinazioni FCR/aFRR: il resto va in arbitraggio.")
+
+        ris_rs = calcola_revenue_stacking(
+            prezzi, pot_mw=pot_rs, cap_mwh=cap_rs, eff=eff_rs,
+            prezzo_fcr=pfcr_rs, prezzo_afrr=pafrr_rs,
+            ore_fcr=ore_fcr_rs, ore_afrr=ore_afrr_rs,
+            modo=modo_rs, p_fcr=m_fcr_rs, p_afrr=m_afrr_rs,
+            lock_fcr_h=lock_fcr_rs, lock_afrr_h=lock_afrr_rs)
+        if not ris_rs["valido"]:
+            st.error(ris_rs["errore"])
+        else:
+            k1_rs, k2_rs, k3_rs, k4_rs = st.columns(4)
+            render_kpi("Ricavo totale periodo (EUR)", f"{ris_rs['ricavo_totale_eur']:,.0f}", k1_rs)
+            render_kpi("Ricavo medio/giorno (EUR)", f"{ris_rs['ricavo_medio_giorno']:,.0f}", k2_rs)
+            render_kpi("Ricavo (EUR/MW/giorno)", f"{ris_rs['ricavo_per_mw_giorno']:,.0f}", k3_rs)
+            top_rs = max((("FCR", ris_rs["quota_fcr_pct"]), ("aFRR", ris_rs["quota_afrr_pct"]),
+                          ("Arbitraggio", ris_rs["quota_arb_pct"])), key=lambda t: t[1])
+            render_kpi("Flusso principale", f"{top_rs[0]} ({top_rs[1]:.0f} %)", k4_rs)
+
+            if ris_rs["giudizio"] == "STACKING VINCENTE":
+                st.success(f"**{ris_rs['giudizio']}** — {ris_rs['verdetto']}")
+            elif ris_rs["giudizio"] == "NESSUN RICAVO":
+                st.warning(f"**{ris_rs['giudizio']}** — {ris_rs['verdetto']}")
+            else:
+                st.info(f"**{ris_rs['giudizio']}** — {ris_rs['verdetto']}")
+
+            st.caption(f"Allocazione: {ris_rs['p_fcr']:.1f} MW FCR + {ris_rs['p_afrr']:.1f} MW aFRR + "
+                       f"{ris_rs['p_arb']:.1f} MW arbitraggio | Headroom riserve {ris_rs['energia_lock_mwh']:.2f} MWh, "
+                       f"capacita' residua {ris_rs['cap_residua_mwh']:.2f} MWh, energia per ciclo "
+                       f"{ris_rs['e_ciclo_mwh']:.2f} MWh, spread netto medio {ris_rs['spread_medio_netto']:.2f} EUR/MWh.")
+
+            df_rs = ris_rs["df_giornaliero"]
+            fig_rs = go.Figure()
+            for col_rs, col_hex in [("Ricavo arbitraggio (EUR)", "#3b82f6"),
+                                    ("Ricavo FCR (EUR)", "#10B981"),
+                                    ("Ricavo aFRR (EUR)", "#F59E0B")]:
+                fig_rs.add_trace(go.Bar(x=df_rs["Giorno"], y=df_rs[col_rs],
+                                        name=col_rs.replace(" (EUR)", ""),
+                                        marker_color=col_hex,
+                                        hovertemplate="Giorno: %{x}<br>" + col_rs + ": %{y:,.0f} EUR<extra></extra>"))
+            fig_rs.update_layout(template="plotly_dark", height=380, barmode="stack",
+                                 title=f"Ricavo giornaliero per flusso (totale {ris_rs['ricavo_totale_eur']:,.0f} EUR)",
+                                 xaxis_title="Giorno", yaxis_title="EUR")
+            st.plotly_chart(fig_rs, use_container_width=True)
+
+            if modo_rs == "ottimale" and not ris_rs["df_griglia"].empty:
+                piv_rs = ris_rs["df_griglia"].pivot_table(index="P aFRR (MW)", columns="P FCR (MW)",
+                                                          values="Ricavo totale (EUR)")
+                fig_hm_rs = go.Figure(data=go.Heatmap(
+                    z=piv_rs.values,
+                    x=[f"{c:.1f}" for c in piv_rs.columns],
+                    y=[f"{i:.1f}" for i in piv_rs.index],
+                    colorscale="Viridis",
+                    hovertemplate="FCR %{x} MW, aFRR %{y} MW<br>Ricavo %{z:,.0f} EUR<extra></extra>"))
+                fig_hm_rs.update_layout(template="plotly_dark", height=380,
+                                        title="Griglia di allocazione: ricavo totale per combinazione (MW)",
+                                        xaxis_title="P FCR (MW)", yaxis_title="P aFRR (MW)")
+                st.plotly_chart(fig_hm_rs, use_container_width=True)
+
+            st.markdown("**Dettaglio giornaliero**")
+            st.dataframe(df_rs, use_container_width=True, hide_index=True)
+            st.caption("Limiti del modello: arbitraggio in perfect foresight su prezzi storici (sovrastima il ricavo reale); "
+                       "prezzi di riserva costanti sul periodo (le aste si muovono ogni settimana); attivazioni di riserva "
+                       "trascurate sull'energia; niente costi di ciclaggio e degrado (vedi tab 🔋 LCOS batteria); un solo ciclo "
+                       "di arbitraggio al giorno.")
+            st.download_button(
+                "⬇️ Esporta stacking (CSV)",
+                df_rs.to_csv(index=False, sep=";").encode("utf-8"),
+                file_name=f"revenue_stacking_{d0}_{d1}.csv",
+                mime="text/csv",
+                key="rs184_csv",
+                help="Una riga per giorno: spread netto e ricavi per flusso.",
             )
 
 
