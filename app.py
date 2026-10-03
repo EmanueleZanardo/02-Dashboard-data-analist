@@ -24402,6 +24402,241 @@ def calcola_carbonio_implicito(prezzi, prezzo_gas_eur_mwh=40.0, heat_rate=2.0,
             "emissioni_t_mwh_e": denom}
 
 
+def calcola_pompaggio(prezzi, pot_turbina_mw=100.0, pot_pompa_mw=100.0,
+                      capacita_mwh=800.0, eff_turbina=0.90, eff_pompa=0.90,
+                      livello_iniziale_pct=50.0, apporto_naturale_mw=0.0,
+                      vom_eur_mwh=2.0, soglia_pompaggio_pct=25.0):
+    """Arbitraggio day-ahead di un impianto di pompaggio idroelettrico.
+
+    Domanda operativa: "ho turbina da P_t MW, pompa da P_p MW e bacino da
+    C MWh — quanto ricavo pompando nelle ore piu' economiche e generando in
+    quelle piu' care?"
+
+    Simulazione oraria causale con strategia a soglie sui percentili
+    giornalieri: ogni giorno si calcolano il percentile `soglia` e il
+    percentile (100 - soglia) dei prezzi; ora per ora si pompa se il prezzo
+    e' sotto la soglia bassa (e c'e' posto nel bacino), si genera se e' sopra
+    la soglia alta (e c'e' acqua nel bacino), altrimenti fermo. L'apporto
+    naturale (MWh/h gratuiti) modella i bacini alpini con afflussi propri.
+
+    Dinamica del bacino (L = livello in MWh accumulati):
+      pompaggio:   preleva E_p dalla rete,  L += E_p * eff_pompa
+      generazione: scarica E_s dal bacino,   immette E_s * eff_turbina in rete
+    Round-trip = eff_turbina * eff_pompa: lo spread deve superarlo piu' i
+    VOM perche' il ciclo paghi.
+
+    - prezzi: Series oraria EUR/MWh, indice datetime (tz-aware reso naive);
+    - pot_turbina_mw / pot_pompa_mw: potenze nominali (> 0);
+    - capacita_mwh: energia massima accumulabile nel bacino (> 0);
+    - eff_turbina / eff_pompa: rendimenti in (0, 1];
+    - livello_iniziale_pct: riempimento iniziale del bacino [0, 100];
+    - apporto_naturale_mw: afflusso gratuito nel bacino (MWh per ora, >= 0);
+    - vom_eur_mwh: costi variabili su ogni MWh movimentato (pompa+turbina);
+    - soglia_pompaggio_pct: percentile giornaliero che separa le ore attive
+      da quelle di fermo, in (0, 50).
+
+    Ritorna dict con 'valido'/'errore', ricavo_generazione_eur,
+    costo_pompaggio_eur, ricavo_lordo_eur, vom_totale_eur, ricavo_netto_eur,
+    ricavo_eur_mw_giorno, spread_medio_catturato_eur_mwh,
+    breakeven_spread_pct, energia_pompata_mwh, energia_generata_mwh,
+    cicli_equivalenti, ore_pompaggio, ore_generazione, fattore_utilizzo_pct,
+    livello_finale_pct, round_trip, giudizio, verdetto, df_oraria
+    (Ora, Prezzo, Azione, Livello bacino, Energia pompata/generata),
+    df_giornaliera, n_ore, n_giorni.
+
+    Giudizio: "ARBITRAGGIO VINCENTE" se ricavo_netto > 0, altrimenti
+    "NON CONVIENE" (gli spread non coprono perdite di round-trip + VOM).
+
+    NaN-safe: serie vuota / non numerica / indice non-datetime, parametri non
+    validi -> errore pulito, mai eccezioni.
+    """
+    def _err(msg):
+        return {"valido": False, "errore": msg}
+
+    # --- pulizia serie prezzi (stesso schema delle altre tab) ---
+    if not isinstance(prezzi, pd.Series):
+        return _err("prezzi deve essere una Series pandas con indice datetime.")
+    s = prezzi.copy()
+    try:
+        s.index = pd.to_datetime(s.index, errors="coerce")
+    except Exception:
+        return _err("prezzi deve avere un indice datetime valido.")
+    if s.index.isna().any():
+        return _err("prezzi deve avere un indice datetime valido.")
+    try:
+        if getattr(s.index, "tz", None) is not None:
+            s.index = s.index.tz_localize(None)
+    except Exception:
+        return _err("prezzi deve avere un indice datetime valido.")
+    s = s[~s.index.duplicated(keep="first")].sort_index()
+    s = pd.to_numeric(s, errors="coerce").dropna()
+    if len(s) == 0:
+        return _err("Serie prezzi vuota: niente da analizzare.")
+
+    # --- validazione parametri ---
+    def _num(v, nome, minimo, massimo=None):
+        if isinstance(v, bool):
+            return None, f"{nome} deve essere un numero."
+        try:
+            x = float(v)
+        except (TypeError, ValueError):
+            return None, f"{nome} deve essere un numero."
+        if not np.isfinite(x) or x < minimo:
+            return None, f"{nome} deve essere un numero >= {minimo}."
+        if massimo is not None and x > massimo:
+            return None, f"{nome} deve essere un numero <= {massimo}."
+        return x, None
+
+    pt, em = _num(pot_turbina_mw, "pot_turbina_mw", 1e-9)
+    if em:
+        return _err(em)
+    pp, em = _num(pot_pompa_mw, "pot_pompa_mw", 1e-9)
+    if em:
+        return _err(em)
+    cap, em = _num(capacita_mwh, "capacita_mwh", 1e-9)
+    if em:
+        return _err(em)
+    et, em = _num(eff_turbina, "eff_turbina", 1e-9, 1.0)
+    if em:
+        return _err(em)
+    epu, em = _num(eff_pompa, "eff_pompa", 1e-9, 1.0)
+    if em:
+        return _err(em)
+    liv0, em = _num(livello_iniziale_pct, "livello_iniziale_pct", 0.0, 100.0)
+    if em:
+        return _err(em)
+    apporto, em = _num(apporto_naturale_mw, "apporto_naturale_mw", 0.0)
+    if em:
+        return _err(em)
+    vom, em = _num(vom_eur_mwh, "vom_eur_mwh", 0.0)
+    if em:
+        return _err(em)
+    soglia, em = _num(soglia_pompaggio_pct, "soglia_pompaggio_pct", 1e-9)
+    if em:
+        return _err(em)
+    if not (soglia < 50.0):
+        return _err("soglia_pompaggio_pct deve essere < 50.")
+
+    # --- simulazione oraria ---
+    round_trip = et * epu
+    livello = cap * liv0 / 100.0
+    q_low_f = soglia / 100.0
+    q_high_f = 1.0 - soglia / 100.0
+
+    righe = []
+    ric_gen = 0.0
+    costo_pump = 0.0
+    e_gen = 0.0
+    e_pump = 0.0
+    ore_p = 0
+    ore_g = 0
+    for _giorno, sg in s.groupby(pd.Grouper(freq="D")):
+        q_low = float(np.quantile(sg.values, q_low_f))
+        q_high = float(np.quantile(sg.values, q_high_f))
+        for ts, p in sg.items():
+            if apporto > 0.0:
+                livello = min(cap, livello + apporto)
+            azione = "Fermo"
+            en_p = 0.0
+            en_g = 0.0
+            if p <= q_low and livello < cap:
+                en_p = min(pp, (cap - livello) / epu)
+                if en_p > 1e-9:
+                    livello += en_p * epu
+                    costo_pump += en_p * p
+                    e_pump += en_p
+                    ore_p += 1
+                    azione = "Pompaggio"
+            elif p >= q_high and livello > 0.0:
+                scarico = min(pt / et, livello)
+                if scarico > 1e-9:
+                    en_g = scarico * et
+                    livello -= scarico
+                    ric_gen += en_g * p
+                    e_gen += en_g
+                    ore_g += 1
+                    azione = "Generazione"
+            righe.append((ts, float(p), azione, float(livello),
+                          float(en_p), float(en_g)))
+
+    df_raw = pd.DataFrame(righe, columns=["Ora", "Prezzo (EUR/MWh)", "Azione",
+                                          "Livello bacino (MWh)",
+                                          "Energia pompata (MWh)",
+                                          "Energia generata (MWh)"])
+
+    # --- KPI ---
+    vom_tot = vom * (e_gen + e_pump)
+    lordo = ric_gen - costo_pump
+    netto = lordo - vom_tot
+    n_giorni = int(pd.Series(s.index.date).nunique())
+    spread_medio = lordo / e_gen if e_gen > 0 else 0.0
+    cicli = e_pump / cap
+    eur_mw_g = netto / pt / n_giorni if n_giorni > 0 else 0.0
+    util = (ore_p + ore_g) / len(s) * 100.0
+    liv_finale = livello / cap * 100.0
+    breakeven_spread = (1.0 / round_trip - 1.0) * 100.0
+
+    if netto > 0:
+        giudizio = "ARBITRAGGIO VINCENTE"
+        verdetto = (f"Il pompaggio rende {netto:,.0f} EUR netti sul periodo "
+                    f"({eur_mw_g:,.0f} EUR/MW/giorno), con {cicli:.1f} cicli "
+                    f"equivalenti e spread medio catturato di "
+                    f"{spread_medio:.1f} EUR/MWh.")
+    else:
+        giudizio = "NON CONVIENE"
+        verdetto = (f"Gli spread non coprono le perdite: con round-trip al "
+                    f"{round_trip * 100:.0f}% lo spread deve superare il "
+                    f"{breakeven_spread:.0f}% piu' i VOM perche' il ciclo "
+                    f"paghi. Ricavo netto {netto:,.0f} EUR sul periodo.")
+
+    # --- tabelle ---
+    df_oraria = df_raw.copy()
+    for c in ["Prezzo (EUR/MWh)", "Livello bacino (MWh)",
+              "Energia pompata (MWh)", "Energia generata (MWh)"]:
+        df_oraria[c] = df_oraria[c].round(2)
+
+    dfg = df_raw.copy()
+    dfg["Giorno"] = pd.to_datetime(dfg["Ora"]).dt.strftime("%Y-%m-%d")
+    dfg["Ricavo gen (EUR)"] = (dfg["Energia generata (MWh)"]
+                               * dfg["Prezzo (EUR/MWh)"])
+    dfg["Costo pump (EUR)"] = (dfg["Energia pompata (MWh)"]
+                               * dfg["Prezzo (EUR/MWh)"])
+    grp = dfg.groupby("Giorno")
+    df_giornaliera = pd.DataFrame({
+        "Giorno": list(grp.groups.keys()),
+        "Ricavo generazione (EUR)": grp["Ricavo gen (EUR)"].sum().values.round(0),
+        "Costo pompaggio (EUR)": grp["Costo pump (EUR)"].sum().values.round(0),
+        "Energia generata (MWh)": grp["Energia generata (MWh)"].sum().values.round(1),
+        "Energia pompata (MWh)": grp["Energia pompata (MWh)"].sum().values.round(1),
+    })
+    df_giornaliera["Ricavo netto (EUR)"] = (
+        df_giornaliera["Ricavo generazione (EUR)"]
+        - df_giornaliera["Costo pompaggio (EUR)"]).round(0)
+    df_giornaliera["Cicli"] = (
+        df_giornaliera["Energia pompata (MWh)"] / cap).round(2)
+
+    return {"valido": True, "errore": None,
+            "ricavo_generazione_eur": ric_gen,
+            "costo_pompaggio_eur": costo_pump,
+            "ricavo_lordo_eur": lordo,
+            "vom_totale_eur": vom_tot,
+            "ricavo_netto_eur": netto,
+            "ricavo_eur_mw_giorno": eur_mw_g,
+            "spread_medio_catturato_eur_mwh": spread_medio,
+            "breakeven_spread_pct": breakeven_spread,
+            "energia_pompata_mwh": e_pump,
+            "energia_generata_mwh": e_gen,
+            "cicli_equivalenti": cicli,
+            "ore_pompaggio": ore_p,
+            "ore_generazione": ore_g,
+            "fattore_utilizzo_pct": util,
+            "livello_finale_pct": liv_finale,
+            "round_trip": round_trip,
+            "giudizio": giudizio, "verdetto": verdetto,
+            "df_oraria": df_oraria, "df_giornaliera": df_giornaliera,
+            "n_ore": len(s), "n_giorni": n_giorni}
+
+
 # ==========================================
 # WORKSPACE 1: SIMULATORE STRATEGICO
 # ==========================================
@@ -25046,7 +25281,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -41124,6 +41359,106 @@ elif workspace == _('ws8'):
                 mime="text/csv",
                 key="co2i185_csv",
                 help="Una riga per ora: prezzo e CO2 implicita.",
+            )
+
+    with tab186:
+        titolo_pmp = edu("Pompaggio", "Turbina, pompa e bacino: quanto rende pompare nelle ore piu' economiche e generare in quelle piu' care. La strategia e' a soglie sui percentili giornalieri di prezzo (pompa sotto il percentile basso, genera sopra quello alto); il round-trip (prodotto dei rendimenti) dice di quanto lo spread deve superare le perdite perche' il ciclo paghi.")
+        st.markdown(f"<h1>🏔️ {titolo_pmp}</h1>", unsafe_allow_html=True)
+        st.caption("Arbitraggio day-ahead di un impianto di pompaggio: ricavo, cicli e livello del bacino ora per ora.")
+        c1a_pmp, c1b_pmp, c1c_pmp = st.columns(3)
+        with c1a_pmp:
+            pt_pmp = st.number_input("Potenza turbina (MW)", min_value=0.0, value=100.0, step=10.0,
+                                    key="pmp186_pt",
+                                    help="Potenza nominale in generazione.")
+            pp_pmp = st.number_input("Potenza pompa (MW)", min_value=0.0, value=100.0, step=10.0,
+                                    key="pmp186_pp",
+                                    help="Potenza nominale in pompaggio.")
+            cap_pmp = st.number_input("Capacita' bacino (MWh)", min_value=0.0, value=800.0, step=50.0,
+                                     key="pmp186_cap",
+                                     help="Energia massima accumulabile nel bacino superiore.")
+        with c1b_pmp:
+            et_pmp = st.number_input("Rendimento turbina", min_value=0.5, max_value=1.0,
+                                    value=0.90, step=0.01, key="pmp186_et")
+            ep_pmp = st.number_input("Rendimento pompa", min_value=0.5, max_value=1.0,
+                                    value=0.90, step=0.01, key="pmp186_ep")
+            liv_pmp = st.slider("Livello iniziale bacino (%)", min_value=0.0, max_value=100.0,
+                               value=50.0, step=5.0, key="pmp186_liv")
+            st.caption(f"Round-trip: {et_pmp * ep_pmp * 100:.0f} % — lo spread deve superare il "
+                       f"{(1 / (et_pmp * ep_pmp) - 1) * 100:.0f} % piu' i VOM.")
+        with c1c_pmp:
+            ap_pmp = st.number_input("Apporto naturale (MWh/h)", min_value=0.0, value=0.0, step=1.0,
+                                    key="pmp186_ap",
+                                    help="Afflusso gratuito nel bacino (bacini alpini con apporti propri).")
+            vom_pmp = st.number_input("VOM (EUR/MWh movimentato)", min_value=0.0, value=2.0, step=0.5,
+                                     key="pmp186_vom",
+                                     help="Costi variabili su ogni MWh pompato o generato.")
+            sog_pmp = st.slider("Soglia pompaggio/generazione (percentile %)", min_value=5.0,
+                               max_value=45.0, value=25.0, step=5.0, key="pmp186_sog",
+                               help="Pompa sotto il percentile N del giorno, genera sopra il percentile 100-N.")
+
+        ris_pmp = calcola_pompaggio(
+            prezzi, pot_turbina_mw=pt_pmp, pot_pompa_mw=pp_pmp,
+            capacita_mwh=cap_pmp, eff_turbina=et_pmp, eff_pompa=ep_pmp,
+            livello_iniziale_pct=liv_pmp, apporto_naturale_mw=ap_pmp,
+            vom_eur_mwh=vom_pmp, soglia_pompaggio_pct=sog_pmp)
+        if not ris_pmp["valido"]:
+            st.error(ris_pmp["errore"])
+        else:
+            k1_pmp, k2_pmp, k3_pmp, k4_pmp = st.columns(4)
+            render_kpi("Ricavo netto periodo (EUR)", f"{ris_pmp['ricavo_netto_eur']:,.0f}", k1_pmp)
+            render_kpi("Ricavo (EUR/MW/giorno)", f"{ris_pmp['ricavo_eur_mw_giorno']:,.0f}", k2_pmp)
+            render_kpi("Spread medio catturato (EUR/MWh)",
+                       f"{ris_pmp['spread_medio_catturato_eur_mwh']:.1f}", k3_pmp)
+            render_kpi("Cicli equivalenti", f"{ris_pmp['cicli_equivalenti']:.1f}", k4_pmp)
+
+            st.info(f"**{ris_pmp['giudizio']}** — {ris_pmp['verdetto']}")
+
+            df_o_pmp = ris_pmp["df_oraria"]
+            fig_pmp = make_subplots(specs=[[{"secondary_y": True}]])
+            fig_pmp.add_trace(go.Scatter(x=df_o_pmp["Ora"], y=df_o_pmp["Prezzo (EUR/MWh)"],
+                                         mode="lines", name="Prezzo",
+                                         line=dict(color="#9CA3AF", width=1.2)),
+                              secondary_y=False)
+            fig_pmp.add_trace(go.Scatter(x=df_o_pmp["Ora"], y=df_o_pmp["Livello bacino (MWh)"],
+                                         mode="lines", name="Livello bacino",
+                                         fill="tozeroy",
+                                         line=dict(color="#3B82F6", width=1.5)),
+                              secondary_y=True)
+            fig_pmp.update_layout(template="plotly_dark", height=380,
+                                  title="Prezzo e livello del bacino",
+                                  xaxis_title="Data e Ora", hovermode="x unified")
+            fig_pmp.update_yaxes(title_text="EUR/MWh", secondary_y=False)
+            fig_pmp.update_yaxes(title_text="MWh accumulati", secondary_y=True)
+            st.plotly_chart(fig_pmp, use_container_width=True)
+
+            df_g_pmp = ris_pmp["df_giornaliera"]
+            fig_gp = go.Figure()
+            fig_gp.add_trace(go.Bar(x=df_g_pmp["Giorno"], y=df_g_pmp["Ricavo netto (EUR)"],
+                                    name="Ricavo netto giornaliero",
+                                    marker_color="#10B981"))
+            fig_gp.update_layout(template="plotly_dark", height=320,
+                                 title="Ricavo netto giornaliero",
+                                 xaxis_title="Giorno", yaxis_title="EUR")
+            st.plotly_chart(fig_gp, use_container_width=True)
+
+            st.markdown("**Dettaglio giornaliero**")
+            st.dataframe(df_g_pmp, use_container_width=True, hide_index=True)
+            st.caption(f"Ore di pompaggio: {ris_pmp['ore_pompaggio']} — ore di generazione: "
+                       f"{ris_pmp['ore_generazione']} — utilizzo: "
+                       f"{ris_pmp['fattore_utilizzo_pct']:.0f} % — livello finale: "
+                       f"{ris_pmp['livello_finale_pct']:.0f} %. Limiti del modello: strategia a "
+                       f"soglie semplice (non ottimizzata come un vero dispatch); prezzi e parametri "
+                       f"costanti sul periodo; niente costi di avviamento ne' vincoli di transizione "
+                       f"pompa/turbina; l'apporto naturale e' gratuito e sempre disponibile.")
+            d0p_pmp = df_o_pmp["Ora"].min().strftime("%Y%m%d")
+            d1p_pmp = df_o_pmp["Ora"].max().strftime("%Y%m%d")
+            st.download_button(
+                "⬇️ Esporta pompaggio (CSV)",
+                df_o_pmp.to_csv(index=False, sep=";").encode("utf-8"),
+                file_name=f"pompaggio_{d0p_pmp}_{d1p_pmp}.csv",
+                mime="text/csv",
+                key="pmp186_csv",
+                help="Una riga per ora: prezzo, azione e livello del bacino.",
             )
 
 
