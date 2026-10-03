@@ -204,7 +204,7 @@ class TestRegistry:
         # appartenenza + sequenza senza buchi (non conteggio esatto)
         assert "tab168" in dvars
         assert dvars == ["tab%d" % i for i in range(1, len(dvars) + 1)]
-        assert dvars[-1] == "tab168"
+        assert len(dvars) >= 168
         withs = re.findall(r"^    with (tab\d+):", src, re.M)
         assert withs == ["tab%d" % i for i in range(1, len(withs) + 1)]
         assert "tab168" in withs
