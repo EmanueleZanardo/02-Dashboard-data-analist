@@ -21461,6 +21461,224 @@ def calcola_dunkelflaute(prezzi, cap_fv_mw=100.0, cap_eolico_mw=100.0,
             "giudizio": giudizio, "verdetto": verdetto}
 
 
+def calcola_scala_copertura(prezzi, mw_f1=2.0, mw_f2=2.0, mw_f3=2.0,
+                            tranche=None, target_pct=80.0):
+    """Scala di copertura mensile: quanta energia del periodo e' coperta a prezzo fisso.
+
+    Domanda operativa: "mese per mese, che quota del mio carico e' gia'
+    fissata a prezzo fisso e dove resto esposto al mercato?" - la scala
+    confronta il carico mensile (da profilo MW F1/F2/F3) con le tranche di
+    copertura inserite (nome, MW, inizio, fine, prezzo fisso) e segnala i
+    mesi sotto il target di copertura della policy di procurement.
+
+    Metodo: carico orario MW dalle fasce AEEGSI via `fascia_oraria`;
+    per ogni tranche valida, le ore la cui data e' compresa tra inizio e
+    fine (estremi inclusi) accumulano MW coperti e controvalore a prezzo
+    fisso; aggregazione mensile su Period M; quota = coperto / carico * 100;
+    prezzo medio coperture = controvalore / MWh coperti (ponderato);
+    scoperto = max(carico - coperto, 0); over-hedge se quota > 100.
+
+    tranche: DataFrame (da st.data_editor) o lista di dict con colonne
+    "Tranche", "MW", "Inizio", "Fine", "Prezzo (€/MWh)". Le righe non
+    valide (date non parsabili, inizio > fine, MW <= 0, prezzo non
+    numerico) vengono scartate e contate in `n_tranche_scartate`.
+
+    KPI: quota coperta media ponderata sul periodo, n. mesi sotto target
+    (+ elenco), prezzo medio ponderato delle coperture, MWh scoperti
+    totali; tabella mensile (Mese, Carico, Coperto, Quota %, Prezzo medio
+    coperture, Scoperto, Stato); giudizio COPERTURA OK / ATTENZIONE /
+    NESSUNA COPERTURA; verdetto con mesi critici e nota sull'over-hedge.
+
+    NaN-safe: serie vuota / indice non datetime / MW tutti <= 0 /
+    target fuori (0, 100] / formato tranche non valido -> errore pulito;
+    nessuna tranche -> valido con quote a 0 (tutto scoperto); tz-aware
+    reso naive; duplicati keep-first; prezzi NaN scartati e contati.
+    Deterministico.
+    """
+
+    def _err(msg):
+        return {"errore": msg, "valido": False}
+
+    try:
+        mws = [float(mw_f1), float(mw_f2), float(mw_f3)]
+        target = float(target_pct)
+    except (TypeError, ValueError):
+        return _err("Parametri non validi.")
+    if not all(np.isfinite(m) and m >= 0 for m in mws):
+        return _err("I MW per fascia devono essere >= 0.")
+    if sum(mws) <= 0:
+        return _err("Imposta una potenza maggiore di zero in almeno una fascia.")
+    if not np.isfinite(target) or not (0.0 < target <= 100.0):
+        return _err("Il target di copertura deve essere tra 0 e 100 (escluso lo 0).")
+    if not isinstance(prezzi, pd.Series):
+        return _err("Input non valido: serve una Series di prezzi orari.")
+    try:
+        idx = pd.to_datetime(prezzi.index, errors="coerce")
+    except Exception:
+        return _err("Indice non convertibile a datetime.")
+    if idx.isna().all():
+        return _err("Indice non datetime.")
+    vals = pd.to_numeric(prezzi.values, errors="coerce")
+    okm = ~idx.isna()
+    idx, vals = idx[okm], vals[okm]
+    if len(idx) == 0:
+        return _err("Serie prezzi vuota.")
+    n_nan = int(np.isnan(vals).sum())
+    dfp = pd.DataFrame({"prezzo": vals}, index=idx).dropna(subset=["prezzo"])
+    if dfp.index.tz is not None:
+        dfp.index = dfp.index.tz_localize(None)
+    dfp = dfp[~dfp.index.duplicated(keep="first")].sort_index()
+    if len(dfp) == 0:
+        return _err("Serie prezzi vuota dopo la pulizia dei NaN.")
+
+    fasce = dfp.index.map(fascia_oraria)
+    mw_h = fasce.map({"F1": mws[0], "F2": mws[1], "F3": mws[2]}).astype(float).to_numpy()
+
+    if isinstance(tranche, pd.DataFrame):
+        righe = tranche.to_dict("records")
+    elif isinstance(tranche, (list, tuple)):
+        righe = list(tranche)
+    elif tranche is None:
+        righe = []
+    else:
+        return _err("Formato tranche non valido: serve DataFrame o lista di dict.")
+    t_valide, n_scartate = [], 0
+    for r in righe:
+        try:
+            d = dict(r)
+            nome = str(d.get("Tranche") or "Tranche").strip() or "Tranche"
+            mw = float(d.get("MW"))
+            px = float(d.get("Prezzo (€/MWh)"))
+            g1 = pd.to_datetime(d.get("Inizio"), errors="coerce")
+            g2 = pd.to_datetime(d.get("Fine"), errors="coerce")
+        except (TypeError, ValueError, AttributeError):
+            n_scartate += 1
+            continue
+        if pd.isna(g1) or pd.isna(g2):
+            n_scartate += 1
+            continue
+        if g1.tzinfo is not None:
+            g1 = g1.tz_localize(None)
+        if g2.tzinfo is not None:
+            g2 = g2.tz_localize(None)
+        g1, g2 = g1.normalize(), g2.normalize()
+        if not (np.isfinite(mw) and mw > 0):
+            n_scartate += 1
+            continue
+        if not np.isfinite(px):
+            n_scartate += 1
+            continue
+        if g2 < g1:
+            n_scartate += 1
+            continue
+        t_valide.append({"nome": nome, "mw": mw, "prezzo": px,
+                         "inizio": g1, "fine": g2})
+
+    giorni = dfp.index.normalize().to_numpy()
+    hedge_mw = np.zeros(len(dfp))
+    hedge_eur = np.zeros(len(dfp))
+    for t in t_valide:
+        mask = (giorni >= t["inizio"].to_numpy()) & (giorni <= t["fine"].to_numpy())
+        hedge_mw[mask] += t["mw"]
+        hedge_eur[mask] += t["mw"] * t["prezzo"]
+
+    mese = dfp.index.to_period("M")
+    dfh = pd.DataFrame({"carico": mw_h, "coperto": hedge_mw, "controval": hedge_eur})
+    gm = dfh.groupby(mese)
+    carico_m = gm["carico"].sum()
+    coperto_m = gm["coperto"].sum()
+    controval_m = gm["controval"].sum()
+
+    righe_m, mesi_sotto, mesi_over = [], [], []
+    for per in carico_m.index:
+        car = float(carico_m.loc[per])
+        cop = float(coperto_m.loc[per])
+        cv = float(controval_m.loc[per])
+        quota = (cop / car * 100.0) if car > 0 else 0.0
+        pm = (cv / cop) if cop > 0 else None
+        sco = max(car - cop, 0.0)
+        over = quota > 100.0
+        sotto = quota < target
+        if sotto:
+            mesi_sotto.append(str(per))
+        if over:
+            mesi_over.append(str(per))
+        stato = "OVER-HEDGE" if over else ("SOTTO TARGET" if sotto else "OK")
+        righe_m.append({
+            "Mese": str(per),
+            "Carico (MWh)": round(car, 1),
+            "Coperto (MWh)": round(cop, 1),
+            "Quota (%)": round(quota, 1),
+            "Prezzo medio coperture (€/MWh)": round(pm, 2) if pm is not None else None,
+            "Scoperto (MWh)": round(sco, 1),
+            "Stato": stato,
+        })
+    tabella = pd.DataFrame(righe_m)
+
+    car_tot = float(carico_m.sum())
+    cop_tot = float(coperto_m.sum())
+    quota_media = (cop_tot / car_tot * 100.0) if car_tot > 0 else 0.0
+    pm_tot = (float(controval_m.sum()) / cop_tot) if cop_tot > 0 else None
+    mwh_scoperti = max(car_tot - cop_tot, 0.0)
+
+    if not t_valide:
+        giudizio = "NESSUNA COPERTURA"
+        verdetto = ("Nessuna tranche di copertura valida inserita: tutto il carico "
+                    "resta esposto al mercato spot. Aggiungi righe nella tabella "
+                    "tranche per simulare la scala di copertura.")
+    elif not mesi_sotto and not mesi_over:
+        giudizio = "COPERTURA OK"
+        verdetto = (f"Tutti i {len(righe_m)} mesi sono sopra il target del "
+                    f"{target:.0f} % (quota media {quota_media:.1f} %).")
+    elif not mesi_sotto:
+        giudizio = "COPERTURA OK"
+        verdetto = (f"Tutti i mesi sono sopra il target del {target:.0f} %, ma "
+                    f"{len(mesi_over)} mese/i in over-hedge "
+                    f"({', '.join(mesi_over)}): quota oltre il 100% del carico.")
+    else:
+        giudizio = "ATTENZIONE"
+        verdetto = (f"{len(mesi_sotto)} mese/i sotto il target del {target:.0f} %: "
+                    f"{', '.join(mesi_sotto)}. Aumenta le tranche su quei mesi o "
+                    f"accetta l'esposizione residua.")
+        if mesi_over:
+            verdetto += f" Over-hedge in: {', '.join(mesi_over)}."
+
+    ts_mesi = carico_m.index.to_timestamp()
+    quota_m = (coperto_m / carico_m * 100.0).fillna(0.0)
+    serie_quota = pd.Series(quota_m.to_numpy(), index=ts_mesi, name="Quota (%)")
+    serie_coperto = pd.Series(coperto_m.to_numpy(), index=ts_mesi, name="Coperto (MWh)")
+    serie_scoperto = pd.Series((carico_m - coperto_m).clip(lower=0).to_numpy(),
+                               index=ts_mesi, name="Scoperto (MWh)")
+
+    return {
+        "errore": None, "valido": True,
+        "tabella_mensile": tabella,
+        "quota_media_pct": round(quota_media, 2),
+        "n_mesi_sotto_target": len(mesi_sotto),
+        "mesi_sotto_target": mesi_sotto,
+        "mesi_over_hedge": mesi_over,
+        "prezzo_medio_coperture": round(pm_tot, 2) if pm_tot is not None else None,
+        "mwh_scoperti": round(mwh_scoperti, 1),
+        "mwh_carico_tot": round(car_tot, 1),
+        "mwh_coperti_tot": round(cop_tot, 1),
+        "n_tranche_valide": len(t_valide),
+        "n_tranche_scartate": n_scartate,
+        "target_pct": target,
+        "n_nan_prezzi": n_nan,
+        "giudizio": giudizio,
+        "verdetto": verdetto,
+        "serie_quota": serie_quota,
+        "serie_coperto": serie_coperto,
+        "serie_scoperto": serie_scoperto,
+        "tranche_valide": [
+            {"Tranche": t["nome"], "MW": t["mw"],
+             "Inizio": t["inizio"].strftime("%Y-%m-%d"),
+             "Fine": t["fine"].strftime("%Y-%m-%d"),
+             "Prezzo (€/MWh)": t["prezzo"]} for t in t_valide
+        ],
+    }
+
+
 def calcola_hellbrise(prezzi, cap_fv_mw=100.0, cap_eolico_mw=100.0,
                       percentile_hb=90.0, soglia_curtail_pct=80.0,
                       prezzo_curtail=0.0, min_giorni=7):
@@ -22335,7 +22553,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -36874,6 +37092,116 @@ elif workspace == _('ws8'):
                     mime="text/csv",
                     key="hb169_csv_g",
                     help="Un giorno per riga: fattore rinnovabile e flag hellbrise.",
+                )
+
+
+    with tab170:
+        titolo_sc = edu("Scala di copertura", "SCALA DI COPERTURA (hedge ladder): mese per mese, che quota del carico e' gia' fissata a prezzo fisso con le tranche di copertura e quanta resta esposta al mercato. Il TARGET e' la quota minima di copertura che la policy di procurement richiede ogni mese.")
+        st.markdown(f"<h1>🪜 {titolo_sc}</h1>", unsafe_allow_html=True)
+        st.caption("Mese per mese: quota di carico coperta a prezzo fisso dalle tranche, prezzo medio delle coperture e mesi sotto il target di policy.")
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            sc_mw_f1 = st.number_input("Profilo: MW in F1", min_value=0.0, value=2.0, step=0.5,
+                                       key="sc170_mw_f1", help="Potenza prelevata nelle ore di punta.")
+        with c2:
+            sc_mw_f2 = st.number_input("Profilo: MW in F2", min_value=0.0, value=2.0, step=0.5,
+                                       key="sc170_mw_f2", help="Potenza prelevata nelle ore intermedie.")
+        with c3:
+            sc_mw_f3 = st.number_input("Profilo: MW in F3", min_value=0.0, value=2.0, step=0.5,
+                                       key="sc170_mw_f3", help="Potenza prelevata nelle ore fuori punta.")
+        with c4:
+            sc_target = st.slider("Target di copertura (%)", min_value=5.0, max_value=100.0,
+                                  value=80.0, step=5.0, key="sc170_target",
+                                  help="Quota minima di copertura richiesta ogni mese dalla policy di procurement.")
+        st.markdown("**Tranche di copertura** (aggiungi righe con il tasto + sotto la tabella)")
+        df_sc_default = pd.DataFrame([
+            {"Tranche": "Base Q1", "MW": 1.5, "Inizio": "2026-01-01", "Fine": "2026-03-31", "Prezzo (€/MWh)": 95.0},
+            {"Tranche": "Base estiva", "MW": 1.0, "Inizio": "2026-06-01", "Fine": "2026-08-31", "Prezzo (€/MWh)": 78.0},
+        ])
+        df_sc_in = st.data_editor(
+            df_sc_default, num_rows="dynamic", use_container_width=True,
+            key="sc170_tranche",
+            column_config={
+                "Tranche": st.column_config.TextColumn("Tranche", help="Nome della tranche di copertura."),
+                "MW": st.column_config.NumberColumn("MW", min_value=0.0, max_value=10000.0, format="%.2f",
+                                                    help="Potenza coperta a prezzo fisso."),
+                "Inizio": st.column_config.TextColumn("Inizio", help="Primo giorno di delivery (AAAA-MM-GG)."),
+                "Fine": st.column_config.TextColumn("Fine", help="Ultimo giorno di delivery (AAAA-MM-GG)."),
+                "Prezzo (€/MWh)": st.column_config.NumberColumn("Prezzo (€/MWh)", min_value=-1000.0,
+                                                                max_value=10000.0, format="%.2f"),
+            },
+            help="Ogni riga e' una tranche a prezzo fisso: nei giorni tra Inizio e Fine (inclusi) copre MW a quel prezzo.",
+        )
+        ris_sc = calcola_scala_copertura(prezzi, sc_mw_f1, sc_mw_f2, sc_mw_f3, df_sc_in, sc_target)
+        if not ris_sc["valido"]:
+            st.error(ris_sc["errore"])
+        else:
+            g = ris_sc["giudizio"]
+            if g == "ATTENZIONE":
+                st.warning(f"⚠️ {ris_sc['verdetto']}")
+            elif g == "NESSUNA COPERTURA":
+                st.info(f"ℹ️ {ris_sc['verdetto']}")
+            else:
+                st.success(f"✅ {ris_sc['verdetto']}")
+            pm_sc = ris_sc["prezzo_medio_coperture"]
+            pm_sc_txt = "n/d" if pm_sc is None else f"{pm_sc:,.2f} €/MWh"
+            k1, k2, k3, k4 = st.columns(4)
+            render_kpi(edu("Quota coperta media", "MWh coperti diviso MWh di carico sul periodo: la copertura media del portafoglio."), f"{ris_sc['quota_media_pct']:.1f} %", k1)
+            render_kpi(edu("Mesi sotto target", "Mesi con quota di copertura sotto il target di policy: dove resta esposizione da gestire."), f"{ris_sc['n_mesi_sotto_target']}", k2)
+            render_kpi(edu("Prezzo medio coperture", "Prezzo medio ponderato delle tranche a prezzo fisso: il prezzo 'bloccato' del portafoglio."), pm_sc_txt, k3)
+            render_kpi(edu("MWh scoperti", "Energia del periodo non coperta dalle tranche: resta esposta al prezzo di mercato."), f"{ris_sc['mwh_scoperti']:,.0f}", k4)
+            st.caption(f"Carico totale {ris_sc['mwh_carico_tot']:,.0f} MWh · Coperto {ris_sc['mwh_coperti_tot']:,.0f} MWh · {ris_sc['n_tranche_valide']} tranche valide ({ris_sc['n_tranche_scartate']} scartate) · Target {ris_sc['target_pct']:.0f} % · Prezzi NaN scartati: {ris_sc['n_nan_prezzi']}")
+            if ris_sc["mesi_sotto_target"]:
+                st.caption(f"Mesi sotto target: {', '.join(ris_sc['mesi_sotto_target'])}")
+            if ris_sc["mesi_over_hedge"]:
+                st.caption(f"Mesi in over-hedge: {', '.join(ris_sc['mesi_over_hedge'])}")
+
+            st.markdown("**Copertura mensile: MWh coperti vs scoperti**")
+            tm_sc = ris_sc["tabella_mensile"]
+            fig_sc1 = go.Figure()
+            fig_sc1.add_trace(go.Bar(x=tm_sc["Mese"], y=tm_sc["Coperto (MWh)"], name="Coperto",
+                                     marker_color="#22c55e",
+                                     hovertemplate="Mese: %{x}<br>Coperto: %{y:,.0f} MWh<extra></extra>"))
+            fig_sc1.add_trace(go.Bar(x=tm_sc["Mese"], y=tm_sc["Scoperto (MWh)"], name="Scoperto",
+                                     marker_color="#ef4444",
+                                     hovertemplate="Mese: %{x}<br>Scoperto: %{y:,.0f} MWh<extra></extra>"))
+            fig_sc1.update_layout(barmode="stack", yaxis_title="MWh",
+                                  margin=dict(l=10, r=10, t=10, b=10))
+            st.plotly_chart(fig_sc1, use_container_width=True)
+
+            st.markdown("**Quota di copertura per mese e target**")
+            sq_sc = ris_sc["serie_quota"]
+            fig_sc2 = go.Figure()
+            fig_sc2.add_trace(go.Scatter(x=sq_sc.index, y=sq_sc.values, mode="lines+markers",
+                                         name="Quota coperta %",
+                                         line=dict(color="#3b82f6", width=2),
+                                         hovertemplate="Mese: %{x|%m/%Y}<br>Quota: %{y:.1f} %<extra></extra>"))
+            fig_sc2.add_hline(y=ris_sc["target_pct"], line_dash="dash", line_color="#f59e0b",
+                              annotation_text=f"Target {ris_sc['target_pct']:.0f} %")
+            fig_sc2.update_layout(yaxis_title="%", margin=dict(l=10, r=10, t=10, b=10))
+            st.plotly_chart(fig_sc2, use_container_width=True)
+
+            st.markdown("**Scala di copertura mensile**")
+            st.dataframe(tm_sc, use_container_width=True, hide_index=True)
+            e1, e2 = st.columns(2)
+            with e1:
+                st.download_button(
+                    "⬇️ Esporta scala mensile (CSV)",
+                    tm_sc.to_csv(index=False, sep=";").encode("utf-8"),
+                    file_name=f"scala_copertura_mensile_{d0}_{d1}.csv",
+                    mime="text/csv",
+                    key="sc170_csv_m",
+                    help="Una riga per mese: carico, MWh coperti, quota %, prezzo medio coperture, MWh scoperti e stato.",
+                )
+            with e2:
+                dt_sc = pd.DataFrame(ris_sc["tranche_valide"])
+                st.download_button(
+                    "⬇️ Esporta tranche valide (CSV)",
+                    dt_sc.to_csv(index=False, sep=";").encode("utf-8"),
+                    file_name=f"scala_copertura_tranche_{d0}_{d1}.csv",
+                    mime="text/csv",
+                    key="sc170_csv_t",
+                    help="Le tranche valide usate nel calcolo, con date normalizzate.",
                 )
 
 
