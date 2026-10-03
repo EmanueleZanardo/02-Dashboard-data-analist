@@ -21112,6 +21112,178 @@ def calcola_idrogeno_verde(prezzi, potenza_mw=10.0, capex_eur_kw=1500.0,
             "tabella_soglie": tabella_soglie, "verdetto": verdetto}
 
 
+def calcola_diversita_carico(siti, quota_potenza_eur_kw_anno=60.0, min_ore=24):
+    """Fattore di diversita' del carico di un portafoglio multi-sito.
+
+    Domanda operativa: "i picchi dei miei siti coincidono?" — se i siti
+    piccano in ore diverse, il picco del PORTAFOGLIO e' minore della somma
+    dei picchi individuali: la quota potenza, contrattata sul picco
+    coincidente, costa meno che sommare le quote dei singoli siti.
+
+    Fattore di diversita' = somma dei picchi individuali / picco coincidente (>= 1)
+    Fattore di coincidenza = 1 / fattore di diversita'
+
+    Input: dict {nome: Series MW} o DataFrame (una colonna per sito).
+    NaN-safe: NaN del carico -> 0 (sito fermo in quell'ora), contati;
+    tz-aware reso naive; duplicati keep-first; join per intersezione con
+    < min_ore ore in comune -> errore pulito; carichi negativi / nomi
+    vuoti o duplicati / sito a energia nulla / < 2 siti -> errore pulito.
+    Deterministico.
+    """
+
+    def _err(msg):
+        return {"errore": msg, "valido": False}
+
+    try:
+        min_ore = int(min_ore)
+    except (TypeError, ValueError):
+        return _err("min_ore non valido.")
+    if min_ore < 2:
+        return _err("min_ore deve essere almeno 2.")
+    try:
+        quota = float(quota_potenza_eur_kw_anno)
+    except (TypeError, ValueError):
+        return _err("Quota potenza non valida.")
+    if not np.isfinite(quota) or quota < 0:
+        return _err("Quota potenza non valida.")
+
+    if siti is None:
+        return _err("Nessun sito fornito.")
+    if isinstance(siti, pd.DataFrame):
+        items = [(str(c), siti[c]) for c in siti.columns]
+    elif isinstance(siti, dict):
+        items = list(siti.items())
+    else:
+        return _err("Input non valido: serve dict {nome: serie MW} o DataFrame.")
+    if len(items) < 2:
+        return _err("Servono almeno 2 siti per calcolare la diversita'.")
+    nomi = [str(n).strip() for n, _ in items]
+    if any(n == "" for n in nomi):
+        return _err("Nome sito vuoto non ammesso.")
+    if len(set(nomi)) != len(nomi):
+        return _err("Nomi sito duplicati.")
+
+    serie, nan_ore = {}, {}
+    for (_n_raw, s), nome in zip(items, nomi):
+        if not isinstance(s, pd.Series):
+            return _err("Sito '%s': serve una Series pandas." % nome)
+        try:
+            idx = pd.to_datetime(s.index, errors="coerce")
+        except Exception:
+            return _err("Sito '%s': indice non convertibile a datetime." % nome)
+        if idx.isna().all():
+            return _err("Sito '%s': indice non datetime." % nome)
+        vals = pd.to_numeric(s.values, errors="coerce")
+        okm = ~idx.isna()
+        idx, vals = idx[okm], vals[okm]
+        if len(idx) == 0:
+            return _err("Sito '%s': serie vuota." % nome)
+        if bool(np.any(vals < 0)):
+            return _err("Sito '%s': carichi negativi non ammessi." % nome)
+        n_nan = int(np.isnan(vals).sum())
+        vals = np.where(np.isnan(vals), 0.0, vals)
+        ser = pd.Series(vals, index=idx)
+        if ser.index.tz is not None:
+            ser.index = ser.index.tz_localize(None)
+        ser = ser[~ser.index.duplicated(keep="first")].sort_index()
+        serie[nome] = ser
+        nan_ore[nome] = n_nan
+
+    comune = serie[nomi[0]].index
+    for nome in nomi[1:]:
+        comune = comune.intersection(serie[nome].index)
+    comune = comune.sort_values()
+    if len(comune) < min_ore:
+        return _err("Solo %d ore in comune tra i siti (minimo %d)."
+                    % (len(comune), min_ore))
+    mat = pd.DataFrame({nome: serie[nome].reindex(comune) for nome in nomi})
+    n_ore = len(comune)
+
+    energie = mat.sum(axis=0)
+    if bool((energie <= 0).any()):
+        fermo = str(energie[energie <= 0].index[0])
+        return _err("Sito '%s' a energia nulla nel periodo." % fermo)
+
+    picchi = mat.max(axis=0)
+    ore_picco_sito = mat.idxmax(axis=0)
+    portafoglio = mat.sum(axis=1)
+    picco_coinc = float(portafoglio.max())
+    ora_picco = portafoglio.idxmax()
+    somma_picchi = float(picchi.sum())
+    fat_div = somma_picchi / picco_coinc if picco_coinc > 0 else 1.0
+    fat_coin = 1.0 / fat_div if fat_div > 0 else 1.0
+
+    carico_ora_picco = mat.loc[ora_picco]
+    energia_tot = float(energie.sum())
+    righe = []
+    for nome in nomi:
+        en = float(energie[nome])
+        pk = float(picchi[nome])
+        righe.append({
+            "Sito": nome,
+            "Picco individuale (MW)": round(pk, 3),
+            "Ora del picco": ore_picco_sito[nome].strftime("%d/%m/%Y %H:%M"),
+            "Energia (MWh)": round(en, 1),
+            "Fattore di carico (%)": round(en / (pk * n_ore) * 100.0, 1),
+            "Carico all'ora di picco (MW)": round(float(carico_ora_picco[nome]), 3),
+            "Contributo al picco coincidente (%)":
+                round(float(carico_ora_picco[nome]) / picco_coinc * 100.0, 1),
+            "Quota energia (%)": round(en / energia_tot * 100.0, 1),
+            "Ore con NaN": nan_ore[nome],
+        })
+    tabella = pd.DataFrame(righe)
+
+    mesi = []
+    for periodo, grp in portafoglio.groupby(pd.PeriodIndex(portafoglio.index, freq="M")):
+        pv = float(grp.max())
+        pk = grp.idxmax()
+        sp = float(mat.loc[grp.index].max(axis=0).sum())
+        mesi.append({"Mese": str(periodo),
+                     "Picco coincidente (MW)": round(pv, 3),
+                     "Somma picchi (MW)": round(sp, 3),
+                     "Fattore di diversita'": round(sp / pv, 3) if pv > 0 else None,
+                     "Ora del picco": pk.strftime("%d/%m/%Y %H:%M")})
+    tabella_mensile = pd.DataFrame(mesi)
+
+    kw_risp = (somma_picchi - picco_coinc) * 1000.0
+    risparmio = kw_risp * quota
+
+    if fat_div >= 1.25:
+        giudizio = "ALTA"
+        nota_g = ("diversificazione efficace: i picchi dei siti cadono in ore "
+                  "diverse, conviene contrattare la potenza sul portafoglio aggregato.")
+    elif fat_div >= 1.10:
+        giudizio = "MEDIA"
+        nota_g = ("diversificazione parziale: c'e' margine di risparmio sulla "
+                  "quota potenza aggregando i siti.")
+    else:
+        giudizio = "BASSA"
+        nota_g = ("i siti piccano quasi insieme: poca differenza tra somma dei "
+                  "picchi e picco coincidente, l'aggregazione da' poco beneficio.")
+
+    top = str(tabella.loc[tabella["Contributo al picco coincidente (%)"].idxmax(),
+                          "Sito"])
+    verdetto = (
+        "Portafoglio di %d siti: fattore di diversita' %.3f (%s), picco coincidente "
+        "%.2f MW il %s contro somma dei picchi individuali %.2f MW. %s "
+        "Risparmio stimato sulla quota potenza: %.0f EUR/anno "
+        "(%.0f kW x %.2f EUR/kW/anno). Il sito piu' presente all'ora di picco e' '%s'." % (
+            len(nomi), fat_div, giudizio, picco_coinc,
+            ora_picco.strftime("%d/%m/%Y %H:%M"), somma_picchi, nota_g,
+            risparmio, kw_risp, quota, top))
+
+    return {"errore": None, "valido": True,
+            "n_siti": len(nomi), "n_ore": n_ore,
+            "picco_coincidente_mw": picco_coinc, "ora_picco": ora_picco,
+            "somma_picchi_mw": somma_picchi,
+            "fattore_diversita": fat_div, "fattore_coincidenza": fat_coin,
+            "kw_risparmiati": kw_risp, "risparmio_eur_anno": risparmio,
+            "quota_potenza_eur_kw_anno": quota,
+            "serie_portafoglio": portafoglio.rename("Carico portafoglio (MW)"),
+            "tabella": tabella, "tabella_mensile": tabella_mensile,
+            "giudizio": giudizio, "verdetto": verdetto}
+
+
 # ==========================================
 # WORKSPACE 1: SIMULATORE STRATEGICO
 # ==========================================
@@ -21756,7 +21928,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -35956,6 +36128,116 @@ elif workspace == _('ws8'):
                     mime="text/csv",
                     key="ihr166_csv_m",
                     help="Una riga per mese: heat rate medio, efficienza implicita e regime dominante.",
+                )
+
+    with tab167:
+        titolo_dv = edu("Diversità di carico", "I PICCHI DEI TUOI SITI COINCIDONO? Se i siti piccano in ore diverse, il picco del PORTAFOGLIO è minore della somma dei picchi individuali: il fattore di diversità (somma picchi / picco coincidente, sempre ≥ 1) misura quanto guadagni ad aggregare i siti sotto un'unica quota potenza invece di contrattarla sito per sito. Diversità alta = picchi sfalsati = risparmio sulla potenza impegnata.")
+        st.markdown(f"<h1>🔌 {titolo_dv}</h1>", unsafe_allow_html=True)
+        st.caption("Quanto i picchi dei siti si compensano tra loro: fattore di diversità e risparmio sulla quota potenza.")
+        PESI_DV = {
+            "piatto": [1.0] * 24,
+            "diurno": [0.625] * 7 + [1.25] * 14 + [0.625] * 3,
+            "notturno": [1.25] * 7 + [0.625] * 14 + [1.25] * 3,
+            "uffici": [0.3] * 7 + [0.8, 1.1] + [1.3] * 9 + [1.0, 0.7, 0.5, 0.4] + [0.3] * 2,
+        }
+        dv_n = st.slider("Numero di siti", min_value=2, max_value=6, value=3,
+                         key="dv167_n",
+                         help="Quanti siti/impianti aggregare nel portafoglio.")
+        dv_quota = st.number_input("Quota potenza (€/kW/anno)", min_value=0.0,
+                                   value=60.0, step=5.0, key="dv167_quota",
+                                   help="Corrispettivo di potenza annuo: serve a stimare il risparmio da aggregazione.")
+        mw_default_dv = [5.0, 3.0, 2.0, 1.5, 1.0, 1.0]
+        cols_dv = st.columns(3)
+        nomi_dv, mw_dv, forme_dv = [], [], []
+        for i in range(int(dv_n)):
+            with cols_dv[i % 3]:
+                nomi_dv.append(st.text_input(f"Nome sito {i + 1}", value=f"Sito {i + 1}",
+                                             key=f"dv167_nome{i}"))
+                mw_dv.append(st.number_input(f"Potenza media sito {i + 1} (MW)",
+                                             min_value=0.1, max_value=10000.0,
+                                             value=mw_default_dv[i], step=0.5,
+                                             key=f"dv167_mw{i}"))
+                forme_dv.append(st.selectbox(f"Forma carico sito {i + 1}",
+                                             ["Diurno", "Piatto", "Notturno", "Uffici"],
+                                             key=f"dv167_forma{i}",
+                                             help="Diurno = più carico 7-20; Notturno = più carico di notte; Uffici = profilo 9-17."))
+        profili_dv = {}
+        ore_dv = prezzi.index.hour.to_numpy()
+        for nm, mwv, fm in zip(nomi_dv, mw_dv, forme_dv):
+            w = np.asarray(PESI_DV[fm.lower()], dtype=float)
+            w = w / w.mean()
+            profili_dv[nm] = pd.Series(float(mwv) * w[ore_dv], index=prezzi.index)
+        ris_dv = calcola_diversita_carico(profili_dv, dv_quota)
+        if not ris_dv["valido"]:
+            st.error(ris_dv["errore"])
+        else:
+            if ris_dv["giudizio"] == "ALTA":
+                st.success(f"✅ {ris_dv['verdetto']}")
+            elif ris_dv["giudizio"] == "MEDIA":
+                st.warning(f"ℹ️ {ris_dv['verdetto']}")
+            else:
+                st.error(f"⚠️ {ris_dv['verdetto']}")
+            d1, d2, d3, d4 = st.columns(4)
+            render_kpi(edu("Fattore di diversità", "Somma dei picchi individuali / picco coincidente: ≥ 1.25 alta, ≥ 1.10 media, sotto bassa."), f"{ris_dv['fattore_diversita']:.3f}", d1)
+            render_kpi(edu("Picco coincidente", "Picco del portafoglio aggregato: è su questo che si contratta la potenza se i siti sono aggregati."), f"{ris_dv['picco_coincidente_mw']:.2f} MW", d2)
+            render_kpi(edu("Somma dei picchi", "Somma dei picchi individuali dei siti: il riferimento se la potenza fosse contrattata sito per sito."), f"{ris_dv['somma_picchi_mw']:.2f} MW", d3)
+            render_kpi(edu("Risparmio quota potenza", "kW risparmiati × quota potenza annua: il beneficio economico dell'aggregazione."), f"{ris_dv['risparmio_eur_anno']:,.0f} €/anno".replace(",", " "), d4)
+            st.caption(f"Ora del picco coincidente: {ris_dv['ora_picco'].strftime('%d/%m/%Y %H:%M')} · Fattore di coincidenza {ris_dv['fattore_coincidenza']:.3f} · kW risparmiati {ris_dv['kw_risparmiati']:,.0f}".replace(",", " "))
+
+            st.markdown("**Picchi individuali vs carico all'ora di picco**")
+            tab_dv = ris_dv["tabella"]
+            fig_dv1 = go.Figure()
+            fig_dv1.add_trace(go.Bar(x=tab_dv["Sito"], y=tab_dv["Picco individuale (MW)"],
+                                     name="Picco individuale",
+                                     marker_color="#38BDF8",
+                                     hovertemplate="%{x}<br>Picco: %{y:.2f} MW<extra></extra>"))
+            fig_dv1.add_trace(go.Bar(x=tab_dv["Sito"], y=tab_dv["Carico all'ora di picco (MW)"],
+                                     name="Carico all'ora di picco",
+                                     marker_color="#F97316",
+                                     hovertemplate="%{x}<br>All'ora di picco: %{y:.2f} MW<extra></extra>"))
+            fig_dv1.add_hline(y=ris_dv["picco_coincidente_mw"], line_dash="dash",
+                              line_color="#10B981",
+                              annotation_text=f"Picco coincidente {ris_dv['picco_coincidente_mw']:.2f} MW")
+            fig_dv1.update_layout(barmode="group", yaxis_title="MW",
+                                  margin=dict(l=10, r=10, t=10, b=10))
+            st.plotly_chart(fig_dv1, use_container_width=True)
+
+            st.markdown("**Carico del portafoglio: la settimana del picco**")
+            serie_pf = ris_dv["serie_portafoglio"]
+            t0 = max(serie_pf.index.min(), ris_dv["ora_picco"] - pd.Timedelta(days=3))
+            t1 = min(serie_pf.index.max(), ris_dv["ora_picco"] + pd.Timedelta(days=3))
+            pf_w = serie_pf.loc[t0:t1]
+            fig_dv2 = go.Figure()
+            fig_dv2.add_trace(go.Scatter(x=pf_w.index, y=pf_w.values, mode="lines",
+                                         name="Portafoglio", line=dict(color="#38BDF8", width=1.5),
+                                         hovertemplate="Ora: %{x}<br>Carico: %{y:.2f} MW<extra></extra>"))
+            fig_dv2.add_vline(x=ris_dv["ora_picco"], line_dash="dash", line_color="#EF4444",
+                              annotation_text="Picco coincidente")
+            fig_dv2.update_layout(yaxis_title="MW",
+                                  margin=dict(l=10, r=10, t=10, b=10))
+            st.plotly_chart(fig_dv2, use_container_width=True)
+
+            st.dataframe(tab_dv, use_container_width=True, hide_index=True)
+            st.markdown("**Diversità mensile**")
+            st.dataframe(ris_dv["tabella_mensile"], use_container_width=True, hide_index=True)
+            f1, f2 = st.columns(2)
+            with f1:
+                st.download_button(
+                    "⬇️ Esporta diversità per sito (CSV)",
+                    tab_dv.to_csv(index=False, sep=";").encode("utf-8"),
+                    file_name=f"diversita_carico_{d0}_{d1}.csv",
+                    mime="text/csv",
+                    key="dv167_csv_s",
+                    help="Una riga per sito: picco, energia, fattore di carico, contributo al picco coincidente.",
+                )
+            with f2:
+                st.download_button(
+                    "⬇️ Esporta diversità mensile (CSV)",
+                    ris_dv["tabella_mensile"].to_csv(index=False, sep=";").encode("utf-8"),
+                    file_name=f"diversita_carico_mensile_{d0}_{d1}.csv",
+                    mime="text/csv",
+                    key="dv167_csv_m",
+                    help="Una riga per mese: picco coincidente, somma picchi, fattore di diversità.",
                 )
 
 
