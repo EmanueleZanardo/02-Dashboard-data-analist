@@ -25346,6 +25346,281 @@ def calcola_curtailment(prezzi, potenza_mw=10.0, profilo="solare",
     }
 
 
+def calcola_strategia_offerta(prezzi, potenza_mw=5.0, costo_marginale=45.0,
+                              quota_volume=90.0, n_punti=61):
+    """Strategia di offerta di vendita sul day-ahead (lato produttore).
+
+    Domanda operativa: "Ho un impianto da P MW con costo marginale cm da
+    vendere sul mercato day-ahead in pay-as-cleared (se l'offerta a b
+    EUR/MWh viene accettata incasso il prezzo di clearing, non b) — a che
+    prezzo di offerta entro, ora per ora, per massimizzare il margine
+    atteso?"
+
+    Modello (price-taker: l'offerta non sposta il prezzo; distribuzione
+    empirica dei prezzi storici per fascia oraria h):
+      quota(b)   = P(spot_h >= b)                    l'offerta "cleara" se il
+                                                     clearing >= b
+      margine(b) = E[(spot_h - cm) * 1(spot_h >= b)]  per MWh offerto
+      cattura(b) = E[spot_h | spot_h >= b]
+    Per b >= cm ogni ora clearata ha margine >= 0, e alzare b rimuove solo
+    termini positivi: il massimo del margine atteso e' a b = cm (risultato
+    classico: in pay-as-cleared senza potere di mercato l'offerta ottima
+    e' il costo marginale). Un bid piu' basso aumenta la quota venduta
+    (certezza di dispatch) a costo di un margine atteso minore: la tab
+    calcola la frontiera margine-vs-quota (bid uniforme) e tre politiche
+    di bid per fascia oraria:
+      "margine" (b = cm: margine atteso massimo),
+      "volume"  (b = quantile orario con quota venduta ~= quota_volume %),
+      "prezzo"  (b = mediana oraria: vende solo la meta' migliore delle
+                 ore, cattura piu' alta ma meno MWh),
+    piu' il baseline "mercato" (b = -inf: vende tutto, anche le ore in
+    perdita).
+
+    Differenza vs tab75 (Backtest ordini limite): quella e' lato domanda
+    (a che prezzo limite COMPRARE per risparmiare); questa e' lato
+    produttore (a che prezzo di offerta VENDERE per massimizzare il
+    margine, con costo marginale, quota di vendita e prezzo di cattura).
+    Diversa anche da tab101 (Dispatch ottimale: unit commitment con
+    vincoli tecnici) e da tab177 (autoproduzione vs acquisto): qui nessun
+    vincolo di impianto, solo strategia di offerta al mercato.
+
+    Ritorna dict con 'valido'/'errore', n_ore, n_giorni, potenza_mw,
+    costo_marginale, quota_volume, grid_bid, df_frontiera, politiche
+    (per 'margine', 'volume', 'prezzo', 'mercato': bids_orari (24),
+    marg_giorno_eur, margine_atteso_eur (periodo), quota_venduta_pct,
+    cattura_eur_mwh, mwh_venduti_attesi), df_oraria (24 righe), df_mensile,
+    giudizio, verdetto.
+
+    Giudizio: "NON CONVENIENTE" (margine atteso <= 0 con la politica
+    ottima), "STRATEGIA CONSIGLIATA" (quota venduta >= 50%),
+    "MARGINALE" (quota >= 10%), "MERCATO DIFFICILE" (quota < 10%).
+
+    NaN-safe: serie vuota / non Series / indice non-datetime, parametri
+    non validi -> errore pulito; duplicati keep-first, tz-aware reso
+    naive, deterministico (nessuna componente casuale).
+    """
+    def _err(msg):
+        return {"valido": False, "errore": msg}
+
+    # --- pulizia serie prezzi (stesso schema delle altre tab) ---
+    if not isinstance(prezzi, pd.Series):
+        return _err("prezzi deve essere una Series pandas con indice datetime.")
+    s = prezzi.copy()
+    try:
+        s.index = pd.to_datetime(s.index, errors="coerce")
+    except Exception:
+        return _err("prezzi deve avere un indice datetime valido.")
+    if s.index.isna().any():
+        return _err("prezzi deve avere un indice datetime valido.")
+    try:
+        if getattr(s.index, "tz", None) is not None:
+            s.index = s.index.tz_localize(None)
+    except Exception:
+        return _err("prezzi deve avere un indice datetime valido.")
+    s = s[~s.index.duplicated(keep="first")].sort_index()
+    s = pd.to_numeric(s, errors="coerce").dropna()
+    if len(s) == 0:
+        return _err("Serie prezzi vuota: niente da analizzare.")
+    spot = s.to_numpy(dtype=float)
+    n = len(s)
+    n_giorni = n / 24.0
+
+    # --- validazione parametri ---
+    def _num(v, nome, minimo, massimo=None):
+        if isinstance(v, bool):
+            return None, f"{nome} deve essere un numero."
+        try:
+            x = float(v)
+        except (TypeError, ValueError):
+            return None, f"{nome} deve essere un numero."
+        if not np.isfinite(x) or x < minimo:
+            return None, f"{nome} deve essere un numero >= {minimo}."
+        if massimo is not None and x > massimo:
+            return None, f"{nome} deve essere un numero <= {massimo}."
+        return x, None
+
+    pmw, em = _num(potenza_mw, "potenza_mw", 1e-9, 100000.0)
+    if em:
+        return _err(em)
+    cm, em = _num(costo_marginale, "costo_marginale", -10000.0, 10000.0)
+    if em:
+        return _err(em)
+    qv, em = _num(quota_volume, "quota_volume", 1e-9, 100.0)
+    if em:
+        return _err(em)
+    if isinstance(n_punti, bool):
+        return _err("n_punti deve essere un intero.")
+    try:
+        np_i = int(n_punti)
+    except (TypeError, ValueError):
+        return _err("n_punti deve essere un intero.")
+    if np_i < 11 or np_i > 501:
+        return _err("n_punti deve essere tra 11 e 501.")
+
+    # --- gruppi per fascia oraria ---
+    ore = s.index.hour.to_numpy()
+    gruppi = [spot[ore == h] for h in range(24)]
+
+    def _riepilogo(ss, bids_pol):
+        """Metriche attese per una sottoserie, date le politiche di bid."""
+        sp = ss.to_numpy(dtype=float)
+        oh = ss.index.hour.to_numpy()
+        out = {}
+        per_ora = []
+        for h in range(24):
+            g = sp[oh == h]
+            riga = {"Ora": h}
+            for nome, bids in bids_pol.items():
+                b = bids[h]
+                if g.size == 0:
+                    riga[f"quota_{nome}"] = 0.0
+                    riga[f"marg_{nome}"] = 0.0
+                    riga[f"bid_{nome}"] = b
+                    continue
+                cl = g >= b
+                riga[f"quota_{nome}"] = float(cl.mean())
+                riga[f"marg_{nome}"] = float(np.where(cl, g - cm, 0.0).mean())
+                riga[f"bid_{nome}"] = b
+            per_ora.append(riga)
+        for nome in bids_pol:
+            qq = np.array([r[f"quota_{nome}"] for r in per_ora])
+            mm = np.array([r[f"marg_{nome}"] for r in per_ora])
+            nh = np.array([float((oh == h).sum()) for h in range(24)])
+            marg_giorno = pmw * float(mm.sum())
+            vend = pmw * float((qq * nh).sum())
+            pot = pmw * float(nh.sum())
+            quota = 100.0 * vend / pot if pot > 0 else 0.0
+            catt = 0.0
+            if vend > 0:
+                num = 0.0
+                den = 0.0
+                for h in range(24):
+                    g = sp[oh == h]
+                    b = bids_pol[nome][h]
+                    cl = g >= b
+                    if cl.any():
+                        num += float(g[cl].mean()) * float(cl.mean()) * float(g.size)
+                        den += float(cl.mean()) * float(g.size)
+                catt = num / den if den > 0 else 0.0
+            out[nome] = {"marg_giorno_eur": marg_giorno,
+                         "mwh_venduti": vend, "mwh_potenziali": pot,
+                         "quota_pct": quota, "cattura": catt}
+        return out, per_ora
+
+    # --- politiche di bid per fascia oraria ---
+    bids_pol = {
+        "margine": np.full(24, cm),
+        "volume": np.array([float(np.quantile(g, 1.0 - qv / 100.0))
+                            if g.size else cm for g in gruppi]),
+        "prezzo": np.array([float(np.median(g)) if g.size else cm
+                            for g in gruppi]),
+        "mercato": np.full(24, -np.inf),
+    }
+
+    r0, per_ora = _riepilogo(s, bids_pol)
+    politiche = {}
+    for nome in ("margine", "volume", "prezzo", "mercato"):
+        rr = r0[nome]
+        politiche[nome] = {
+            "bids_orari": bids_pol[nome].copy(),
+            "marg_giorno_eur": rr["marg_giorno_eur"],
+            "margine_atteso_eur": rr["marg_giorno_eur"] * n_giorni,
+            "quota_venduta_pct": rr["quota_pct"],
+            "cattura_eur_mwh": rr["cattura"],
+            "mwh_venduti_attesi": rr["mwh_venduti"],
+        }
+
+    # --- frontiera margine-vs-quota con bid uniforme ---
+    grid = np.unique(np.quantile(spot, np.linspace(0.0, 1.0, np_i)))
+    fr_bid, fr_marg, fr_quota = [], [], []
+    for b in grid:
+        q_t = 100.0 * float(np.mean(spot >= b))
+        m_t = pmw * float(sum(np.where(g >= b, g - cm, 0.0).mean()
+                              for g in gruppi if g.size))
+        fr_bid.append(float(b))
+        fr_marg.append(m_t)
+        fr_quota.append(q_t)
+    df_frontiera = pd.DataFrame({
+        "Bid (EUR/MWh)": fr_bid,
+        "Margine atteso/giorno (EUR)": fr_marg,
+        "Quota venduta %": fr_quota,
+    })
+
+    # --- tabella oraria (24 righe) ---
+    df_oraria = pd.DataFrame([{
+        "Ora": r["Ora"],
+        "Bid margine": r["bid_margine"],
+        "Bid volume": r["bid_volume"],
+        "Bid prezzo": r["bid_prezzo"],
+        "Quota margine %": 100.0 * r["quota_margine"],
+        "Quota volume %": 100.0 * r["quota_volume"],
+        "Quota prezzo %": 100.0 * r["quota_prezzo"],
+        "Margine/giorno margine (EUR)": pmw * r["marg_margine"],
+        "Margine/giorno volume (EUR)": pmw * r["marg_volume"],
+        "Margine/giorno prezzo (EUR)": pmw * r["marg_prezzo"],
+    } for r in per_ora])
+
+    # --- tabella mensile ---
+    mesi = s.index.to_period("M").astype(str)
+    righe_m = []
+    for m in sorted(mesi.unique()):
+        sub = s[mesi == m]
+        rm, _ = _riepilogo(sub, bids_pol)
+        ngm = len(sub) / 24.0
+        riga = {"Mese": m}
+        for nome in ("margine", "volume", "prezzo", "mercato"):
+            riga[f"Margine {nome} (EUR)"] = rm[nome]["marg_giorno_eur"] * ngm
+            riga[f"Quota {nome} %"] = rm[nome]["quota_pct"]
+        righe_m.append(riga)
+    df_mensile = pd.DataFrame(righe_m, columns=[
+        "Mese",
+        "Margine margine (EUR)", "Margine volume (EUR)",
+        "Margine prezzo (EUR)", "Margine mercato (EUR)",
+        "Quota margine %", "Quota volume %", "Quota prezzo %",
+        "Quota mercato %",
+    ])
+
+    # --- giudizio ---
+    m_marg = politiche["margine"]["margine_atteso_eur"]
+    q_marg = politiche["margine"]["quota_venduta_pct"]
+    if m_marg <= 0:
+        giudizio = "NON CONVENIENTE"
+        verdetto = (f"Con costo marginale {cm:,.2f} EUR/MWh il margine atteso "
+                    f"e' {m_marg:,.0f} EUR sul periodo: i prezzi storici "
+                    f"coprono raramente il costo. Meglio non offrire (o "
+                    f"ridurre il costo marginale).")
+    elif q_marg >= 50.0:
+        giudizio = "STRATEGIA CONSIGLIATA"
+        verdetto = (f"Offrendo a {cm:,.2f} EUR/MWh (costo marginale) vendi il "
+                    f"{q_marg:.0f}% delle ore con margine atteso "
+                    f"{m_marg:,.0f} EUR sul periodo: in pay-as-cleared e' "
+                    f"l'offerta che massimizza il margine atteso. Bid piu' "
+                    f"bassi aumentano la quota venduta a costo del margine "
+                    f"(vedi frontiera).")
+    elif q_marg >= 10.0:
+        giudizio = "MARGINALE"
+        verdetto = (f"Margine atteso positivo ({m_marg:,.0f} EUR) ma quota "
+                    f"venduta bassa ({q_marg:.0f}%): l'impianto cleara poche "
+                    f"ore. Valuta se abbassare il bid per vendere di piu' "
+                    f"(politica 'volume') accettando un margine minore.")
+    else:
+        giudizio = "MERCATO DIFFICILE"
+        verdetto = (f"Solo il {q_marg:.0f}% delle ore copre il costo "
+                    f"marginale ({cm:,.2f} EUR/MWh): il mercato day-ahead "
+                    f"storico e' difficile per questo impianto. Margine "
+                    f"atteso {m_marg:,.0f} EUR.")
+
+    return {
+        "valido": True, "errore": None,
+        "n_ore": n, "n_giorni": n_giorni,
+        "potenza_mw": pmw, "costo_marginale": cm, "quota_volume": qv,
+        "grid_bid": grid, "df_frontiera": df_frontiera,
+        "politiche": politiche,
+        "df_oraria": df_oraria, "df_mensile": df_mensile,
+        "giudizio": giudizio, "verdetto": verdetto,
+    }
+
+
 def calcola_cogenerazione(prezzi, potenza_mw=1.0, rend_elettrico=0.38,
                           rend_termico=0.45, prezzo_gas=40.0, prezzo_co2=80.0,
                           fattore_emissione=0.202, valore_calore=55.0,
@@ -26174,7 +26449,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -42815,6 +43090,123 @@ elif workspace == _('ws8'):
                                help="Una riga per giorno: MWh potenziali, curtailati, quota %, beneficio.",
                                )
 
+    with tab191:
+        titolo_off = edu("Strategia di offerta", "Offerta di vendita sul mercato day-ahead: il produttore propone un prezzo b per MWh; in pay-as-cleared (EPEX) l'offerta viene accettata se il prezzo di clearing e' >= b e incassa il clearing, non b. Senza potere di mercato il bid ottimo e' il costo marginale.")
+        st.markdown(f"<h1>🎯 {titolo_off}</h1>", unsafe_allow_html=True)
+        st.caption("Lato produttore: a che prezzo di offerta vendere sul day-ahead per massimizzare il margine atteso — bid ottimali per fascia oraria, frontiera margine-vs-quota, prezzo di cattura.")
+        c1a_off, c1b_off = st.columns(2)
+        with c1a_off:
+            pmw_off = st.number_input("Potenza offerta (MW)", min_value=0.1,
+                                     value=5.0, step=1.0, key="off191_pmw",
+                                     help="MW offerti in ogni ora del periodo.")
+            cm_off = st.number_input("Costo marginale (EUR/MWh)",
+                                    min_value=0.0, value=45.0, step=5.0,
+                                    key="off191_cm",
+                                    help="Costo variabile per MWh prodotto: in pay-as-cleared il bid che massimizza il margine atteso e' esattamente questo.")
+        with c1b_off:
+            qv_off = st.slider("Quota volume garantita (%)", min_value=50,
+                               max_value=99, value=90, key="off191_qv",
+                               help="Per la politica 'volume': bid orario al quantile con questa quota di ore vendute.")
+            pol_off = st.radio("Politica di offerta",
+                               ["margine", "volume", "prezzo"],
+                               key="off191_pol", horizontal=True,
+                               help="margine: bid = costo marginale (margine atteso max). volume: bid basso per vendere quasi sempre. prezzo: bid = mediana oraria (solo le ore migliori).")
+
+        ris_off = calcola_strategia_offerta(
+            prezzi, potenza_mw=pmw_off, costo_marginale=cm_off,
+            quota_volume=float(qv_off))
+        if not ris_off["valido"]:
+            st.error(ris_off["errore"])
+        else:
+            pols_off = ris_off["politiche"]
+            p_off = pols_off[pol_off]
+            p_merc_off = pols_off["mercato"]
+            k1_off, k2_off, k3_off, k4_off = st.columns(4)
+            with k1_off:
+                st.metric("Margine atteso (periodo)",
+                          f"{p_off['margine_atteso_eur']:,.0f} EUR",
+                          f"{p_off['marg_giorno_eur']:,.0f} EUR/giorno")
+            with k2_off:
+                st.metric("Quota venduta",
+                          f"{p_off['quota_venduta_pct']:.1f} %",
+                          f"{p_off['mwh_venduti_attesi']:,.0f} MWh attesi")
+            with k3_off:
+                st.metric("Prezzo di cattura",
+                          f"{p_off['cattura_eur_mwh']:,.2f} EUR/MWh",
+                          f"{p_off['cattura_eur_mwh'] - p_merc_off['cattura_eur_mwh']:+,.2f} vs sempre a mercato")
+            with k4_off:
+                st.metric("Bid medio (24h)",
+                          f"{float(p_off['bids_orari'].mean()):,.2f} EUR/MWh",
+                          f"costo marginale {ris_off['costo_marginale']:,.2f}")
+            giudizio_off = ris_off["giudizio"]
+            if giudizio_off == "STRATEGIA CONSIGLIATA":
+                st.success(ris_off["verdetto"])
+            elif giudizio_off == "MARGINALE":
+                st.info(ris_off["verdetto"])
+            elif giudizio_off == "MERCATO DIFFICILE":
+                st.warning(ris_off["verdetto"])
+            else:
+                st.error(ris_off["verdetto"])
+            st.caption("Pay-as-cleared: l'offerta a b vende se il clearing >= b e incassa il clearing. "
+                       "Bid = costo marginale => margine atteso massimo; bid piu' bassi => piu' ore vendute, meno margine.")
+
+            df_fr_off = ris_off["df_frontiera"]
+            fig_off = go.Figure()
+            fig_off.add_trace(go.Scatter(x=df_fr_off["Quota venduta %"],
+                                        y=df_fr_off["Margine atteso/giorno (EUR)"],
+                                        mode="lines", name="Frontiera (bid uniforme)",
+                                        line=dict(color="#38BDF8", width=2)))
+            for nome_off, col_off in (("margine", "#10B981"),
+                                      ("volume", "#F59E0B"),
+                                      ("prezzo", "#8B5CF6")):
+                pp_off = pols_off[nome_off]
+                fig_off.add_trace(go.Scatter(x=[pp_off["quota_venduta_pct"]],
+                                            y=[pp_off["marg_giorno_eur"]],
+                                            mode="markers+text",
+                                            name=f"Politica {nome_off}",
+                                            text=[nome_off], textposition="top center",
+                                            marker=dict(color=col_off, size=13,
+                                                        symbol="diamond")))
+            fig_off.update_layout(template="plotly_dark", height=340,
+                                  title="Frontiera margine atteso vs quota venduta",
+                                  xaxis_title="Quota venduta %",
+                                  yaxis_title="Margine atteso/giorno (EUR)")
+            st.plotly_chart(fig_off, use_container_width=True)
+
+            fig_ist_off = go.Figure()
+            fig_ist_off.add_trace(go.Histogram(x=prezzi.dropna().to_numpy(),
+                                               nbinsx=60, name="Prezzi storici",
+                                               marker_color="#64748B"))
+            fig_ist_off.add_vline(x=ris_off["costo_marginale"],
+                                  line_dash="dash", line_color="#10B981",
+                                  annotation_text="costo marginale")
+            for nome_off, col_off in (("margine", "#10B981"),
+                                      ("volume", "#F59E0B"),
+                                      ("prezzo", "#8B5CF6")):
+                fig_ist_off.add_vline(
+                    x=float(pols_off[nome_off]["bids_orari"].mean()),
+                    line_dash="dot", line_color=col_off,
+                    annotation_text=f"bid medio {nome_off}")
+            fig_ist_off.update_layout(template="plotly_dark", height=300,
+                                       title="Distribuzione prezzi e bid medi per politica",
+                                       xaxis_title="EUR/MWh", yaxis_title="Ore",
+                                       showlegend=False)
+            st.plotly_chart(fig_ist_off, use_container_width=True)
+
+            st.markdown("**Bid e quota per fascia oraria**")
+            st.dataframe(ris_off["df_oraria"], use_container_width=True,
+                         hide_index=True)
+            st.markdown("**Margine e quota per mese**")
+            st.dataframe(ris_off["df_mensile"], use_container_width=True,
+                         hide_index=True)
+            csv_off = ris_off["df_mensile"].to_csv(index=False, sep=";").encode("utf-8")
+            st.download_button("Scarica CSV mensile",
+                               data=csv_off,
+                               file_name="strategia_offerta.csv",
+                               mime="text/csv",
+                               key="off191_csv",
+                               help="Una riga per mese: margine atteso e quota venduta per politica di offerta.",
+                               )
 
 
 # Footer
