@@ -204,11 +204,13 @@ class TestRegistry:
         src = open("app.py", encoding="utf-8").read()
         m = re.search(r"tab1, tab2, .*? = st\.tabs\(\[", src, re.S)
         dvars = re.findall(r"tab\d+", m.group(0))
-        assert "tab167" in dvars and dvars[-1] == "tab167"
-        assert len(dvars) == 167
+        # appartenenza + sequenza senza buchi (non conteggio esatto)
+        assert "tab167" in dvars
+        assert dvars == ["tab%d" % i for i in range(1, len(dvars) + 1)]
         withs = re.findall(r"^    with (tab\d+):", src, re.M)
         assert withs == ["tab%d" % i for i in range(1, len(withs) + 1)]
-        assert len(withs) == 167
+        assert "tab167" in withs
+        assert len(withs) == len(dvars) >= 167
         assert '"🔌 Diversità di carico"' in src
         keys = re.findall(r'key="(dv167_[^"]+)"', src)
         assert len(keys) == len(set(keys)) and len(keys) >= 4
