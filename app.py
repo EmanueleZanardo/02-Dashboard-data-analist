@@ -21461,6 +21461,279 @@ def calcola_dunkelflaute(prezzi, cap_fv_mw=100.0, cap_eolico_mw=100.0,
             "giudizio": giudizio, "verdetto": verdetto}
 
 
+def calcola_test_stazionarieta(prezzi, regression="c", lags="auto", max_lags=None):
+    """Test ADF (Augmented Dickey-Fuller) di radice unitaria sulla serie prezzi.
+
+    H0: la serie ha una radice unitaria (non stazionaria, es. random walk).
+    Dalla regressione OLS
+        Δy_t = det_t + gamma*y_{t-1} + Σ_{i=1..p} delta_i*Δy_{t-i} + e_t
+    con det_t = {niente | costante | costante+trend} secondo `regression`,
+    la statistica test e' t = gamma/se(gamma). H0 si rifiuta quando la
+    statistica e' PIU' NEGATIVA del valore critico (valori critici asintotici
+    di MacKinnon): la serie e' stazionaria.
+
+    Implementazione propria con OLS numpy (niente statsmodels): selezione dei
+    lag con AIC su campione troncato comune (pmax da regola di Schwert),
+    test ripetuto sulla differenza prima per l'ordine di integrazione
+    (I(0)/I(1)/I(2+)) e verdetto ADF mese per mese (finestre con >=168 ore).
+
+    Parametri: regression in {"n","c","ct"}; lags "auto" o intero >= 0;
+    max_lags tetto opzionale ai lag automatici.
+    Ritorna dict con "valido"/"errore"; mai eccezioni su input strani.
+    """
+    _CV = {
+        "n": {1: -2.566, 5: -1.941, 10: -1.617},
+        "c": {1: -3.430, 5: -2.862, 10: -2.567},
+        "ct": {1: -3.959, 5: -3.410, 10: -3.127},
+    }
+    _LAB = {"n": "nessun termine deterministico", "c": "costante",
+            "ct": "costante + trend"}
+
+    def _err(msg):
+        return {"valido": False, "errore": msg}
+
+    if regression not in _CV:
+        return _err("regression deve essere 'n', 'c' o 'ct'.")
+
+    lag_fisso = None
+    if isinstance(lags, str):
+        if lags != "auto":
+            return _err("lags deve essere 'auto' o un intero >= 0.")
+    else:
+        try:
+            lag_fisso = int(lags)
+        except (TypeError, ValueError):
+            return _err("lags deve essere 'auto' o un intero >= 0.")
+        if lag_fisso < 0:
+            return _err("lags deve essere 'auto' o un intero >= 0.")
+
+    ml_cap = None
+    if max_lags is not None:
+        try:
+            ml_cap = int(max_lags)
+        except (TypeError, ValueError):
+            return _err("max_lags deve essere un intero >= 0 o None.")
+        if ml_cap < 0:
+            return _err("max_lags deve essere un intero >= 0 o None.")
+
+    try:
+        s = pd.Series(prezzi)
+    except (TypeError, ValueError):
+        return _err("La serie prezzi non e' leggibile come Series.")
+    s = pd.to_numeric(s, errors="coerce").dropna()
+    if len(s) < 30:
+        return _err("Servono almeno 30 osservazioni valide per il test ADF "
+                    f"(trovate {len(s)}).")
+    idx = s.index
+    is_dt = isinstance(idx, pd.DatetimeIndex)
+    if is_dt:
+        try:
+            idx = idx.tz_localize(None)
+        except (TypeError, AttributeError, ValueError):
+            pass
+        s = pd.Series(s.to_numpy(), index=idx)
+    y = s.to_numpy(dtype=float)
+    if not np.all(np.isfinite(y)):
+        return _err("La serie contiene valori non finiti.")
+    T = len(y)
+    n_det = 0 if regression == "n" else (1 if regression == "c" else 2)
+    y_costante = bool(np.all(y == y[0]))
+
+    def _pmax(Tv):
+        pm = int(12.0 * (Tv / 100.0) ** 0.25)
+        pm = max(0, min(pm, (Tv - n_det - 10) // 2))
+        if ml_cap is not None:
+            pm = max(0, min(pm, ml_cap))
+        return pm
+
+    def _fit(yv, reg, p, n_use=None):
+        """OLS della regressione ADF con p lag; None se non stimabile."""
+        Tv = len(yv)
+        n = Tv - 1 - p
+        if n <= 0:
+            return None
+        dy = np.diff(yv)
+        yl = yv[:-1]
+        cols = []
+        if reg in ("c", "ct"):
+            cols.append(np.ones(n))
+        if reg == "ct":
+            cols.append(np.arange(1, n + 1, dtype=float))
+        i_gamma = len(cols)
+        cols.append(yl[p:])
+        for i in range(1, p + 1):
+            cols.append(dy[p - i: Tv - 1 - i])
+        Y = dy[p:]
+        X = np.column_stack(cols)
+        if n_use is not None:
+            n_use = min(n_use, n)
+            Y = Y[-n_use:]
+            X = X[-n_use:, :]
+            n = n_use
+        k = X.shape[1]
+        if n <= k + 1:
+            return None
+        beta, _r, _rk, _sv = np.linalg.lstsq(X, Y, rcond=None)
+        resid = Y - X @ beta
+        dof = n - k
+        if dof <= 0:
+            return None
+        rss = float(resid @ resid)
+        if not np.isfinite(rss):
+            return None
+        gamma = float(beta[i_gamma])
+        yss = float(Y @ Y)
+        if rss == 0.0 or (yss > 0.0 and rss <= 1e-24 * yss):
+            # fit (quasi) perfetto: serie deterministica senza rumore
+            stat = -np.inf if gamma < 0 else (np.inf if gamma > 0 else 0.0)
+            return {"stat": stat, "gamma": gamma, "n": n, "k": k,
+                    "rss": 0.0, "p": p, "perfetto": True}
+        s2 = rss / dof
+        try:
+            xtx_inv = np.linalg.pinv(X.T @ X)
+        except np.linalg.LinAlgError:
+            return None
+        v = float(xtx_inv[i_gamma, i_gamma])
+        if not np.isfinite(v) or v <= 0:
+            return None
+        stat = gamma / np.sqrt(s2 * v)
+        if not np.isfinite(stat):
+            return None
+        return {"stat": float(stat), "gamma": gamma, "n": n, "k": k,
+                "rss": rss, "p": p, "perfetto": False}
+
+    def _seleziona(yv, reg):
+        """Sceglie i lag con AIC su campione troncato comune."""
+        pm = _pmax(len(yv))
+        n0 = len(yv) - 1 - pm
+        if n0 <= n_det + 2:
+            return None
+        best = None
+        perfetto = None
+        for p in range(pm + 1):
+            f = _fit(yv, reg, p, n_use=n0)
+            if f is None:
+                continue
+            if f["perfetto"]:
+                # serie deterministica senza rumore: niente AIC da calcolare
+                if perfetto is None:
+                    perfetto = f
+                if f["stat"] == -np.inf:
+                    return f  # mean reversion perfetta: non c'e' di meglio
+                continue
+            aic = n0 * np.log(f["rss"] / n0) + 2.0 * f["k"]
+            if best is None or aic < best[0]:
+                best = (aic, f)
+        if best is not None:
+            return best[1]
+        return perfetto  # solo fit perfetti non mean-reverting (es. esplosiva)
+
+    def _verdetto(stat, cv):
+        return {"rifiuta_1": bool(stat < cv[1]),
+                "rifiuta_5": bool(stat < cv[5]),
+                "rifiuta_10": bool(stat < cv[10])}
+
+    cv = _CV[regression]
+    if y_costante:
+        fit = {"stat": -np.inf, "gamma": np.nan, "n": T - 1,
+               "k": n_det + 1, "rss": 0.0, "p": 0}
+        fit_d = dict(fit)
+        p_usato = 0
+    else:
+        if lag_fisso is None:
+            fit = _seleziona(y, regression)
+            if fit is None:
+                return _err("Regressione ADF non stimabile su questa serie.")
+            p_usato = fit["p"]
+        else:
+            fit = _fit(y, regression, lag_fisso)
+            if fit is None:
+                return _err(f"lag={lag_fisso} non stimabile con {T} osservazioni.")
+            p_usato = lag_fisso
+        yd = np.diff(y)
+        fit_d = _seleziona(yd, regression) if len(yd) >= 30 else None
+
+    stat = float(fit["stat"])
+    v = _verdetto(stat, cv)
+    verdetto = "STAZIONARIA" if v["rifiuta_5"] else "RADICE UNITARIA"
+
+    stat_diff, rifiuta_diff_5 = None, None
+    if fit_d is not None:
+        stat_diff = float(fit_d["stat"])
+        rifiuta_diff_5 = _verdetto(stat_diff, cv)["rifiuta_5"]
+    if v["rifiuta_5"]:
+        ordine = "I(0)"
+    elif rifiuta_diff_5 is True:
+        ordine = "I(1)"
+    elif rifiuta_diff_5 is False:
+        ordine = "I(2+)"
+    else:
+        ordine = "I(1)? (differenze non testate)"
+
+    righe = []
+    if is_dt:
+        try:
+            mesi = s.index.to_period("M")
+        except (TypeError, ValueError, AttributeError):
+            mesi = None
+        if mesi is not None:
+            for per, grp in s.groupby(mesi):
+                gv = grp.to_numpy(dtype=float)
+                if len(gv) < 168 or not np.all(np.isfinite(gv)):
+                    continue
+                if np.all(gv == gv[0]):
+                    righe.append({"Mese": str(per), "Ore": len(gv),
+                                  "Statistica": -np.inf,
+                                  "Verdetto": "STAZIONARIA"})
+                    continue
+                fm = _seleziona(gv, regression)
+                if fm is None:
+                    righe.append({"Mese": str(per), "Ore": len(gv),
+                                  "Statistica": np.nan, "Verdetto": "n.d."})
+                else:
+                    vm = _verdetto(float(fm["stat"]), cv)
+                    righe.append({
+                        "Mese": str(per), "Ore": len(gv),
+                        "Statistica": float(fm["stat"]),
+                        "Verdetto": ("STAZIONARIA" if vm["rifiuta_5"]
+                                     else "RADICE UNITARIA")})
+    df_roll = pd.DataFrame(righe,
+                           columns=["Mese", "Ore", "Statistica", "Verdetto"])
+    ok_roll = df_roll[df_roll["Verdetto"].isin(["STAZIONARIA",
+                                                "RADICE UNITARIA"])]
+    quota_mesi = (float((ok_roll["Verdetto"] == "STAZIONARIA").mean())
+                  if len(ok_roll) else None)
+
+    if v["rifiuta_5"]:
+        giudizio = ("La serie dei prezzi e' STAZIONARIA (rifiuto di H0 al 5%): "
+                    "media e varianza stabili nel tempo, gli shock rientrano. "
+                    "Ha senso parlare di prezzo medio, bande e mean reversion "
+                    "sui livelli.")
+    elif rifiuta_diff_5:
+        giudizio = ("La serie ha una RADICE UNITARIA in livelli ma la differenza "
+                    "prima e' stazionaria: il prezzo e' I(1). Lavora sulle "
+                    "VARIAZIONI, non sui livelli: medie e bande calcolate sui "
+                    "livelli non sono affidabili.")
+    else:
+        giudizio = ("La serie NON e' stazionaria nemmeno alle differenze prime: "
+                    "processo oltre I(1) o break strutturali. Verifica la qualita' "
+                    "dei dati e valuta finestre piu' corte o la rimozione del trend.")
+
+    return {
+        "valido": True, "errore": None,
+        "regression": regression, "regression_label": _LAB[regression],
+        "n_obs": T, "lags": p_usato, "lags_auto": lag_fisso is None,
+        "stat": stat, "cv": dict(cv),
+        "rifiuta_1": v["rifiuta_1"], "rifiuta_5": v["rifiuta_5"],
+        "rifiuta_10": v["rifiuta_10"],
+        "verdetto": verdetto, "serie_costante": y_costante,
+        "stat_diff": stat_diff, "rifiuta_diff_5": rifiuta_diff_5,
+        "ordine_integrazione": ordine,
+        "rolling": df_roll, "quota_mesi_stazionari": quota_mesi,
+        "giudizio": giudizio,
+    }
+
+
 def calcola_scala_copertura(prezzi, mw_f1=2.0, mw_f2=2.0, mw_f3=2.0,
                             tranche=None, target_pct=80.0):
     """Scala di copertura mensile: quanta energia del periodo e' coperta a prezzo fisso.
@@ -22553,7 +22826,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -37203,6 +37476,97 @@ elif workspace == _('ws8'):
                     key="sc170_csv_t",
                     help="Le tranche valide usate nel calcolo, con date normalizzate.",
                 )
+
+    with tab171:
+        titolo_stz = edu("Test di stazionarietà", "Il TEST DI STAZIONARIETÀ (ADF, Augmented Dickey-Fuller) verifica se la serie dei prezzi ha una RADICE UNITARIA. H0 = la serie NON e' stazionaria (random walk): se la statistica e' PIU' NEGATIVA del valore critico, H0 si rifiuta e la serie e' stazionaria (media e varianza stabili, gli shock rientrano). Per un energy analyst conta perche' quasi tutti gli strumenti (mean reversion, bande, hedge ratio, VaR) assumono stazionarieta': se il prezzo e' I(1), quei calcoli vanno fatti sulle VARIAZIONI, non sui livelli.")
+        st.markdown(f"<h1>📏 {titolo_stz}</h1>", unsafe_allow_html=True)
+        st.caption("La serie dei prezzi ha una radice unitaria? Test ADF con valori critici di MacKinnon: livelli, differenze e verdetto mese per mese.")
+        c1, c2 = st.columns(2)
+        with c1:
+            stz_reg = st.selectbox(
+                "Termine deterministico",
+                ["Costante", "Costante + trend", "Nessuno"],
+                index=0, key="st171_reg",
+                help="Componente deterministica della regressione ADF: 'Costante' per prezzi che oscillano attorno a un livello, 'Costante + trend' se c'e' un trend di fondo, 'Nessuno' per serie a media zero.")
+        with c2:
+            stz_lagmode = st.selectbox(
+                "Selezione dei lag",
+                ["Auto (AIC)", "Fisso"],
+                index=0, key="st171_lagmode",
+                help="Auto: i lag della parte aumentata sono scelti con l'AIC (massimo da regola di Schwert). Fisso: li decidi tu.")
+        stz_lag = 0
+        if stz_lagmode == "Fisso":
+            stz_lag = int(st.number_input(
+                "Numero di lag", min_value=0, max_value=24, value=4, step=1,
+                key="st171_lag",
+                help="Ordine p della parte aumentata: quanti Δy ritardati entrano nella regressione ADF."))
+        _reg_map = {"Costante": "c", "Costante + trend": "ct", "Nessuno": "n"}
+        ris_stz = calcola_test_stazionarieta(
+            prezzi, regression=_reg_map[stz_reg],
+            lags="auto" if stz_lagmode == "Auto (AIC)" else stz_lag)
+        if not ris_stz["valido"]:
+            st.error(ris_stz["errore"])
+        else:
+            k1, k2, k3, k4 = st.columns(4)
+            with k1:
+                st.metric("Statistica ADF", f"{ris_stz['stat']:.2f}")
+            with k2:
+                st.metric("Verdetto (5%)", ris_stz["verdetto"])
+            with k3:
+                st.metric("Ordine di integrazione", ris_stz["ordine_integrazione"])
+            with k4:
+                st.metric("Lag usati",
+                          f"{ris_stz['lags']}{' (AIC)' if ris_stz['lags_auto'] else ''}")
+            if ris_stz["verdetto"] == "STAZIONARIA":
+                st.success(ris_stz["giudizio"])
+            else:
+                st.warning(ris_stz["giudizio"])
+
+            st.markdown("**Statistica ADF contro i valori critici di MacKinnon**")
+            _cv = ris_stz["cv"]
+            _stat_show = ris_stz["stat"]
+            if not np.isfinite(_stat_show):
+                _stat_show = _cv[1] * 1.5
+            fig_stz = go.Figure()
+            fig_stz.add_bar(
+                y=["Statistica ADF", "Critico 1%", "Critico 5%", "Critico 10%"],
+                x=[_stat_show, _cv[1], _cv[5], _cv[10]],
+                orientation="h",
+                marker_color=["#2563EB", "#9CA3AF", "#9CA3AF", "#9CA3AF"])
+            fig_stz.update_layout(
+                xaxis_title="t(γ): più negativa = più evidenza di stazionarietà",
+                margin=dict(l=10, r=10, t=10, b=10))
+            st.plotly_chart(fig_stz, use_container_width=True)
+            st.caption("H0 (radice unitaria) si rifiuta quando la barra blu supera a sinistra il valore critico.")
+            if ris_stz["stat_diff"] is not None:
+                st.caption(f"Test sulla differenza prima: statistica {ris_stz['stat_diff']:.2f} "
+                           f"→ {'stazionaria' if ris_stz['rifiuta_diff_5'] else 'non stazionaria'} al 5%.")
+
+            df_stz_roll = ris_stz["rolling"]
+            if len(df_stz_roll):
+                st.markdown("**Verdetto ADF mese per mese** (finestre con almeno 168 ore)")
+                _colmap = {"STAZIONARIA": "#16A34A", "RADICE UNITARIA": "#DC2626",
+                           "n.d.": "#9CA3AF"}
+                fig_stz2 = go.Figure()
+                fig_stz2.add_bar(
+                    x=df_stz_roll["Mese"],
+                    y=df_stz_roll["Statistica"].clip(lower=_cv[5] * 2),
+                    marker_color=df_stz_roll["Verdetto"].map(_colmap))
+                fig_stz2.add_hline(y=_cv[5], line_dash="dash", line_color="#DC2626",
+                                   annotation_text="Critico 5%")
+                fig_stz2.update_layout(yaxis_title="Statistica ADF",
+                                       margin=dict(l=10, r=10, t=10, b=10))
+                st.plotly_chart(fig_stz2, use_container_width=True)
+                st.dataframe(df_stz_roll, use_container_width=True, hide_index=True)
+                st.download_button(
+                    "⬇️ Esporta verdetti mensili (CSV)",
+                    df_stz_roll.to_csv(index=False, sep=";").encode("utf-8"),
+                    file_name=f"stazionarieta_mensile_{d0}_{d1}.csv",
+                    mime="text/csv",
+                    key="st171_csv",
+                    help="Una riga per mese: ore osservate, statistica ADF e verdetto al 5%.",
+                )
+
 
 
 # Footer
