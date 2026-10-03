@@ -22840,6 +22840,88 @@ def calcola_make_or_buy(prezzi, mw_f1, mw_f2, mw_f3, costo_marginale=85.0,
             "costo_avviamento": ca, "min_up": mu, "min_down": md}
 
 
+def calcola_orologio_prezzo(prezzi):
+    """Orologio del prezzo: profilo orario medio per mese, su quadrante polare.
+
+    Domanda operativa: in quale mese e a che ora il prezzo e' sistematicamente
+    piu' alto o piu' basso? L'orologio mostra, per ogni mese di calendario, il
+    profilo medio delle 24 ore: la struttura giorno/notte cambia con le
+    stagioni, e leggerla dice quando conviene spostare i consumi (shifting
+    stagionale del carico), quando pianificare la manutenzione e quando
+    comprare spot.
+
+    Metodo: media del prezzo per coppia (mese, ora del giorno) su tutta la
+    serie storica; per ogni mese con dati, ora piu' economica / piu' cara e
+    spread giorno/notte; profilo annuo medio per ora (media sui mesi) con ora
+    migliore e peggiore dell'anno.
+
+    Ritorna dict con valido/errore, df_matrice (Mese, Ora del giorno, Prezzo
+    medio (EUR/MWh) — 12x24 righe), df_mesi (Mese, Ora più economica,
+    Prezzo min (EUR/MWh), Ora più cara, Prezzo max (EUR/MWh),
+    Spread (EUR/MWh)), ora_migliore_anno, ora_peggiore_anno,
+    spread_medio_mensile, mese_spread_max, prezzo_medio_annuo, n_ore,
+    mesi_presenti. NaN-safe: serie vuota / indice non datetime / <24 ore
+    valide -> valido False con errore pulito, mai eccezioni. Deterministico
+    (nanargmin/nanargmax prendono la prima occorrenza a parita' di prezzo).
+    """
+    cols_m = ["Mese", "Ora del giorno", "Prezzo medio (EUR/MWh)"]
+    cols_s = ["Mese", "Ora più economica", "Prezzo min (EUR/MWh)",
+              "Ora più cara", "Prezzo max (EUR/MWh)", "Spread (EUR/MWh)"]
+    vuoto = {"valido": False, "errore": None,
+             "df_matrice": pd.DataFrame(columns=cols_m),
+             "df_mesi": pd.DataFrame(columns=cols_s)}
+    try:
+        p = prezzi.astype(float).dropna()
+        p = p[~p.index.duplicated(keep="first")].sort_index()
+    except Exception:
+        return dict(vuoto, errore="Serie prezzi non valida.")
+    if len(p) == 0:
+        return dict(vuoto, errore="Serie prezzi vuota.")
+    if not isinstance(p.index, pd.DatetimeIndex):
+        return dict(vuoto, errore="Indice prezzi non valido (serve un DatetimeIndex).")
+    if len(p) < 24:
+        return dict(vuoto, errore="Serie troppo corta: servono almeno 24 ore valide.")
+    mesi = p.index.month.to_numpy()
+    ore = p.index.hour.to_numpy()
+    vals = p.to_numpy(dtype=float)
+    somma = np.zeros((12, 24))
+    conte = np.zeros((12, 24))
+    for m, h, v in zip(mesi, ore, vals):
+        somma[m - 1, h] += v
+        conte[m - 1, h] += 1
+    with np.errstate(invalid="ignore", divide="ignore"):
+        media = np.where(conte > 0, somma / conte, np.nan)
+    righe_m = [{"Mese": m + 1, "Ora del giorno": h,
+                "Prezzo medio (EUR/MWh)": float(media[m, h])}
+               for m in range(12) for h in range(24)]
+    df_matrice = pd.DataFrame(righe_m, columns=cols_m)
+    righe_s = []
+    for m in range(12):
+        riga = media[m]
+        if np.isnan(riga).all():
+            continue
+        i_min = int(np.nanargmin(riga))
+        i_max = int(np.nanargmax(riga))
+        righe_s.append({"Mese": m + 1, "Ora più economica": i_min,
+                        "Prezzo min (EUR/MWh)": float(riga[i_min]),
+                        "Ora più cara": i_max,
+                        "Prezzo max (EUR/MWh)": float(riga[i_max]),
+                        "Spread (EUR/MWh)": float(riga[i_max] - riga[i_min])})
+    df_mesi = pd.DataFrame(righe_s, columns=cols_s)
+    profilo_annuo = np.nanmean(media, axis=0)
+    ora_best = int(np.nanargmin(profilo_annuo))
+    ora_worst = int(np.nanargmax(profilo_annuo))
+    spread_medio = float(df_mesi["Spread (EUR/MWh)"].mean()) if len(df_mesi) else 0.0
+    m_spread_max = (int(df_mesi.loc[df_mesi["Spread (EUR/MWh)"].idxmax(), "Mese"])
+                    if len(df_mesi) else None)
+    return {"valido": True, "errore": None,
+            "df_matrice": df_matrice, "df_mesi": df_mesi,
+            "ora_migliore_anno": ora_best, "ora_peggiore_anno": ora_worst,
+            "spread_medio_mensile": spread_medio, "mese_spread_max": m_spread_max,
+            "prezzo_medio_annuo": float(vals.mean()), "n_ore": len(p),
+            "mesi_presenti": sorted({int(m) for m in mesi})}
+
+
 def calcola_flessibilita_oraria(prezzi, mw_f1, mw_f2, mw_f3, quota_flessibile_pct=10.0,
                                raggio_spostamento=6):
     """Valore orario della flessibilita' di spostamento del carico (demand response).
@@ -24036,7 +24118,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -39521,6 +39603,71 @@ elif workspace == _('ws8'):
                 mime="text/csv",
                 key="fl178_csv",
                 help="Una riga per ora: prezzo, carico, quota spostabile, ora/prezzo destinazione, risparmio.",
+            )
+
+    with tab179:
+        MESI_OP = ["Gen", "Feb", "Mar", "Apr", "Mag", "Giu",
+                   "Lug", "Ago", "Set", "Ott", "Nov", "Dic"]
+        titolo_op = edu("Orologio del prezzo", "A che ora il prezzo è sistematicamente più alto o più basso, mese per mese? L'orologio polare mostra il profilo medio delle 24 ore per ogni mese: la struttura giorno/notte cambia con le stagioni, e leggerla ti dice quando spostare i consumi, quando fare manutenzione e quando comprare spot.")
+        st.markdown(f"<h1>🕰️ {titolo_op}</h1>", unsafe_allow_html=True)
+        st.caption("Profilo orario medio del prezzo per mese: l'orologio della struttura giorno/notte.")
+        mesi_op = st.multiselect("Mesi da mostrare sull'orologio", options=list(range(1, 13)),
+                                 default=list(range(1, 13)),
+                                 format_func=lambda m: MESI_OP[m - 1], key="op179_mesi",
+                                 help="Seleziona i mesi da confrontare sul quadrante polare.")
+        ris_op = calcola_orologio_prezzo(prezzi)
+        if not ris_op["valido"]:
+            st.error(ris_op["errore"])
+        else:
+            k1, k2, k3, k4 = st.columns(4)
+            with k1:
+                st.metric("Spread medio mensile",
+                          f"{ris_op['spread_medio_mensile']:,.1f} €/MWh".replace(",", "X").replace(".", ",").replace("X", "."),
+                          "differenza ora cara − ora economica")
+            with k2:
+                st.metric("Mese con spread massimo",
+                          MESI_OP[ris_op["mese_spread_max"] - 1] if ris_op["mese_spread_max"] else "—",
+                          "miglior mese per lo shifting")
+            with k3:
+                st.metric("Ora più economica (media annua)", f"{ris_op['ora_migliore_anno']:02d}:00",
+                          "concentrare qui i consumi")
+            with k4:
+                st.metric("Ora più cara (media annua)", f"{ris_op['ora_peggiore_anno']:02d}:00",
+                          "da evitare se possibile")
+            _dfm = ris_op["df_matrice"]
+            _theta = [f"{h:02d}:00" for h in range(24)]
+            fig_op = go.Figure()
+            for _m in mesi_op:
+                _r = _dfm.loc[_dfm["Mese"] == _m, "Prezzo medio (EUR/MWh)"].to_numpy()
+                fig_op.add_trace(go.Scatterpolar(r=_r, theta=_theta, mode="lines+markers",
+                                                 name=MESI_OP[_m - 1], marker=dict(size=4)))
+            fig_op.update_layout(title="Orologio del prezzo: profilo orario medio per mese (EUR/MWh)",
+                                 polar=dict(radialaxis=dict(visible=True, title="EUR/MWh"),
+                                            angularaxis=dict(direction="clockwise", rotation=90)))
+            st.plotly_chart(fig_op, use_container_width=True)
+            _dfs = ris_op["df_mesi"].copy()
+            fig_ops = px.bar(_dfs, x="Mese", y="Spread (EUR/MWh)",
+                             title="Spread giorno/notte per mese (EUR/MWh)",
+                             color="Spread (EUR/MWh)", color_continuous_scale="YlOrRd")
+            fig_ops.update_xaxes(tickmode="array",
+                                 tickvals=list(range(1, 13)),
+                                 ticktext=MESI_OP)
+            st.plotly_chart(fig_ops, use_container_width=True)
+            st.markdown("**Sintesi mensile** (ora più economica / più cara e spread giorno/notte)")
+            _dft = _dfs.copy()
+            _dft["Mese"] = _dft["Mese"].map(lambda m: MESI_OP[m - 1])
+            _dft["Ora più economica"] = _dft["Ora più economica"].map(lambda h: f"{h:02d}:00")
+            _dft["Ora più cara"] = _dft["Ora più cara"].map(lambda h: f"{h:02d}:00")
+            for _cc in ["Prezzo min (EUR/MWh)", "Prezzo max (EUR/MWh)", "Spread (EUR/MWh)"]:
+                _dft[_cc] = _dft[_cc].round(1)
+            st.dataframe(_dft, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta matrice 12×24 (CSV)",
+                ris_op["df_matrice"].to_csv(index=False, sep=";").encode("utf-8"),
+                file_name=f"orologio_prezzo_{d0}_{d1}.csv",
+                mime="text/csv",
+                key="op179_csv",
+                help="Una riga per coppia mese/ora: prezzo medio orario del mese (EUR/MWh).",
             )
 
 
