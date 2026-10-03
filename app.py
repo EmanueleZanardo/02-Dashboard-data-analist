@@ -20627,6 +20627,169 @@ def calcola_fattore_carico(prezzi, mw_f1, mw_f2, mw_f3, costo_potenza_eur_kw_ann
     }
 
 
+def calcola_heat_rate_implicito(prezzi, gas_eur_mwh, co2_eur_t, ef_tco2_mwh=0.4,
+                                min_ore=24):
+    """Heat rate implicito orario del mercato: quale impianto fissa il prezzo?
+
+    Domanda operativa: "che efficienza ha l'impianto marginale che sta
+    fissando il prezzo?" L'heat rate implicito (IHR) inverte la formula dello
+    spark spread: invece di fissare l'efficienza e calcolare il margine, si
+    fissa il prezzo di mercato e si ricava l'efficienza dell'unita' marginale.
+
+    IHR_clean(h) = (P(h) - ef x E) / G    [MWh termici / MWh elettrico]
+    IHR_lordo(h) = P(h) / G               (senza scorporo CO2, per confronto)
+
+    P = prezzo spot elettrico €/MWh, G = prezzo gas €/MWh termico,
+    E = prezzo CO2 €/t, ef = fattore emissivo tCO2/MWh elettrico
+    (default 0.4, CCGT). L'efficienza implicita e' 1 / IHR_clean.
+
+    Lettura dei regimi (self-contained, stessa soglia in UI e test):
+      IHR < 1.50 : Rinnovabili/nucleare sul margine (eff. implicita > 66.7%:
+                   il prezzo scende sotto il costo variabile del gas)
+      1.50-2.00 : CCGT moderno sul margine
+      2.00-2.50 : Gas a media efficienza
+      2.50-3.20 : OCGT / picco gas
+      >= 3.20   : Scarsita' / premio di scarsita' (il mercato prezza oltre il
+                   costo variabile anche dell'impianto a gas piu' inefficiente)
+
+    Differenza dagli altri tab: "Spark spread" e "Tolling" fissano
+    l'efficienza e calcolano il margine di UNA centrale; qui si legge il
+    mercato per capire CHI fissa il prezzo, utile per posizionare le
+    coperture gas-power e anticipare la risposta dello spot ai movimenti
+    di TTF/EUA.
+
+    NaN-safe: serie vuota / indice non datetime / non numerica / gas <= 0 /
+    CO2 < 0 / ef <= 0 -> errore pulito; ore con (P - ef*E) <= 0 scartate e
+    contate (ore_scartate); < min_ore ore valide -> errore pulito; tz-aware
+    reso naive, duplicati keep-first; deterministico.
+    """
+    def _err(msg):
+        return {"valido": False, "errore": msg, "serie_ihr": None,
+                "serie_ihr_lordo": None, "tabella_mensile": None}
+
+    regimi = (
+        (1.50, "Rinnovabili/nucleare sul margine"),
+        (2.00, "CCGT moderno sul margine"),
+        (2.50, "Gas a media efficienza"),
+        (3.20, "OCGT / picco gas"),
+        (float("inf"), "Scarsita' / premio di scarsita'"),
+    )
+
+    def _regime(v):
+        for soglia, nome in regimi:
+            if v < soglia:
+                return nome
+        return regimi[-1][1]
+
+    try:
+        gas = float(gas_eur_mwh)
+        co2 = float(co2_eur_t)
+        ef = float(ef_tco2_mwh)
+    except (TypeError, ValueError):
+        return _err("Parametri gas/CO2 non numerici.")
+    if not gas > 0:
+        return _err("Il prezzo del gas deve essere > 0.")
+    if not co2 >= 0:
+        return _err("Il prezzo CO2 non puo' essere negativo.")
+    if not ef > 0:
+        return _err("Il fattore emissivo deve essere > 0.")
+
+    if not isinstance(prezzi, pd.Series):
+        return _err("Serie prezzi non valida.")
+    try:
+        s = prezzi.copy()
+    except Exception:
+        return _err("Serie prezzi non valida.")
+    if not isinstance(s.index, pd.DatetimeIndex):
+        return _err("L'indice dei prezzi deve essere datetime.")
+    try:
+        s = pd.to_numeric(s, errors="coerce")
+    except Exception:
+        return _err("Serie prezzi non numerica.")
+    s = s.sort_index()
+    if getattr(s.index, "tz", None) is not None:
+        s.index = s.index.tz_localize(None)
+    s = s[~s.index.duplicated(keep="first")]
+    s = s.dropna()
+    n_tot = int(len(s))
+    if n_tot == 0:
+        return _err("Serie prezzi vuota dopo la pulizia.")
+
+    costo_co2 = co2 * ef
+    num = s - costo_co2
+    ihr = num / gas
+    lordo = s / gas
+    valida = ihr[ihr > 0]
+    n_val = int(len(valida))
+    if n_val < int(min_ore):
+        return _err(f"Ore valide insufficienti ({n_val} < {min_ore}): il "
+                    "numeratore (prezzo - costo CO2) e' <= 0 quasi ovunque.")
+
+    serie_ihr = valida.copy()
+    serie_ihr.name = "Heat rate implicito (MWh_th/MWh_e)"
+    serie_lordo = lordo.loc[valida.index].copy()
+    serie_lordo.name = "Heat rate implicito lordo (MWh_th/MWh_e)"
+
+    medio = float(serie_ihr.mean())
+    eff = 100.0 / medio if medio > 0 else None
+    reg = serie_ihr.apply(_regime)
+    conteggi = reg.value_counts()
+    nomi = [nome for _, nome in regimi]
+    quote = {nome: float(conteggi.get(nome, 0)) / n_val * 100.0 for nome in nomi}
+    dominante = str(conteggi.idxmax())
+    q_scars = quote[nomi[-1]]
+
+    righe = []
+    dfm = pd.DataFrame({"ihr": serie_ihr, "regime": reg})
+    dfm["mese"] = dfm.index.to_period("M")
+    for m, g in dfm.groupby("mese", observed=True):
+        g_mean = float(g["ihr"].mean())
+        righe.append({
+            "Mese": str(m),
+            "Ore valide": int(len(g)),
+            "Heat rate implicito medio": round(g_mean, 2),
+            "Efficienza implicita (%)": round(100.0 / g_mean, 1),
+            "Regime dominante": str(g["regime"].mode().iloc[0]),
+            "Scarsita' (%)": round(float((g["regime"] == nomi[-1]).mean() * 100), 1),
+        })
+    tabella_mensile = pd.DataFrame(righe)
+
+    verdetto = (f"Sul margine sta soprattutto: {dominante} "
+                f"({quote[dominante]:.1f}% delle ore).")
+    if q_scars >= 10.0:
+        verdetto += (f" Nel {q_scars:.1f}% delle ore il prezzo incorpora un "
+                     "premio di scarsita' (IHR >= 3.20): il mercato prezza "
+                     "oltre il costo variabile anche dell'impianto a gas "
+                     "piu' inefficiente.")
+    if eff is not None and eff > 66.7:
+        verdetto += (" L'efficienza implicita media supera il 66.7%: nelle "
+                     "ore rinnovabili/nucleare sul margine il prezzo scende "
+                     "sotto il costo variabile del gas.")
+
+    return {
+        "valido": True,
+        "errore": None,
+        "serie_ihr": serie_ihr,
+        "serie_ihr_lordo": serie_lordo,
+        "medio": round(medio, 3),
+        "mediana": round(float(serie_ihr.median()), 3),
+        "minimo": round(float(serie_ihr.min()), 3),
+        "massimo": round(float(serie_ihr.max()), 3),
+        "medio_lordo": round(float(serie_lordo.mean()), 3),
+        "eff_implicita_pct": round(eff, 1) if eff is not None else None,
+        "ore_valide": n_val,
+        "ore_totali": n_tot,
+        "ore_scartate": n_tot - n_val,
+        "quote_regimi": {k: round(v, 1) for k, v in quote.items()},
+        "regime_dominante": dominante,
+        "quota_scarsita": round(q_scars, 1),
+        "tabella_mensile": tabella_mensile,
+        "giudizio": dominante,
+        "verdetto": verdetto,
+    }
+
+
+
 def calcola_prezzo_fisso_equo(prezzi, carico_base_mw=5.0, forma_carico="diurno",
                               premio_rischio_pct=5.0, margine_eur_mwh=3.0,
                               adder_volume_eur_mwh=1.0):
@@ -21593,7 +21756,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -35700,6 +35863,99 @@ elif workspace == _('ws8'):
                     mime="text/csv",
                     key="fc165_csv_w",
                     help="Una riga per % di taglio del picco: soglia, energia sopra soglia e risparmi stimati.",
+                )
+
+
+    with tab166:
+        titolo_ihr = edu("Heat rate implicito", "L'HEAT RATE IMPLICITO inverte la formula dello spark spread: dato il prezzo di mercato, ricava l'efficienza dell'impianto MARGINALE che sta fissando il prezzo (IHR = (prezzo_elettrico - CO2) / prezzo_gas, in MWh termici per MWh elettrico). Se l'IHR è ~1.8 il mercato è fissato da un CCGT moderno; se sale sopra 3.2 il prezzo incorpora un premio di scarsità; se scende sotto 1.5 sono rinnovabili o nucleare a fissare il prezzo. Serve per posizionare le coperture gas-power e leggere la risposta dello spot ai movimenti di TTF/EUA.")
+        st.markdown(f"<h1>🔥 {titolo_ihr}</h1>", unsafe_allow_html=True)
+        st.caption("Quale impianto sta fissando il prezzo? — Efficienza implicita dell'unità marginale, ora per ora.")
+        g1, g2, g3 = st.columns(3)
+        with g1:
+            gas_ihr = st.number_input("Prezzo gas (€/MWh termico)", min_value=0.01,
+                                      value=35.0, step=1.0, key="ihr166_gas",
+                                      help="Prezzo del gas combustibile (TTF o PSV).")
+        with g2:
+            co2_ihr = st.number_input("Prezzo CO2 (€/t)", min_value=0.0,
+                                      value=70.0, step=1.0, key="ihr166_co2",
+                                      help="Prezzo delle quote EUA (EU ETS).")
+        with g3:
+            ef_ihr = st.number_input("Fattore emissivo (tCO2/MWh el.)", min_value=0.01,
+                                     max_value=1.0, value=0.4, step=0.05, key="ihr166_ef",
+                                     help="Default 0.4 per un CCGT: serve a scorporare il costo CO2 dal prezzo.")
+        ris_ihr = calcola_heat_rate_implicito(prezzi, gas_ihr, co2_ihr, ef_ihr)
+        if not ris_ihr["valido"]:
+            st.error(ris_ihr["errore"])
+        else:
+            if ris_ihr["regime_dominante"] == "Scarsita' / premio di scarsita'":
+                st.error(f"🚨 {ris_ihr['verdetto']}")
+            elif ris_ihr["quota_scarsita"] >= 10.0:
+                st.warning(f"⚠️ {ris_ihr['verdetto']}")
+            else:
+                st.success(f"✅ {ris_ihr['verdetto']}")
+            k1, k2, k3, k4 = st.columns(4)
+            render_kpi(edu("Heat rate implicito medio", "MWh termici per MWh elettrico dell'unità marginale: più basso = impianto più efficiente che fissa il prezzo."), f"{ris_ihr['medio']:.2f}", k1)
+            render_kpi(edu("Efficienza implicita", "1 / heat rate implicito medio: l'efficienza elettrica dell'impianto che il mercato sta prezzando sul margine."), f"{ris_ihr['eff_implicita_pct']:.1f} %", k2)
+            render_kpi(edu("Regime dominante", "La tecnologia più frequente sul margine nel periodo: rinnovabili/nucleare, CCGT moderno, gas a media efficienza, OCGT/picco o scarsità."), ris_ihr["regime_dominante"], k3)
+            render_kpi(edu("Ore in scarsità", f"Ore con IHR ≥ 3.20 ({ris_ihr['quota_scarsita']:.1f}% del periodo): il prezzo prezza oltre il costo variabile anche dell'impianto a gas più inefficiente."), f"{int(round(ris_ihr['quota_scarsita'] * ris_ihr['ore_valide'] / 100))} h", k4)
+            st.caption(f"Mediana {ris_ihr['mediana']:.2f} · min {ris_ihr['minimo']:.2f} · max {ris_ihr['massimo']:.2f} · lordo (senza CO2) {ris_ihr['medio_lordo']:.2f} · ore valide {ris_ihr['ore_valide']}/{ris_ihr['ore_totali']} ({ris_ihr['ore_scartate']} scartate: prezzo ≤ costo CO2).")
+
+            st.markdown("**Heat rate implicito orario con fasce di regime**")
+            fig_ihr = go.Figure()
+            fig_ihr.add_trace(go.Scatter(x=ris_ihr["serie_ihr"].index, y=ris_ihr["serie_ihr"].values,
+                                         mode="lines", name="IHR clean",
+                                         line=dict(color="#38BDF8", width=1.5),
+                                         hovertemplate="Ora: %{x}<br>IHR: %{y:.2f}<extra></extra>"))
+            for soglia, nome, colore in [(1.50, "rinnovabili/nucleare", "#10B981"),
+                                         (2.00, "CCGT moderno", "#38BDF8"),
+                                         (2.50, "media efficienza", "#FBBF24"),
+                                         (3.20, "OCGT/picco", "#F97316")]:
+                fig_ihr.add_hline(y=soglia, line_dash="dash", line_color=colore,
+                                  annotation_text=f"{soglia:.2f} {nome}", annotation_font_size=9)
+            fig_ihr.update_layout(yaxis_title="Heat rate implicito (MWh_th/MWh_e)",
+                                  margin=dict(l=10, r=10, t=10, b=10))
+            st.plotly_chart(fig_ihr, use_container_width=True)
+
+            st.markdown("**Distribuzione dei regimi marginali**")
+            qr = ris_ihr["quote_regimi"]
+            colori_reg = {"Rinnovabili/nucleare sul margine": "#10B981",
+                          "CCGT moderno sul margine": "#38BDF8",
+                          "Gas a media efficienza": "#FBBF24",
+                          "OCGT / picco gas": "#F97316",
+                          "Scarsita' / premio di scarsita'": "#EF4444"}
+            fig_ihr2 = go.Figure()
+            fig_ihr2.add_trace(go.Bar(x=list(qr.keys()), y=list(qr.values()),
+                                      marker_color=[colori_reg.get(r, "#9CA3AF") for r in qr.keys()],
+                                      hovertemplate="%{x}<br>%{y:.1f}% delle ore<extra></extra>"))
+            fig_ihr2.update_layout(yaxis_title="% delle ore valide",
+                                   margin=dict(l=10, r=10, t=10, b=10))
+            st.plotly_chart(fig_ihr2, use_container_width=True)
+            st.dataframe(ris_ihr["tabella_mensile"], use_container_width=True, hide_index=True)
+
+            st.markdown("**Serie oraria**")
+            df_ihr = pd.DataFrame({"Data e Ora": ris_ihr["serie_ihr"].index.strftime("%d/%m/%Y %H:%M"),
+                                   "Prezzo spot (€/MWh)": np.round(prezzi.loc[ris_ihr["serie_ihr"].index].values.astype(float), 2),
+                                   "Heat rate implicito": np.round(ris_ihr["serie_ihr"].values, 3),
+                                   "Heat rate implicito lordo": np.round(ris_ihr["serie_ihr_lordo"].values, 3)})
+            st.dataframe(df_ihr.tail(24), use_container_width=True, hide_index=True)
+            e1, e2 = st.columns(2)
+            with e1:
+                st.download_button(
+                    "⬇️ Esporta heat rate implicito orario (CSV)",
+                    df_ihr.to_csv(index=False, sep=";").encode("utf-8"),
+                    file_name=f"heat_rate_implicito_{d0}_{d1}.csv",
+                    mime="text/csv",
+                    key="ihr166_csv_h",
+                    help="Una riga per ora: prezzo spot, heat rate implicito clean e lordo.",
+                )
+            with e2:
+                st.download_button(
+                    "⬇️ Esporta heat rate implicito mensile (CSV)",
+                    ris_ihr["tabella_mensile"].to_csv(index=False, sep=";").encode("utf-8"),
+                    file_name=f"heat_rate_implicito_mensile_{d0}_{d1}.csv",
+                    mime="text/csv",
+                    key="ihr166_csv_m",
+                    help="Una riga per mese: heat rate medio, efficienza implicita e regime dominante.",
                 )
 
 
