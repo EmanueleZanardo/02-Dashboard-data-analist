@@ -25155,6 +25155,190 @@ def calcola_comunita_energetica(prezzi, potenza_fv_kwp=100.0, cf_fv=0.13,
             "n_giorni": int(df_giornaliera.shape[0])}
 
 
+def calcola_cogenerazione(prezzi, potenza_mw=1.0, rend_elettrico=0.38,
+                          rend_termico=0.45, prezzo_gas=40.0, prezzo_co2=80.0,
+                          fattore_emissione=0.202, valore_calore=55.0,
+                          eta_e_ref=0.525, eta_t_ref=0.90):
+    """Cogenerazione (CHP): spark spread con credito termico + PES per CAR.
+
+    Domanda operativa: "Ho un cogeneratore da P MW — in quali ore conviene
+    farlo girare, quanto margine fa, e si qualifica come cogenerazione ad
+    alto rendimento (CAR)?"
+
+    Per ogni MWh elettrico prodotto servono 1/eta_e MWh di combustibile e si
+    producono eta_t/eta_e MWh di calore utile:
+      costo_fuel_e   = (prezzo_gas + prezzo_co2 * fattore_emissione) / eta_e
+      credito_termico_e = (eta_t / eta_e) * valore_calore
+      strike = costo_fuel_e - credito_termico_e   (EUR/MWh elettrico)
+    L'impianto marcia nelle ore con spot > strike (dispatch a spark spread);
+    il margine orario e' (spot - strike) * potenza_mw.
+
+    Risparmio di energia primaria (Direttiva efficienza energetica):
+      PES = 1 - 1 / (eta_e/eta_e_ref + eta_t/eta_t_ref)
+    CAR (cogenerazione ad alto rendimento) se PES >= 10%.
+
+    Ritorna dict con 'valido'/'errore', prezzo_strike, ore_funzionamento,
+    fattore_carico_pct, mwh_elettrici, mwh_termici, mwh_fuel,
+    margine_totale_eur, margine_medio_eur_mwh, clean_spark_medio_eur_mwh,
+    costo_fuel_eur, ricavo_elettrico_eur, valore_calore_eur, pes_pct,
+    qualifica_car, giudizio, verdetto, df_giornaliera, df_mensile,
+    n_ore, n_giorni.
+
+    Giudizio sul margine totale e sul fattore di carico:
+    "MOLTO REDDITIZIO" (margine > 0 e CF >= 50%),
+    "REDDITIZIO" (margine > 0 e CF >= 25%),
+    "MARGINALE" (margine > 0), altrimenti "IN PERDITA".
+
+    NaN-safe: serie vuota / non numerica / indice non-datetime, parametri
+    non validi -> errore pulito, mai eccezioni.
+    """
+    def _err(msg):
+        return {"valido": False, "errore": msg}
+
+    # --- pulizia serie prezzi (stesso schema delle altre tab) ---
+    if not isinstance(prezzi, pd.Series):
+        return _err("prezzi deve essere una Series pandas con indice datetime.")
+    s = prezzi.copy()
+    try:
+        s.index = pd.to_datetime(s.index, errors="coerce")
+    except Exception:
+        return _err("prezzi deve avere un indice datetime valido.")
+    if s.index.isna().any():
+        return _err("prezzi deve avere un indice datetime valido.")
+    try:
+        if getattr(s.index, "tz", None) is not None:
+            s.index = s.index.tz_localize(None)
+    except Exception:
+        return _err("prezzi deve avere un indice datetime valido.")
+    s = s[~s.index.duplicated(keep="first")].sort_index()
+    s = pd.to_numeric(s, errors="coerce").dropna()
+    if len(s) == 0:
+        return _err("Serie prezzi vuota: niente da analizzare.")
+    spot = s.to_numpy(dtype=float)
+    n = len(s)
+
+    # --- validazione parametri ---
+    def _num(v, nome, minimo, massimo=None):
+        if isinstance(v, bool):
+            return None, f"{nome} deve essere un numero."
+        try:
+            x = float(v)
+        except (TypeError, ValueError):
+            return None, f"{nome} deve essere un numero."
+        if not np.isfinite(x) or x < minimo:
+            return None, f"{nome} deve essere un numero >= {minimo}."
+        if massimo is not None and x > massimo:
+            return None, f"{nome} deve essere un numero <= {massimo}."
+        return x, None
+
+    pmw, em = _num(potenza_mw, "potenza_mw", 1e-9, 1000.0)
+    if em:
+        return _err(em)
+    etae, em = _num(rend_elettrico, "rend_elettrico", 1e-9, 0.99)
+    if em:
+        return _err(em)
+    etat, em = _num(rend_termico, "rend_termico", 0.0, 0.99)
+    if em:
+        return _err(em)
+    if etae + etat > 0.99:
+        return _err("rend_elettrico + rend_termico deve essere < 0.99.")
+    pgas, em = _num(prezzo_gas, "prezzo_gas", 0.0)
+    if em:
+        return _err(em)
+    pco2, em = _num(prezzo_co2, "prezzo_co2", 0.0)
+    if em:
+        return _err(em)
+    ef, em = _num(fattore_emissione, "fattore_emissione", 0.0, 2.0)
+    if em:
+        return _err(em)
+    vcal, em = _num(valore_calore, "valore_calore", 0.0)
+    if em:
+        return _err(em)
+    eref, em = _num(eta_e_ref, "eta_e_ref", 1e-9, 0.99)
+    if em:
+        return _err(em)
+    tref, em = _num(eta_t_ref, "eta_t_ref", 1e-9, 0.99)
+    if em:
+        return _err(em)
+
+    # --- economia per MWh elettrico ---
+    costo_fuel_e = (pgas + pco2 * ef) / etae
+    credito_termico_e = (etat / etae) * vcal
+    strike = costo_fuel_e - credito_termico_e
+
+    run = spot > strike
+    ore_run = int(run.sum())
+    margine_h = np.where(run, (spot - strike) * pmw, 0.0)
+    margine_tot = float(margine_h.sum())
+    margine_medio = float(margine_h[run].mean() / pmw) if ore_run else 0.0
+    clean_spark = float(((spot - costo_fuel_e)[run]).mean()) if ore_run else 0.0
+
+    mwh_e = pmw * ore_run
+    mwh_t = pmw * (etat / etae) * ore_run
+    mwh_fuel = pmw / etae * ore_run
+    ricavo_e = float((spot[run] * pmw).sum())
+    costo_fuel = costo_fuel_e * mwh_e
+    valore_cal = credito_termico_e * mwh_e
+    cf = 100.0 * ore_run / n
+
+    pes = 1.0 - 1.0 / (etae / eref + etat / tref)
+    pes_pct = 100.0 * pes
+    car = bool(pes >= 0.10)
+
+    if margine_tot <= 0:
+        giudizio = "IN PERDITA"
+    elif cf >= 50.0:
+        giudizio = "MOLTO REDDITIZIO"
+    elif cf >= 25.0:
+        giudizio = "REDDITIZIO"
+    else:
+        giudizio = "MARGINALE"
+
+    verdetto = (
+        f"Strike {strike:,.2f} EUR/MWh: l'impianto marcia {ore_run} ore su {n} "
+        f"(CF {cf:.1f}%), margine {margine_tot:,.0f} EUR "
+        f"({margine_medio:,.2f} EUR/MWh elettrico). "
+        f"PES {pes_pct:.1f}% -> {'SI qualifica come CAR' if car else 'NON si qualifica come CAR'} "
+        f"(soglia 10%)."
+    )
+
+    # --- aggregazioni ---
+    df_h = pd.DataFrame({"ts": s.index, "margine": margine_h, "run": run})
+    df_h["giorno"] = df_h["ts"].dt.date
+    g = df_h.groupby("giorno", as_index=False)
+    df_giornaliera = pd.DataFrame({
+        "Giorno": g["giorno"].first()["giorno"],
+        "MWh elettrici": g["run"].sum()["run"] * pmw,
+        "MWh termici": g["run"].sum()["run"] * pmw * (etat / etae),
+        "Ore funzionamento": g["run"].sum()["run"].astype(int),
+        "Margine (EUR)": g["margine"].sum()["margine"],
+    })
+    df_h["mese"] = df_h["ts"].dt.to_period("M").astype(str)
+    m = df_h.groupby("mese", as_index=False)
+    df_mensile = pd.DataFrame({
+        "Mese": m["mese"].first()["mese"],
+        "Margine (EUR)": m["margine"].sum()["margine"],
+        "Ore funzionamento": m["run"].sum()["run"].astype(int),
+    })
+    df_mensile["Margine cumulato (EUR)"] = df_mensile["Margine (EUR)"].cumsum()
+
+    return {"valido": True, "errore": None,
+            "prezzo_strike": strike,
+            "ore_funzionamento": ore_run, "fattore_carico_pct": cf,
+            "mwh_elettrici": mwh_e, "mwh_termici": mwh_t,
+            "mwh_fuel": mwh_fuel,
+            "margine_totale_eur": margine_tot,
+            "margine_medio_eur_mwh": margine_medio,
+            "clean_spark_medio_eur_mwh": clean_spark,
+            "costo_fuel_eur": costo_fuel,
+            "ricavo_elettrico_eur": ricavo_e,
+            "valore_calore_eur": valore_cal,
+            "pes_pct": pes_pct, "qualifica_car": car,
+            "giudizio": giudizio, "verdetto": verdetto,
+            "df_giornaliera": df_giornaliera, "df_mensile": df_mensile,
+            "n_ore": n, "n_giorni": int(df_giornaliera.shape[0])}
+
+
 # ==========================================
 # WORKSPACE 1: SIMULATORE STRATEGICO
 # ==========================================
@@ -25799,7 +25983,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -42220,6 +42404,121 @@ elif workspace == _('ws8'):
                 key="cer188_csv",
                 help="Una riga per giorno: generati, carico, condivisi, surplus, deficit, beneficio.",
             )
+    with tab189:
+        titolo_chp = edu("Cogenerazione (CHP)", "Combined Heat and Power: produce insieme elettricita' e calore utile dallo stesso combustibile. Il credito termico (calore che non devi produrre in caldaia) abbassa lo strike: l'impianto marcia quando lo spark spread con credito termico e' positivo.")
+        st.markdown(f"<h1>⚡🔥 {titolo_chp}</h1>", unsafe_allow_html=True)
+        st.caption("Cogeneratore a gas: marcia nelle ore in cui lo spot batte lo strike (costo fuel - credito termico). Include il PES per la qualifica CAR (cogenerazione ad alto rendimento, soglia 10%).")
+        c1a_chp, c1b_chp, c1c_chp = st.columns(3)
+        with c1a_chp:
+            pmw_chp = st.number_input("Potenza elettrica (MW)", min_value=0.01,
+                                      value=1.0, step=0.1, key="chp189_pmw",
+                                      help="Taglia elettrica del cogeneratore.")
+            etae_chp = st.number_input("Rendimento elettrico", min_value=0.05,
+                                       max_value=0.9, value=0.38, step=0.01,
+                                       key="chp189_etae",
+                                       help="Frazione del combustibile convertita in elettricita'.")
+            etat_chp = st.number_input("Rendimento termico", min_value=0.0,
+                                       max_value=0.9, value=0.45, step=0.01,
+                                       key="chp189_etat",
+                                       help="Frazione del combustibile recuperata come calore utile.")
+        with c1b_chp:
+            gas_chp = st.number_input("Prezzo gas (EUR/MWh)", min_value=0.0,
+                                      value=40.0, step=1.0, key="chp189_gas")
+            co2_chp = st.number_input("Prezzo CO2 (EUR/t)", min_value=0.0,
+                                      value=80.0, step=5.0, key="chp189_co2")
+            ef_chp = st.number_input("Fattore emissione (tCO2/MWh fuel)",
+                                     min_value=0.0, max_value=2.0, value=0.202,
+                                     step=0.001, key="chp189_ef",
+                                     help="Gas naturale ~0.202 tCO2/MWh.")
+        with c1c_chp:
+            vcal_chp = st.number_input("Valore calore (EUR/MWh termico)",
+                                       min_value=0.0, value=55.0, step=5.0,
+                                       key="chp189_vcal",
+                                       help="Costo evitato della caldaia: e' il credito termico.")
+            eref_chp = st.number_input("Rif. elettrica PES", min_value=0.05,
+                                       max_value=0.9, value=0.525, step=0.005,
+                                       key="chp189_eref",
+                                       help="Rendimento di riferimento UE per l'elettricita' separata.")
+            tref_chp = st.number_input("Rif. termica PES", min_value=0.05,
+                                       max_value=0.99, value=0.90, step=0.01,
+                                       key="chp189_tref",
+                                       help="Rendimento di riferimento UE per il calore separato.")
+
+        ris_chp = calcola_cogenerazione(
+            prezzi, potenza_mw=pmw_chp, rend_elettrico=etae_chp,
+            rend_termico=etat_chp, prezzo_gas=gas_chp, prezzo_co2=co2_chp,
+            fattore_emissione=ef_chp, valore_calore=vcal_chp,
+            eta_e_ref=eref_chp, eta_t_ref=tref_chp)
+        if not ris_chp["valido"]:
+            st.error(ris_chp["errore"])
+        else:
+            k1_chp, k2_chp, k3_chp, k4_chp = st.columns(4)
+            with k1_chp:
+                st.metric("Margine totale",
+                          f"{ris_chp['margine_totale_eur']:,.0f} EUR",
+                          f"{ris_chp['margine_medio_eur_mwh']:,.2f} EUR/MWh el.")
+            with k2_chp:
+                st.metric("Ore di funzionamento",
+                          f"{ris_chp['ore_funzionamento']:,d}",
+                          f"CF {ris_chp['fattore_carico_pct']:.1f} %")
+            with k3_chp:
+                st.metric("Energia elettrica",
+                          f"{ris_chp['mwh_elettrici']:,.0f} MWh",
+                          f"+ {ris_chp['mwh_termici']:,.0f} MWh termici")
+            with k4_chp:
+                st.metric("PES / CAR",
+                          f"{ris_chp['pes_pct']:.1f} %",
+                          "CAR: SI" if ris_chp["qualifica_car"] else "CAR: NO")
+            giudizio_chp = ris_chp["giudizio"]
+            if giudizio_chp == "MOLTO REDDITIZIO":
+                st.success(ris_chp["verdetto"])
+            elif giudizio_chp == "REDDITIZIO":
+                st.info(ris_chp["verdetto"])
+            elif giudizio_chp == "MARGINALE":
+                st.warning(ris_chp["verdetto"])
+            else:
+                st.error(ris_chp["verdetto"])
+            st.caption(f"Strike {ris_chp['prezzo_strike']:,.2f} EUR/MWh "
+                       f"(clean spark spread medio sulle ore di marcia "
+                       f"{ris_chp['clean_spark_medio_eur_mwh']:,.2f} EUR/MWh, "
+                       f"senza credito termico).")
+
+            df_g_chp = ris_chp["df_giornaliera"]
+            fig_chp = go.Figure()
+            fig_chp.add_trace(go.Bar(x=df_g_chp["Giorno"],
+                                     y=df_g_chp["Margine (EUR)"],
+                                     name="Margine giornaliero",
+                                     marker_color="#F59E0B"))
+            fig_chp.update_layout(template="plotly_dark", height=320,
+                                  title="Margine giornaliero del cogeneratore",
+                                  xaxis_title="Giorno", yaxis_title="EUR")
+            st.plotly_chart(fig_chp, use_container_width=True)
+
+            df_m_chp = ris_chp["df_mensile"]
+            fig_cm_chp = go.Figure()
+            fig_cm_chp.add_trace(go.Bar(x=df_m_chp["Mese"],
+                                        y=df_m_chp["Margine (EUR)"],
+                                        name="Margine mensile",
+                                        marker_color="#F59E0B"))
+            fig_cm_chp.add_trace(go.Scatter(x=df_m_chp["Mese"],
+                                            y=df_m_chp["Margine cumulato (EUR)"],
+                                            mode="lines+markers",
+                                            name="Cumulato",
+                                            marker_color="#10B981"))
+            fig_cm_chp.update_layout(template="plotly_dark", height=320,
+                                     title="Margine mensile e cumulato",
+                                     xaxis_title="Mese", yaxis_title="EUR")
+            st.plotly_chart(fig_cm_chp, use_container_width=True)
+
+            st.dataframe(df_m_chp, use_container_width=True, hide_index=True)
+            csv_chp = df_g_chp.to_csv(index=False, sep=";").encode("utf-8")
+            st.download_button("Scarica CSV giornaliero",
+                               data=csv_chp,
+                               file_name="cogenerazione_chp.csv",
+                               mime="text/csv",
+                               key="chp189_csv",
+                               help="Una riga per giorno: MWh elettrici, MWh termici, ore di funzionamento, margine.",
+                               )
 
 
 # Footer
