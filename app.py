@@ -22323,6 +22323,190 @@ def calcola_causalita_granger(prezzi_giorno, gas_giorno, lags="auto",
             "giudizio": giudizio}
 
 
+def calcola_anticipazione_gas(prezzi_giorno, gas_giorno, max_lag=15,
+                              differenzia=True, min_giorni=60):
+    """Cross-correlazione gas <-> power con lag: di quanti giorni il TTF
+    anticipa (o segue) lo Swissix.
+
+    Domanda operativa: il gas muove prima e la borsa elettrica segue con
+    ritardo di quanti giorni? La tab173 (Granger) dice "il gas aiuta a
+    prevedere il power", qui si quantifica IL RITARDO: la funzione di
+    cross-correlazione (CCF) tra le serie giornaliere.
+
+        CCF(k) = corr(gas_t, power_{t+k})   per k = -max_lag..+max_lag
+
+    Convenzione: k > 0 significa che il gas di oggi e' correlato con il power
+    di domani(+k) -> il GAS ANTICIPA il power di k giorni. k < 0 -> il power
+    anticipa il gas. k = 0 -> movimento contestuale. Il "lag stellare" e'
+    l'argmax di |CCF(k)|; la significativita' usa la banda 1.96/sqrt(n_k).
+
+    Al lag stellare si stima anche il pass-through: regressione OLS
+    dpower_{t+k*} = alpha + beta * dgas_t (beta = covarianza/varianza),
+    che dice "se il TTF si muove di 1 EUR/MWh, lo Swissix si muove di beta
+    EUR/MWh dopo k* giorni" - il numero che serve per tempificare gli hedge.
+
+    Su serie I(1) e' buona pratica lavorare sulle DIFFERENZE PRIME
+    (differenzia=True, default): sui livelli due trend comuni gonfiano la
+    correlazione spuria (vedi tab171). Deterministico, mai eccezioni.
+
+    Input: serie GIORNALIERE (la tab costruisce base/peak dalla serie oraria).
+    NaN-safe: serie vuote / indici non datetime / giorni comuni < min_giorni /
+    serie costanti / max_lag o min_giorni non validi -> errore pulito;
+    tz-aware reso naive; duplicati keep-first; NaN scartati e contati.
+
+    Ritorna dict con "valido"/"errore"; "lag_star", "corr_star",
+    "significativo" (bool: |corr_star| oltre la banda con correzione di
+    Bonferroni sui lag multipli), "verdetto" in {"GAS_ANTICIPA",
+    "POWER_ANTICIPA", "CONTESTUALI", "NESSUNA"}; "beta_pt", "alpha_pt",
+    "r2_pt" (pass-through al lag stellare); "banda95" (banda per lag sul
+    grafico) e "banda_bonf" (banda corretta per il verdetto); "n_giorni",
+    "n_scartate"; "df_ccf" (Lag, Correlazione, Banda 95%, Significativo);
+    "giudizio".
+    """
+    col_ccf = ["Lag", "Correlazione", "Banda 95%", "Significativo"]
+    vuoto = {"valido": False, "errore": None, "lag_star": None,
+             "corr_star": None, "significativo": None, "verdetto": None,
+             "beta_pt": None, "alpha_pt": None, "r2_pt": None,
+             "banda95": None, "banda_bonf": None, "n_giorni": 0,
+             "n_scartate": 0,
+             "df_ccf": pd.DataFrame(columns=col_ccf), "giudizio": ""}
+
+    def _err(msg):
+        out = dict(vuoto)
+        out["df_ccf"] = pd.DataFrame(columns=col_ccf)
+        out["errore"] = msg
+        return out
+
+    try:
+        ml = float(max_lag)
+    except (TypeError, ValueError):
+        return _err("max_lag non valido: intero >= 1.")
+    if not ml.is_integer() or ml < 1:
+        return _err("max_lag non valido: intero >= 1.")
+    max_lag = int(ml)
+    try:
+        min_giorni = int(min_giorni)
+    except (TypeError, ValueError):
+        return _err("min_giorni non valido: intero >= 30.")
+    if min_giorni < 30:
+        return _err("min_giorni non valido: intero >= 30.")
+    if prezzi_giorno is None or gas_giorno is None:
+        return _err("Serie prezzi o gas mancante.")
+    try:
+        p = pd.Series(prezzi_giorno)
+        g = pd.Series(gas_giorno)
+    except Exception:
+        return _err("Input non interpretabili come serie.")
+    if (not isinstance(p.index, pd.DatetimeIndex)
+            or not isinstance(g.index, pd.DatetimeIndex)):
+        return _err("Gli indici di entrambe le serie devono essere di tipo data/ora.")
+    pv = pd.to_numeric(p.values, errors="coerce")
+    gv = pd.to_numeric(g.values, errors="coerce")
+    if np.isnan(pv).all():
+        return _err("Nessun valore numerico nella serie elettrica.")
+    if np.isnan(gv).all():
+        return _err("Nessun valore numerico nella serie gas.")
+    ip = p.index.tz_localize(None) if p.index.tz is not None else p.index
+    ig = g.index.tz_localize(None) if g.index.tz is not None else g.index
+    s_p = pd.Series(pv, index=ip).dropna()
+    s_g = pd.Series(gv, index=ig).dropna()
+    s_p = s_p[~s_p.index.duplicated(keep="first")]
+    s_g = s_g[~s_g.index.duplicated(keep="first")]
+    df = pd.DataFrame({"gas": s_g.groupby(s_g.index.normalize()).mean(),
+                       "power": s_p.groupby(s_p.index.normalize()).mean()})
+    n_scartate = int(df[["gas", "power"]].isna().any(axis=1).sum())
+    df = df.dropna()
+    if bool(differenzia):
+        df = df.diff().dropna()
+    if len(df) < min_giorni:
+        return _err(f"Dati insufficienti: {len(df)} giorni utili, "
+                    f"servono almeno {min_giorni}.")
+    if df["gas"].std() < 1e-12:
+        return _err("Serie gas costante: correlazione non definita.")
+    if df["power"].std() < 1e-12:
+        return _err("Serie elettrica costante: correlazione non definita.")
+    max_lag = min(max_lag, len(df) - min_giorni)
+    if max_lag < 1:
+        return _err("max_lag troppo alto rispetto ai dati disponibili.")
+    x = df["gas"].to_numpy()
+    y = df["power"].to_numpy()
+    n = len(df)
+
+    righe = []
+    for k in range(-max_lag, max_lag + 1):
+        if k >= 0:
+            a, b = x[:n - k], y[k:]
+        else:
+            a, b = x[-k:], y[:n + k]
+        nk = len(a)
+        banda = 1.96 / np.sqrt(nk)
+        if nk < 2 or np.std(a) < 1e-12 or np.std(b) < 1e-12:
+            corr = np.nan
+        else:
+            corr = float(np.corrcoef(a, b)[0, 1])
+        sig = bool(np.isfinite(corr) and abs(corr) > banda)
+        righe.append({"Lag": k, "Correlazione": (round(corr, 4) if np.isfinite(corr) else None),
+                      "Banda 95%": round(banda, 4), "Significativo": "Sì" if sig else "No"})
+    df_ccf = pd.DataFrame(righe, columns=col_ccf)
+    corr_vals = np.array([r["Correlazione"] if r["Correlazione"] is not None else np.nan
+                          for r in righe])
+    if np.isnan(corr_vals).all():
+        return _err("Cross-correlazione non calcolabile su nessun lag.")
+    idx_star = int(np.nanargmax(np.abs(corr_vals)))
+    lag_star = int(righe[idx_star]["Lag"])
+    corr_star = float(corr_vals[idx_star])
+    if lag_star >= 0:
+        a_s, b_s = x[:n - lag_star], y[lag_star:]
+    else:
+        a_s, b_s = x[-lag_star:], y[:n + lag_star]
+    n_s = len(a_s)
+    banda_star = 1.96 / np.sqrt(n_s)
+    # Correzione di Bonferroni per i test multipli (2*max_lag+1 lag):
+    # il lag stellare e' l'argmax di |CCF|, quindi il verdetto usa la banda
+    # con alpha corretta; il grafico mostra comunque la banda 95% per lag.
+    from scipy.stats import norm as _norm
+    m_lag = 2 * max_lag + 1
+    z_bonf = float(_norm.ppf(1.0 - 0.05 / (2.0 * m_lag)))
+    banda_bonf = z_bonf / np.sqrt(n_s)
+    significativo = bool(abs(corr_star) > banda_bonf)
+    cov = float(np.cov(a_s, b_s, ddof=1)[0, 1])
+    var_a = float(np.var(a_s, ddof=1))
+    beta_pt = cov / var_a if var_a > 1e-12 else None
+    alpha_pt = float(np.mean(b_s) - beta_pt * np.mean(a_s)) if beta_pt is not None else None
+    r2_pt = float(corr_star ** 2)
+    if significativo:
+        if lag_star > 0:
+            verdetto = "GAS_ANTICIPA"
+        elif lag_star < 0:
+            verdetto = "POWER_ANTICIPA"
+        else:
+            verdetto = "CONTESTUALI"
+    else:
+        verdetto = "NESSUNA"
+    if verdetto == "GAS_ANTICIPA":
+        giudizio = (f"Il gas anticipa il power di {lag_star} giorni (corr. {corr_star:+.2f}): "
+                    "difendibile come driver anticipatore e per tempificare gli hedge "
+                    f"(pass-through {beta_pt:+.2f} EUR/MWh di power per 1 EUR/MWh di TTF).")
+    elif verdetto == "POWER_ANTICIPA":
+        giudizio = (f"Attenzione: e' il power ad anticipare il gas di {abs(lag_star)} giorni "
+                    "(corr. {:+.2f}): il TTF non e' un anticipatore affidabile qui.".format(corr_star))
+    elif verdetto == "CONTESTUALI":
+        giudizio = ("Gas e power si muovono insieme lo stesso giorno "
+                    f"(corr. {corr_star:+.2f}): nessun anticipo sfruttabile per il timing.")
+    else:
+        giudizio = ("Nessuna cross-correlazione significativa entro i lag esplorati: "
+                    "il gas non offre un timing affidabile per il power.")
+    return {"valido": True, "errore": None, "lag_star": lag_star,
+            "corr_star": round(corr_star, 4), "significativo": significativo,
+            "verdetto": verdetto,
+            "beta_pt": (round(beta_pt, 4) if beta_pt is not None else None),
+            "alpha_pt": (round(alpha_pt, 4) if alpha_pt is not None else None),
+            "r2_pt": round(r2_pt, 4), "banda95": round(banda_star, 4),
+            "banda_bonf": round(banda_bonf, 4),
+            "n_giorni": n, "n_scartate": n_scartate,
+            "df_ccf": df_ccf, "giudizio": giudizio}
+
+
 def calcola_scala_copertura(prezzi, mw_f1=2.0, mw_f2=2.0, mw_f3=2.0,
                             tranche=None, target_pct=80.0):
     """Scala di copertura mensile: quanta energia del periodo e' coperta a prezzo fisso.
@@ -23415,7 +23599,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -38521,6 +38705,137 @@ elif workspace == _('ws8'):
                             key="gr173_csv_coef",
                             help="Coefficienti propri e incrociati del VAR per direzione e lag.",
                         )
+
+
+    with tab174:
+        titolo_ll = edu("Anticipo gas→power", "Di quanti giorni il gas TTF anticipa lo Swissix? La cross-correlazione CCF(k) = corr(gas_t, power_{t+k}) cerca il ritardo k* con la correlazione piu' forte: k* > 0 significa che il gas di oggi muove il power tra k* giorni. Il pass-through (regressione al lag k*) dice di quanto: e' il numero per tempificare gli hedge.")
+        st.markdown(f"<h1>⏮️ {titolo_ll}</h1>", unsafe_allow_html=True)
+        st.caption("Di quanti giorni il TTF anticipa lo Swissix: cross-correlazione gas↔power sui giorni, banda 95%, pass-through al lag ottimale.")
+        sorg_ll = st.radio("Serie gas TTF", ["🧪 Sintetica (mock TTF)", "📤 Carica CSV reale"],
+                           horizontal=True, key="ll174_sorg",
+                           help="Il mock e' la serie sintetica TTF della dashboard. Carica un CSV per usare i TTF reali.")
+        s_gas174 = None
+        if sorg_ll.startswith("📤"):
+            up174 = st.file_uploader("CSV prezzi gas TTF (€/MWh termico)", type=["csv"], key="ll174_up",
+                                     help="Colonne riconosciute: data/giorno/date + prezzo/price/ttf. Separatore , ; o tab. La risoluzione superiore al giorno viene mediata.")
+            st.download_button("⬇️ Scarica template", "data,prezzo\n2026-01-01,38.5\n2026-01-02,39.1\n".encode("utf-8"),
+                               file_name="template_gas_ttf.csv", mime="text/csv", key="ll174_tmpl",
+                               help="Esempio di formato atteso: una riga per giorno con data e prezzo.")
+            if up174 is not None:
+                try:
+                    dfu174 = pd.read_csv(up174, sep=None, engine="python")
+                    cols174 = {str(c).strip().lower(): c for c in dfu174.columns}
+                    c_date174 = next((cols174[k] for k in ("data", "date", "giorno", "day", "timestamp", "datetime") if k in cols174),
+                                     dfu174.columns[0])
+                    c_prez174 = next((cols174[k] for k in ("prezzo", "price", "ttf", "eur_mwh", "value", "valore") if k in cols174),
+                                     dfu174.columns[1] if len(dfu174.columns) > 1 else dfu174.columns[0])
+                    dt174 = pd.to_datetime(dfu174[c_date174], errors="coerce")
+                    pv174 = pd.to_numeric(dfu174[c_prez174], errors="coerce")
+                    ok174 = dt174.notna() & pv174.notna()
+                    if int(ok174.sum()) < 10:
+                        st.error("CSV gas non valido: servono almeno 10 righe con data e prezzo numerico.")
+                    else:
+                        s_gas174 = pd.Series(pv174[ok174].to_numpy(), index=pd.DatetimeIndex(dt174[ok174]), name="TTF (€/MWh)")
+                        s_gas174.index = s_gas174.index.tz_localize(None)
+                        st.success(f"✅ {len(s_gas174)} quotazioni gas caricate ({s_gas174.index.min().date()} → {s_gas174.index.max().date()}).")
+                except Exception as e:
+                    st.error(f"CSV gas non leggibile: {e}")
+        else:
+            banner_demo("serie gas TTF sintetica (Mock): stagionalita' + spike con seed fisso — ENTSO-E non pubblica prezzi gas")
+            s_gas174 = generate_mock_gas(d0, d1)
+
+        c174a, c174b, c174c = st.columns(3)
+        with c174a:
+            ll_prof = st.selectbox("Profilo elettrico", ["base", "peak"], key="ll174_prof",
+                                   help="base = media 0-23 di tutti i giorni; peak = media ore 8-20 dei soli lun-ven.")
+        with c174b:
+            ll_diff = st.selectbox("Serie analizzata",
+                                   ["Differenze prime (consigliato)", "Livelli"],
+                                   index=0, key="ll174_diff",
+                                   help="Sui livelli, due trend comuni gonfiano la cross-correlazione: se le serie sono I(1) (tab171) usa le differenze prime.")
+        with c174c:
+            ll_maxlag = int(st.number_input("Lag massimo (giorni)", min_value=1, max_value=30, value=15, step=1,
+                                            key="ll174_maxlag",
+                                            help="Intervallo di ritardi esplorato: da -max a +max giorni."))
+
+        if s_gas174 is None:
+            st.info("ℹ️ Seleziona o carica la serie gas per calcolare l'anticipo.")
+        else:
+            try:
+                _pv174 = pd.to_numeric(prezzi.values, errors="coerce")
+                _ip174 = prezzi.index.tz_localize(None) if prezzi.index.tz is not None else prezzi.index
+                _sp174 = pd.Series(_pv174, index=_ip174).dropna()
+                _ore174 = _sp174.index.hour
+                _dow174 = _sp174.index.dayofweek
+                _giorni174 = _sp174.index.normalize()
+                if ll_prof == "base":
+                    _pw174 = _sp174.groupby(_giorni174).mean()
+                else:
+                    _mk174 = (_ore174 >= 8) & (_ore174 < 20) & (_dow174 < 5)
+                    _pw174 = _sp174[_mk174].groupby(_giorni174[_mk174]).mean() if bool(_mk174.any()) else pd.Series(dtype=float)
+            except Exception:
+                _pw174 = pd.Series(dtype=float)
+            if _pw174.empty:
+                st.error("Serie elettrica giornaliera non costruibile (nessun dato valido o nessuna ora peak).")
+            else:
+                ris_ll = calcola_anticipazione_gas(
+                    _pw174, s_gas174, max_lag=ll_maxlag,
+                    differenzia=ll_diff.startswith("Differenze"))
+                if not ris_ll["valido"]:
+                    st.error(ris_ll["errore"])
+                else:
+                    k1, k2, k3, k4 = st.columns(4)
+                    with k1:
+                        _ls174 = ris_ll["lag_star"]
+                        st.metric("Anticipo (lag k*)",
+                                  (f"+{_ls174} gg (gas)" if _ls174 > 0 else
+                                   (f"{_ls174} gg (power)" if _ls174 < 0 else "0 gg (contest.)")))
+                    with k2:
+                        st.metric("Correlazione a k*",
+                                  f"{ris_ll['corr_star']:+.3f}" + (" ✅" if ris_ll["significativo"] else ""))
+                    with k3:
+                        st.metric("Pass-through",
+                                  "n/d" if ris_ll["beta_pt"] is None else f"{ris_ll['beta_pt']:+.3f}")
+                    with k4:
+                        st.metric("Giorni utili", f"{ris_ll['n_giorni']}")
+                    _verd174 = ris_ll["verdetto"]
+                    if _verd174 == "GAS_ANTICIPA":
+                        st.success(ris_ll["giudizio"])
+                    elif _verd174 == "POWER_ANTICIPA":
+                        st.warning(ris_ll["giudizio"])
+                    elif _verd174 == "CONTESTUALI":
+                        st.info(ris_ll["giudizio"])
+                    else:
+                        st.warning(ris_ll["giudizio"])
+
+                    st.markdown("**Cross-correlazione gas↔power per lag** (banda tratteggiata = significatività 95%; k>0 = il gas anticipa)")
+                    _dfcc174 = ris_ll["df_ccf"]
+                    fig_ll = go.Figure()
+                    _col174 = ["#2563EB" if s == "Sì" else "#9CA3AF" for s in _dfcc174["Significativo"]]
+                    fig_ll.add_bar(x=_dfcc174["Lag"].astype(str), y=_dfcc174["Correlazione"],
+                                   marker_color=_col174, name="Correlazione")
+                    fig_ll.add_scatter(x=_dfcc174["Lag"].astype(str), y=_dfcc174["Banda 95%"],
+                                       mode="lines", line=dict(dash="dash", color="#EF4444"),
+                                       name="+banda 95%")
+                    fig_ll.add_scatter(x=_dfcc174["Lag"].astype(str), y=-_dfcc174["Banda 95%"],
+                                       mode="lines", line=dict(dash="dash", color="#EF4444"),
+                                       name="-banda 95%")
+                    fig_ll.add_vline(x=str(ris_ll["lag_star"]), line_dash="dot",
+                                     line_color="#10B981", annotation_text="k*")
+                    fig_ll.update_layout(xaxis_title="Lag k (giorni)", yaxis_title="corr(gas_t, power_{t+k})",
+                                         margin=dict(l=10, r=10, t=10, b=10))
+                    st.plotly_chart(fig_ll, use_container_width=True)
+
+                    st.markdown("**Tabella cross-correlazioni**")
+                    st.dataframe(_dfcc174, use_container_width=True, hide_index=True)
+                    st.download_button(
+                        "⬇️ Esporta cross-correlazioni (CSV)",
+                        _dfcc174.to_csv(index=False, sep=";").encode("utf-8"),
+                        file_name=f"anticipo_gas_power_{d0}_{d1}.csv",
+                        mime="text/csv",
+                        key="ll174_csv",
+                        help="Una riga per lag: correlazione, banda 95%, significatività.",
+                    )
 
 
 # Footer
