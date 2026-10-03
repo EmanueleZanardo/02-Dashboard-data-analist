@@ -22701,6 +22701,145 @@ def calcola_finestra_fermo_consumo(prezzi, mw_f1, mw_f2, mw_f3, giorni_fermo=3,
             "carico_residuo_pct": float(carico_residuo_pct)}
 
 
+def calcola_make_or_buy(prezzi, mw_f1, mw_f2, mw_f3, costo_marginale=85.0,
+                        mw_cogen=2.0, costo_avviamento=500.0,
+                        min_up=4, min_down=2, breakeven=True):
+    """Make-or-buy orario per un consumatore industriale con cogeneratore.
+
+    Domanda operativa: ho un cogeneratore (o gruppo elettrogeno) da P MW
+    con costo marginale cm (€/MWh tutto incluso: combustibile, manutenzione
+    variabile, CO2) — in quali ore conviene autoprodurre invece di comprare
+    dalla rete al prezzo spot?
+
+    Metodo: spark_h = prezzo_h - cm (€/MWh per MW di cogeneratore). Lo
+    schedule ottimale di accensione e' calcolato da ottimizza_dispatch
+    (stessa matematica del tab 'Dispatch ottimale', ma qui e' il
+    CONSUMATORE che decide: ON = autoproduco, OFF = compro dalla rete),
+    con costo di avviamento e tempi minimi di marcia/fermo. Nelle ore ON
+    l'energia autoprodotta e' min(P, carico_h): il cogeneratore copre solo
+    il proprio carico, non vende in rete (lo schedule DP e' ottimale per il
+    caso non cappato e resta un'ottima euristica con il cap).
+    Break-even: il costo marginale massimo che mantiene il valore >= 0,
+    via bisezione (valore decrescente in cm); None se mai conveniente,
+    inf se sempre conveniente nel periodo.
+
+    Ritorna dict con valido/errore, df_ore (Ora, Prezzo EUR/MWh, Carico MW,
+    Spread EUR/MWh, Autoproduci, Energia autoprodotta MWh, Risparmio EUR),
+    df_blocchi (Inizio, Fine, Ore, Energia MWh, Risparmio lordo EUR,
+    Risparmio netto EUR), ore_on, energia_mwh, risparmio_totale,
+    costo_acquisto_totale (EUR, prezzo*carico su tutto il periodo),
+    quota_risparmio_pct, avviamenti, fattore_utilizzo_pct,
+    prezzo_medio_on/off, costo_vincoli (EUR/MW, dal DP), breakeven_cm,
+    n_ore. NaN-safe: serie vuota / parametri non validi -> valido False
+    con errore pulito, mai eccezioni. Deterministico.
+    """
+    cols_o = ["Ora", "Prezzo (EUR/MWh)", "Carico (MW)", "Spread (EUR/MWh)",
+              "Autoproduci", "Energia autoprodotta (MWh)", "Risparmio (EUR)"]
+    cols_b = ["Inizio", "Fine", "Ore", "Energia (MWh)",
+              "Risparmio lordo (EUR)", "Risparmio netto (EUR)"]
+    vuoto = {"valido": False, "errore": None, "df_ore": pd.DataFrame(columns=cols_o),
+             "df_blocchi": pd.DataFrame(columns=cols_b)}
+    try:
+        p = prezzi.astype(float).dropna()
+        p = p[~p.index.duplicated(keep="first")].sort_index()
+    except Exception:
+        return dict(vuoto, errore="Serie prezzi non valida.")
+    if len(p) == 0:
+        return dict(vuoto, errore="Serie prezzi vuota.")
+    try:
+        mws = [max(0.0, float(x)) for x in (mw_f1, mw_f2, mw_f3)]
+        cm = float(costo_marginale)
+        pcogen = float(mw_cogen)
+        ca = float(costo_avviamento)
+        mu = int(min_up)
+        md = int(min_down)
+    except (TypeError, ValueError):
+        return dict(vuoto, errore="Parametri non validi.")
+    if sum(mws) <= 0:
+        return dict(vuoto, errore="Carico nullo: imposta MW > 0 in almeno una fascia.")
+    if cm < 0 or pcogen <= 0 or ca < 0:
+        return dict(vuoto, errore="Costo marginale, potenza e avviamento devono essere >= 0 (potenza > 0).")
+    if mu < 1 or md < 1 or float(mu) != float(min_up) or float(md) != float(min_down):
+        return dict(vuoto, errore="Tempi minimi di marcia/fermo non validi (interi >= 1).")
+    try:
+        fasce = p.index.map(fascia_oraria)
+    except Exception:
+        return dict(vuoto, errore="Indice prezzi non valido (serve un DatetimeIndex).")
+    mw_of = {"F1": mws[0], "F2": mws[1], "F3": mws[2]}
+    carico = np.array([mw_of[fx] for fx in fasce], dtype=float)
+    spark = p.to_numpy(dtype=float) - cm
+    dp = ottimizza_dispatch(spark, costo_avvio=ca, costo_fisso_orario=0.0,
+                            min_up=mu, min_down=md)
+    sched = dp["schedule"].astype(bool)
+    n = len(p)
+    energia_h = np.where(sched, np.minimum(pcogen, carico), 0.0)
+    risparmio_h = np.where(sched, spark * energia_h, 0.0)
+    # costo di avviamento ripartito sui blocchi ON consecutivi
+    idx = np.arange(n)
+    df_ore = pd.DataFrame({
+        "Ora": p.index, "Prezzo (EUR/MWh)": p.to_numpy(dtype=float),
+        "Carico (MW)": carico, "Spread (EUR/MWh)": spark,
+        "Autoproduci": np.where(sched, "SI", "NO"),
+        "Energia autoprodotta (MWh)": energia_h,
+        "Risparmio (EUR)": risparmio_h})
+    blocchi, avv_count = [], 0
+    if sched.any():
+        cambi = np.diff(sched.astype(int))
+        ini = np.r_[0, np.where(cambi == 1)[0] + 1]
+        fin = np.r_[np.where(cambi == -1)[0], n - 1]
+        for a, b in zip(ini, fin):
+            avv_count += 1
+            lordo = float(risparmio_h[a:b + 1].sum())
+            blocchi.append({
+                "Inizio": p.index[a], "Fine": p.index[b],
+                "Ore": int(b - a + 1),
+                "Energia (MWh)": float(energia_h[a:b + 1].sum()),
+                "Risparmio lordo (EUR)": lordo,
+                "Risparmio netto (EUR)": lordo - ca})
+    df_blocchi = pd.DataFrame(blocchi, columns=cols_b)
+    costo_acq = float((p.to_numpy(dtype=float) * carico).sum())
+    risp_tot = float(risparmio_h.sum()) - avv_count * ca
+    ore_on = int(sched.sum())
+    be = None
+    if breakeven:
+        pmax = float(np.max(p.to_numpy(dtype=float)))
+        v0 = ottimizza_dispatch(p.to_numpy(dtype=float) - 0.0, costo_avvio=ca,
+                                min_up=mu, min_down=md)["valore"]
+        if v0 <= 0:
+            be = None
+        elif ottimizza_dispatch(p.to_numpy(dtype=float) - pmax, costo_avvio=ca,
+                                min_up=mu, min_down=md)["valore"] > 0:
+            be = float("inf")
+        else:
+            lo, hi = 0.0, pmax
+            for _ in range(24):
+                mid = (lo + hi) / 2.0
+                v = ottimizza_dispatch(p.to_numpy(dtype=float) - mid, costo_avvio=ca,
+                                       min_up=mu, min_down=md)["valore"]
+                if v > 0:
+                    lo = mid
+                else:
+                    hi = mid
+            be = (lo + hi) / 2.0
+    on_px = p.to_numpy(dtype=float)[sched]
+    off_px = p.to_numpy(dtype=float)[~sched]
+    return {"valido": True, "errore": None,
+            "df_ore": df_ore, "df_blocchi": df_blocchi,
+            "ore_on": ore_on, "n_ore": n,
+            "energia_mwh": float(energia_h.sum()),
+            "risparmio_totale": risp_tot,
+            "costo_acquisto_totale": costo_acq,
+            "quota_risparmio_pct": (risp_tot / costo_acq * 100.0 if costo_acq > 0 else 0.0),
+            "avviamenti": avv_count,
+            "fattore_utilizzo_pct": (ore_on / n * 100.0 if n else 0.0),
+            "prezzo_medio_on": (float(on_px.mean()) if on_px.size else float("nan")),
+            "prezzo_medio_off": (float(off_px.mean()) if off_px.size else float("nan")),
+            "costo_vincoli": float(dp["costo_vincoli"]) * pcogen,
+            "breakeven_cm": be,
+            "costo_marginale": cm, "mw_cogen": pcogen,
+            "costo_avviamento": ca, "min_up": mu, "min_down": md}
+
+
 def calcola_scala_copertura(prezzi, mw_f1=2.0, mw_f2=2.0, mw_f3=2.0,
                             tranche=None, target_pct=80.0):
     """Scala di copertura mensile: quanta energia del periodo e' coperta a prezzo fisso.
@@ -23793,7 +23932,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -39138,6 +39277,94 @@ elif workspace == _('ws8'):
                 mime="text/csv",
                 key="fm176_csv",
                 help="Una riga per finestra consecutiva: inizio, fine, costo evitato in €.",
+            )
+
+    with tab177:
+        titolo_mb = edu("Autoproduzione vs acquisto (make-or-buy)", "Hai un cogeneratore o un gruppo elettrogeno con un costo marginale noto (€/MWh tutto incluso): in quali ore conviene autoprodurre invece di comprare dalla rete? Lo schedule ottimale di accensione considera costo di avviamento e tempi minimi di marcia/fermo — la stessa matematica del dispatch delle centrali, applicata al consumatore.")
+        st.markdown(f"<h1>⚖️ {titolo_mb}</h1>", unsafe_allow_html=True)
+        st.caption("Make-or-buy orario: quando accendere il cogeneratore invece di comprare dalla rete.")
+        c1_mb, c2_mb, c3_mb = st.columns(3)
+        with c1_mb:
+            cm_mb = st.number_input("Costo marginale autoproduzione (€/MWh)", min_value=0.0, value=85.0, step=5.0,
+                                    key="mb177_cm",
+                                    help="Tutto incluso: combustibile + manutenzione variabile + CO2.")
+            pc_mb = st.number_input("Potenza cogeneratore (MW)", min_value=0.1, value=2.0, step=0.5,
+                                    key="mb177_mw",
+                                    help="Taglia elettrica del cogeneratore/gruppo.")
+        with c2_mb:
+            ca_mb = st.number_input("Costo di avviamento (€)", min_value=0.0, value=500.0, step=100.0,
+                                    key="mb177_avv",
+                                    help="Costo di ogni avviamento (usura, combustibile di rampa).")
+            mu_mb = st.number_input("Min. ore di marcia consecutive", min_value=1, max_value=168, value=4, step=1,
+                                    key="mb177_minup",
+                                    help="Una volta acceso, il cogeneratore resta ON almeno queste ore.")
+        with c3_mb:
+            md_mb = st.number_input("Min. ore di fermo consecutive", min_value=1, max_value=168, value=2, step=1,
+                                    key="mb177_mindown",
+                                    help="Una volta spento, resta OFF almeno queste ore.")
+        ris_mb = calcola_make_or_buy(prezzi, mw_f1, mw_f2, mw_f3, cm_mb, pc_mb, ca_mb, mu_mb, md_mb)
+        if not ris_mb["valido"]:
+            st.error(ris_mb["errore"])
+        else:
+            k1, k2, k3, k4 = st.columns(4)
+            with k1:
+                st.metric("Ore di autoproduzione", f"{ris_mb['ore_on']:,}".replace(",", "."),
+                          f"{ris_mb['fattore_utilizzo_pct']:.1f}% del periodo".replace(".", ","))
+            with k2:
+                st.metric("Energia autoprodotta", f"{ris_mb['energia_mwh']:,.0f} MWh".replace(",", "."))
+            with k3:
+                st.metric("Risparmio totale", f"{ris_mb['risparmio_totale']:,.0f} €".replace(",", "."),
+                          f"{ris_mb['quota_risparmio_pct']:.2f}% del costo di acquisto".replace(".", ","))
+            with k4:
+                st.metric("Avviamenti", f"{ris_mb['avviamenti']}",
+                          f"costo vincoli {ris_mb['costo_vincoli']:,.0f} €".replace(",", "."))
+            c4_mb, c5_mb = st.columns(2)
+            with c4_mb:
+                _be = ris_mb["breakeven_cm"]
+                _be_txt = ("mai conveniente nel periodo" if _be is None
+                           else ("sempre conveniente nel periodo" if _be == float("inf")
+                                 else f"{_be:,.0f} €/MWh".replace(",", ".")))
+                st.metric("Break-even costo marginale", _be_txt,
+                          "sopra questa soglia conviene comprare dalla rete")
+            with c5_mb:
+                _pmon = ris_mb["prezzo_medio_on"]
+                _pmoff = ris_mb["prezzo_medio_off"]
+                st.metric("Prezzo medio ore ON / OFF",
+                          f"{(_pmon if _pmon == _pmon else 0):,.0f} / {(_pmoff if _pmoff == _pmoff else 0):,.0f} €/MWh".replace(",", "."),
+                          "selettività dello schedule")
+            if ris_mb["ore_on"]:
+                _dfo = ris_mb["df_ore"].copy()
+                _dfo["Data"] = pd.to_datetime(_dfo["Ora"]).dt.date
+                _gmb = _dfo.groupby("Data").agg(**{"Risparmio (EUR)": ("Risparmio (EUR)", "sum"),
+                                                    "Energia autoprodotta (MWh)": ("Energia autoprodotta (MWh)", "sum")}).reset_index()
+                fig_mb = px.bar(_gmb, x="Data", y="Risparmio (EUR)",
+                                title=f"Risparmio giornaliero da autoproduzione (cm {cm_mb:,.0f} €/MWh, {pc_mb} MW)".replace(",", "."),
+                                color_discrete_sequence=["#16a34a"])
+                st.plotly_chart(fig_mb, use_container_width=True)
+                st.markdown("**Blocchi di marcia** (ogni avviamento costa "
+                            f"{ca_mb:,.0f} €)".replace(",", "."))
+                _dfb = ris_mb["df_blocchi"].copy()
+                for _cc in ["Risparmio lordo (EUR)", "Risparmio netto (EUR)"]:
+                    _dfb[_cc] = _dfb[_cc].round(0)
+                _dfb["Energia (MWh)"] = _dfb["Energia (MWh)"].round(1)
+                st.dataframe(_dfb, use_container_width=True, hide_index=True)
+            else:
+                st.warning("Con questi parametri il cogeneratore non si accende mai: il costo marginale supera quasi sempre il prezzo di rete.")
+            st.download_button(
+                "⬇️ Esporta ore (CSV)",
+                ris_mb["df_ore"].to_csv(index=False, sep=";").encode("utf-8"),
+                file_name=f"make_or_buy_ore_{d0}_{d1}.csv",
+                mime="text/csv",
+                key="mb177_csv_ore",
+                help="Una riga per ora: prezzo, carico, spread, autoproduci SI/NO, energia e risparmio.",
+            )
+            st.download_button(
+                "⬇️ Esporta blocchi di marcia (CSV)",
+                ris_mb["df_blocchi"].to_csv(index=False, sep=";").encode("utf-8"),
+                file_name=f"make_or_buy_blocchi_{d0}_{d1}.csv",
+                mime="text/csv",
+                key="mb177_csv_blocchi",
+                help="Una riga per blocco di marcia consecutiva: inizio, fine, ore, energia, risparmio lordo/netto.",
             )
 
 
