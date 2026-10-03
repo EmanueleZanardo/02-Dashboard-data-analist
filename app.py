@@ -21734,6 +21734,324 @@ def calcola_test_stazionarieta(prezzi, regression="c", lags="auto", max_lags=Non
     }
 
 
+def calcola_cointegrazione(prezzi_giorno, gas_giorno, regression="c", lags="auto",
+                           min_giorni=90):
+    """Test di cointegrazione Engle-Granger (due passi) tra spot elettrico e gas TTF.
+
+    Domanda operativa: la beta gas-power (tab140) e' un hedge statico difendibile
+    nel lungo periodo, o una regressione spuria? Due serie I(1) sono cointegrate
+    quando una loro combinazione lineare (P - a - b*G) e' STAZIONARIA: il prezzo
+    elettrico torna verso l'equilibrio di lungo periodo fissato dal gas.
+
+    Passo 1 - regressione di cointegrazione OLS sui livelli:
+        P_t = a + b*G_t  (+ trend lineare se regression="ct")
+        b e' l'hedge ratio gas-to-power di lungo periodo.
+    Passo 2 - test ADF sui residui u_t con valori critici di Engle-Granger
+    (piu' severi dei MacKinnon puri perche' i residui sono stimati, valori
+    asintotici standard per 1 regressore):
+        "n":  1% -2.57 / 5% -1.94 / 10% -1.62
+        "c":  1% -3.90 / 5% -3.34 / 10% -3.04
+        "ct": 1% -4.32 / 5% -3.78 / 10% -3.50
+    H0: i residui hanno radice unitaria (NESSUNA cointegrazione). Si rifiuta
+    quando la statistica e' PIU' NEGATIVA del critico.
+
+    Dal gamma della regressione ADF sui residui si ricava l'half-life del
+    rientro verso l'equilibrio: HL = -ln(2)/ln(1+gamma) giorni (solo se gamma<0).
+
+    Input: serie GIORNALIERE (la tab costruisce base/peak dalla serie oraria).
+    NaN-safe: serie vuote / indici non datetime / giorni comuni < min_giorni /
+    gas costante / regression o lag non validi -> errore pulito; tz-aware reso
+    naive; duplicati keep-first; residui di scala trascurabile (std <= 1e-9
+    della scala dei prezzi) trattati come costanti = cointegrazione perfetta;
+    deterministico. Mai eccezioni.
+
+    Ritorna dict con "valido"/"errore"; "alpha", "beta" (hedge ratio),
+    "r2", "correlazione"; "stat", "cv", "rifiuta_1/5/10", "cointegrata" (bool
+    al 5%), "lags", "lags_auto"; "half_life_giorni" (None se non stimabile),
+    "z_score" e "spread_eur" dell'ultimo giorno (scostamento dall'equilibrio),
+    "n_giorni", "n_scartate", "gas_medio", "power_medio", "std_residui";
+    "df_mesi" (Mese, Giorni, Residuo medio, Z-score medio); "df_serie"
+    (Giorno, Gas, Power, Residuo, Z-score); "giudizio".
+    """
+    _EG_CV = {"n": {1: -2.57, 5: -1.94, 10: -1.62},
+              "c": {1: -3.90, 5: -3.34, 10: -3.04},
+              "ct": {1: -4.32, 5: -3.78, 10: -3.50}}
+    col_mesi = ["Mese", "Giorni", "Residuo medio (€/MWh)", "Z-score medio"]
+    col_serie = ["Giorno", "Gas (€/MWh)", "Power (€/MWh)", "Residuo (€/MWh)",
+                 "Z-score"]
+    vuoto = {"valido": False, "errore": None, "alpha": None, "beta": None,
+             "r2": None, "correlazione": None, "stat": None, "cv": None,
+             "rifiuta_1": None, "rifiuta_5": None, "rifiuta_10": None,
+             "cointegrata": None, "lags": None, "lags_auto": None,
+             "half_life_giorni": None, "z_score": None, "spread_eur": None,
+             "n_giorni": 0, "n_scartate": 0, "gas_medio": None,
+             "power_medio": None, "std_residui": None,
+             "df_mesi": pd.DataFrame(columns=col_mesi),
+             "df_serie": pd.DataFrame(columns=col_serie), "giudizio": ""}
+
+    def _err(msg):
+        out = dict(vuoto)
+        out["df_mesi"] = pd.DataFrame(columns=col_mesi)
+        out["df_serie"] = pd.DataFrame(columns=col_serie)
+        out["errore"] = msg
+        return out
+
+    if regression not in _EG_CV:
+        return _err("regression non valida: 'n', 'c' o 'ct'.")
+    if lags != "auto":
+        try:
+            lags = int(lags)
+        except (TypeError, ValueError):
+            return _err("lags non valido: 'auto' o intero >= 0.")
+        if lags < 0:
+            return _err("lags non valido: 'auto' o intero >= 0.")
+    try:
+        min_giorni = int(min_giorni)
+    except (TypeError, ValueError):
+        return _err("min_giorni non valido: intero >= 30.")
+    if min_giorni < 30:
+        return _err("min_giorni non valido: intero >= 30.")
+    if prezzi_giorno is None or gas_giorno is None:
+        return _err("Serie prezzi o gas mancante.")
+    try:
+        p = pd.Series(prezzi_giorno)
+        g = pd.Series(gas_giorno)
+    except Exception:
+        return _err("Input non interpretabili come serie.")
+    if (not isinstance(p.index, pd.DatetimeIndex)
+            or not isinstance(g.index, pd.DatetimeIndex)):
+        return _err("Gli indici di entrambe le serie devono essere di tipo data/ora.")
+    pv = pd.to_numeric(p.values, errors="coerce")
+    gv = pd.to_numeric(g.values, errors="coerce")
+    if np.isnan(pv).all():
+        return _err("Nessun valore numerico nella serie elettrica.")
+    if np.isnan(gv).all():
+        return _err("Nessun valore numerico nella serie gas.")
+    ip = p.index.tz_localize(None) if p.index.tz is not None else p.index
+    ig = g.index.tz_localize(None) if g.index.tz is not None else g.index
+    s_p = pd.Series(pv, index=ip).dropna()
+    s_g = pd.Series(gv, index=ig).dropna()
+    s_p = s_p[~s_p.index.duplicated(keep="first")]
+    s_g = s_g[~s_g.index.duplicated(keep="first")]
+    df = pd.DataFrame({"gas": s_g.groupby(s_g.index.normalize()).mean(),
+                       "power": s_p.groupby(s_p.index.normalize()).mean()})
+    n_scartate = int(df[["gas", "power"]].isna().any(axis=1).sum())
+    df = df.dropna()
+    if len(df) < min_giorni:
+        return _err(f"Dati insufficienti: {len(df)} giorni comuni, "
+                    f"servono almeno {min_giorni}.")
+    x = df["gas"].to_numpy()
+    y = df["power"].to_numpy()
+    if float(np.var(x)) <= 0:
+        return _err("Prezzo gas costante sul periodo: regressione impossibile.")
+
+    # Passo 1: regressione di cointegrazione OLS  y = a + b*x (+ trend)
+    cols = []
+    if regression in ("c", "ct"):
+        cols.append(np.ones(len(x)))
+    if regression == "ct":
+        cols.append(np.arange(1, len(x) + 1, dtype=float))
+    cols.append(x)
+    X = np.column_stack(cols)
+    try:
+        coef, _r, _rk, _sv = np.linalg.lstsq(X, y, rcond=None)
+    except np.linalg.LinAlgError:
+        return _err("Regressione di cointegrazione non stimabile.")
+    i_beta = len(cols) - 1
+    beta = float(coef[i_beta])
+    alpha = float(coef[0]) if regression in ("c", "ct") else 0.0
+    u = y - X @ coef
+    ss_res = float(u @ u)
+    ss_tot = float(((y - y.mean()) ** 2).sum())
+    r2 = (1.0 - ss_res / ss_tot) if ss_tot > 0 else None
+    corr = float(np.corrcoef(x, y)[0, 1]) if len(x) > 1 else None
+    u_const = bool(np.all(u == u[0]))
+    std_u = float(np.std(u, ddof=1)) if len(u) > 1 else 0.0
+    # residui di scala trascurabile rispetto al prezzo = zeri numerici
+    # (relazione deterministica): trattati come costanti
+    scala_prezzo = max(1.0, float(np.std(y)))
+    u_eff_const = u_const or (std_u <= 1e-9 * scala_prezzo)
+
+    # Passo 2: ADF sui residui (stessa meccanica della tab171, CV Engle-Granger)
+    n_det_adf = 0 if regression == "n" else (1 if regression == "c" else 2)
+
+    def _pmax(Tv):
+        pm = int(12.0 * (Tv / 100.0) ** 0.25)
+        pm = max(0, min(pm, (Tv - n_det_adf - 10) // 2))
+        return pm
+
+    def _fit(yv, reg, pl, n_use=None):
+        Tv = len(yv)
+        n = Tv - 1 - pl
+        if n <= 0:
+            return None
+        dy = np.diff(yv)
+        yl = yv[:-1]
+        c2 = []
+        if reg in ("c", "ct"):
+            c2.append(np.ones(n))
+        if reg == "ct":
+            c2.append(np.arange(1, n + 1, dtype=float))
+        i_g = len(c2)
+        c2.append(yl[pl:])
+        for i in range(1, pl + 1):
+            c2.append(dy[pl - i: Tv - 1 - i])
+        Y = dy[pl:]
+        XX = np.column_stack(c2)
+        if n_use is not None:
+            n_use = min(n_use, n)
+            Y = Y[-n_use:]
+            XX = XX[-n_use:, :]
+            n = n_use
+        k = XX.shape[1]
+        if n <= k + 1:
+            return None
+        bq, _r, _rk, _sv = np.linalg.lstsq(XX, Y, rcond=None)
+        res = Y - XX @ bq
+        dof = n - k
+        if dof <= 0:
+            return None
+        rss = float(res @ res)
+        if not np.isfinite(rss):
+            return None
+        gamma = float(bq[i_g])
+        yss = float(Y @ Y)
+        if rss == 0.0 or (yss > 0.0 and rss <= 1e-24 * yss):
+            stat = (-np.inf if gamma < 0
+                    else (np.inf if gamma > 0 else 0.0))
+            return {"stat": stat, "gamma": gamma, "p": pl, "perfetto": True}
+        s2 = rss / dof
+        try:
+            xtxi = np.linalg.pinv(XX.T @ XX)
+        except np.linalg.LinAlgError:
+            return None
+        v = float(xtxi[i_g, i_g])
+        if not np.isfinite(v) or v <= 0:
+            return None
+        stat = gamma / np.sqrt(s2 * v)
+        if not np.isfinite(stat):
+            return None
+        return {"stat": float(stat), "gamma": gamma, "p": pl, "rss": rss,
+                "k": k, "perfetto": False}
+
+    def _seleziona(yv, reg):
+        pm = _pmax(len(yv))
+        n0 = len(yv) - 1 - pm
+        if n0 <= n_det_adf + 2:
+            return None
+        best, perf = None, None
+        for pl in range(pm + 1):
+            f = _fit(yv, reg, pl, n_use=n0)
+            if f is None:
+                continue
+            if f["perfetto"]:
+                if perf is None:
+                    perf = f
+                if f["stat"] == -np.inf:
+                    return f
+                continue
+            aic = n0 * np.log(f["rss"] / n0) + 2.0 * f["k"]
+            if best is None or aic < best[0]:
+                best = (aic, f)
+        return best[1] if best is not None else perf
+
+    lag_fisso = None if lags == "auto" else lags
+    cv = _EG_CV[regression]
+    if u_eff_const:
+        fit = {"stat": -np.inf, "gamma": np.nan, "p": 0}
+        p_usato = 0
+    else:
+        if lag_fisso is None:
+            fit = _seleziona(u, regression)
+            if fit is None:
+                return _err("Regressione ADF sui residui non stimabile.")
+            p_usato = fit["p"]
+        else:
+            fit = _fit(u, regression, lag_fisso)
+            if fit is None:
+                return _err(f"lag={lag_fisso} non stimabile con "
+                            f"{len(u)} osservazioni.")
+            p_usato = lag_fisso
+    stat = float(fit["stat"])
+    rifiuta = {q: bool(stat < cv[q]) for q in (1, 5, 10)}
+    cointegrata = rifiuta[5]
+
+    gamma = fit.get("gamma", np.nan)
+    half_life = None
+    try:
+        if np.isfinite(gamma) and -1.0 < gamma < 0.0:
+            den = np.log(1.0 + gamma)
+            if np.isfinite(den) and den < 0:
+                half_life = float(-np.log(2.0) / den)
+    except (ValueError, ZeroDivisionError):
+        half_life = None
+
+    z = ((float(u[-1]) - float(u.mean())) / std_u) if std_u > 0 else None
+    spread = float(u[-1])
+
+    righe = []
+    try:
+        mesi = df.index.to_period("M")
+    except (TypeError, ValueError, AttributeError):
+        mesi = None
+    if mesi is not None:
+        for per, grp in df.groupby(mesi):
+            idxm = grp.index
+            um = u[df.index.get_indexer(idxm)]
+            zm = ((um - float(u.mean())) / std_u) if std_u > 0 else np.full(len(um), np.nan)
+            righe.append({"Mese": str(per), "Giorni": len(grp),
+                          "Residuo medio (€/MWh)": round(float(np.mean(um)), 2),
+                          "Z-score medio": (round(float(np.mean(zm)), 2)
+                                            if np.all(np.isfinite(zm)) else None)})
+    df_mesi = pd.DataFrame(righe, columns=col_mesi)
+
+    df_serie = pd.DataFrame({
+        "Giorno": df.index.date,
+        "Gas (€/MWh)": np.round(x, 2),
+        "Power (€/MWh)": np.round(y, 2),
+        "Residuo (€/MWh)": np.round(u, 2),
+        "Z-score": (np.round((u - float(u.mean())) / std_u, 2)
+                    if std_u > 0 else np.full(len(u), np.nan))})
+
+    if cointegrata:
+        giudizio = (f"Serie COINTEGRATE al 5% (stat {stat:.2f} < critico "
+                    f"{cv[5]:.2f}): la beta {beta:.2f} e' un hedge ratio di lungo "
+                    f"periodo difendibile — {beta:.2f} MW di TTF coprono ~1 MW "
+                    f"elettrico. ")
+        if half_life is not None:
+            giudizio += (f"Gli scostamenti dall'equilibrio rientrano con "
+                         f"half-life di ~{half_life:.0f} giorni. ")
+        if z is not None and abs(z) >= 2:
+            giudizio += (f"Attenzione: lo spread e' a {abs(z):.1f} sigma "
+                         f"dall'equilibrio ({spread:+.2f} €/MWh) — dislocazione "
+                         f"anomala da monitorare.")
+        else:
+            giudizio += "Lo spread e' vicino all'equilibrio di lungo periodo."
+    else:
+        giudizio = (f"NESSUNA cointegrazione al 5% (stat {stat:.2f} >= critico "
+                    f"{cv[5]:.2f}): la beta {beta:.2f} e' una regressione "
+                    f"SPURIA sul lungo periodo. Non usare l'hedge statico "
+                    f"gas-to-power come copertura strutturale: ricalibra spesso "
+                    f"(beta rolling, tab140) o copri con prodotti power.")
+
+    return {"valido": True, "errore": None, "alpha": round(alpha, 4),
+            "beta": round(beta, 4), "r2": (round(float(r2), 4)
+                                           if r2 is not None else None),
+            "correlazione": (round(float(corr), 4)
+                             if corr is not None else None),
+            "stat": stat, "cv": dict(cv),
+            "rifiuta_1": rifiuta[1], "rifiuta_5": rifiuta[5],
+            "rifiuta_10": rifiuta[10], "cointegrata": cointegrata,
+            "lags": p_usato, "lags_auto": lag_fisso is None,
+            "half_life_giorni": (round(float(half_life), 1)
+                                 if half_life is not None else None),
+            "z_score": (round(float(z), 2) if z is not None else None),
+            "spread_eur": round(spread, 2), "n_giorni": len(df),
+            "n_scartate": n_scartate, "gas_medio": round(float(x.mean()), 2),
+            "power_medio": round(float(y.mean()), 2),
+            "std_residui": round(std_u, 2), "df_mesi": df_mesi,
+            "df_serie": df_serie, "giudizio": giudizio}
+
 def calcola_scala_copertura(prezzi, mw_f1=2.0, mw_f2=2.0, mw_f3=2.0,
                             tranche=None, target_pct=80.0):
     """Scala di copertura mensile: quanta energia del periodo e' coperta a prezzo fisso.
@@ -22826,7 +23144,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -37567,6 +37885,196 @@ elif workspace == _('ws8'):
                     help="Una riga per mese: ore osservate, statistica ADF e verdetto al 5%.",
                 )
 
+
+    with tab172:
+        titolo_cg = edu("Cointegrazione", "Due serie I(1) sono COINTEGRATE quando una loro combinazione lineare (prezzo elettrico − a − b×gas) e' STAZIONARIA: il prezzo torna verso l'equilibrio di lungo periodo fissato dal gas. Il test Engle-Granger fa due passi: (1) regressione OLS sui livelli, (2) test ADF sui residui con valori critici dedicati (piu' severi dei MacKinnon puri). Se NON c'e' cointegrazione, la beta gas-power e' una regressione SPURIA sul lungo periodo e l'hedge statico col gas non regge.")
+        st.markdown(f"<h1>⛓️ {titolo_cg}</h1>", unsafe_allow_html=True)
+        st.caption("La beta gas-power regge nel lungo periodo? Test di cointegrazione Engle-Granger: residui stazionari, half-life del rientro e spread dall'equilibrio.")
+        sorg_cg = st.radio("Serie gas TTF", ["🧪 Sintetica (mock TTF)", "📤 Carica CSV reale"],
+                           horizontal=True, key="cg172_sorg",
+                           help="Il mock e' la serie sintetica TTF della dashboard (stagionalita' + spike, seed fisso). Carica un CSV per usare i TTF reali.")
+        s_gas172 = None
+        if sorg_cg.startswith("📤"):
+            up172 = st.file_uploader("CSV prezzi gas TTF (€/MWh termico)", type=["csv"], key="cg172_up",
+                                     help="Colonne riconosciute: data/giorno/date + prezzo/price/ttf. Separatore , ; o tab. La risoluzione superiore al giorno viene mediata.")
+            st.download_button("⬇️ Scarica template", "data,prezzo\n2026-01-01,38.5\n2026-01-02,39.1\n".encode("utf-8"),
+                               file_name="template_gas_ttf.csv", mime="text/csv", key="cg172_tmpl",
+                               help="Esempio di formato atteso: una riga per giorno con data e prezzo.")
+            if up172 is not None:
+                try:
+                    dfu172 = pd.read_csv(up172, sep=None, engine="python")
+                    cols172 = {str(c).strip().lower(): c for c in dfu172.columns}
+                    c_date172 = next((cols172[k] for k in ("data", "date", "giorno", "day", "timestamp", "datetime") if k in cols172),
+                                     dfu172.columns[0])
+                    c_prez172 = next((cols172[k] for k in ("prezzo", "price", "ttf", "eur_mwh", "value", "valore") if k in cols172),
+                                     dfu172.columns[1] if len(dfu172.columns) > 1 else dfu172.columns[0])
+                    dt172 = pd.to_datetime(dfu172[c_date172], errors="coerce")
+                    pv172 = pd.to_numeric(dfu172[c_prez172], errors="coerce")
+                    ok172 = dt172.notna() & pv172.notna()
+                    if int(ok172.sum()) < 10:
+                        st.error("CSV gas non valido: servono almeno 10 righe con data e prezzo numerico.")
+                    else:
+                        s_gas172 = pd.Series(pv172[ok172].to_numpy(), index=pd.DatetimeIndex(dt172[ok172]), name="TTF (€/MWh)")
+                        s_gas172.index = s_gas172.index.tz_localize(None)
+                        st.success(f"✅ {len(s_gas172)} quotazioni gas caricate ({s_gas172.index.min().date()} → {s_gas172.index.max().date()}).")
+                except Exception as e:
+                    st.error(f"CSV gas non leggibile: {e}")
+        else:
+            banner_demo("serie gas TTF sintetica (Mock): stagionalita' + spike con seed fisso — ENTSO-E non pubblica prezzi gas")
+            s_gas172 = generate_mock_gas(d0, d1)
+
+        c172a, c172b, c172c = st.columns(3)
+        with c172a:
+            cg_prof = st.selectbox("Profilo elettrico", ["base", "peak"], key="cg172_prof",
+                                   help="base = media 0-23 di tutti i giorni; peak = media ore 8-20 dei soli lun-ven.")
+        with c172b:
+            cg_reg = st.selectbox("Termine deterministico",
+                                  ["Costante", "Costante + trend", "Nessuno"],
+                                  index=0, key="cg172_reg",
+                                  help="Componente deterministica della regressione di cointegrazione e dell'ADF sui residui.")
+        with c172c:
+            cg_lagmode = st.selectbox("Selezione dei lag",
+                                      ["Auto (AIC)", "Fisso"],
+                                      index=0, key="cg172_lagmode",
+                                      help="Lag della parte aumentata dell'ADF sui residui: Auto con AIC (massimo da regola di Schwert) o valore fisso.")
+        cg_lag = 0
+        if cg_lagmode == "Fisso":
+            cg_lag = int(st.number_input("Numero di lag", min_value=0, max_value=24, value=4, step=1,
+                                         key="cg172_lag",
+                                         help="Ordine p della parte aumentata: quanti Δu ritardati entrano nella regressione ADF sui residui."))
+
+        if s_gas172 is None:
+            st.info("ℹ️ Seleziona o carica la serie gas per calcolare la cointegrazione.")
+        else:
+            _reg_map172 = {"Costante": "c", "Costante + trend": "ct", "Nessuno": "n"}
+            try:
+                _pv172 = pd.to_numeric(prezzi.values, errors="coerce")
+                _ip172 = prezzi.index.tz_localize(None) if prezzi.index.tz is not None else prezzi.index
+                _sp172 = pd.Series(_pv172, index=_ip172).dropna()
+                _ore172 = _sp172.index.hour
+                _giorni172 = _sp172.index.normalize()
+                if cg_prof == "base":
+                    _pw172 = _sp172.groupby(_giorni172).mean()
+                else:
+                    _dow172 = _sp172.index.dayofweek
+                    _mk172 = (_ore172 >= 8) & (_ore172 < 20) & (_dow172 < 5)
+                    _pw172 = _sp172[_mk172].groupby(_giorni172[_mk172]).mean() if bool(_mk172.any()) else pd.Series(dtype=float)
+            except Exception:
+                _pw172 = pd.Series(dtype=float)
+            if _pw172.empty:
+                st.error("Serie elettrica giornaliera non costruibile (nessun dato valido o nessuna ora peak).")
+            else:
+                ris_cg = calcola_cointegrazione(
+                    _pw172, s_gas172, regression=_reg_map172[cg_reg],
+                    lags="auto" if cg_lagmode == "Auto (AIC)" else cg_lag)
+                if not ris_cg["valido"]:
+                    st.error(ris_cg["errore"])
+                else:
+                    k1, k2, k3, k4 = st.columns(4)
+                    with k1:
+                        st.metric("Beta (hedge ratio)", f"{ris_cg['beta']:.2f}")
+                    with k2:
+                        st.metric("Statistica EG", f"{ris_cg['stat']:.2f}")
+                    with k3:
+                        st.metric("Cointegrata (5%)",
+                                  "SÌ ✅" if ris_cg["cointegrata"] else "NO ❌")
+                    with k4:
+                        st.metric("Half-life rientro",
+                                  f"{ris_cg['half_life_giorni']:.0f} gg" if ris_cg["half_life_giorni"] is not None else "n/d")
+                    if ris_cg["cointegrata"]:
+                        st.success(ris_cg["giudizio"])
+                    else:
+                        st.warning(ris_cg["giudizio"])
+                    st.caption(f"Regressione P = {ris_cg['alpha']:.2f} + {ris_cg['beta']:.2f} × Gas "
+                               f"(R² {ris_cg['r2']:.3f}) su {ris_cg['n_giorni']} giorni; "
+                               f"spread attuale {ris_cg['spread_eur']:+.2f} €/MWh "
+                               f"(z-score {ris_cg['z_score']:+.2f}); lag ADF {ris_cg['lags']}"
+                               f"{' (AIC)' if ris_cg['lags_auto'] else ''}.")
+
+                    st.markdown("**Statistica EG contro i valori critici di Engle-Granger**")
+                    _cv172 = ris_cg["cv"]
+                    _stat172 = ris_cg["stat"]
+                    if not np.isfinite(_stat172):
+                        _stat172 = _cv172[1] * 1.5
+                    fig_cg = go.Figure()
+                    fig_cg.add_bar(
+                        y=["Statistica EG", "Critico 1%", "Critico 5%", "Critico 10%"],
+                        x=[_stat172, _cv172[1], _cv172[5], _cv172[10]],
+                        orientation="h",
+                        marker_color=["#2563EB", "#9CA3AF", "#9CA3AF", "#9CA3AF"])
+                    fig_cg.update_layout(
+                        xaxis_title="Statistica: più negativa del critico = cointegrazione",
+                        margin=dict(l=10, r=10, t=10, b=10))
+                    st.plotly_chart(fig_cg, use_container_width=True)
+                    st.caption("H0 (nessuna cointegrazione) si rifiuta quando la barra blu supera a sinistra il valore critico.")
+
+                    df_sc172 = ris_cg["df_serie"]
+                    st.markdown("**Equilibrio di lungo periodo** (retta OLS gas → power)")
+                    _xg172 = df_sc172["Gas (€/MWh)"].to_numpy()
+                    _yg172 = df_sc172["Power (€/MWh)"].to_numpy()
+                    _xl172 = np.linspace(float(_xg172.min()), float(_xg172.max()), 50)
+                    fig_cg2 = go.Figure()
+                    fig_cg2.add_scatter(x=_xg172, y=_yg172, mode="markers",
+                                        name="Giorni osservati",
+                                        marker=dict(size=4, color="#2563EB", opacity=0.6))
+                    fig_cg2.add_scatter(x=_xl172, y=ris_cg["alpha"] + ris_cg["beta"] * _xl172,
+                                        mode="lines", name="Equilibrio OLS",
+                                        line=dict(color="#DC2626", width=2))
+                    fig_cg2.update_layout(xaxis_title="Gas TTF (€/MWh)",
+                                          yaxis_title="Power (€/MWh)",
+                                          margin=dict(l=10, r=10, t=10, b=10))
+                    st.plotly_chart(fig_cg2, use_container_width=True)
+
+                    st.markdown("**Spread (residui) rispetto all'equilibrio** con bande ±1/±2σ")
+                    _sd172 = ris_cg["std_residui"]
+                    fig_cg3 = go.Figure()
+                    fig_cg3.add_scatter(x=df_sc172["Giorno"], y=df_sc172["Residuo (€/MWh)"],
+                                        mode="lines", name="Residuo",
+                                        line=dict(color="#2563EB", width=1.5))
+                    for _mult172, _col172, _dash172 in ((2, "#DC2626", "dash"), (1, "#F59E0B", "dot")):
+                        fig_cg3.add_hline(y=_mult172 * _sd172, line_dash=_dash172, line_color=_col172,
+                                          annotation_text=f"+{_mult172}σ")
+                        fig_cg3.add_hline(y=-_mult172 * _sd172, line_dash=_dash172, line_color=_col172,
+                                          annotation_text=f"−{_mult172}σ")
+                    fig_cg3.add_hline(y=0, line_color="#16A34A", annotation_text="Equilibrio")
+                    fig_cg3.update_layout(yaxis_title="Residuo (€/MWh)",
+                                          margin=dict(l=10, r=10, t=10, b=10))
+                    st.plotly_chart(fig_cg3, use_container_width=True)
+
+                    df_m172 = ris_cg["df_mesi"]
+                    if len(df_m172):
+                        st.markdown("**Residuo medio mese per mese** (scostamento dall'equilibrio)")
+                        _colmap172 = {"positivo": "#DC2626", "negativo": "#16A34A"}
+                        _segno172 = df_m172["Residuo medio (€/MWh)"].apply(
+                            lambda v: "positivo" if v >= 0 else "negativo")
+                        fig_cg4 = go.Figure()
+                        fig_cg4.add_bar(x=df_m172["Mese"],
+                                        y=df_m172["Residuo medio (€/MWh)"],
+                                        marker_color=_segno172.map(_colmap172))
+                        fig_cg4.add_hline(y=0, line_color="#6B7280")
+                        fig_cg4.update_layout(yaxis_title="Residuo medio (€/MWh)",
+                                              margin=dict(l=10, r=10, t=10, b=10))
+                        st.plotly_chart(fig_cg4, use_container_width=True)
+                        st.dataframe(df_m172, use_container_width=True, hide_index=True)
+                        cexp1, cexp2 = st.columns(2)
+                        with cexp1:
+                            st.download_button(
+                                "⬇️ Esporta serie giornaliera (CSV)",
+                                df_sc172.to_csv(index=False, sep=";").encode("utf-8"),
+                                file_name=f"cointegrazione_giornaliera_{d0}_{d1}.csv",
+                                mime="text/csv",
+                                key="cg172_csv_serie",
+                                help="Una riga per giorno: gas, power, residuo dall'equilibrio e z-score.",
+                            )
+                        with cexp2:
+                            st.download_button(
+                                "⬇️ Esporta residui mensili (CSV)",
+                                df_m172.to_csv(index=False, sep=";").encode("utf-8"),
+                                file_name=f"cointegrazione_mensile_{d0}_{d1}.csv",
+                                mime="text/csv",
+                                key="cg172_csv_mesi",
+                                help="Una riga per mese: giorni osservati, residuo medio e z-score medio.",
+                            )
 
 
 # Footer
