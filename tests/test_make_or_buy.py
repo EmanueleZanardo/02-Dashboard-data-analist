@@ -155,7 +155,7 @@ def test_registry_tab177():
     from pathlib import Path
     src = Path(__file__).resolve().parent.parent.joinpath("app.py").read_text(encoding="utf-8")
     tree = ast.parse(src)
-    # la dichiarazione st.tabs contiene 177 titoli, variabili tab1..tab177
+    # la dichiarazione st.tabs contiene 178 titoli, variabili tab1..tab178
     found = []
 
     class V(ast.NodeVisitor):
@@ -169,11 +169,11 @@ def test_registry_tab177():
 
     V().visit(tree)
     assert found, "nessuna chiamata st.tabs trovata"
-    assert found[-1] == 177, f"titoli dichiarati: {found[-1]}"
+    assert found[-1] == 178, f"titoli dichiarati: {found[-1]}"
     assert "tab177" in src
     assert "with tab177:" in src
     assert "⚖️ Autoproduzione vs acquisto" in src
     # sequenza variabili senza buchi
     import re
     vars_ = sorted({int(m.group(1)) for m in re.finditer(r"\btab(\d+)\b", src)})
-    assert vars_ == list(range(1, 178)), "buchi nella sequenza tabN"
+    assert vars_ == list(range(1, 179)), "buchi nella sequenza tabN"
