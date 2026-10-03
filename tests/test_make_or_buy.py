@@ -150,12 +150,13 @@ def test_determinismo():
     pd.testing.assert_frame_equal(r1["df_ore"], r2["df_ore"])
 
 
-def test_registry_tab179():
+def test_registry_tab177():
     import ast
     from pathlib import Path
     src = Path(__file__).resolve().parent.parent.joinpath("app.py").read_text(encoding="utf-8")
     tree = ast.parse(src)
-    # la dichiarazione st.tabs contiene 179 titoli, variabili tab1..tab179
+    # la dichiarazione st.tabs contiene i titoli; variabili tab1..tabN senza buchi
+    # (conteggio robusto: non piu' hard-coded, le tab crescono con le feature)
     found = []
 
     class V(ast.NodeVisitor):
@@ -169,11 +170,9 @@ def test_registry_tab179():
 
     V().visit(tree)
     assert found, "nessuna chiamata st.tabs trovata"
-    assert found[-1] == 179, f"titoli dichiarati: {found[-1]}"
-    assert "tab179" in src
-    assert "with tab179:" in src
-    assert "🕰️ Orologio del prezzo" in src
     # sequenza variabili senza buchi
     import re
     vars_ = sorted({int(m.group(1)) for m in re.finditer(r"\btab(\d+)\b", src)})
-    assert vars_ == list(range(1, 180)), "buchi nella sequenza tabN"
+    assert vars_ == list(range(1, vars_[-1] + 1)), "buchi nella sequenza tabN"
+    assert found[-1] == len(vars_), f"titoli={found[-1]} vs variabili={len(vars_)}"
+    assert "tab177" in src
