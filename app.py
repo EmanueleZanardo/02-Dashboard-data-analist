@@ -24264,6 +24264,144 @@ def calcola_revenue_stacking(prezzi, pot_mw=2.0, cap_mwh=4.0, eff=0.85,
             "singoli_eur": singoli}
 
 
+def calcola_carbonio_implicito(prezzi, prezzo_gas_eur_mwh=40.0, heat_rate=2.0,
+                               fattore_emissione_t_mwh_th=0.202,
+                               vom_eur_mwh=3.0, prezzo_eua_riferimento=75.0):
+    """CO2 implicita nello spark spread di un CCGT: quale prezzo della CO2
+    azzera il margine ora per ora.
+
+    Domanda operativa: "il mercato power sta prezzando la CO2 sopra o sotto
+    il prezzo spot degli EUA?" — per un ciclo combinato a gas, il margine
+    orario e'  P_h - G*HR - CO2*EF*HR - VOM.  Ponendolo a zero si ricava la
+    CO2 implicita:  CO2_impl_h = (P_h - G*HR - VOM) / (EF*HR), in EUR/t.
+
+    - prezzi: Series oraria dei prezzi elettrici (EUR/MWh, indice datetime;
+      tz-aware reso naive come negli altri tab);
+    - prezzo_gas_eur_mwh: prezzo del gas (EUR/MWh termico, scalare);
+    - heat_rate: MWh termici per MWh elettrico (2.0 = rendimento 50%);
+    - fattore_emissione_t_mwh_th: tCO2 per MWh termico di gas (0.202 default);
+    - vom_eur_mwh: costi variabili O&M per MWh elettrico;
+    - prezzo_eua_riferimento: prezzo spot EUA per il confronto (EUR/t).
+
+    Ritorna dict con 'valido'/'errore', co2_media, co2_mediana, co2_p10,
+    co2_p90, quota_sopra_riferimento_pct, ore_con_margine_positivo,
+    clean_spark_medio (margine con l'EUA al prezzo di riferimento),
+    giudizio, verdetto, df_oraria (Ora, Prezzo, CO2 implicita),
+    df_mensile (Mese, CO2 implicita media, Ore).
+
+    Giudizio: "CO2 SOPRA L'EUA" se la mediana implicita supera il riferimento
+    di oltre il 10% (il power paga un premio carbone oltre l'EUA, tipico con
+    margini termici tesi); "CO2 SOTTO L'EUA" se sta oltre il 10% sotto
+    (marginale non a gas o spark depresso); "IN LINEA" altrimenti.
+
+    NaN-safe: serie vuota / non numerica / indice non-datetime, parametri non
+    validi -> errore pulito, mai eccezioni.
+    """
+    def _err(msg):
+        return {"valido": False, "errore": msg}
+
+    # --- pulizia serie prezzi ---
+    if not isinstance(prezzi, pd.Series):
+        return _err("prezzi deve essere una Series pandas con indice datetime.")
+    s = prezzi.copy()
+    try:
+        s.index = pd.to_datetime(s.index, errors="coerce")
+    except Exception:
+        return _err("prezzi deve avere un indice datetime valido.")
+    if s.index.isna().any():
+        return _err("prezzi deve avere un indice datetime valido.")
+    try:
+        if getattr(s.index, "tz", None) is not None:
+            s.index = s.index.tz_localize(None)
+    except Exception:
+        return _err("prezzi deve avere un indice datetime valido.")
+    s = s[~s.index.duplicated(keep="first")].sort_index()
+    s = pd.to_numeric(s, errors="coerce").dropna()
+    if len(s) == 0:
+        return _err("Serie prezzi vuota: niente da analizzare.")
+
+    # --- validazione parametri ---
+    def _num(v, nome, minimo, massimo=None):
+        if isinstance(v, bool):
+            return None, f"{nome} deve essere un numero >= {minimo}."
+        try:
+            x = float(v)
+        except (TypeError, ValueError):
+            return None, f"{nome} deve essere un numero >= {minimo}."
+        if not np.isfinite(x) or x < minimo:
+            return None, f"{nome} deve essere un numero >= {minimo}."
+        if massimo is not None and x > massimo:
+            return None, f"{nome} deve essere un numero <= {massimo}."
+        return x, None
+
+    gas, em = _num(prezzo_gas_eur_mwh, "prezzo_gas_eur_mwh", 0.0)
+    if em:
+        return _err(em)
+    hr, em = _num(heat_rate, "heat_rate", 1.0, 5.0)
+    if em:
+        return _err(em)
+    ef, em = _num(fattore_emissione_t_mwh_th, "fattore_emissione_t_mwh_th", 1e-6)
+    if em:
+        return _err(em)
+    vom, em = _num(vom_eur_mwh, "vom_eur_mwh", 0.0)
+    if em:
+        return _err(em)
+    eua_ref, em = _num(prezzo_eua_riferimento, "prezzo_eua_riferimento", 0.0)
+    if em:
+        return _err(em)
+
+    # --- calcolo ---
+    denom = ef * hr  # tCO2 per MWh elettrico
+    co2_impl = (s - gas * hr - vom) / denom
+    spark_pulito = s - gas * hr - eua_ref * denom - vom
+
+    media = float(co2_impl.mean())
+    mediana = float(co2_impl.median())
+    p10 = float(co2_impl.quantile(0.10))
+    p90 = float(co2_impl.quantile(0.90))
+    quota_sopra = float((co2_impl > eua_ref).mean() * 100.0)
+    ore_pos = int((spark_pulito > 0).sum())
+    spark_medio = float(spark_pulito.mean())
+
+    if mediana > eua_ref * 1.10:
+        giudizio = "CO2 SOPRA L'EUA"
+        verdetto = ("Il mercato power prezza la CO2 oltre il 10% sopra lo spot "
+                    "EUA: margini termici tesi o premio di scarsita' sul "
+                    "marginale a gas.")
+    elif mediana < eua_ref * 0.90:
+        giudizio = "CO2 SOTTO L'EUA"
+        verdetto = ("La CO2 implicita sta oltre il 10% sotto lo spot EUA: "
+                    "spark spread depresso oppure il marginale non e' il gas "
+                    "(carbone, idro, import).")
+    else:
+        giudizio = "IN LINEA"
+        verdetto = ("La CO2 implicita e' allineata allo spot EUA (entro il "
+                    "10%): il prezzo power riflette fedelmente gas + carbonio.")
+
+    df_oraria = pd.DataFrame({
+        "Ora": co2_impl.index,
+        "Prezzo (EUR/MWh)": s.values.round(2),
+        "CO2 implicita (EUR/t)": co2_impl.values.round(2),
+    })
+    mens = co2_impl.groupby(pd.Grouper(freq="M"))
+    df_mensile = pd.DataFrame({
+        "Mese": [d.strftime("%Y-%m") for d in mens.mean().index],
+        "CO2 implicita media (EUR/t)": mens.mean().values.round(2),
+        "Ore": mens.size().values,
+    })
+
+    return {"valido": True, "errore": None,
+            "co2_media": media, "co2_mediana": mediana,
+            "co2_p10": p10, "co2_p90": p90,
+            "quota_sopra_riferimento_pct": quota_sopra,
+            "ore_con_margine_positivo": ore_pos,
+            "clean_spark_medio": spark_medio,
+            "giudizio": giudizio, "verdetto": verdetto,
+            "df_oraria": df_oraria, "df_mensile": df_mensile,
+            "n_ore": len(s), "heat_rate": hr,
+            "emissioni_t_mwh_e": denom}
+
+
 # ==========================================
 # WORKSPACE 1: SIMULATORE STRATEGICO
 # ==========================================
@@ -24908,7 +25046,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -40901,6 +41039,91 @@ elif workspace == _('ws8'):
                 mime="text/csv",
                 key="rs184_csv",
                 help="Una riga per giorno: spread netto e ricavi per flusso.",
+            )
+
+
+    with tab185:
+        titolo_co2i = edu("CO₂ implicita", "Quale prezzo della CO2 rende nullo il margine di un ciclo combinato a gas, ora per ora: CO2_impl = (P - G*HR - VOM) / (EF*HR). Se la mediana sta sopra lo spot EUA, il mercato power paga un premio oltre la CO2 (margini termici tesi); se sta sotto, il marginale non e' il gas oppure lo spark e' depresso.")
+        st.markdown(f"<h1>💨 {titolo_co2i}</h1>", unsafe_allow_html=True)
+        st.caption("Il prezzo della CO2 che il mercato elettrico prezza dentro lo spark spread, confrontato con lo spot EUA.")
+        c1a_co2i, c1b_co2i, c1c_co2i = st.columns(3)
+        with c1a_co2i:
+            gas_co2i = st.number_input("Prezzo gas (EUR/MWh termico)", min_value=0.0, value=40.0, step=1.0,
+                                      key="co2i185_gas",
+                                      help="Prezzo del gas del marginale termico (es. TTF).")
+            eua_co2i = st.number_input("Prezzo spot EUA (EUR/t)", min_value=0.0, value=75.0, step=1.0,
+                                      key="co2i185_eua",
+                                      help="Quotazione spot dei permessi EU ETS usata come riferimento.")
+        with c1b_co2i:
+            tec_co2i = st.selectbox("Tecnologia marginale",
+                                    ["CCGT 55% (HR 1.82)", "CCGT 50% (HR 2.00)",
+                                     "OCGT 40% (HR 2.50)", "Personalizzato"],
+                                    key="co2i185_tec",
+                                    help="Rendimento del ciclo combinato marginale: definisce heat rate ed emissioni per MWh.")
+            if tec_co2i == "Personalizzato":
+                hr_co2i = st.number_input("Heat rate (MWh_th/MWh_e)", min_value=1.0, max_value=5.0,
+                                         value=2.0, step=0.05, key="co2i185_hr")
+            else:
+                hr_co2i = float(tec_co2i.split("HR")[1].strip(" )"))
+                st.caption(f"Heat rate: {hr_co2i:.2f} — emissioni: {0.202 * hr_co2i:.3f} tCO2/MWh.")
+        with c1c_co2i:
+            vom_co2i = st.number_input("VOM (EUR/MWh elettrico)", min_value=0.0, value=3.0, step=0.5,
+                                      key="co2i185_vom",
+                                      help="Costi variabili O&M del CCGT per MWh elettrico prodotto.")
+
+        ris_co2i = calcola_carbonio_implicito(
+            prezzi, prezzo_gas_eur_mwh=gas_co2i, heat_rate=hr_co2i,
+            vom_eur_mwh=vom_co2i, prezzo_eua_riferimento=eua_co2i)
+        if not ris_co2i["valido"]:
+            st.error(ris_co2i["errore"])
+        else:
+            k1_co2i, k2_co2i, k3_co2i, k4_co2i = st.columns(4)
+            render_kpi("CO₂ implicita media (EUR/t)", f"{ris_co2i['co2_media']:.1f}", k1_co2i)
+            render_kpi("CO₂ implicita mediana (EUR/t)", f"{ris_co2i['co2_mediana']:.1f}", k2_co2i)
+            render_kpi("Ore sopra lo spot EUA (%)", f"{ris_co2i['quota_sopra_riferimento_pct']:.0f} %", k3_co2i)
+            render_kpi("Clean spark medio (EUR/MWh)", f"{ris_co2i['clean_spark_medio']:+.1f}", k4_co2i)
+
+            st.info(f"**{ris_co2i['giudizio']}** — {ris_co2i['verdetto']}")
+
+            df_o_co2i = ris_co2i["df_oraria"]
+            fig_co2i = go.Figure()
+            fig_co2i.add_trace(go.Scatter(x=df_o_co2i["Ora"], y=df_o_co2i["CO2 implicita (EUR/t)"],
+                                         mode="lines", name="CO2 implicita",
+                                         line=dict(color="#10B981", width=1.5)))
+            fig_co2i.add_hline(y=eua_co2i, line_dash="dash", line_color="#F59E0B",
+                               annotation_text=f"Spot EUA {eua_co2i:.0f} EUR/t")
+            fig_co2i.update_layout(template="plotly_dark", height=380,
+                                   title="CO2 implicita oraria vs spot EUA",
+                                   xaxis_title="Data e Ora", yaxis_title="EUR/t",
+                                   hovermode="x unified")
+            st.plotly_chart(fig_co2i, use_container_width=True)
+
+            fig_hi_co2i = go.Figure()
+            fig_hi_co2i.add_trace(go.Histogram(x=df_o_co2i["CO2 implicita (EUR/t)"],
+                                              nbinsx=60, name="Distribuzione",
+                                              marker_color="#10B981", opacity=0.75))
+            fig_hi_co2i.add_vline(x=eua_co2i, line_dash="dash", line_color="#F59E0B",
+                                 annotation_text="Spot EUA")
+            fig_hi_co2i.update_layout(template="plotly_dark", height=320,
+                                      title="Distribuzione della CO2 implicita",
+                                      xaxis_title="EUR/t", yaxis_title="Ore")
+            st.plotly_chart(fig_hi_co2i, use_container_width=True)
+
+            st.markdown("**Media mensile**")
+            st.dataframe(ris_co2i["df_mensile"], use_container_width=True, hide_index=True)
+            st.caption("Limiti del modello: gas costante sul periodo (in realta' il TTF si muove ogni giorno); "
+                       "marginale sempre a gas (ignora carbone, idro e import); niente costi di avviamento ne' "
+                       "vincoli tecnici del CCGT; la CO2 implicita negativa indica ore in cui il gas non copre "
+                       "neppure il combustibile.")
+            d0c_co2i = df_o_co2i["Ora"].min().strftime("%Y%m%d")
+            d1c_co2i = df_o_co2i["Ora"].max().strftime("%Y%m%d")
+            st.download_button(
+                "⬇️ Esporta CO2 implicita (CSV)",
+                df_o_co2i.to_csv(index=False, sep=";").encode("utf-8"),
+                file_name=f"co2_implicita_{d0c_co2i}_{d1c_co2i}.csv",
+                mime="text/csv",
+                key="co2i185_csv",
+                help="Una riga per ora: prezzo e CO2 implicita.",
             )
 
 
