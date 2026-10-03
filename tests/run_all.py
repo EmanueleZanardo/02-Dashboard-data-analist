@@ -42,8 +42,20 @@ def main() -> int:
         if not m:
             m = re.search(r"check\s*=\s*(\d+)[^\d]{0,10}fail\w*\s*=\s*(\d+)",
                           out, re.IGNORECASE)
-        if not m and re.search(r"FAILS?(?:URES)?:\s*(none|nessuno|0)\b", out,
-                               re.IGNORECASE):
+        if not m:
+            m = re.search(r"checks?\s*=\s*(\d+)\s*,?\s*fails?\s*=\s*(\d+)",
+                          out, re.IGNORECASE)
+        if not m:
+            m = re.search(r"(\d+)\s+checks?,\s*(\d+)\s*fails?", out, re.IGNORECASE)
+        m_ag = re.search(r"ALL GREEN\s*\(\s*(\d+)\s+checks?\)", out, re.IGNORECASE)
+        if not m and m_ag:
+            # "ALL GREEN (29 checks)": dichiarazione esplicita di tutto-verde
+            c, fl = int(m_ag.group(1)), 0
+        elif not m and re.search(r"TUTTI I CHECK VERDI", out, re.IGNORECASE):
+            # stile legacy senza numeri: 0 fail, i check si contano dalle righe PASS
+            c, fl = len(re.findall(r"(?m)^PASS\b", out)), 0
+        elif not m and re.search(r"FAILS?(?:URES)?:\s*(none|nessuno|0)\b", out,
+                                 re.IGNORECASE):
             # stili legacy alternativi ("FAILURES: none", "FAILS: nessuno",
             # "FAILURES: 0"): 0 fail, i check si contano dalle righe PASS
             c, fl = len(re.findall(r"(?m)^PASS\b", out)), 0
