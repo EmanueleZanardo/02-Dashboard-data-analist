@@ -23255,6 +23255,131 @@ def calcola_curva_forward_attesa(prezzi, prezzo_base=None, data_inizio=None,
             "media_annua": media_ann, "q_bassa": qb, "q_alta": qa}
 
 
+def calcola_costo_ritardo_fixing(prezzi, settimane_attesa=4, soglia_eur=5.0):
+    """Costo atteso del ritardo di fissazione: replay storico del 'wait k weeks'.
+
+    Domanda operativa: "devo fissare un prezzo a termine - quanto mi costa
+    ASPETTARE k settimane prima di fissare?" La serie oraria viene aggregata in
+    medie settimanali di calendario; per ogni settimana dello storico si misura
+    la variazione del prezzo medio a distanza di k settimane
+    (Delta_k = media(t) - media(t-k), rolling sulle settimane). La distribuzione
+    dei Delta storici e' la stima empirica del costo del ritardo: per un
+    COMPRATORE, Delta > 0 = aspettare e' costato di piu' (rimpianto),
+    Delta < 0 = aspettare ha fatto risparmiare. Statistiche: costo atteso
+    (media dei Delta), mediana, P10/P90, probabilita' di risparmio aspettando,
+    probabilita' che il ritardo costi piu' della soglia di tolleranza,
+    rimpianto massimo storico e miglior risparmio storico. La 'curva del
+    rimpianto' ripete il calcolo per k = 1..K_max e mostra come il rischio di
+    timing cresce con l'orizzonte (E|Delta_k| e P90). Giudizio sul rischio di
+    timing: spread P90-P10 rapportato al prezzo medio settimanale
+    (ALTO >= 25%, MODERATO >= 10%, CONTENUTA sotto; NON VALUTABILE se il prezzo
+    medio settimanale non e' positivo).
+
+    Ritorna dict con valido/errore, df_settimane (Settimana, Prezzo medio
+    (EUR/MWh)), df_delta (Settimana, Variazione (EUR/MWh)) per il k scelto,
+    costo_atteso, mediana_delta, std_delta, p10, p90, prob_risparmio,
+    prob_sopra_soglia, max_rimpianto, max_risparmio, prezzo_medio_settimanale,
+    df_curva_rimpianto (Settimane di attesa, Costo atteso |Delta| (EUR/MWh),
+    P90 Delta (EUR/MWh), Media Delta (EUR/MWh)), giudizio, n_settimane, n_oss,
+    settimane_attesa, soglia_eur.
+    """
+    def _err(msg):
+        return {"valido": False, "errore": msg}
+    # --- validazione parametri ---
+    if isinstance(settimane_attesa, bool) or not isinstance(settimane_attesa, (int, np.integer)):
+        return _err("settimane_attesa deve essere un intero tra 1 e 26.")
+    k = int(settimane_attesa)
+    if not 1 <= k <= 26:
+        return _err("settimane_attesa deve essere un intero tra 1 e 26.")
+    if isinstance(soglia_eur, bool):
+        return _err("soglia_eur deve essere un numero >= 0.")
+    try:
+        soglia = float(soglia_eur)
+    except (TypeError, ValueError):
+        return _err("soglia_eur deve essere un numero >= 0.")
+    if not np.isfinite(soglia) or soglia < 0:
+        return _err("soglia_eur deve essere un numero finito >= 0.")
+    # --- pulizia serie ---
+    try:
+        s = pd.Series(prezzi)
+    except Exception:
+        return _err("prezzi: serie non valida.")
+    if s.empty:
+        return _err("prezzi: serie vuota.")
+    try:
+        idx = pd.DatetimeIndex(s.index)
+    except Exception:
+        return _err("prezzi: indice non datetime.")
+    if idx.tz is not None:
+        idx = idx.tz_localize(None)
+    s = pd.Series(pd.to_numeric(s, errors="coerce").to_numpy(), index=idx)
+    s = s[~s.index.isna()].dropna()
+    if s.empty:
+        return _err("prezzi: nessun valore numerico valido.")
+    s = s[~s.index.duplicated(keep="first")].sort_index()
+    # --- medie settimanali di calendario ---
+    try:
+        sett = s.resample("W").mean().dropna()
+    except Exception as e:
+        return _err(f"aggregazione settimanale fallita: {e}")
+    n_sett = int(len(sett))
+    if n_sett < k + 2:
+        return _err(f"serie troppo corta: servono almeno {k + 2} settimane di "
+                    f"calendario per un'attesa di {k} settimane (disponibili {n_sett}).")
+    delta = sett.diff(k).dropna()
+    n_oss = int(len(delta))
+    vals = delta.to_numpy(dtype=float)
+    prezzo_medio = float(np.nanmean(sett.to_numpy(dtype=float)))
+    costo_atteso = float(np.nanmean(vals))
+    mediana = float(np.nanmedian(vals))
+    std = float(np.nanstd(vals, ddof=1)) if n_oss >= 2 else float("nan")
+    p10 = float(np.nanquantile(vals, 0.10))
+    p90 = float(np.nanquantile(vals, 0.90))
+    prob_risparmio = float(np.mean(vals < 0.0))
+    prob_sopra_soglia = float(np.mean(vals > soglia))
+    max_rimpianto = float(np.nanmax(vals))
+    max_risparmio = float(np.nanmin(vals))  # Delta piu' negativo = miglior risparmio
+    # --- giudizio sul rischio di timing ---
+    if not np.isfinite(prezzo_medio) or prezzo_medio <= 0:
+        giudizio = "NON VALUTABILE"
+        spread_pct = float("nan")
+    else:
+        spread_pct = float((p90 - p10) / prezzo_medio * 100.0)
+        if spread_pct >= 25.0:
+            giudizio = "ALTO"
+        elif spread_pct >= 10.0:
+            giudizio = "MODERATO"
+        else:
+            giudizio = "CONTENUTA"
+    # --- curva del rimpianto: k = 1..K_max ---
+    k_max = min(26, n_sett - 2)
+    righe = []
+    for kk in range(1, k_max + 1):
+        dk = sett.diff(kk).dropna().to_numpy(dtype=float)
+        righe.append({"Settimane di attesa": kk,
+                      "Costo atteso |Delta| (EUR/MWh)": float(np.mean(np.abs(dk))),
+                      "P90 Delta (EUR/MWh)": float(np.nanquantile(dk, 0.90)),
+                      "Media Delta (EUR/MWh)": float(np.mean(dk)),
+                      "N osservazioni": int(len(dk))})
+    df_curva = pd.DataFrame(righe)
+    df_settimane = pd.DataFrame({"Settimana": sett.index.strftime("%Y-%m-%d"),
+                                 "Prezzo medio (EUR/MWh)": sett.to_numpy(dtype=float)})
+    df_d = pd.DataFrame({"Settimana": delta.index.strftime("%Y-%m-%d"),
+                         "Variazione (EUR/MWh)": vals})
+    return {"valido": True, "errore": None,
+            "df_settimane": df_settimane, "df_delta": df_d,
+            "costo_atteso": costo_atteso, "mediana_delta": mediana,
+            "std_delta": std, "p10": p10, "p90": p90,
+            "prob_risparmio": prob_risparmio,
+            "prob_sopra_soglia": prob_sopra_soglia,
+            "max_rimpianto": max_rimpianto, "max_risparmio": max_risparmio,
+            "prezzo_medio_settimanale": prezzo_medio,
+            "spread_p90_p10_pct": spread_pct,
+            "df_curva_rimpianto": df_curva,
+            "giudizio": giudizio, "n_settimane": n_sett, "n_oss": n_oss,
+            "settimane_attesa": k, "soglia_eur": soglia}
+
+
 def calcola_scala_copertura(prezzi, mw_f1=2.0, mw_f2=2.0, mw_f3=2.0,
                             tranche=None, target_pct=80.0):
     """Scala di copertura mensile: quanta energia del periodo e' coperta a prezzo fisso.
@@ -24347,7 +24472,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -40051,6 +40176,90 @@ elif workspace == _('ws8'):
                 mime="text/csv",
                 key="cfa181_csv",
                 help="Una riga per mese: periodo, fattore stagionale, prezzo atteso e banda P10-P90.",
+            )
+
+
+    with tab182:
+        titolo_rdf = edu("Costo del ritardo di fissazione", "Devi fissare un prezzo a termine ma vorresti aspettare? Aspettare ha un costo misurabile: questa tab fa il REPLAY storico — per ogni settimana del periodo, simula 'cosa sarebbe successo se avessi aspettato k settimane' e misura la variazione del prezzo medio. Delta positivo = aspettare e' costato di piu' (rimpianto, sei un compratore), Delta negativo = aspettare ha fatto risparmiare. Ottieni il costo atteso del ritardo, il caso avverso P90, la probabilita' che aspettare abbia storicamente fatto risparmiare e la curva del rimpianto: come il rischio di timing cresce allungando l'attesa.")
+        st.markdown(f"<h1>⏳ {titolo_rdf}</h1>", unsafe_allow_html=True)
+        st.caption("Replay storico: se avessi aspettato k settimane prima di fissare, quanto sarebbe cambiato il prezzo?")
+        c1_rdf, c2_rdf = st.columns(2)
+        with c1_rdf:
+            sett_rdf = st.slider("Settimane di attesa", min_value=1, max_value=26, value=4,
+                                 key="rdf182_sett",
+                                 help="Orizzonte del ritardo da simulare sul passato (max 26 settimane).")
+        with c2_rdf:
+            soglia_rdf = st.number_input("Soglia di tolleranza (EUR/MWh)", min_value=0.0, value=5.0, step=1.0,
+                                         key="rdf182_soglia",
+                                         help="Ritardo 'accettabile' se costa meno di questa soglia; oltre, conta come sforamento.")
+        ris_rdf = calcola_costo_ritardo_fixing(prezzi, settimane_attesa=sett_rdf, soglia_eur=soglia_rdf)
+        if not ris_rdf["valido"]:
+            st.error(ris_rdf["errore"])
+        else:
+            k1, k2, k3, k4 = st.columns(4)
+            _fmt = lambda x: (f"{x:+,.1f} €/MWh".replace(",", "."))
+            with k1:
+                st.metric("Costo atteso del ritardo", _fmt(ris_rdf["costo_atteso"]),
+                          f"mediana {_fmt(ris_rdf['mediana_delta'])} — su {ris_rdf['n_oss']} replay")
+            with k2:
+                st.metric("Caso avverso P90", _fmt(ris_rdf["p90"]),
+                          f"P10 {_fmt(ris_rdf['p10'])}")
+            with k3:
+                st.metric("Prob. risparmio aspettando",
+                          f"{ris_rdf['prob_risparmio'] * 100:.0f}%",
+                          f"P(sforamento > {soglia_rdf:.0f} €/MWh): {ris_rdf['prob_sopra_soglia'] * 100:.0f}%")
+            with k4:
+                st.metric("Rimpianto max storico", _fmt(ris_rdf["max_rimpianto"]),
+                          f"miglior risparmio {_fmt(ris_rdf['max_risparmio'])}")
+            if ris_rdf["giudizio"] == "ALTO":
+                st.warning(f"Rischio di timing ALTO (spread P90-P10 = {ris_rdf['spread_p90_p10_pct']:,.1f}% del prezzo medio): aspettare {sett_rdf} settimane e' una scommessa costosa — il fixing ora elimina un rischio rilevante.".replace(",", "."))
+            elif ris_rdf["giudizio"] == "MODERATO":
+                st.info(f"Rischio di timing MODERATO (spread P90-P10 = {ris_rdf['spread_p90_p10_pct']:,.1f}%): aspettare {sett_rdf} settimane costa in media {_fmt(ris_rdf['costo_atteso'])} con code fino a {_fmt(ris_rdf['p90'])}.".replace(",", "."))
+            elif ris_rdf["giudizio"] == "NON VALUTABILE":
+                st.info("Giudizio sul rischio non valutabile (prezzo medio settimanale non positivo); le statistiche sui Delta restano valide.")
+            else:
+                st.success(f"Rischio di timing CONTENUTO (spread P90-P10 = {ris_rdf['spread_p90_p10_pct']:,.1f}%): aspettare {sett_rdf} settimane muove il prezzo di poco — il timing e' meno critico.".replace(",", "."))
+            _dlt = ris_rdf["df_delta"]["Variazione (EUR/MWh)"].to_numpy(dtype=float)
+            fig_rdf = go.Figure()
+            fig_rdf.add_trace(go.Histogram(x=_dlt, nbinsx=min(30, max(5, ris_rdf["n_oss"] // 3)),
+                                           name="Replay storici", marker_color="#3b82f6", opacity=0.75))
+            for _xv, _nm, _cl in [(ris_rdf["costo_atteso"], "Costo atteso", "#dc2626"),
+                                  (ris_rdf["p90"], "P90", "#f59e0b"),
+                                  (ris_rdf["p10"], "P10", "#059669")]:
+                fig_rdf.add_vline(x=_xv, line_dash="dash", line_color=_cl,
+                                  annotation_text=f"{_nm} {_xv:+.1f}".replace(",", "."))
+            fig_rdf.update_layout(title=f"Distribuzione del costo del ritardo ({sett_rdf} settimane di attesa)",
+                                  xaxis_title="Variazione prezzo EUR/MWh (+ = aspettare e' costato di piu')",
+                                  yaxis_title="N. replay storici")
+            st.plotly_chart(fig_rdf, use_container_width=True)
+            _cur = ris_rdf["df_curva_rimpianto"]
+            fig_rdf2 = go.Figure()
+            fig_rdf2.add_trace(go.Scatter(x=_cur["Settimane di attesa"].tolist(),
+                                          y=_cur["Costo atteso |Delta| (EUR/MWh)"].tolist(),
+                                          mode="lines+markers", line=dict(color="#1d4ed8", width=2),
+                                          name="Costo atteso |Delta|"))
+            fig_rdf2.add_trace(go.Scatter(x=_cur["Settimane di attesa"].tolist(),
+                                          y=_cur["P90 Delta (EUR/MWh)"].tolist(),
+                                          mode="lines+markers", line=dict(color="#f59e0b", width=2, dash="dash"),
+                                          name="P90 Delta"))
+            fig_rdf2.add_trace(go.Scatter(x=_cur["Settimane di attesa"].tolist(),
+                                          y=_cur["Media Delta (EUR/MWh)"].tolist(),
+                                          mode="lines+markers", line=dict(color="#6b7280", width=1.5),
+                                          name="Media Delta (segno)"))
+            fig_rdf2.update_layout(title="Curva del rimpianto: rischio di timing vs orizzonte di attesa",
+                                   xaxis_title="Settimane di attesa", yaxis_title="EUR/MWh")
+            st.plotly_chart(fig_rdf2, use_container_width=True)
+            st.markdown("**Replay storici (variazioni a k settimane)**")
+            _dfd_show = ris_rdf["df_delta"].copy()
+            _dfd_show["Variazione (EUR/MWh)"] = _dfd_show["Variazione (EUR/MWh)"].round(1)
+            st.dataframe(_dfd_show, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta replay (CSV)",
+                ris_rdf["df_delta"].to_csv(index=False, sep=";").encode("utf-8"),
+                file_name=f"costo_ritardo_fixing_{d0}_{d1}.csv",
+                mime="text/csv",
+                key="rdf182_csv",
+                help="Una riga per settimana: variazione del prezzo medio a k settimane di distanza.",
             )
 
 
