@@ -23112,6 +23112,149 @@ def calcola_quantili_orari(prezzi, q_bassa=10.0, q_alta=90.0):
             "q_bassa": qb, "q_alta": qa}
 
 
+def calcola_curva_forward_attesa(prezzi, prezzo_base=None, data_inizio=None,
+                                 n_mesi=12, q_bassa=10.0, q_alta=90.0):
+    """Curva forward mensile attesa: stagionalita' storica x prezzo forward base.
+
+    Domanda operativa: "il broker mi quota il calendar a X EUR/MWh - come si
+    ripartisce mese per mese per il mio budget energia?" Dai prezzi orari
+    storici estrae il FATTORE STAGIONALE mensile (media del mese solare su
+    tutti gli anni / media annuale, stessa logica del tab Stagionalita') e la
+    dispersione intra-mese (quantili q_bassa/q_alta delle ore di quel mese su
+    tutti gli anni). Il prezzo forward base inserito dall'utente (o, in
+    mancanza, la media storica) viene scalato per i fattori: si ottiene la
+    curva forward mensile attesa con banda di incertezza, pronta per budget,
+    negoziazione e validazione delle quotazioni dei broker (confronto con il
+    tab Strip forward).
+
+    Ritorna dict con valido/errore, df_curva (Mese, Periodo, Fattore
+    stagionale, Prezzo atteso, Banda bassa, Banda alta), prezzo_base_usato,
+    mese_piu_caro / mese_piu_economico (dict {'periodo','prezzo'} o None),
+    ampiezza_eur, ampiezza_pct, giudizio ('ALTA'/'MODERATA'/'CONTENUTA'
+    stagionalita'), n_anni_storico, media_annua, q_bassa, q_alta.
+
+    NaN-safe: serie vuota / indice non datetime / parametri non validi /
+    media annua <= 0 / mese proiettato senza storico -> valido False con
+    errore pulito, mai eccezioni. Deterministico (quantili numpy,
+    interpolazione lineare).
+    """
+    try:
+        qb = float(q_bassa)
+        qa = float(q_alta)
+    except (TypeError, ValueError):
+        return {"valido": False, "errore": "Percentili di banda non validi.",
+                "df_curva": pd.DataFrame()}
+    if not (0.0 <= qb < qa <= 100.0):
+        return {"valido": False,
+                "errore": "Percentili non validi: serve 0 <= P_bassa < P_alta <= 100.",
+                "df_curva": pd.DataFrame()}
+    if isinstance(n_mesi, bool) or not isinstance(n_mesi, (int, np.integer)):
+        return {"valido": False,
+                "errore": "Numero di mesi non valido (serve un intero).",
+                "df_curva": pd.DataFrame()}
+    n_mesi = int(n_mesi)
+    if not (1 <= n_mesi <= 36):
+        return {"valido": False,
+                "errore": "Numero di mesi non valido: serve un intero tra 1 e 36.",
+                "df_curva": pd.DataFrame()}
+    base_in = None
+    if prezzo_base is not None:
+        try:
+            base_in = float(prezzo_base)
+        except (TypeError, ValueError):
+            return {"valido": False,
+                    "errore": "Prezzo forward base non valido.",
+                    "df_curva": pd.DataFrame()}
+        if not np.isfinite(base_in) or base_in <= 0:
+            return {"valido": False,
+                    "errore": "Prezzo forward base non valido: deve essere > 0.",
+                    "df_curva": pd.DataFrame()}
+    cols = ["Mese", "Periodo", "Fattore stagionale",
+            "Prezzo atteso (EUR/MWh)", "Banda bassa (EUR/MWh)",
+            "Banda alta (EUR/MWh)"]
+    vuoto = {"valido": False, "errore": None,
+             "df_curva": pd.DataFrame(columns=cols)}
+    try:
+        p = prezzi.astype(float).dropna()
+        p = p[~p.index.duplicated(keep="first")].sort_index()
+    except Exception:
+        return dict(vuoto, errore="Serie prezzi non valida.")
+    if len(p) == 0:
+        return dict(vuoto, errore="Serie prezzi vuota.")
+    try:
+        idxn = p.index.tz_localize(None) if p.index.tz is not None else p.index
+        mesi_idx = np.asarray(idxn.month)
+    except Exception:
+        return dict(vuoto, errore="Indice prezzi non valido (serve un DatetimeIndex).")
+    vals = p.to_numpy(dtype=float)
+    media_ann = float(vals.mean())
+    if not np.isfinite(media_ann) or media_ann <= 0:
+        return dict(vuoto, errore="Media annua non positiva: la curva non si puo' scalare.")
+    stat = {}
+    for m in range(1, 13):
+        v = vals[mesi_idx == m]
+        if len(v) == 0:
+            continue
+        qq = np.quantile(v, [qb / 100.0, qa / 100.0])
+        media_m = float(v.mean())
+        stat[m] = {"fattore": float(media_m / media_ann),
+                   "p_bassa": float(qq[0]), "p_alta": float(qq[1]),
+                   "media_m": media_m}
+    try:
+        if data_inizio is None:
+            inizio = (pd.Timestamp(idxn.max()).normalize().replace(day=1)
+                      + pd.offsets.MonthBegin(1))
+        else:
+            inizio = pd.Timestamp(data_inizio).normalize().replace(day=1)
+    except Exception:
+        return dict(vuoto, errore="Data di inizio proiezione non valida.")
+    periodi = pd.date_range(start=inizio, periods=n_mesi, freq="MS")
+    mancanti = sorted({int(d.month) for d in periodi if int(d.month) not in stat})
+    if mancanti:
+        return dict(vuoto, errore="Storico insufficiente: nessun dato per "
+                   + ", ".join(f"mese {m}" for m in mancanti) + ".")
+    base = base_in if base_in is not None else media_ann
+    nomi = ["Gen", "Feb", "Mar", "Apr", "Mag", "Giu",
+            "Lug", "Ago", "Set", "Ott", "Nov", "Dic"]
+    righe = []
+    for d in periodi:
+        m = int(d.month)
+        s = stat[m]
+        atteso = base * s["fattore"]
+        if s["media_m"] > 0:
+            bb = atteso * s["p_bassa"] / s["media_m"]
+            ba = atteso * s["p_alta"] / s["media_m"]
+        else:
+            bb, ba = atteso, atteso
+        righe.append({"Mese": d.strftime("%Y-%m"),
+                      "Periodo": f"{nomi[m - 1]} {d.year}",
+                      "Fattore stagionale": round(s["fattore"], 3),
+                      "Prezzo atteso (EUR/MWh)": round(atteso, 2),
+                      "Banda bassa (EUR/MWh)": round(bb, 2),
+                      "Banda alta (EUR/MWh)": round(ba, 2)})
+    df = pd.DataFrame(righe, columns=cols)
+    att = df["Prezzo atteso (EUR/MWh)"].to_numpy(dtype=float)
+    i_max, i_min = int(np.argmax(att)), int(np.argmin(att))
+    amp = float(att[i_max] - att[i_min])
+    media_att = float(att.mean())
+    amp_pct = float(amp / media_att * 100.0) if media_att != 0 else 0.0
+    if amp_pct >= 30.0:
+        giudizio = "ALTA"
+    elif amp_pct >= 15.0:
+        giudizio = "MODERATA"
+    else:
+        giudizio = "CONTENUTA"
+    return {"valido": True, "errore": None, "df_curva": df,
+            "prezzo_base_usato": base,
+            "mese_piu_caro": {"periodo": df.loc[i_max, "Periodo"],
+                              "prezzo": float(att[i_max])},
+            "mese_piu_economico": {"periodo": df.loc[i_min, "Periodo"],
+                                   "prezzo": float(att[i_min])},
+            "ampiezza_eur": amp, "ampiezza_pct": amp_pct,
+            "giudizio": giudizio, "n_anni_storico": int(idxn.year.nunique()),
+            "media_annua": media_ann, "q_bassa": qb, "q_alta": qa}
+
+
 def calcola_scala_copertura(prezzi, mw_f1=2.0, mw_f2=2.0, mw_f3=2.0,
                             tranche=None, target_pct=80.0):
     """Scala di copertura mensile: quanta energia del periodo e' coperta a prezzo fisso.
@@ -24204,7 +24347,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -39828,6 +39971,86 @@ elif workspace == _('ws8'):
                 mime="text/csv",
                 key="qo180_csv",
                 help="Una riga per ora del giorno (0-23): N ore, min, quantili, max, media, ampiezza banda.",
+            )
+
+    with tab181:
+        titolo_cfa = edu("Curva forward attesa", "Il broker ti quota il calendar a un prezzo unico: questa tab lo ripartisce mese per mese usando la stagionalità storica del prezzo. Inserisci il prezzo forward base e ottieni la curva mensile attesa con banda di incertezza — pronta per il budget energia e per validare le quotazioni dei broker contro il valore implicito dello storico (tab Strip forward).")
+        st.markdown(f"<h1>📆 {titolo_cfa}</h1>", unsafe_allow_html=True)
+        st.caption("Curva forward mensile attesa: stagionalità storica × prezzo forward base.")
+        try:
+            _med_ann = float(np.nanmean(prezzi.to_numpy(dtype=float)))
+        except Exception:
+            _med_ann = float("nan")
+        c1_cfa, c2_cfa, c3_cfa = st.columns(3)
+        with c1_cfa:
+            base_cfa = st.number_input("Prezzo forward base (EUR/MWh)", min_value=0.01,
+                                       value=round(_med_ann, 1) if _med_ann == _med_ann else 100.0,
+                                       step=1.0, key="cfa181_base",
+                                       help="Quotazione forward (es. calendar) da ripartire sui mesi. Default = media storica del periodo.")
+        with c2_cfa:
+            nmesi_cfa = st.slider("Mesi di proiezione", min_value=1, max_value=36, value=12,
+                                  key="cfa181_mesi",
+                                  help="Quanti mesi in avanti proiettare la curva.")
+        with c3_cfa:
+            try:
+                _ult = pd.Timestamp(prezzi.index.max())
+                _def_inizio = (_ult.normalize().replace(day=1) + pd.offsets.MonthBegin(1)).date()
+            except Exception:
+                _def_inizio = pd.Timestamp.today().normalize().replace(day=1).date()
+            inizio_cfa = st.date_input("Inizio proiezione", value=_def_inizio, key="cfa181_inizio",
+                                       help="Primo mese della curva (default: mese dopo l'ultima ora disponibile).")
+        ris_cfa = calcola_curva_forward_attesa(prezzi, base_cfa, inizio_cfa, nmesi_cfa)
+        if not ris_cfa["valido"]:
+            st.error(ris_cfa["errore"])
+        else:
+            _dfc = ris_cfa["df_curva"]
+            k1, k2, k3, k4 = st.columns(4)
+            with k1:
+                st.metric("Prezzo base usato", f"{ris_cfa['prezzo_base_usato']:,.1f} €/MWh".replace(",", "."),
+                          f"stagionalità su {ris_cfa['n_anni_storico']} anni di storico")
+            with k2:
+                st.metric("Mese più caro atteso", ris_cfa["mese_piu_caro"]["periodo"],
+                          f"{ris_cfa['mese_piu_caro']['prezzo']:,.1f} €/MWh".replace(",", "."))
+            with k3:
+                st.metric("Mese più economico atteso", ris_cfa["mese_piu_economico"]["periodo"],
+                          f"{ris_cfa['mese_piu_economico']['prezzo']:,.1f} €/MWh".replace(",", "."))
+            with k4:
+                st.metric("Ampiezza stagionale", f"{ris_cfa['ampiezza_eur']:,.1f} €/MWh".replace(",", "."),
+                          f"{ris_cfa['ampiezza_pct']:,.1f}% — stagionalità {ris_cfa['giudizio']}".replace(",", "."))
+            if ris_cfa["giudizio"] == "ALTA":
+                st.warning(f"Stagionalità ALTA ({ris_cfa['ampiezza_pct']:,.1f}%): il prezzo atteso varia molto tra i mesi — vale la pena fissare i mesi cari in anticipo.".replace(",", "."))
+            elif ris_cfa["giudizio"] == "MODERATA":
+                st.info(f"Stagionalità MODERATA ({ris_cfa['ampiezza_pct']:,.1f}%): i mesi invernali/estivi meritano attenzione nel budget.".replace(",", "."))
+            else:
+                st.success(f"Stagionalità CONTENUTA ({ris_cfa['ampiezza_pct']:,.1f}%): la curva è quasi piatta, il calendar quota bene tutto l'anno.".replace(",", "."))
+            fig_cfa = go.Figure()
+            _x = _dfc["Periodo"].tolist()
+            fig_cfa.add_trace(go.Scatter(x=_x, y=_dfc["Banda alta (EUR/MWh)"].tolist(), mode="lines",
+                                         line=dict(width=0), showlegend=False, hoverinfo="skip"))
+            fig_cfa.add_trace(go.Scatter(x=_x, y=_dfc["Banda bassa (EUR/MWh)"].tolist(), mode="lines",
+                                         line=dict(width=0), fill="tonexty",
+                                         fillcolor="rgba(16,185,129,0.15)",
+                                         name=f"Banda P{ris_cfa['q_bassa']:g}–P{ris_cfa['q_alta']:g}"))
+            fig_cfa.add_trace(go.Scatter(x=_x, y=_dfc["Prezzo atteso (EUR/MWh)"].tolist(),
+                                         mode="lines+markers",
+                                         line=dict(color="#059669", width=2),
+                                         name="Prezzo atteso"))
+            fig_cfa.update_layout(title=f"Curva forward mensile attesa (base {ris_cfa['prezzo_base_usato']:,.1f} €/MWh)".replace(",", "."),
+                                  xaxis_title="Mese", yaxis_title="EUR/MWh")
+            st.plotly_chart(fig_cfa, use_container_width=True)
+            st.markdown("**Tabella della curva attesa**")
+            _dfc_show = _dfc.copy()
+            _dfc_show["Fattore stagionale"] = _dfc_show["Fattore stagionale"].round(3)
+            for _cc in ["Prezzo atteso (EUR/MWh)", "Banda bassa (EUR/MWh)", "Banda alta (EUR/MWh)"]:
+                _dfc_show[_cc] = _dfc_show[_cc].round(1)
+            st.dataframe(_dfc_show, use_container_width=True, hide_index=True)
+            st.download_button(
+                "⬇️ Esporta curva (CSV)",
+                _dfc.to_csv(index=False, sep=";").encode("utf-8"),
+                file_name=f"curva_forward_attesa_{d0}_{d1}.csv",
+                mime="text/csv",
+                key="cfa181_csv",
+                help="Una riga per mese: periodo, fattore stagionale, prezzo atteso e banda P10-P90.",
             )
 
 
