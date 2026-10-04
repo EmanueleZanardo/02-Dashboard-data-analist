@@ -27066,6 +27066,161 @@ def calcola_var_portafoglio(df_prezzi, posizioni, moltiplicatori=None,
         return _err("Errore interno: %s" % e)
 
 
+"""Sviluppo standalone helper tab199 - test logica prima dell'inserimento."""
+def genera_demo_basis(n_giorni=365, seed=199):
+    """Serie giornaliere sintetiche deterministiche: hub (GBM con stagionalita')
+    + basis mean-reverting (OU) con spike occasionali; locale = hub + basis."""
+    if isinstance(n_giorni, bool) or not isinstance(n_giorni, int):
+        n_giorni = 365
+    n_giorni = max(60, min(2000, n_giorni))
+    rng = np.random.default_rng(seed)
+    # Hub: GBM giornaliera intorno a 85 EUR/MWh + stagionalita' annua
+    t = np.arange(n_giorni)
+    shock = rng.standard_normal(n_giorni) * 0.045
+    hub = 85.0 * np.exp(np.cumsum(shock)
+                        + 0.15 * np.sin(2 * np.pi * t / 365.0))
+    hub = np.clip(hub, 5.0, 400.0)
+    # Basis: OU intorno a +4 EUR/MWh + spike occasionali (+/-)
+    mu, kappa, sigma = 4.0, 0.10, 1.1
+    basis = np.empty(n_giorni)
+    b = mu
+    for i in range(n_giorni):
+        b = b + kappa * (mu - b) + sigma * rng.standard_normal()
+        if rng.random() < 0.03:  # ~3% giorni: spike di congestione
+            b = b + rng.choice([-1.0, 1.0]) * rng.uniform(8.0, 22.0)
+        basis[i] = b
+    locale = hub + basis
+    idx = pd.date_range(end=pd.Timestamp.today().normalize(),
+                        periods=n_giorni, freq="D")
+    return pd.DataFrame({"Hub (€/MWh)": hub, "Locale (€/MWh)": locale},
+                        index=idx)
+
+
+def calcola_basis_risk(df_prezzi, col_hub, col_locale, confidenza=0.99,
+                       soglia_spike=3.0, volume_mwh_giorno=None):
+    """Analisi del rischio basis (locale - hub).
+
+    Ritorna dict con 'errore' (None se ok) e statistiche; mai eccezioni.
+    """
+    def _err(msg):
+        return {"errore": msg, "valido": False}
+
+    try:
+        if not isinstance(df_prezzi, pd.DataFrame) or df_prezzi.empty:
+            return _err("Dati prezzi mancanti o vuoti.")
+        if col_hub not in df_prezzi.columns:
+            return _err("Colonna hub '%s' non trovata." % col_hub)
+        if col_locale not in df_prezzi.columns:
+            return _err("Colonna locale '%s' non trovata." % col_locale)
+        if col_hub == col_locale:
+            return _err("Hub e locale devono essere due colonne diverse.")
+        if isinstance(confidenza, bool) or not isinstance(
+                confidenza, (int, float)) or not (0.90 < confidenza <= 0.9999):
+            return _err("Confidenza fuori intervallo (0.90, 0.9999].")
+        if isinstance(soglia_spike, bool) or not isinstance(
+                soglia_spike, (int, float)) or not (1.0 <= soglia_spike <= 10.0):
+            return _err("Soglia spike fuori intervallo [1, 10].")
+        vol = None
+        if volume_mwh_giorno is not None:
+            if (isinstance(volume_mwh_giorno, bool)
+                    or not isinstance(volume_mwh_giorno, (int, float))
+                    or not np.isfinite(volume_mwh_giorno)
+                    or volume_mwh_giorno < 0):
+                return _err("Volume esposto non valido (>= 0).")
+            vol = float(volume_mwh_giorno)
+
+        hub = pd.to_numeric(df_prezzi[col_hub], errors="coerce")
+        loc = pd.to_numeric(df_prezzi[col_locale], errors="coerce")
+        ok = hub.notna() & loc.notna()
+        hub, loc = hub[ok], loc[ok]
+        n = int(len(hub))
+        if n < 31:
+            return _err("Servono almeno 31 osservazioni allineate (trovate %d)." % n)
+
+        basis = loc - hub
+        b_media = float(basis.mean())
+        b_med = float(basis.median())
+        b_std = float(basis.std(ddof=1))
+        b_min = float(basis.min())
+        b_max = float(basis.max())
+        b_skew = float(basis.skew())
+        b_kurt = float(basis.kurt())
+        mean_loc = float(loc.mean())
+
+        # Decomposizione varianza: Var(loc) = Var(hub) + Var(basis) + 2*Cov
+        vh = float(hub.var(ddof=1))
+        vb = float(basis.var(ddof=1))
+        cv = float(hub.cov(basis))
+        vtot = vh + vb + 2.0 * cv
+        quota_basis = quota_hub = quota_cov = None
+        if vtot > 0:
+            quota_basis = vb / vtot
+            quota_hub = vh / vtot
+            quota_cov = 2.0 * cv / vtot
+
+        ratio = abs(b_std / mean_loc) if mean_loc != 0 else None
+
+        # VaR sulla variazione giornaliera del basis (perdita se il basis si
+        # muove contro: qui VaR = -quantile delle variazioni, €/MWh)
+        db = basis.diff().dropna()
+        q = float(db.quantile(1.0 - confidenza))
+        var_basis = -q
+        coda = db[db <= q]
+        es_basis = float(-coda.mean()) if len(coda) else 0.0
+        var_eur = var_basis * vol if vol else None
+        es_eur = es_basis * vol if vol else None
+
+        # Spike: |basis - media| > soglia * std
+        if b_std > 0:
+            dev = (basis - b_media).abs()
+            m_spike = dev > float(soglia_spike) * b_std
+            n_spike = int(m_spike.sum())
+            spike_max = float(dev[m_spike].max()) if n_spike else 0.0
+            date_spike = basis[m_spike].index
+        else:
+            n_spike, spike_max = 0, 0.0
+            date_spike = basis.iloc[0:0].index
+
+        # Giornate critiche: basis piu' alta (sfavorevole a chi compra locale)
+        df_crit = pd.DataFrame({
+            "Data": basis.index,
+            "Hub (€/MWh)": hub.values,
+            "Locale (€/MWh)": loc.values,
+            "Basis (€/MWh)": basis.values,
+        }).sort_values("Basis (€/MWh)", ascending=False).head(5)
+        df_crit["Data"] = pd.to_datetime(df_crit["Data"]).dt.strftime("%Y-%m-%d")
+
+        corr_hb = float(hub.corr(basis)) if b_std > 0 and vh > 0 else 0.0
+
+        if b_std == 0:
+            verdetto = "NULLO — basis costante: nessun rischio basis."
+        elif ratio is not None and ratio >= 0.10:
+            verdetto = ("ELEVATO — la volatilita' del basis supera il 10% del "
+                        "prezzo locale: coprire il basis o rinegoziare l'indice.")
+        elif ratio is not None and ratio >= 0.04:
+            verdetto = ("MODERATO — basis materiale: monitorare congestioni e "
+                        "differenziali di zona.")
+        else:
+            verdetto = "CONTENUTO — il basis e' una frazione piccola del prezzo."
+
+        return {"errore": None, "valido": True, "n_giorni": n,
+                "basis_media": b_media, "basis_mediana": b_med,
+                "basis_std": b_std, "basis_min": b_min, "basis_max": b_max,
+                "basis_skew": b_skew, "basis_kurt": b_kurt,
+                "mean_locale": mean_loc,
+                "quota_basis_var": quota_basis, "quota_hub_var": quota_hub,
+                "quota_cov_var": quota_cov,
+                "basis_su_prezzo": ratio,
+                "var_basis_mwh": float(var_basis), "es_basis_mwh": float(es_basis),
+                "var_eur_giorno": var_eur, "es_eur_giorno": es_eur,
+                "n_spike": n_spike, "spike_max_dev": spike_max,
+                "date_spike": list(date_spike),
+                "corr_hub_basis": corr_hb,
+                "serie_basis": basis, "serie_hub": hub, "serie_locale": loc,
+                "df_critiche": df_crit, "verdetto": verdetto}
+    except Exception as e:  # pragma: no cover - guardia totale
+        return {"errore": "Errore interno: %s" % e, "valido": False}
+
 # WORKSPACE 1: SIMULATORE STRATEGICO
 # =========================================="
 if workspace == _('ws1'):
@@ -27709,7 +27864,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -45199,6 +45354,159 @@ elif workspace == _('ws8'):
                                    file_name="var_portafoglio_componenti.csv", mime="text/csv",
                                    key="var198_csv_comp",
                                    help="VaR per componente, quota e standalone per commodity.")
+
+    with tab199:
+        titolo_br = edu("Basis risk", "Il basis e' la differenza tra il prezzo della tua zona di consegna (locale) e l'hub liquido di riferimento (es. PUN vs Germania, PSV vs TTF). Anche coprendo l'hub con future, il basis resta scoperto: qui lo misuri, scomponi da dove viene il rischio e ne stimi il VaR.")
+        st.markdown(f"<h1>📊 {titolo_br}</h1>", unsafe_allow_html=True)
+        st.caption("Quanto rischio resta scoperto dopo aver coperto l'hub? Misura e scomponi il basis locale-hub.")
+        src199 = st.radio("Prezzi giornalieri",
+                          ["🧪 Demo sintetica (seed fisso)", "📤 Carica CSV"],
+                          horizontal=True, key="br199_src")
+        df_br = None
+        hub199_col = loc199_col = None
+        if src199.startswith("🧪"):
+            banner_demo("hub e prezzo locale sintetici correlati (seed 199)")
+            df_br = genera_demo_basis()
+            hub199_col, loc199_col = "Hub (€/MWh)", "Locale (€/MWh)"
+        else:
+            up199 = st.file_uploader("CSV prezzi (prima colonna = data, almeno due colonne di prezzi)",
+                                     type=["csv"], key="br199_csv")
+            if up199 is not None:
+                try:
+                    raw199 = pd.read_csv(up199, sep=None, engine="python")
+                    raw199.iloc[:, 0] = pd.to_datetime(raw199.iloc[:, 0], errors="coerce")
+                    raw199 = raw199.dropna(subset=[raw199.columns[0]])
+                    raw199 = raw199.set_index(raw199.columns[0]).sort_index()
+                    tmp199 = raw199.apply(pd.to_numeric, errors="coerce")
+                    cols199 = [c for c in tmp199.columns if tmp199[c].notna().any()]
+                    if len(cols199) >= 2:
+                        df_br = tmp199[cols199]
+                        sc1, sc2 = st.columns(2)
+                        with sc1:
+                            hub199_col = st.selectbox("Colonna hub (riferimento liquido)", cols199,
+                                                      index=0, key="br199_hub")
+                        with sc2:
+                            loc199_col = st.selectbox("Colonna locale (zona di consegna)", cols199,
+                                                      index=min(1, len(cols199) - 1), key="br199_loc")
+                    else:
+                        st.error("Servono almeno due colonne numeriche di prezzi.")
+                except Exception as e:
+                    st.error("CSV non leggibile: %s" % e)
+        if df_br is None or hub199_col is None or loc199_col is None:
+            st.info("Carica un CSV con almeno 31 giorni di prezzi hub + locale per procedere.")
+        else:
+            bp1, bp2, bp3 = st.columns(3)
+            with bp1:
+                conf199 = st.selectbox("Confidenza VaR", [0.95, 0.975, 0.99], index=2,
+                                       format_func=lambda x: "%g%%" % (x * 100.0),
+                                       key="br199_conf")
+            with bp2:
+                soglia199 = st.slider("Soglia spike (x dev. std)", 1.0, 6.0, 3.0, 0.5,
+                                      key="br199_soglia",
+                                      help="Un giorno e' spike se |basis - media| supera soglia x deviazione standard.")
+            with bp3:
+                vol199 = st.number_input("Volume esposto (MWh/giorno, 0 = n.d.)",
+                                         min_value=0.0, value=0.0, step=10.0,
+                                         key="br199_vol")
+            ris199 = calcola_basis_risk(df_br, hub199_col, loc199_col,
+                                        confidenza=float(conf199),
+                                        soglia_spike=float(soglia199),
+                                        volume_mwh_giorno=float(vol199) if vol199 > 0 else None)
+            if ris199["errore"]:
+                st.error(ris199["errore"])
+            else:
+                def _fmtb(x, fmt="%.2f"):
+                    return (fmt % x) if x is not None and np.isfinite(x) else "n.d."
+                bk1, bk2, bk3, bk4 = st.columns(4)
+                with bk1:
+                    st.metric("Basis medio", "%s €/MWh" % _fmtb(ris199["basis_media"]),
+                              help="Media di (locale - hub): premio/sconto strutturale della tua zona.")
+                with bk2:
+                    st.metric("Std basis", "%s €/MWh" % _fmtb(ris199["basis_std"]),
+                              help="Volatilita' del basis: il rischio che resta dopo la copertura hub.")
+                with bk3:
+                    st.metric("VaR basis %s" % ("%g%%" % (float(conf199) * 100.0)),
+                              "%s €/MWh" % _fmtb(ris199["var_basis_mwh"]),
+                              help="Massima variazione giornaliera sfavorevole del basis al livello di confidenza scelto.")
+                with bk4:
+                    st.metric("Quota varianza da basis",
+                              _fmtb(ris199["quota_basis_var"] * 100.0, "%.1f") + "%" if ris199["quota_basis_var"] is not None else "n.d.",
+                              help="Frazione della varianza del prezzo locale spiegata dal basis (resto: hub + covarianza).")
+                if ris199["var_eur_giorno"] is not None:
+                    st.caption("VaR sul volume esposto: **%s €/giorno** (ES: %s €/giorno)."
+                               % (_fmtb(ris199["var_eur_giorno"], "%.0f"),
+                                  _fmtb(ris199["es_eur_giorno"], "%.0f")))
+                st.info("📊 %s" % ris199["verdetto"])
+                bser199 = ris199["serie_basis"]
+                fig_bb = go.Figure()
+                fig_bb.add_trace(go.Scatter(x=bser199.index, y=bser199.values,
+                                            mode="lines", name="Basis",
+                                            line=dict(color="#3b82f6", width=1.5)))
+                fig_bb.add_hline(y=ris199["basis_media"], line_dash="dash",
+                                 line_color="#eab308",
+                                 annotation_text="media %.2f" % ris199["basis_media"])
+                if ris199["n_spike"]:
+                    spk199 = bser199.loc[pd.to_datetime(ris199["date_spike"])]
+                    fig_bb.add_trace(go.Scatter(x=spk199.index, y=spk199.values,
+                                                mode="markers", name="Spike",
+                                                marker=dict(color="#ef4444", size=8,
+                                                            symbol="triangle-up")))
+                fig_bb.update_layout(title="Basis giornaliero (locale - hub)",
+                                     xaxis_title="Data", yaxis_title="€/MWh",
+                                     template="plotly_dark", height=380,
+                                     hovermode="x unified")
+                st.plotly_chart(fig_bb, use_container_width=True)
+                st.caption("Spike evidenziati in rosso: |basis - media| oltre la soglia (%d giorni)."
+                           % ris199["n_spike"])
+                hg1, hg2 = st.columns(2)
+                with hg1:
+                    fig_bh = go.Figure(go.Histogram(x=bser199.values, nbinsx=40,
+                                                    marker_color="#8b5cf6", opacity=0.75,
+                                                    name="Basis"))
+                    fig_bh.add_vline(x=ris199["basis_media"], line_dash="dash",
+                                     line_color="#eab308", annotation_text="media")
+                    fig_bh.update_layout(title="Distribuzione del basis",
+                                         xaxis_title="€/MWh", yaxis_title="Giorni",
+                                         template="plotly_dark", height=340, bargap=0.05)
+                    st.plotly_chart(fig_bh, use_container_width=True)
+                with hg2:
+                    fig_bs = go.Figure(go.Scatter(x=ris199["serie_hub"].values,
+                                                  y=ris199["serie_locale"].values,
+                                                  mode="markers", name="Giorni",
+                                                  marker=dict(color="#10b981", size=4,
+                                                              opacity=0.6)))
+                    lo199 = float(min(ris199["serie_hub"].min(), ris199["serie_locale"].min()))
+                    hi199 = float(max(ris199["serie_hub"].max(), ris199["serie_locale"].max()))
+                    fig_bs.add_trace(go.Scatter(x=[lo199, hi199], y=[lo199, hi199],
+                                                mode="lines", name="basis = 0",
+                                                line=dict(dash="dash", color="#6b7280")))
+                    fig_bs.update_layout(title="Locale vs hub (corr. hub-basis: %.2f)"
+                                         % ris199["corr_hub_basis"],
+                                         xaxis_title="Hub (€/MWh)",
+                                         yaxis_title="Locale (€/MWh)",
+                                         template="plotly_dark", height=340)
+                    st.plotly_chart(fig_bs, use_container_width=True)
+                st.markdown("**Decomposizione della varianza del prezzo locale**")
+                df_dec199 = pd.DataFrame({
+                    "Componente": ["Hub", "Basis", "Covarianza hub-basis"],
+                    "Quota varianza (%)": [
+                        _fmtb(ris199["quota_hub_var"] * 100.0, "%.1f") if ris199["quota_hub_var"] is not None else "n.d.",
+                        _fmtb(ris199["quota_basis_var"] * 100.0, "%.1f") if ris199["quota_basis_var"] is not None else "n.d.",
+                        _fmtb(ris199["quota_cov_var"] * 100.0, "%.1f") if ris199["quota_cov_var"] is not None else "n.d."],
+                })
+                st.dataframe(df_dec199, use_container_width=True, hide_index=True)
+                st.markdown("**Giornate con basis piu' alto** (sfavorevoli a chi compra sul locale)")
+                st.dataframe(ris199["df_critiche"], use_container_width=True, hide_index=True)
+                csv_br = pd.DataFrame({"Data": bser199.index,
+                                       "Hub (€/MWh)": ris199["serie_hub"].values,
+                                       "Locale (€/MWh)": ris199["serie_locale"].values,
+                                       "Basis (€/MWh)": bser199.values})
+                st.download_button("Scarica CSV basis",
+                                   data=csv_br.to_csv(index=False, sep=";").encode("utf-8"),
+                                   file_name="basis_risk.csv", mime="text/csv",
+                                   key="br199_csv_basis",
+                                   help="Serie giornaliera di hub, locale e basis.")
+
 
 # Footer
 
