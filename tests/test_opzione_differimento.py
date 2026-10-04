@@ -105,8 +105,8 @@ class TestProprieta:
                                   "NON INVESTIRE ORA", "NON INVESTIRE")
 
 
-class TestRegistryTab204:
-    def test_registry_204(self):
+class TestRegistryTab205:
+    def test_registry_205(self):
         from pathlib import Path
         src = Path(__file__).parent.parent.joinpath("app.py").read_text()
         tree = _ast.parse(src)
@@ -118,15 +118,15 @@ class TestRegistryTab204:
                                 "lower", lambda: "")() == "tabs"):
                 titoli = [t.value for t in node.value.args[0].elts]
         assert titoli is not None
-        assert len(titoli) == 204
-        assert titoli[-1] == "⏳ Opzione di differimento"
+        assert len(titoli) == 205
+        assert titoli[-1] == "🏦 Dimensionamento debito (DSCR)"
         import re as _re
-        m = _re.search(r"((?:tab\d+, )+tab204) = st\.tabs\(\[", src)
+        m = _re.search(r"((?:tab\d+, )+tab205) = st\.tabs\(\[", src)
         assert m is not None
         vars_tab = [v.strip() for v in m.group(1).split(",")]
-        assert len(vars_tab) == 204
-        assert vars_tab[-1] == "tab204"
+        assert len(vars_tab) == 205
+        assert vars_tab[-1] == "tab205"
         withs = _re.findall(r"    with (tab\d+):", src)
-        assert len(withs) == 204 and "tab204" in withs
+        assert len(withs) == 205 and "tab205" in withs
         keys = _re.findall(r'key="(dif204_[^"]+)"', src)
         assert len(keys) == len(set(keys)) == 7
