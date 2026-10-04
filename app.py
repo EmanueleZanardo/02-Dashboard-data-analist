@@ -28786,6 +28786,235 @@ def calcola_backtest_indicizzato(prezzi, prezzo_fisso_eur_mwh, spread_eur_mwh,
     return out
 
 
+def calcola_robustezza_offerta(prezzi, mw_f1=1.0, mw_f2=1.0, mw_f3=1.0,
+                               offerte=None, spostamento_pct=20.0):
+    """Robustezza delle offerte di fornitura al profilo di carico (F1/F2/F3).
+
+    Domanda operativa: "l'offerta piu' economica resta la piu' economica se
+    il mio profilo di carico cambia?" Le offerte si valutano sul TUO profilo
+    orario reale (MW per fascia F1/F2/F3 sulle ore del periodo selezionato),
+    non su un volume piatto: a parita' di MWh totali, un'offerta con F1 cara
+    penalizza chi consuma di giorno. Poi la classifica viene stressata con
+    tre scenari di spostamento del carico:
+      - "Verso picco": una quota q% dell'energia F2+F3 si sposta in F1
+        (es. piu' produzione diurna);
+      - "Verso notte": una quota q% dell'energia F1 si sposta in F3
+        (es. turni notturni, ricariche notturne);
+      - "Profilo piatto": gli stessi MWh totali distribuiti uniformemente
+        sulle ore.
+    L'offerta "robusta" e' quella che vince in piu' scenari; il RIMPIANTO
+    massimo quantifica quanto costerebbe aver scelto l'offerta sbagliata
+    nello scenario peggiore.
+
+    Ogni offerta e' un dict con: nome, prezzo_f1/prezzo_f2/prezzo_f3
+    (€/MWh, opzionali), prezzo_energia (€/MWh piatto, usato per le fasce non
+    valorizzate), canone_fisso_eur_mese (default 0), sconto_pct (default 0,
+    applicato ai prezzi energia). Costo offerta = Σ fascia MWh×prezzo ×
+    (1 - sconto/100) + canone × mesi equivalenti (ore totali / 730.5).
+
+    Differenza dagli altri tab: 'Confronto offerte' e 'Confronto fornitori'
+    confrontano su un volume annuo piatto; qui il costo e' calcolato per
+    causazione oraria sul profilo reale e la classifica e' testata contro
+    spostamenti del carico.
+
+    NaN-safe: serie vuota / indice non datetime / profilo MW nullo o
+    negativo / meno di 2 offerte / parametri non numerici o fuori range /
+    nomi duplicati -> {'valido': False, 'errore': ...}, mai eccezioni;
+    tz-aware reso naive; deterministico.
+
+    Ritorna dict con 'errore', 'valido', 'scenari' (nomi), 'n_ore',
+    'mwh_fasce' (dict F1/F2/F3), 'mesi_equiv', 'df_base' (ranking sul
+    profilo attuale), 'df_scenari' (costi per scenario x offerta +
+    vincitore), 'vittorie' (dict nome -> n. scenari vinti),
+    'vincitore_base', 'vincitore_robusto', 'rimpianto' (dict nome -> EUR),
+    'rimpianto_max', 'verdetto'.
+    """
+    colonne_base = ["Offerta", "MWh F1", "MWh F2", "MWh F3",
+                    "Costo energia (€)", "Canone (€)", "Costo totale (€)",
+                    "€/MWh medio", "Δ vs migliore (€)"]
+    vuoto = {"errore": None, "valido": False, "scenari": [], "n_ore": 0,
+             "mwh_fasce": {}, "mesi_equiv": 0.0,
+             "df_base": pd.DataFrame(columns=colonne_base),
+             "df_scenari": pd.DataFrame(), "vittorie": {},
+             "vincitore_base": None, "vincitore_robusto": None,
+             "rimpianto": {}, "rimpianto_max": None, "verdetto": ""}
+
+    def _ko(msg):
+        r = dict(vuoto)
+        r["errore"] = msg
+        return r
+
+    def _num(x):
+        try:
+            v = float(x)
+        except (TypeError, ValueError):
+            return None
+        return None if v != v else v
+
+    def _eur(x):
+        return "{:,.0f}".format(float(x)).replace(",", ".")
+
+    # --- ore del periodo -> fasce ---
+    try:
+        idx = prezzi.index[~prezzi.index.duplicated(keep="first")].sort_values()
+    except Exception:
+        return _ko("Serie prezzi non valida: serve un indice datetime orario.")
+    if not isinstance(idx, pd.DatetimeIndex):
+        return _ko("La serie prezzi deve avere un indice temporale.")
+    if getattr(idx, "tz", None) is not None:
+        idx = idx.tz_localize(None)
+    if len(idx) == 0:
+        return _ko("Serie prezzi vuota.")
+    fasce = idx.map(fascia_oraria)
+    n1 = int((fasce == "F1").sum())
+    n2 = int((fasce == "F2").sum())
+    n3 = int((fasce == "F3").sum())
+    n_ore = len(idx)
+
+    try:
+        mw = [float(mw_f1), float(mw_f2), float(mw_f3)]
+    except (TypeError, ValueError):
+        return _ko("MW di fascia non validi.")
+    if any(v < 0 for v in mw) or sum(mw) == 0:
+        return _ko("Profilo MW nullo o negativo.")
+    try:
+        q = float(spostamento_pct)
+    except (TypeError, ValueError):
+        return _ko("spostamento_pct non valido.")
+    q = max(0.0, min(100.0, q)) / 100.0
+
+    e1, e2, e3 = mw[0] * n1, mw[1] * n2, mw[2] * n3
+    e_tot = e1 + e2 + e3
+    mesi_equiv = n_ore / 730.5
+
+    # --- offerte ---
+    if not isinstance(offerte, (list, tuple)) or len(offerte) < 2:
+        return _ko("Servono almeno 2 offerte da confrontare.")
+    offs = []
+    for i, o in enumerate(offerte):
+        if not isinstance(o, dict):
+            return _ko("L'offerta #%d non e' valida." % (i + 1))
+        nome = str(o.get("nome", "Offerta %d" % (i + 1))).strip()
+        if not nome or nome.lower() == "nan":
+            nome = "Offerta %d" % (i + 1)
+        flat = _num(o.get("prezzo_energia"))
+        p1 = _num(o.get("prezzo_f1"))
+        p2 = _num(o.get("prezzo_f2"))
+        p3 = _num(o.get("prezzo_f3"))
+        if p1 is None:
+            p1 = flat
+        if p2 is None:
+            p2 = flat
+        if p3 is None:
+            p3 = flat
+        if None in (p1, p2, p3):
+            return _ko("L'offerta '%s': servono i prezzi F1/F2/F3 o un prezzo "
+                       "energia piatto." % nome)
+        if min(p1, p2, p3) < 0:
+            return _ko("L'offerta '%s': i prezzi energia non possono essere "
+                       "negativi." % nome)
+        canone = _num(o.get("canone_fisso_eur_mese", 0.0))
+        if canone is None or canone < 0:
+            return _ko("L'offerta '%s': canone fisso non valido." % nome)
+        sconto = _num(o.get("sconto_pct", 0.0))
+        if sconto is None or not (0.0 <= sconto <= 100.0):
+            return _ko("L'offerta '%s': sconto_pct deve stare tra 0 e 100."
+                       % nome)
+        offs.append({"nome": nome, "p": (p1, p2, p3),
+                     "canone": canone, "sconto": sconto})
+    nomi = [o["nome"] for o in offs]
+    if len(set(nomi)) != len(nomi):
+        return _ko("I nomi delle offerte devono essere univoci.")
+
+    def _costo(off, ee1, ee2, ee3):
+        p1, p2, p3 = off["p"]
+        energia = (ee1 * p1 + ee2 * p2 + ee3 * p3) * (1.0 - off["sconto"] / 100.0)
+        return energia + off["canone"] * mesi_equiv
+
+    qlbl = "%g" % (q * 100.0)
+    scen = {
+        "Profilo attuale": (e1, e2, e3),
+        "Verso picco (+%s%% F1)" % qlbl: (e1 + q * (e2 + e3),
+                                          e2 * (1.0 - q), e3 * (1.0 - q)),
+        "Verso notte (+%s%% F3)" % qlbl: (e1 * (1.0 - q), e2, e3 + q * e1),
+        "Profilo piatto": (e_tot * n1 / n_ore, e_tot * n2 / n_ore,
+                           e_tot * n3 / n_ore),
+    }
+
+    costi = {s: {o["nome"]: _costo(o, *ee) for o in offs}
+             for s, ee in scen.items()}
+    vincitori = {s: min(c, key=lambda k: c[k]) for s, c in costi.items()}
+    vittorie = {nm: sum(1 for s in scen if vincitori[s] == nm) for nm in nomi}
+    base = "Profilo attuale"
+    vincitore_base = vincitori[base]
+    max_v = max(vittorie.values())
+    candidati = [nm for nm in nomi if vittorie[nm] == max_v]
+    vincitore_robusto = min(candidati, key=lambda nm: costi[base][nm])
+    rimpianto = {nm: max(costi[s][nm] - min(costi[s].values()) for s in scen)
+                 for nm in nomi}
+    rimpianto_max = max(rimpianto.values())
+
+    righe = []
+    for o in offs:
+        nm = o["nome"]
+        ce = ((e1 * o["p"][0] + e2 * o["p"][1] + e3 * o["p"][2])
+              * (1.0 - o["sconto"] / 100.0))
+        can = o["canone"] * mesi_equiv
+        tot = ce + can
+        righe.append({"Offerta": nm, "MWh F1": e1, "MWh F2": e2, "MWh F3": e3,
+                      "Costo energia (€)": ce, "Canone (€)": can,
+                      "Costo totale (€)": tot,
+                      "€/MWh medio": tot / e_tot if e_tot else None,
+                      "Δ vs migliore (€)": None})
+    df_base = pd.DataFrame(righe, columns=colonne_base)
+    df_base = df_base.sort_values("Costo totale (€)").reset_index(drop=True)
+    best = float(df_base["Costo totale (€)"].iloc[0])
+    df_base["Δ vs migliore (€)"] = df_base["Costo totale (€)"] - best
+    for c in colonne_base[1:]:
+        df_base[c] = pd.to_numeric(df_base[c], errors="coerce").round(
+            1 if c.startswith("MWh") else 2)
+
+    righe_s = []
+    for s in scen:
+        r = {"Scenario": s}
+        for nm in nomi:
+            r[nm] = round(costi[s][nm], 2)
+        r["Vincitore"] = vincitori[s]
+        righe_s.append(r)
+    df_scenari = pd.DataFrame(righe_s, columns=["Scenario"] + nomi + ["Vincitore"])
+
+    nv = len(scen)
+    vb, vr = vincitore_base, vincitore_robusto
+    if vb == vr:
+        verdetto = ("«%s» vince sul profilo attuale ed e' anche la piu' robusta "
+                    "(%d scenari vinti su %d). Rimpianto massimo scegliendola: "
+                    "€ %s." % (vb, vittorie[vb], nv, _eur(rimpianto[vb])))
+    else:
+        verdetto = ("«%s» e' la piu' economica sul profilo attuale, ma «%s» vince "
+                    "in piu' scenari (%d su %d). Se il profilo cambiasse, "
+                    "scegliere «%s» costerebbe al massimo € %s in piu' rispetto "
+                    "alla migliore di scenario." % (
+                        vb, vr, vittorie[vr], nv, vb, _eur(rimpianto[vb])))
+
+    out = dict(vuoto)
+    out.update({
+        "valido": True,
+        "scenari": list(scen.keys()),
+        "n_ore": n_ore,
+        "mwh_fasce": {"F1": e1, "F2": e2, "F3": e3},
+        "mesi_equiv": mesi_equiv,
+        "df_base": df_base,
+        "df_scenari": df_scenari,
+        "vittorie": vittorie,
+        "vincitore_base": vincitore_base,
+        "vincitore_robusto": vincitore_robusto,
+        "rimpianto": rimpianto,
+        "rimpianto_max": rimpianto_max,
+        "verdetto": verdetto,
+    })
+    return out
+
+
 def calcola_opzione_differimento(V, K, T_anni, vol_pct, tasso_pct,
                                dy_pct=0.0, n_step=200):
     """Opzione REALE di differimento di un investimento energetico.
@@ -29616,7 +29845,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -48609,6 +48838,98 @@ elif workspace == _('ws8'):
                 file_name="backtest_offerta_indicizzata.csv", mime="text/csv",
                 key="idx214_csv",
                 help="Prezzo indicizzato mensile, costi e risparmi vs fisso.")
+
+    with tab215:
+        titolo_rob = edu("Robustezza offerta", "Confronti le offerte sul volume piatto? Un'offerta con F1 cara sembra economica ma penalizza chi consuma di giorno. Questa tab valuta ogni offerta sul TUO profilo orario reale (MW per fascia sulle ore del periodo selezionato) e poi stressa la classifica spostando il carico: verso il picco, verso la notte, o appiattendolo. L'offerta robusta e' quella che resta la piu' economica in piu' scenari.")
+        st.markdown(f"<h1>🛡️ {titolo_rob}</h1>", unsafe_allow_html=True)
+        st.caption("Offerte a fasce F1/F2/F3 valutate sul tuo profilo reale + stress-test della classifica se il carico si sposta.")
+        if sorgente.startswith("🧪"):
+            banner_demo("serie oraria Swissix sintetica (Mock): profilo giornaliero + stagionalita', non prezzi reali")
+        rb1, rb2, rb3 = st.columns(3)
+        with rb1:
+            rob_mw1 = st.number_input("MW in F1", min_value=0.0, value=2.0, step=0.5,
+                                      key="rob215_f1",
+                                      help="Potenza nelle ore di punta (lun–ven 08:00–19:00).")
+        with rb2:
+            rob_mw2 = st.number_input("MW in F2", min_value=0.0, value=1.5, step=0.5,
+                                      key="rob215_f2",
+                                      help="Potenza nelle ore intermedie.")
+        with rb3:
+            rob_mw3 = st.number_input("MW in F3", min_value=0.0, value=1.0, step=0.5,
+                                      key="rob215_f3",
+                                      help="Potenza nelle ore fuori punta (notte, weekend).")
+        st.markdown("**Offerte da confrontare** (prezzi €/MWh — lascia vuote F1/F2/F3 per usare il prezzo piatto)")
+        df_rob_def = pd.DataFrame([
+            {"Nome": "Offerta attuale", "Prezzo F1": np.nan, "Prezzo F2": np.nan,
+             "Prezzo F3": np.nan, "Prezzo piatto": 130.0, "Canone €/mese": 45.0,
+             "Sconto %": 0.0},
+            {"Nome": "Fornitore B", "Prezzo F1": 145.0, "Prezzo F2": 118.0,
+             "Prezzo F3": 92.0, "Prezzo piatto": np.nan, "Canone €/mese": 25.0,
+             "Sconto %": 0.0},
+        ])
+        edit_rob = st.data_editor(df_rob_def, num_rows="dynamic", key="rob215_edit",
+                                  help="Una riga per offerta. Il prezzo piatto vale per le fasce lasciate vuote.")
+        q_rob = st.slider("Spostamento carico negli scenari (%)", min_value=5,
+                          max_value=50, value=20, step=5, key="rob215_q",
+                          help="% dell'energia spostata verso F1 / verso F3 negli scenari di stress.")
+        offerte_rob = []
+        try:
+            for _, rr in pd.DataFrame(edit_rob).iterrows():
+                nm = rr["Nome"]
+                if pd.isna(nm) or not str(nm).strip():
+                    continue
+                offerte_rob.append({
+                    "nome": str(nm).strip(),
+                    "prezzo_f1": rr["Prezzo F1"], "prezzo_f2": rr["Prezzo F2"],
+                    "prezzo_f3": rr["Prezzo F3"],
+                    "prezzo_energia": rr["Prezzo piatto"],
+                    "canone_fisso_eur_mese": rr["Canone €/mese"],
+                    "sconto_pct": rr["Sconto %"],
+                })
+        except (TypeError, ValueError, KeyError):
+            offerte_rob = []
+        ris_rob = calcola_robustezza_offerta(
+            prezzi, rob_mw1, rob_mw2, rob_mw3, offerte_rob,
+            spostamento_pct=float(q_rob))
+        if ris_rob["errore"]:
+            st.error(ris_rob["errore"])
+        else:
+            st.success(f"✅ {ris_rob['verdetto']}")
+            nomi_rob = [c for c in ris_rob["df_scenari"].columns
+                        if c not in ("Scenario", "Vincitore")]
+            k1r, k2r, k3r = st.columns(3)
+            with k1r:
+                st.metric("Vince sul profilo attuale", ris_rob["vincitore_base"],
+                          help="Offerta piu' economica col tuo profilo di carico reale.")
+            with k2r:
+                st.metric("Offerta piu' robusta", ris_rob["vincitore_robusto"],
+                          help="Vince in piu' scenari di spostamento del carico.")
+            with k3r:
+                st.metric("Rimpianto max (scelta base)",
+                          "€ {:,.0f}".format(ris_rob["rimpianto"][ris_rob["vincitore_base"]]).replace(",", "."),
+                          help="Quanto costerebbe in piu', nello scenario peggiore, aver scelto la vincitrice del profilo attuale.")
+            fig_rob = go.Figure()
+            colori_rob = ["#3b82f6", "#22c55e", "#f59e0b", "#ef4444", "#a855f7", "#06b6d4"]
+            for i, nm in enumerate(nomi_rob):
+                fig_rob.add_trace(go.Bar(
+                    x=ris_rob["df_scenari"]["Scenario"], y=ris_rob["df_scenari"][nm],
+                    name=nm, marker_color=colori_rob[i % len(colori_rob)],
+                    hovertemplate="%{x}<br>" + nm + ": € %{y:,.0f}<extra></extra>"))
+            fig_rob.update_layout(title="Costo per offerta nei 4 scenari",
+                                  template="plotly_dark", height=380, barmode="group",
+                                  xaxis_title="Scenario", yaxis_title="€")
+            st.plotly_chart(fig_rob, use_container_width=True)
+            st.markdown("**Ranking sul profilo attuale**")
+            st.dataframe(ris_rob["df_base"], use_container_width=True, hide_index=True)
+            st.markdown("**Costi e vincitore per scenario**")
+            st.dataframe(ris_rob["df_scenari"], use_container_width=True, hide_index=True)
+            st.caption("Mesi equivalenti nel periodo: %.2f (ore totali / 730,5); il canone e' riparametrato su questo valore." % ris_rob["mesi_equiv"])
+            st.download_button(
+                "Scarica CSV robustezza offerta",
+                data=ris_rob["df_scenari"].to_csv(index=False, sep=";").encode("utf-8"),
+                file_name="robustezza_offerta.csv", mime="text/csv",
+                key="rob215_csv",
+                help="Costi per offerta in ciascuno scenario + vincitore.")
 
 # Footer
 
