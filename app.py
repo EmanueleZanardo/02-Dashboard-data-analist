@@ -26923,6 +26923,149 @@ def calcola_kpi_performance(serie_pnl, periodi_anno=365, tasso_free_pct=0.0):
         return _err("Errore interno: %s" % e)
 
 
+"""Sviluppo standalone helper tab198 - test logica prima dell'inserimento."""
+import numpy as np
+import pandas as pd
+
+
+def genera_demo_var_portafoglio(n_giorni=365, seed=198):
+    if isinstance(n_giorni, bool) or not isinstance(n_giorni, int):
+        n_giorni = 365
+    n_giorni = max(60, min(2000, n_giorni))
+    rng = np.random.default_rng(seed)
+    corr = np.array([[1.0, 0.7, 0.4],
+                     [0.7, 1.0, 0.3],
+                     [0.4, 0.3, 1.0]])
+    z = rng.standard_normal((n_giorni, 3)) @ np.linalg.cholesky(corr).T
+    vol = np.array([0.06, 0.045, 0.03])
+    base = np.array([85.0, 40.0, 70.0])
+    prezzi = base * np.exp(np.cumsum(z * vol, axis=0))
+    idx = pd.date_range(end=pd.Timestamp.today().normalize(),
+                        periods=n_giorni, freq="D")
+    return pd.DataFrame(prezzi, index=idx,
+                        columns=["Power (€/MWh)", "Gas (€/MWh)", "CO2 (€/t)"])
+
+
+def calcola_var_portafoglio(df_prezzi, posizioni, moltiplicatori=None,
+                            confidenza=0.99, orizzonte_giorni=1):
+    def _err(msg):
+        return {"errore": msg, "valido": False}
+
+    def _fx(x, fmt="%.2f"):
+        try:
+            return fmt % x if x is not None and np.isfinite(x) else "n.d."
+        except Exception:
+            return "n.d."
+    try:
+        if not isinstance(df_prezzi, pd.DataFrame) or df_prezzi.empty:
+            return _err("Servono prezzi giornalieri: DataFrame non vuoto.")
+        if not isinstance(posizioni, dict) or not posizioni:
+            return _err("Servono le posizioni: dict {commodity: quantita'}.")
+        if isinstance(confidenza, bool) or not isinstance(confidenza, (int, float)) \
+                or not np.isfinite(confidenza) or not 0.90 <= confidenza <= 0.9999:
+            return _err("Confidenza non valida: usare un valore tra 0.90 e 0.9999.")
+        if isinstance(orizzonte_giorni, bool) or not isinstance(orizzonte_giorni, int) \
+                or not 1 <= orizzonte_giorni <= 30:
+            return _err("Orizzonte non valido: intero tra 1 e 30 giorni.")
+        molt = moltiplicatori if isinstance(moltiplicatori, dict) else {}
+        cols, pesi = [], []
+        for comm, qty in posizioni.items():
+            if isinstance(qty, bool) or not isinstance(qty, (int, float)) \
+                    or not np.isfinite(qty):
+                return _err("Quantita' non valida per '%s'." % comm)
+            if qty == 0:
+                continue
+            if comm not in df_prezzi.columns:
+                return _err("Commodity '%s' non presente nei prezzi." % comm)
+            m = molt.get(comm, 1.0)
+            if isinstance(m, bool) or not isinstance(m, (int, float)) \
+                    or not np.isfinite(m) or m <= 0:
+                return _err("Moltiplicatore non valido per '%s'." % comm)
+            cols.append(comm)
+            pesi.append(float(qty) * float(m))
+        if not cols:
+            return _err("Nessuna posizione diversa da zero.")
+        px = df_prezzi[cols].apply(pd.to_numeric, errors="coerce").dropna()
+        if len(px) < 31:
+            return _err("Servono almeno 31 giorni di prezzi validi (allineati).")
+        d = px.diff().dropna()
+        if len(d) < 30:
+            return _err("Serie storica troppo corta dopo le differenze.")
+        w = np.array(pesi)
+        pnl = pd.Series(d.values @ w, index=d.index, name="P&L simulato (€)")
+        n = len(pnl)
+        soglia = float(np.quantile(pnl.values, 1.0 - float(confidenza)))
+        var_1d = max(0.0, -soglia)
+        coda = pnl.values[pnl.values <= soglia]
+        es_1d = max(0.0, float(-coda.mean())) if len(coda) else var_1d
+        scala = float(np.sqrt(orizzonte_giorni))
+        var_h, es_h = var_1d * scala, es_1d * scala
+        last = px.iloc[-1].values
+        nozionale = float(np.sum(np.abs(w) * last))
+        var_pct = (var_h / nozionale) if nozionale > 0 else 0.0
+        corr = d.corr()
+        cov = d.cov().values
+        denom = float(w @ cov @ w)
+        if denom > 0:
+            comp_1d = var_1d * (w * (cov @ w)) / denom
+        else:
+            comp_1d = np.zeros_like(w)
+        quota = np.zeros_like(comp_1d)
+        if var_h > 0:
+            quota = comp_1d * scala / var_h * 100.0
+        df_comp = pd.DataFrame({
+            "Commodity": cols,
+            "Posizione": [posizioni[c] for c in cols],
+            "VaR componente (€)": comp_1d * scala,
+            "Quota VaR (%)": quota,
+        })
+        stand = []
+        for i, c in enumerate(cols):
+            pc = d[c].values * w[i]
+            sc = float(np.quantile(pc, 1.0 - float(confidenza)))
+            stand.append(max(0.0, -sc) * scala)
+        df_comp["VaR standalone (€)"] = stand
+        diversif = float(np.sum(stand) - var_h)
+        pegg = pnl.nsmallest(5)
+        df_peg = pd.DataFrame({"Data": pegg.index, "P&L simulato (€)": pegg.values})
+        if var_h == 0:
+            tag = "NULLO"
+            giudizio = ("nessuna perdita simulata alla confidenza scelta: "
+                        "book coperto o prezzi fermi nel campione.")
+        elif var_pct >= 0.05:
+            tag = "ELEVATO"
+            giudizio = ("il VaR supera il 5% del nozionale: riduci la size o "
+                        "copri la componente dominante.")
+        elif var_pct >= 0.02:
+            tag = "MODERATO"
+            giudizio = ("rischio sotto controllo ma non trascurabile: "
+                        "monitora la componente dominante.")
+        else:
+            tag = "CONTENUTO"
+            giudizio = ("VaR sotto il 2% del nozionale: il book regge bene "
+                        "la coda storica.")
+        verdetto = ("Su %d giorni, confidenza %s%%, orizzonte %d g.: VaR %s €, "
+                    "ES %s €, nozionale %s € (VaR %s%%). Diversificazione: %s €. "
+                    "%s: %s" % (
+                        n, _fx(float(confidenza) * 100.0), orizzonte_giorni,
+                        _fx(var_h, "%.0f"), _fx(es_h, "%.0f"),
+                        _fx(nozionale, "%.0f"), _fx(var_pct * 100.0, "%.2f"),
+                        _fx(diversif, "%.0f"), tag, giudizio))
+        return {"errore": None, "valido": True, "n_giorni": int(n),
+                "confidenza": float(confidenza),
+                "orizzonte_giorni": int(orizzonte_giorni),
+                "var_eur": float(var_h), "es_eur": float(es_h),
+                "var_1d_eur": float(var_1d), "es_1d_eur": float(es_1d),
+                "nozionale_eur": float(nozionale),
+                "var_pct_nozionale": float(var_pct),
+                "correlazione": corr, "componenti": df_comp,
+                "diversificazione_eur": float(diversif),
+                "df_peggiori": df_peg, "serie_pnl": pnl,
+                "verdetto": verdetto}
+    except Exception as e:  # pragma: no cover - guardia totale
+        return _err("Errore interno: %s" % e)
+
+
 # WORKSPACE 1: SIMULATORE STRATEGICO
 # =========================================="
 if workspace == _('ws1'):
@@ -27566,7 +27709,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -44943,6 +45086,119 @@ elif workspace == _('ws8'):
                                        file_name="kpi_performance_mensile.csv", mime="text/csv",
                                        key="kpi197_csv_mm",
                                        help="P&L aggregato per mese (righe = anni).")
+
+    with tab198:
+        titolo_var = edu("VaR di portafoglio", "Value-at-Risk ed Expected Shortfall del book multi-commodity con simulazione storica: a ogni variazione giornaliera osservata di power, gas e CO2 si applicano le tue posizioni e si legge la coda delle perdite simulate. Con VaR per componente, beneficio di diversificazione e matrice di correlazione.")
+        st.markdown(f"<h1>🎲 {titolo_var}</h1>", unsafe_allow_html=True)
+        st.caption("Quanto puoi perdere sul book power+gas+CO2? La coda del P&L simulato sulla storia.")
+        src198 = st.radio("Prezzi giornalieri",
+                          ["🧪 Demo sintetica (seed fisso)", "📤 Carica CSV"],
+                          horizontal=True, key="var198_src")
+        df_vp = None
+        if src198.startswith("🧪"):
+            banner_demo("prezzi giornalieri sintetici correlati (power-gas 0.7, power-CO2 0.4, gas-CO2 0.3)")
+            df_vp = genera_demo_var_portafoglio()
+        else:
+            up198 = st.file_uploader("CSV prezzi (prima colonna = data, una colonna per commodity)",
+                                     type=["csv"], key="var198_csv")
+            if up198 is not None:
+                try:
+                    raw198 = pd.read_csv(up198, sep=None, engine="python")
+                    raw198.iloc[:, 0] = pd.to_datetime(raw198.iloc[:, 0], errors="coerce")
+                    raw198 = raw198.dropna(subset=[raw198.columns[0]])
+                    raw198 = raw198.set_index(raw198.columns[0]).sort_index()
+                    tmp198 = raw198.apply(pd.to_numeric, errors="coerce")
+                    df_vp = tmp198[[c for c in tmp198.columns if tmp198[c].notna().any()]].iloc[:, :8]
+                except Exception as e:
+                    st.error("CSV non leggibile: %s" % e)
+        if df_vp is None or len(df_vp) == 0:
+            st.info("Carica un CSV con almeno 31 giorni di prezzi per procedere.")
+        else:
+            comms198 = list(df_vp.columns)
+            cv1, cv2 = st.columns(2)
+            with cv1:
+                conf198 = st.selectbox("Confidenza", [0.95, 0.975, 0.99], index=2,
+                                       format_func=lambda x: "%g%%" % (x * 100.0),
+                                       key="var198_conf")
+            with cv2:
+                oriz198 = st.slider("Orizzonte (giorni)", 1, 10, 1, key="var198_oriz",
+                                    help="Scaling in radice quadrata del tempo: approssimazione standard, non tiene conto di autocorrelazione.")
+            st.markdown("**Posizioni** (quantita' > 0 = long, < 0 = short, 0 = esclusa)")
+            def198 = {"Power (€/MWh)": 10.0, "Gas (€/MWh)": -6.0, "CO2 (€/t)": -3.0}
+            pos198 = {}
+            qcols198 = st.columns(min(len(comms198), 4))
+            for i198, cm198 in enumerate(comms198):
+                pos198[cm198] = qcols198[i198 % len(qcols198)].number_input(
+                    cm198, value=float(def198.get(cm198, 0.0)), step=1.0,
+                    format="%.1f", key="var198_q_%d" % i198)
+            ris198 = calcola_var_portafoglio(df_vp, pos198, confidenza=float(conf198),
+                                             orizzonte_giorni=int(oriz198))
+            if ris198["errore"]:
+                st.error(ris198["errore"])
+            else:
+                def _fmtv(x, fmt="%.2f"):
+                    return (fmt % x) if x is not None else "n.d."
+                vv1, vv2, vv3, vv4 = st.columns(4)
+                with vv1:
+                    st.metric("VaR %g%% (%d g.)" % (float(conf198) * 100.0, int(oriz198)),
+                              "%s €" % _fmtv(ris198["var_eur"], "%.0f"),
+                              help="Massima perdita attesa all'orizzonte con la confidenza scelta (simulazione storica).")
+                with vv2:
+                    st.metric("Expected Shortfall", "%s €" % _fmtv(ris198["es_eur"], "%.0f"),
+                              help="Perdita media nei casi peggiori oltre il VaR: quanto fa male quando fa male.")
+                with vv3:
+                    st.metric("Nozionale", "%s €" % _fmtv(ris198["nozionale_eur"], "%.0f"),
+                              help="Somma dei valori assoluti delle posizioni ai prezzi correnti.")
+                with vv4:
+                    st.metric("VaR / nozionale", _fmtv(ris198["var_pct_nozionale"] * 100.0, "%.2f") + "%",
+                              "div. %s €" % _fmtv(ris198["diversificazione_eur"], "%.0f"),
+                              help="VaR in percentuale del nozionale; delta = beneficio di diversificazione (somma dei VaR standalone meno VaR di portafoglio).")
+                st.info("🎲 %s" % ris198["verdetto"])
+                pnl198 = ris198["serie_pnl"]
+                fig_vp = go.Figure()
+                fig_vp.add_trace(go.Histogram(x=pnl198.values, nbinsx=50, name="P&L simulato",
+                                              marker_color="#3b82f6", opacity=0.75))
+                fig_vp.add_vline(x=-ris198["var_1d_eur"], line_dash="dash", line_color="#ef4444",
+                                 annotation_text="VaR 1g")
+                fig_vp.add_vline(x=-ris198["es_1d_eur"], line_dash="dot", line_color="#f59e0b",
+                                 annotation_text="ES 1g")
+                fig_vp.update_layout(title="Distribuzione del P&L giornaliero simulato (€)",
+                                     xaxis_title="P&L (€)", yaxis_title="Giorni", bargap=0.05)
+                st.plotly_chart(fig_vp, use_container_width=True)
+                st.caption("Istogramma sul P&L a 1 giorno; il VaR/ES all'orizzonte scelto scala con radice di T.")
+                dfc198 = ris198["componenti"]
+                fig_vc = go.Figure(go.Bar(
+                    x=dfc198["Commodity"], y=dfc198["VaR componente (€)"],
+                    marker_color="#8b5cf6", name="VaR componente",
+                    text=["%.0f € (%.1f%%)" % (v, q)
+                          for v, q in zip(dfc198["VaR componente (€)"], dfc198["Quota VaR (%)"])],
+                    textposition="outside"))
+                fig_vc.update_layout(title="VaR per componente (€, orizzonte scelto)",
+                                     xaxis_title="Commodity", yaxis_title="€")
+                st.plotly_chart(fig_vc, use_container_width=True)
+                st.dataframe(dfc198, use_container_width=True, hide_index=True)
+                corr198 = ris198["correlazione"]
+                fig_vk = go.Figure(data=go.Heatmap(
+                    z=corr198.values, x=list(corr198.columns), y=list(corr198.index),
+                    zmin=-1, zmax=1, colorscale="RdBu", reversescale=True,
+                    text=[[f"{v:.2f}" for v in r] for r in corr198.values],
+                    texttemplate="%{text}"))
+                fig_vk.update_layout(title="Correlazione delle variazioni giornaliere")
+                st.plotly_chart(fig_vk, use_container_width=True)
+                st.markdown("**Peggiori giornate simulate**")
+                st.dataframe(ris198["df_peggiori"], use_container_width=True, hide_index=True)
+                csv_vp = pnl198.reset_index()
+                csv_vp.columns = ["Data", "P&L simulato (€)"]
+                st.download_button("Scarica CSV P&L simulato",
+                                   data=csv_vp.to_csv(index=False, sep=";").encode("utf-8"),
+                                   file_name="var_portafoglio_pnl.csv", mime="text/csv",
+                                   key="var198_csv_pnl",
+                                   help="Serie del P&L giornaliero simulato dalla storia.")
+                st.download_button("Scarica CSV componenti",
+                                   data=dfc198.to_csv(index=False, sep=";").encode("utf-8"),
+                                   file_name="var_portafoglio_componenti.csv", mime="text/csv",
+                                   key="var198_csv_comp",
+                                   help="VaR per componente, quota e standalone per commodity.")
 
 # Footer
 
