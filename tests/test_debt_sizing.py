@@ -119,15 +119,15 @@ class TestRegistryTab205:
                                 "lower", lambda: "")() == "tabs"):
                 titoli = [t.value for t in node.value.args[0].elts]
         assert titoli is not None
-        assert len(titoli) == 214
-        assert titoli[-1] == "📉 Backtest offerta indicizzata"
+        assert len(titoli) == 215
+        assert titoli[-1] == "🛡️ Robustezza offerta"
         import re as _re
-        m = _re.search(r"((?:tab\d+, )+tab214) = st\.tabs\(\[", src)
+        m = _re.search(r"((?:tab\d+, )+tab215) = st\.tabs\(\[", src)
         assert m is not None
         vars_tab = [v.strip() for v in m.group(1).split(",")]
-        assert len(vars_tab) == 214
-        assert vars_tab[-1] == "tab214"
+        assert len(vars_tab) == 215
+        assert vars_tab[-1] == "tab215"
         withs = _re.findall(r"    with (tab\d+):", src)
-        assert len(withs) == 214 and "tab205" in withs
+        assert len(withs) == 215 and "tab205" in withs
         keys = _re.findall(r'key="(deb205_[^"]+)"', src)
         assert len(keys) == len(set(keys)) == 11
