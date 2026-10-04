@@ -26751,6 +26751,178 @@ def calcola_business_case_accumulo(prezzi, potenza_mw=10.0, energia_mwh=20.0,
 
 
 # ==========================================
+def calcola_kpi_performance(serie_pnl, periodi_anno=365, tasso_free_pct=0.0):
+    """KPI di performance risk-adjusted di una serie P&L per periodo.
+
+    Domanda operativa: "il mio book rende abbastanza per il rischio che
+    corro?" -- Sharpe, Sortino, Calmar, win rate e profit factor sono lo
+    standard dei factsheet di trading e dei report di risk: qui applicati
+    al P&L giornaliero della posizione aperta sullo spot (stessa serie
+    della tab130 "Drawdown MtM", che ne analizza solo il drawdown, e
+    coerente con la tab9 "MtM hedging").
+
+    Differenza dalle altre tab: tab27 "VaR costo (MC)" e tab56 "Expected
+    Shortfall" misurano il rischio del COSTO di fornitura; tab130 misura
+    solo il drawdown del MtM; tab129 attribuisce il P&L alle sue cause.
+    Qui si risponde alla domanda di PERFORMANCE: rendimento contro
+    rischio, con i ratio che un risk manager chiede prima di aumentare
+    la size.
+
+    Parametri:
+      serie_pnl: P&L per periodo in € (es. giornaliero), indice datetime;
+      periodi_anno: periodi in un anno per l'annualizzazione
+        (365 = mercato elettrico 7/7, 252 = convenzione trading classica);
+      tasso_free_pct: tasso risk-free annuo (%) sottratto dal rendimento
+        nei ratio di Sharpe e Sortino.
+
+    Ritorna dict con: valido, errore, n_periodi, pnl_totale_eur,
+    rend_medio_periodo_eur, rend_annuo_eur, vol_annua_eur, sharpe (None se
+    volatilita' nulla), sortino (None se mai sotto il risk-free),
+    max_drawdown_eur (<= 0), calmar (None se drawdown nullo),
+    win_rate_pct, profit_factor (None se senza perdite o senza profitti),
+    best_periodo_eur, worst_periodo_eur (+ date se indice datetime),
+    equity (Series cumulata), drawdown (Series <= 0), df_mensile (pivot
+    anni x mesi, vuoto se senza date), verdetto.
+
+    NaN-safe: serie vuota / < 2 punti / non numerica / inf / parametri non
+    validi (incl. bool) -> errore pulito; mai eccezioni. Deterministico.
+    """
+    colonne_m = ["Anno"] + ["M%02d" % i for i in range(1, 13)]
+
+    def _err(msg):
+        return {"errore": msg, "valido": False, "n_periodi": 0,
+                "pnl_totale_eur": None, "rend_medio_periodo_eur": None,
+                "rend_annuo_eur": None, "vol_annua_eur": None,
+                "sharpe": None, "sortino": None, "max_drawdown_eur": None,
+                "calmar": None, "win_rate_pct": None, "profit_factor": None,
+                "best_periodo_eur": None, "best_data": None,
+                "worst_periodo_eur": None, "worst_data": None,
+                "equity": pd.Series(dtype=float),
+                "drawdown": pd.Series(dtype=float),
+                "df_mensile": pd.DataFrame(columns=colonne_m),
+                "verdetto": ""}
+
+    def _num(x):
+        if isinstance(x, bool):
+            return None
+        try:
+            v = float(x)
+        except (TypeError, ValueError):
+            return None
+        return v if np.isfinite(v) else None
+
+    npa = _num(periodi_anno)
+    trf = _num(tasso_free_pct)
+    if npa is None or int(npa) != npa or npa < 12 or npa > 366:
+        return _err("Periodi/anno non validi: serve un intero in [12, 366] "
+                    "(365 energia, 252 trading).")
+    if trf is None or trf < 0 or trf > 50:
+        return _err("Tasso risk-free non valido: serve un numero in [0, 50] (%).")
+    npa = int(npa)
+
+    try:
+        pnl = pd.Series(serie_pnl)
+        pnl = pd.to_numeric(pnl, errors="coerce").dropna()
+        if len(pnl) == 0:
+            return _err("Serie P&L vuota o non numerica.")
+        if not bool(np.isfinite(pnl.to_numpy(dtype=float)).all()):
+            return _err("Serie P&L con valori non finiti.")
+        if len(pnl) < 2:
+            return _err("Servono almeno 2 periodi di P&L.")
+        pnl = pnl.astype(float)
+        n = len(pnl)
+
+        rf_p = trf / 100.0 / npa
+        exc = pnl - rf_p
+        media_exc = float(exc.mean())
+        std_exc = float(exc.std(ddof=1))
+        sharpe = (media_exc / std_exc * np.sqrt(npa)) if std_exc > 0 else None
+
+        downside = exc.clip(upper=0.0)
+        dd_dev = float(np.sqrt((downside ** 2).mean()))
+        sortino = (media_exc / dd_dev * np.sqrt(npa)) if dd_dev > 0 else None
+
+        equity = pnl.cumsum()
+        runmax = equity.cummax()
+        dd = equity - runmax
+        max_dd = float(dd.min())
+
+        rend_annuo = float(pnl.mean() * npa)
+        vol_annua = float(pnl.std(ddof=1) * np.sqrt(npa))
+        calmar = (rend_annuo / abs(max_dd)) if max_dd < 0 else None
+
+        win_rate = float((pnl > 0).mean() * 100.0)
+        gp = float(pnl[pnl > 0].sum())
+        gl = float(-pnl[pnl < 0].sum())
+        profit_factor = (gp / gl) if gl > 0 and gp > 0 else None
+
+        best = float(pnl.max())
+        worst = float(pnl.min())
+        best_data = None
+        worst_data = None
+        df_m = pd.DataFrame(columns=colonne_m)
+        if isinstance(pnl.index, pd.DatetimeIndex) and len(pnl.index) > 0:
+            arr = pnl.to_numpy(dtype=float)
+            best_data = pnl.index[int(np.argmax(arr))]
+            worst_data = pnl.index[int(np.argmin(arr))]
+            tmp = pd.DataFrame({"pnl": arr}, index=pnl.index)
+            mens = tmp["pnl"].groupby([tmp.index.year,
+                                       tmp.index.month]).sum()
+            if len(mens):
+                piv = mens.unstack(fill_value=0.0)
+                piv = piv.reindex(columns=range(1, 13), fill_value=0.0)
+                piv.columns = ["M%02d" % i for i in piv.columns]
+                piv.index.name = "Anno"
+                df_m = piv.reset_index()
+
+        def _f(x, fmt="%.2f"):
+            return (fmt % x) if x is not None else "n.d."
+
+        if sharpe is None:
+            tag = "N.D."
+            giudizio = ("volatilita' nulla: il P&L e' costante periodo su "
+                        "periodo, i ratio risk-adjusted non sono definibili.")
+        elif sharpe >= 2.0:
+            tag = "ECCELLENTE"
+            giudizio = ("profilo da aumentare: rendimento ampiamente sopra "
+                        "il rischio corso, anche al netto del risk-free.")
+        elif sharpe >= 1.0:
+            tag = "BUONO"
+            giudizio = ("profilo solido: il rendimento ripaga il rischio; "
+                        "verifica la tenuta su finestre diverse.")
+        elif sharpe >= 0.5:
+            tag = "DISCRETO"
+            giudizio = ("profilo accettabile ma senza margine: basta poco "
+                        "per scivolare in territorio debole.")
+        elif sharpe >= 0.0:
+            tag = "DEBOLE"
+            giudizio = ("rendimento positivo ma non commisurato al rischio: "
+                        "riduci la size o migliora il timing.")
+        else:
+            tag = "NEGATIVO"
+            giudizio = ("il book distrugge valore anche prima dei costi: "
+                        "fermati e rivedi la strategia.")
+        verdetto = ("Su %d periodi: P&L totale %s €, Sharpe %s, Sortino %s, "
+                    "Calmar %s, win rate %s%%, profit factor %s, max drawdown "
+                    "%s €. %s: %s" % (
+                        n, _f(float(pnl.sum()), "%.0f"), _f(sharpe),
+                        _f(sortino), _f(calmar), _f(win_rate, "%.1f"),
+                        _f(profit_factor), _f(max_dd, "%.0f"), tag, giudizio))
+        return {"errore": None, "valido": True, "n_periodi": int(n),
+                "pnl_totale_eur": float(pnl.sum()),
+                "rend_medio_periodo_eur": float(pnl.mean()),
+                "rend_annuo_eur": rend_annuo, "vol_annua_eur": vol_annua,
+                "sharpe": sharpe, "sortino": sortino,
+                "max_drawdown_eur": max_dd, "calmar": calmar,
+                "win_rate_pct": win_rate, "profit_factor": profit_factor,
+                "best_periodo_eur": best, "best_data": best_data,
+                "worst_periodo_eur": worst, "worst_data": worst_data,
+                "equity": equity, "drawdown": dd, "df_mensile": df_m,
+                "verdetto": verdetto}
+    except Exception as e:  # pragma: no cover - guardia totale
+        return _err("Errore interno: %s" % e)
+
+
 # WORKSPACE 1: SIMULATORE STRATEGICO
 # =========================================="
 if workspace == _('ws1'):
@@ -27394,7 +27566,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -44648,6 +44820,129 @@ elif workspace == _('ws8'):
                                file_name="business_case_accumulo_flussi.csv", mime="text/csv",
                                key="bac196_csv_f",
                                help="Flussi di cassa netti anno per anno con degrado e cumulato.")
+
+    with tab197:
+        if sorgente.startswith("🧪"):
+            banner_demo("P&L giornaliero da serie CH sintetica deterministica")
+        titolo_kpi = edu("KPI di performance", "Sharpe, Sortino, Calmar, win rate e profit factor: i cinque numeri standard dei factsheet di trading e dei report di risk, applicati al P&L giornaliero della tua posizione aperta sullo spot (la stessa serie della tab Drawdown MtM, che ne analizza solo il drawdown). Dicono se il rendimento ripaga davvero il rischio corso.")
+        st.markdown(f"<h1>📊 {titolo_kpi}</h1>", unsafe_allow_html=True)
+        st.caption("La posizione aperta rende abbastanza per il rischio? Ratio risk-adjusted sul P&L giornaliero.")
+        ruolo_kpi = st.radio(
+            "Ruolo", ["Acquisto (fornitore non coperto: perdi se lo spot sale)",
+                      "Vendita (produttore non coperto: perdi se lo spot scende)"],
+            horizontal=True, key="kpi197_ruolo")
+        ruolo_kpiv = "acquisto" if ruolo_kpi.startswith("Acquisto") else "vendita"
+        kp1, kp2, kp3, kp4 = st.columns(4)
+        with kp1:
+            mw_kpi = st.number_input("MW aperti (non coperti)", min_value=0.1,
+                                     value=2.0, step=0.5, format="%.1f",
+                                     key="kpi197_mw")
+        with kp2:
+            p_ref_kpi = st.number_input(
+                "Prezzo di riferimento (€/MWh)",
+                value=round(float(prezzi.mean()), 1),
+                step=1.0, format="%.1f", key="kpi197_pref",
+                help="Budget, fixing medio o prezzo del contratto non chiuso.")
+        with kp3:
+            npa_kpi = st.selectbox("Periodi/anno", [365, 252], index=0,
+                                   key="kpi197_npa",
+                                   help="365 = mercato elettrico 7 giorni su 7; 252 = convenzione trading classica.")
+        with kp4:
+            trf_kpi = st.number_input("Risk-free annuo (%)", min_value=0.0,
+                                      max_value=50.0, value=2.0, step=0.5,
+                                      key="kpi197_trf",
+                                      help="Tasso privo di rischio sottratto dal rendimento in Sharpe e Sortino.")
+        pnl_kpi = calcola_pnl_posizione_aperta(prezzi, float(mw_kpi),
+                                               float(p_ref_kpi),
+                                               ruolo=ruolo_kpiv)
+        if pnl_kpi["errore"]:
+            st.error(pnl_kpi["errore"])
+        elif not pnl_kpi["valido"]:
+            st.warning("Parametri non validi per il P&L della posizione.")
+        else:
+            ris_kpi = calcola_kpi_performance(pnl_kpi["serie_giornaliera"],
+                                              int(npa_kpi), float(trf_kpi))
+            if ris_kpi["errore"]:
+                st.error(ris_kpi["errore"])
+            elif not ris_kpi["valido"]:
+                st.warning("Parametri non validi per i KPI.")
+            else:
+                def _fmtk(x, fmt="%.2f"):
+                    return (fmt % x) if x is not None else "n.d."
+                kk1, kk2, kk3, kk4 = st.columns(4)
+                with kk1:
+                    st.metric("Sharpe", _fmtk(ris_kpi["sharpe"]),
+                              f"rf {float(trf_kpi):.1f}%",
+                              help="Rendimento in eccesso sul risk-free diviso volatilita', annualizzato. >= 1 buono, >= 2 eccellente.")
+                with kk2:
+                    st.metric("Sortino", _fmtk(ris_kpi["sortino"]),
+                              "solo downside",
+                              help="Come lo Sharpe ma penalizza solo la volatilita' negativa (sotto il risk-free).")
+                with kk3:
+                    st.metric("Calmar", _fmtk(ris_kpi["calmar"]),
+                              f"dd {_fmtk(ris_kpi['max_drawdown_eur'], '%.0f')} €",
+                              help="Rendimento annuo diviso max drawdown: quanto rende per ogni euro di peggior perdita dal picco.")
+                with kk4:
+                    st.metric("Win rate", _fmtk(ris_kpi["win_rate_pct"], "%.1f") + ("%" if ris_kpi["win_rate_pct"] is not None else ""),
+                              f"pf {_fmtk(ris_kpi['profit_factor'])}",
+                              help="Percentuale di periodi in utile; profit factor = profitti lordi / perdite lorde.")
+                kk5, kk6, kk7, kk8 = st.columns(4)
+                with kk5:
+                    st.metric("P&L totale", f"{ris_kpi['pnl_totale_eur']:+,.0f} €",
+                              f"{ris_kpi['n_periodi']} periodi")
+                with kk6:
+                    st.metric("Rendimento annuo", f"{ris_kpi['rend_annuo_eur']:+,.0f} €",
+                              f"vol {_fmtk(ris_kpi['vol_annua_eur'], '%.0f')} €")
+                with kk7:
+                    st.metric("Miglior periodo", f"{ris_kpi['best_periodo_eur']:+,.0f} €",
+                              str(ris_kpi["best_data"].date()) if ris_kpi["best_data"] is not None else "")
+                with kk8:
+                    st.metric("Peggior periodo", f"{ris_kpi['worst_periodo_eur']:+,.0f} €",
+                              str(ris_kpi["worst_data"].date()) if ris_kpi["worst_data"] is not None else "")
+                st.info(f"📊 {ris_kpi['verdetto']}")
+
+                eq_kpi = ris_kpi["equity"]
+                dd_kpi = ris_kpi["drawdown"]
+                fig_k = go.Figure()
+                fig_k.add_trace(go.Scatter(x=eq_kpi.index, y=eq_kpi.values,
+                                           mode="lines", name="Equity (P&L cumulato)",
+                                           line=dict(color="#22c55e", width=2)))
+                fig_k.add_trace(go.Scatter(x=dd_kpi.index, y=dd_kpi.values,
+                                           mode="lines", name="Drawdown",
+                                           fill="tozeroy",
+                                           line=dict(color="#ef4444", width=1)))
+                fig_k.update_layout(title="Equity e drawdown della posizione",
+                                    xaxis_title="Data", yaxis_title="€")
+                st.plotly_chart(fig_k, use_container_width=True)
+
+                df_mm = ris_kpi["df_mensile"]
+                if len(df_mm):
+                    st.subheader("P&L mensile (€)")
+                    mat = df_mm.set_index("Anno")
+                    fig_h = go.Figure(data=go.Heatmap(
+                        z=mat.values, x=list(mat.columns), y=list(mat.index),
+                        colorscale=[[0, "#ef4444"], [0.5, "#1f2937"], [1, "#22c55e"]],
+                        zmid=0, text=[[f"{v:,.0f}" for v in r] for r in mat.values],
+                        texttemplate="%{text}", hoverongaps=False))
+                    fig_h.update_layout(title="Mappa mensile del P&L (€)",
+                                        xaxis_title="Mese", yaxis_title="Anno")
+                    st.plotly_chart(fig_h, use_container_width=True)
+                    st.dataframe(df_mm, use_container_width=True, hide_index=True)
+
+                csv_eq = pd.DataFrame({"Data": eq_kpi.index,
+                                       "Equity (€)": eq_kpi.values,
+                                       "Drawdown (€)": dd_kpi.values}
+                                      ).to_csv(index=False, sep=";").encode("utf-8")
+                st.download_button("Scarica CSV equity/drawdown", data=csv_eq,
+                                   file_name="kpi_performance_equity.csv", mime="text/csv",
+                                   key="kpi197_csv_eq",
+                                   help="Curva equity (P&L cumulato) e drawdown periodo per periodo.")
+                if len(df_mm):
+                    csv_mm = df_mm.to_csv(index=False, sep=";").encode("utf-8")
+                    st.download_button("Scarica CSV P&L mensile", data=csv_mm,
+                                       file_name="kpi_performance_mensile.csv", mime="text/csv",
+                                       key="kpi197_csv_mm",
+                                       help="P&L aggregato per mese (righe = anni).")
 
 # Footer
 
