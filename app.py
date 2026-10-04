@@ -27812,6 +27812,194 @@ def calcola_costo_liquidazione(df_posizioni, spread_bps=10.0,
     except Exception as e:  # pragma: no cover - guardia totale
         return {"errore": "Errore interno: %s" % e, "valido": False}
 
+
+def calcola_opzione_differimento(V, K, T_anni, vol_pct, tasso_pct,
+                               dy_pct=0.0, n_step=200):
+    """Opzione REALE di differimento di un investimento energetico.
+
+    Investire subito in un impianto (batteria, FV, CCGT...) quando i prezzi
+    sono volatili equivale a esercitare immediatamente una call AMERICANA sul
+    valore attuale del progetto V con strike = CAPEX K. Aspettare ha un
+    valore: l'opzione di differimento, prezzata qui con un albero binomiale
+    CRR sul valore del progetto.
+
+    Parametri:
+    V: valore attuale del progetto (€, PV dei flussi attesi a prezzi correnti);
+    K: CAPEX (€, strike dell'opzione); T_anni: orizzonte entro cui si puo'
+    decidere (anni, >= 0); vol_pct: volatilita' annua del valore del progetto
+    (%); tasso_pct: tasso risk-free annuo (%); dy_pct: dividend yield annuo
+    (%): flussi/mancati ricavi persi restando fermi (e' il COSTO dell'attesa:
+    piu' e' alto, piu' conviene investire subito); n_step: passi dell'albero.
+
+    Albero CRR sul valore spot con cost of carry b = r - dy:
+      dt = T/N; u = exp(sig*sqrt(dt)); d = 1/u;
+      p = (exp(b*dt) - d)/(u - d) (risk-neutral); df = exp(-r*dt).
+    Backward induction con esercizio anticipato a ogni nodo:
+      V_nodo = max(intrinseco, df*(p*V_up + (1-p)*V_down)).
+    Soglia critica V*: bisezione sul V per cui l'esercizio immediato diventa
+    ottimale (opzione == V - K); se dy = 0 e r = 0 non conviene mai
+    esercitare prima -> soglia None (corretto: senza costo dell'attesa ne'
+    interessi, aspettare e' sempre gratis).
+
+    Ritorna dict con 'errore' (None se ok), 'valido', 'valore_opzione'
+    (americana), 'valore_europea' (stesso albero), 'early_premium',
+    'van_immediato' (V - K), 'valore_attesa' (opzione - max(V-K,0) >= 0),
+    'soglia_critica' (V* o None), 'decisione' ('INVESTI ORA' / 'ASPETTA' /
+    'NON INVESTIRE'), 'motivo', 'df_vs_V' e 'df_vs_vol' (sensibilita',
+    griglia a 100 passi), 'parametri'. Mai eccezioni.
+    """
+    def _err(msg):
+        return {"errore": msg, "valido": False}
+
+    try:
+        V = float(V)
+        K = float(K)
+        T = float(T_anni)
+        sig = float(vol_pct) / 100.0
+        r = float(tasso_pct) / 100.0
+        dy = float(dy_pct) / 100.0
+        Ns = float(n_step)
+    except (TypeError, ValueError):
+        return _err("Parametri non numerici.")
+    if not all(np.isfinite(x) for x in (V, K, T, sig, r, dy, Ns)):
+        return _err("Parametri non validi (NaN o infiniti).")
+    if V <= 0:
+        return _err("V non valido (valore progetto deve essere > 0).")
+    if K <= 0:
+        return _err("K non valido (CAPEX deve essere > 0).")
+    if T < 0:
+        return _err("T_anni non valido (deve essere >= 0).")
+    if sig < 0 or sig > 5.0:
+        return _err("vol_pct non valida (0-500%).")
+    if r < -0.05 or r > 1.0:
+        return _err("tasso_pct non valido (-5%..100%).")
+    if dy < 0 or dy > 1.0:
+        return _err("dy_pct non valido (0-100%).")
+    if not Ns.is_integer() or not 1 <= Ns <= 500:
+        return _err("n_step non valido (intero 1-500).")
+    N = int(Ns)
+
+    def _crr(v0, k0, t0, s0, r0, d0, n0, americana=True):
+        """Prezzo CRR di una call su spot con dividend yield. Ritorna float."""
+        intr = max(v0 - k0, 0.0)
+        if t0 <= 0.0 or s0 <= 0.0:
+            return intr
+        dt = t0 / n0
+        u = np.exp(s0 * np.sqrt(dt))
+        d = 1.0 / u
+        b = r0 - d0
+        disc = np.exp(-r0 * dt)
+        den = u - d
+        if den <= 0:
+            return intr
+        p = (np.exp(b * dt) - d) / den
+        if not (0.0 < p < 1.0):
+            return float("nan")
+        j = np.arange(n0 + 1)
+        st = v0 * (u ** j) * (d ** (n0 - j))
+        vals = np.maximum(st - k0, 0.0)
+        for i in range(n0, 0, -1):
+            vals = disc * (p * vals[1:] + (1.0 - p) * vals[:-1])
+            if americana:
+                jj = np.arange(i)
+                si = v0 * (u ** jj) * (d ** ((i - 1) - jj))
+                intr_i = si - k0
+                vals = np.where(intr_i > vals, np.maximum(intr_i, 0.0),
+                                vals)
+        return float(vals[0])
+
+    try:
+        am = _crr(V, K, T, sig, r, dy, N, americana=True)
+        eu = _crr(V, K, T, sig, r, dy, N, americana=False)
+        if not (np.isfinite(am) and np.isfinite(eu)):
+            return _err("Parametri estremi: probabilita' risk-neutral "
+                        "fuori (0,1), riduci volatilita'/dividend yield.")
+        eu = min(eu, am)
+        intr_now = max(V - K, 0.0)
+        attesa = max(am - intr_now, 0.0)
+        early = am - eu
+        van = V - K
+
+        # Soglia critica V*: bisezione su f(x) = americana(x) - (x - K).
+        soglia = None
+        if sig > 0.0 and T > 0.0 and not (dy == 0.0 and r == 0.0):
+            def _f(x):
+                return _crr(x, K, T, sig, r, dy, N, americana=True) - (x - K)
+
+            lo, hi = K, max(2.0 * K, K * 1.5)
+            f_hi = _f(hi)
+            while f_hi > 1e-6 * hi and hi < 1e9 * K:
+                hi *= 2.0
+                f_hi = _f(hi)
+            if f_hi <= 1e-6 * hi:
+                for _ in range(60):
+                    mid = 0.5 * (lo + hi)
+                    if _f(mid) > 0:
+                        lo = mid
+                    else:
+                        hi = mid
+                soglia = float(0.5 * (lo + hi))
+        elif sig <= 0.0 or T <= 0.0:
+            soglia = float(K)
+
+        if van <= 0:
+            if attesa > 0.005 * V:
+                decisione = "NON INVESTIRE ORA"
+                motivo = ("VAN negativo: investire oggi distrugge valore. "
+                          "L'opzione di attesa vale %s €: rivaluta se V sale "
+                          "o se il CAPEX scende." % ("%.0f" % attesa))
+            else:
+                decisione = "NON INVESTIRE"
+                motivo = ("VAN negativo e attesa senza valore: il progetto "
+                          "non conviene ne' ora ne' come scommessa sul "
+                          "futuro.")
+        elif attesa <= 0.005 * V:
+            decisione = "INVESTI ORA"
+            motivo = ("Il valore dell'attesa e' trascurabile (%s €): ogni "
+                      "giorno di ritardo costa piu' di quanto l'opzione "
+                      "renda." % ("%.0f" % attesa))
+        else:
+            decisione = "ASPETTA"
+            motivo = ("Aspettare vale %s € piu' che investire oggi: la "
+                      "volatilita' rende l'opzione di differimento "
+                      "preziosa. Investi solo se V supera %s €."
+                      % (("%.0f" % attesa),
+                         ("%.0f" % soglia) if soglia else "n.d."))
+
+        # Sensibilita' (griglia a 100 passi: veloce e deterministica).
+        Ns2 = 100
+        v_lo, v_hi = 0.3 * K, max(2.5 * K, V * 1.5)
+        vv = np.linspace(v_lo, v_hi, 21)
+        righe_v = []
+        for x in vv:
+            a = _crr(float(x), K, T, sig, r, dy, Ns2, americana=True)
+            righe_v.append((float(x), a, float(x) - K,
+                            max(a - max(float(x) - K, 0.0), 0.0)))
+        df_v = pd.DataFrame(righe_v, columns=[
+            "V_progetto (EUR)", "Opzione (EUR)", "VAN immediato (EUR)",
+            "Valore attesa (EUR)"])
+        s_grid = np.linspace(0.0, min(1.0, max(sig * 2.0, 0.2)), 11)
+        righe_s = []
+        for s in s_grid:
+            a = _crr(V, K, T, float(s), r, dy, Ns2, americana=True)
+            righe_s.append((float(s) * 100.0, a,
+                            max(a - intr_now, 0.0)))
+        df_s = pd.DataFrame(righe_s, columns=[
+            "Volatilita' (%)", "Opzione (EUR)", "Valore attesa (EUR)"])
+
+        return {"errore": None, "valido": True,
+                "valore_opzione": am, "valore_europea": eu,
+                "early_premium": early, "van_immediato": van,
+                "valore_attesa": attesa, "soglia_critica": soglia,
+                "decisione": decisione, "motivo": motivo,
+                "df_vs_V": df_v, "df_vs_vol": df_s,
+                "parametri": {"V": V, "K": K, "T_anni": T,
+                              "vol_pct": float(vol_pct),
+                              "tasso_pct": float(tasso_pct),
+                              "dy_pct": float(dy_pct), "n_step": N}}
+    except Exception as e:  # pragma: no cover - guardia totale
+        return {"errore": "Errore interno: %s" % e, "valido": False}
+
 # WORKSPACE 1: SIMULATORE STRATEGICO
 # =========================================="
 if workspace == _('ws1'):
@@ -28455,7 +28643,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -46534,6 +46722,106 @@ elif workspace == _('ws8'):
                 file_name="costo_liquidazione.csv", mime="text/csv",
                 key="liq203_csv_out",
                 help="Tabella per posizione: volumi, nozionali, spread, impatto, giorni necessari e stato.")
+
+    with tab204:
+        titolo_dif = edu("Opzione di differimento", "Un investimento energetico (batteria, fotovoltaico, centrale) e' un'opzione: puoi investire oggi oppure aspettare. Con prezzi volatili, aspettare ha un valore misurabile (opzione reale). Qui lo prezzi con un albero binomiale sul valore del progetto e trovi la soglia di valore oltre la quale conviene investire subito.")
+        st.markdown(f"<h1>⏳ {titolo_dif}</h1>", unsafe_allow_html=True)
+        st.caption("Opzione reale di differimento: quanto vale aspettare prima di investire, e quando conviene muoversi.")
+        c1d, c2d, c3d = st.columns(3)
+        with c1d:
+            v_dif = st.number_input("Valore attuale progetto V (€)",
+                                    min_value=1.0, value=1000000.0,
+                                    step=50000.0, key="dif204_V",
+                                    help="Valore attuale dei flussi attesi del progetto ai prezzi correnti.")
+            k_dif = st.number_input("CAPEX K (€)", min_value=1.0,
+                                    value=900000.0, step=50000.0,
+                                    key="dif204_K",
+                                    help="Costo di investimento: lo strike dell'opzione.")
+        with c2d:
+            t_dif = st.slider("Orizzonte di decisione (anni)", 0.0, 10.0,
+                              2.0, 0.25, key="dif204_T",
+                              help="Entro quanti anni devi decidere (scadenza dell'opzione).")
+            vol_dif = st.slider("Volatilità annua del progetto (%)", 0.0,
+                                100.0, 30.0, 1.0, key="dif204_vol",
+                                help="Incertezza sul valore del progetto: più è alta, più l'attesa vale.")
+        with c3d:
+            r_dif = st.slider("Tasso risk-free (%)", 0.0, 10.0, 3.0, 0.25,
+                              key="dif204_r")
+            dy_dif = st.slider("Costo dell'attesa (%/anno su V)", 0.0, 30.0,
+                               2.0, 0.5, key="dif204_dy",
+                               help="Flussi e mancati ricavi persi per ogni anno di attesa, in % di V: più è alto, più conviene investire subito.")
+        ris_dif = calcola_opzione_differimento(
+            v_dif, k_dif, t_dif, vol_dif, r_dif, dy_dif)
+        if ris_dif["errore"]:
+            st.error(ris_dif["errore"])
+        else:
+            k1d, k2d, k3d, k4d = st.columns(4)
+            with k1d:
+                st.metric("Valore opzione",
+                          "%.0f €" % ris_dif["valore_opzione"],
+                          help="Quanto vale oggi la possibilità di aspettare (call americana su V con strike K).")
+            with k2d:
+                st.metric("VAN immediato",
+                          "%.0f €" % ris_dif["van_immediato"],
+                          help="V - K: cosa guadagni investendo oggi.")
+            with k3d:
+                st.metric("Valore dell'attesa",
+                          "%.0f €" % ris_dif["valore_attesa"],
+                          help="Opzione meno VAN immediato: il premio della flessibilità.")
+            with k4d:
+                soglia_dif = ris_dif["soglia_critica"]
+                st.metric("Soglia critica V*",
+                          "%.0f €" % soglia_dif if soglia_dif else "n.d.",
+                          help="Sopra questo valore del progetto conviene investire subito; sotto, aspettare.")
+            if ris_dif["decisione"] == "INVESTI ORA":
+                st.success("⏳ %s — %s" % (ris_dif["decisione"],
+                                           ris_dif["motivo"]))
+            elif ris_dif["decisione"] == "ASPETTA":
+                st.warning("⏳ %s — %s" % (ris_dif["decisione"],
+                                          ris_dif["motivo"]))
+            else:
+                st.error("⏳ %s — %s" % (ris_dif["decisione"],
+                                        ris_dif["motivo"]))
+            dfv = ris_dif["df_vs_V"]
+            fig_dif = go.Figure()
+            fig_dif.add_trace(go.Scatter(
+                x=dfv["V_progetto (EUR)"], y=dfv["Opzione (EUR)"],
+                mode="lines", name="Opzione di differimento",
+                line=dict(color="#38bdf8", width=2.5),
+                hovertemplate="V: %{x:,.0f} €<br>Opzione: %{y:,.0f} €<extra></extra>"))
+            fig_dif.add_trace(go.Scatter(
+                x=dfv["V_progetto (EUR)"], y=dfv["VAN immediato (EUR)"],
+                mode="lines", name="VAN immediato (V - K)",
+                line=dict(color="#f59e0b", width=1.5, dash="dash"),
+                hovertemplate="V: %{x:,.0f} €<br>VAN: %{y:,.0f} €<extra></extra>"))
+            if soglia_dif:
+                fig_dif.add_vline(x=soglia_dif, line_dash="dot",
+                                  line_color="#22c55e",
+                                  annotation_text="V*")
+            fig_dif.update_layout(title="Opzione di differimento vs valore del progetto",
+                                  xaxis_title="V (€)", yaxis_title="€",
+                                  template="plotly_dark", height=340)
+            st.plotly_chart(fig_dif, use_container_width=True)
+            dfs = ris_dif["df_vs_vol"]
+            fig_dif2 = go.Figure()
+            fig_dif2.add_trace(go.Scatter(
+                x=dfs["Volatilita' (%)"], y=dfs["Valore attesa (EUR)"],
+                mode="lines+markers", name="Valore attesa",
+                line=dict(color="#a78bfa", width=2.5),
+                hovertemplate="Vol: %{x:.0f}%<br>Attesa: %{y:,.0f} €<extra></extra>"))
+            fig_dif2.update_layout(title="Valore dell'attesa al variare della volatilità",
+                                   xaxis_title="Volatilità annua (%)",
+                                   yaxis_title="€", template="plotly_dark",
+                                   height=300)
+            st.plotly_chart(fig_dif2, use_container_width=True)
+            st.markdown("**Sensibilità al valore del progetto**")
+            st.dataframe(dfv, use_container_width=True, hide_index=True)
+            st.download_button(
+                "Scarica CSV opzione di differimento",
+                data=dfv.to_csv(index=False, sep=";").encode("utf-8"),
+                file_name="opzione_differimento.csv", mime="text/csv",
+                key="dif204_csv_out",
+                help="Tabella di sensibilità: V, opzione, VAN immediato e valore dell'attesa.")
 
 
 # Footer
