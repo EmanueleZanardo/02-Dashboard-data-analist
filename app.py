@@ -29015,6 +29015,132 @@ def calcola_robustezza_offerta(prezzi, mw_f1=1.0, mw_f2=1.0, mw_f3=1.0,
     return out
 
 
+def calcola_break_even_offerte(off_a, off_b, quote_fasce, volume_max_mwh=5000.0,
+                                n_punti=101):
+    """Punto di pareggio tra due offerte a parita' di profilo di consumo.
+
+    costo(V) = V * prezzo_effettivo + 12*canone + attivazione, con prezzo
+    effettivo = prezzo piatto oppure media delle fasce F1/F2/F3 pesata sulle
+    quote fornite. Ritorna il volume di break-even V* (None in dominanza) e
+    la curva dei costi per il grafico.
+    """
+    vuoto = {"valido": False, "errore": None, "volume_pareggio_mwh": None,
+             "dominanza": None, "verdetto": None, "df_curva": None}
+
+    def _num(x):
+        return (isinstance(x, (int, float)) and not isinstance(x, bool)
+                and x == x and abs(x) != float("inf"))
+
+    if (not isinstance(quote_fasce, (list, tuple)) or len(quote_fasce) != 3
+            or not all(_num(q) and q >= 0 for q in quote_fasce)
+            or sum(quote_fasce) <= 0):
+        return dict(vuoto, errore="Quote fasce non valide: servono 3 valori >= 0 con somma > 0.")
+    tot_q = float(sum(quote_fasce))
+    q1, q2, q3 = (float(q) / tot_q for q in quote_fasce)
+    if not _num(volume_max_mwh) or volume_max_mwh <= 0:
+        return dict(vuoto, errore="Volume massimo deve essere > 0.")
+    if isinstance(n_punti, bool) or not isinstance(n_punti, int) or n_punti < 2:
+        return dict(vuoto, errore="n_punti deve essere un intero >= 2.")
+
+    def _parse(off, tag):
+        if not isinstance(off, dict):
+            return None, "%s: formato non valido (serve un dict)." % tag
+        nome = off.get("nome")
+        if not isinstance(nome, str) or not nome.strip():
+            return None, "%s: nome mancante." % tag
+        nome = nome.strip()
+        canone = off.get("canone_eur_mese", 0.0)
+        attiv = off.get("attivazione_eur", 0.0)
+        if not _num(canone) or canone < 0:
+            return None, "«%s»: canone €/mese deve essere >= 0." % nome
+        if not _num(attiv) or attiv < 0:
+            return None, "«%s»: attivazione € deve essere >= 0." % nome
+        prezzi = off.get("prezzi")
+        if not isinstance(prezzi, dict):
+            return None, "«%s»: prezzi mancanti (piatto o F1/F2/F3)." % nome
+        if "piatto" in prezzi:
+            p = prezzi["piatto"]
+            if not _num(p) or p < 0:
+                return None, "«%s»: prezzo €/MWh deve essere >= 0." % nome
+            p_eff = float(p)
+        else:
+            vals = []
+            for f in ("F1", "F2", "F3"):
+                v = prezzi.get(f)
+                if not _num(v) or v < 0:
+                    return None, "«%s»: prezzo fascia %s mancante o < 0." % (nome, f)
+                vals.append(float(v))
+            p_eff = q1 * vals[0] + q2 * vals[1] + q3 * vals[2]
+        fisso = 12.0 * float(canone) + float(attiv)
+        return {"nome": nome, "p_eff": p_eff, "fisso": fisso}, None
+
+    pa, err = _parse(off_a, "Offerta A")
+    if err:
+        return dict(vuoto, errore=err)
+    pb, err = _parse(off_b, "Offerta B")
+    if err:
+        return dict(vuoto, errore=err)
+    if pa["nome"] == pb["nome"]:
+        return dict(vuoto, errore="Le due offerte devono avere nomi diversi.")
+
+    d = pa["p_eff"] - pb["p_eff"]          # differenza prezzo variabile
+    n = pb["fisso"] - pa["fisso"]          # differenza fissi (B - A)
+    eps = 1e-9
+    out = dict(vuoto)
+    out.update({"valido": True, "p_eff_a": pa["p_eff"], "p_eff_b": pb["p_eff"],
+                "fisso_a": pa["fisso"], "fisso_b": pb["fisso"],
+                "nome_a": pa["nome"], "nome_b": pb["nome"],
+                "quote_fasce": (q1, q2, q3)})
+
+    if abs(d) < eps and abs(n) < eps:
+        out["dominanza"] = "pareggio"
+        out["verdetto"] = ("Offerte equivalenti: «%s» e «%s» costano uguale "
+                           "a qualsiasi volume." % (pa["nome"], pb["nome"]))
+    elif abs(d) < eps:
+        win = "A" if pa["fisso"] < pb["fisso"] else "B"
+        out["dominanza"] = win
+        out["verdetto"] = ("Stesso prezzo €/MWh: vince sempre «%s» "
+                           "(fissi annui piu' bassi)." % (pa["nome"] if win == "A" else pb["nome"]))
+    else:
+        v_star = n / d
+        if v_star <= 0:
+            # una delle due domina per ogni V > 0: vince il prezzo variabile minore
+            win = "A" if d < 0 else "B"
+            out["dominanza"] = win
+            out["verdetto"] = ("«%s» vince a qualsiasi volume: prezzo €/MWh e fissi "
+                               "non lasciano spazio all'altra offerta."
+                               % (pa["nome"] if win == "A" else pb["nome"]))
+        else:
+            out["volume_pareggio_mwh"] = v_star
+            # a volumi bassi vince chi ha i fissi piu' bassi
+            win_bassi = "A" if pa["fisso"] <= pb["fisso"] else "B"
+            win_alti = "B" if win_bassi == "A" else "A"
+            out["vincitore_bassi_volumi"] = win_bassi
+            out["vincitore_alti_volumi"] = win_alti
+            if v_star > volume_max_mwh:
+                out["verdetto"] = ("Break-even a %s MWh/anno, oltre il volume massimo "
+                                   "analizzato (%s): nel range vince «%s»."
+                                   % (_fmt_mwh(v_star), _fmt_mwh(volume_max_mwh),
+                                      pa["nome"] if win_bassi == "A" else pb["nome"]))
+            else:
+                out["verdetto"] = ("Sotto %s MWh/anno vince «%s», sopra vince «%s»."
+                                   % (_fmt_mwh(v_star),
+                                      pa["nome"] if win_bassi == "A" else pb["nome"],
+                                      pa["nome"] if win_alti == "A" else pb["nome"]))
+
+    volumi = np.linspace(0.0, float(volume_max_mwh), n_punti)
+    out["df_curva"] = pd.DataFrame({
+        "Volume MWh": np.round(volumi, 2),
+        "Costo «%s» €" % pa["nome"]: np.round(volumi * pa["p_eff"] + pa["fisso"], 2),
+        "Costo «%s» €" % pb["nome"]: np.round(volumi * pb["p_eff"] + pb["fisso"], 2),
+    })
+    return out
+
+
+def _fmt_mwh(v):
+    return ("%s" % f"{v:,.0f}").replace(",", ".")
+
+
 def calcola_van_offerte_pluriennali(offerte, volume_annuo_mwh, tasso_annuo_pct,
                                     forward_base_eur_mwh,
                                     escalation_annua_pct=0.0):
@@ -29985,7 +30111,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -49164,6 +49290,129 @@ elif workspace == _('ws8'):
                 file_name="van_offerte_pluriennali.csv", mime="text/csv",
                 key="van216_csv",
                 help="Forward atteso e costi annui attualizzati per offerta.")
+
+    with tab217:
+        titolo_be = edu("Break-even offerte", "Due offerte con strutture diverse (una col canone alto e il prezzo basso, l'altra viceversa) si incrociano a un volume preciso: sotto quel volume conviene una, sopra conviene l'altra. Questa tab calcola il punto di pareggio esatto, con prezzo effettivo pesato sul tuo profilo F1/F2/F3, e mostra le due rette di costo.")
+        st.markdown(f"<h1>🎯 {titolo_be}</h1>", unsafe_allow_html=True)
+        st.caption("A che volume annuo l'offerta col canone alto/prezzo basso pareggia quella col canone basso/prezzo alto?")
+        beA, beB = st.columns(2)
+        with beA:
+            st.markdown("**Offerta A**")
+            be_nome_a = st.text_input("Nome offerta A", value="Offerta Alfa",
+                                     key="be217_nome_a")
+            be_modo_a = st.radio("Tipo prezzo A", ["Piatto", "Fasce F1/F2/F3"],
+                                 key="be217_modo_a", horizontal=True)
+            if be_modo_a == "Piatto":
+                be_prezzi_a = {"piatto": float(st.number_input(
+                    "Prezzo €/MWh (A)", min_value=0.0, value=120.0, step=1.0,
+                    key="be217_p_a"))}
+            else:
+                be_f1a = float(st.number_input("F1 €/MWh (A)", min_value=0.0,
+                                              value=135.0, step=1.0, key="be217_f1_a"))
+                be_f2a = float(st.number_input("F2 €/MWh (A)", min_value=0.0,
+                                              value=118.0, step=1.0, key="be217_f2_a"))
+                be_f3a = float(st.number_input("F3 €/MWh (A)", min_value=0.0,
+                                              value=95.0, step=1.0, key="be217_f3_a"))
+                be_prezzi_a = {"F1": be_f1a, "F2": be_f2a, "F3": be_f3a}
+            be_can_a = float(st.number_input("Canone €/mese (A)", min_value=0.0,
+                                            value=50.0, step=5.0, key="be217_can_a"))
+            be_att_a = float(st.number_input("Attivazione € una tantum (A)",
+                                            min_value=0.0, value=0.0, step=50.0,
+                                            key="be217_att_a"))
+            off_be_a = {"nome": be_nome_a, "prezzi": be_prezzi_a,
+                        "canone_eur_mese": be_can_a, "attivazione_eur": be_att_a}
+        with beB:
+            st.markdown("**Offerta B**")
+            be_nome_b = st.text_input("Nome offerta B", value="Offerta Beta",
+                                     key="be217_nome_b")
+            be_modo_b = st.radio("Tipo prezzo B", ["Piatto", "Fasce F1/F2/F3"],
+                                 key="be217_modo_b", horizontal=True)
+            if be_modo_b == "Piatto":
+                be_prezzi_b = {"piatto": float(st.number_input(
+                    "Prezzo €/MWh (B)", min_value=0.0, value=110.0, step=1.0,
+                    key="be217_p_b"))}
+            else:
+                be_f1b = float(st.number_input("F1 €/MWh (B)", min_value=0.0,
+                                              value=125.0, step=1.0, key="be217_f1_b"))
+                be_f2b = float(st.number_input("F2 €/MWh (B)", min_value=0.0,
+                                              value=108.0, step=1.0, key="be217_f2_b"))
+                be_f3b = float(st.number_input("F3 €/MWh (B)", min_value=0.0,
+                                              value=88.0, step=1.0, key="be217_f3_b"))
+                be_prezzi_b = {"F1": be_f1b, "F2": be_f2b, "F3": be_f3b}
+            be_can_b = float(st.number_input("Canone €/mese (B)", min_value=0.0,
+                                            value=120.0, step=5.0, key="be217_can_b"))
+            be_att_b = float(st.number_input("Attivazione € una tantum (B)",
+                                            min_value=0.0, value=0.0, step=50.0,
+                                            key="be217_att_b"))
+            off_be_b = {"nome": be_nome_b, "prezzi": be_prezzi_b,
+                        "canone_eur_mese": be_can_b, "attivazione_eur": be_att_b}
+        st.markdown("**Profilo di consumo** (quote F1/F2/F3, normalizzate in automatico)")
+        q1b, q2b, q3b = st.columns(3)
+        with q1b:
+            be_q1 = st.slider("Quota F1 (%)", 0, 100, 40, key="be217_q1")
+        with q2b:
+            be_q2 = st.slider("Quota F2 (%)", 0, 100, 35, key="be217_q2")
+        with q3b:
+            be_q3 = st.slider("Quota F3 (%)", 0, 100, 25, key="be217_q3")
+        be_vmax = st.number_input("Volume massimo grafico (MWh/anno)", min_value=100.0,
+                                 value=3000.0, step=100.0, key="be217_vmax")
+        ris_be = calcola_break_even_offerte(
+            off_be_a, off_be_b, (be_q1, be_q2, be_q3),
+            volume_max_mwh=float(be_vmax))
+        if ris_be["errore"]:
+            st.error(ris_be["errore"])
+        else:
+            if ris_be["volume_pareggio_mwh"] is not None:
+                st.success("✅ %s" % ris_be["verdetto"])
+            elif ris_be["dominanza"] == "pareggio":
+                st.info("ℹ️ %s" % ris_be["verdetto"])
+            else:
+                st.warning("⚠️ %s" % ris_be["verdetto"])
+            m1b, m2b, m3b, m4b = st.columns(4)
+            with m1b:
+                st.metric("Prezzo effettivo A",
+                          "€ %.2f/MWh" % ris_be["p_eff_a"],
+                          help="Prezzo piatto oppure media F1/F2/F3 pesata sulle quote.")
+            with m2b:
+                st.metric("Prezzo effettivo B", "€ %.2f/MWh" % ris_be["p_eff_b"])
+            with m3b:
+                if ris_be["volume_pareggio_mwh"] is not None:
+                    st.metric("Break-even",
+                              "%s MWh/anno" % _fmt_mwh(ris_be["volume_pareggio_mwh"]))
+                else:
+                    st.metric("Break-even", "—",
+                              help="Nessun incrocio: un'offerta domina l'altra.")
+            with m4b:
+                st.metric("Fissi annui A vs B",
+                          "€ %s vs %s" % (_fmt_mwh(ris_be["fisso_a"]),
+                                          _fmt_mwh(ris_be["fisso_b"])),
+                          help="12 × canone mensile + attivazione.")
+            fig_be = go.Figure()
+            dfc = ris_be["df_curva"]
+            fig_be.add_trace(go.Scatter(
+                x=dfc["Volume MWh"], y=dfc.iloc[:, 1], mode="lines",
+                name=ris_be["nome_a"], line=dict(color="#3b82f6", width=3)))
+            fig_be.add_trace(go.Scatter(
+                x=dfc["Volume MWh"], y=dfc.iloc[:, 2], mode="lines",
+                name=ris_be["nome_b"], line=dict(color="#22c55e", width=3)))
+            if ris_be["volume_pareggio_mwh"] is not None:
+                fig_be.add_vline(x=ris_be["volume_pareggio_mwh"], line_dash="dash",
+                                 line_color="#eab308",
+                                 annotation_text="Break-even %s MWh" % _fmt_mwh(ris_be["volume_pareggio_mwh"]),
+                                 annotation_position="top right")
+            fig_be.update_layout(title="Costo annuo totale in funzione del volume",
+                                 template="plotly_dark", height=400,
+                                 xaxis_title="Volume (MWh/anno)", yaxis_title="€/anno",
+                                 hovermode="x unified")
+            st.plotly_chart(fig_be, use_container_width=True)
+            st.markdown("**Curva dei costi**")
+            st.dataframe(dfc, use_container_width=True, hide_index=True)
+            st.download_button(
+                "Scarica CSV break-even offerte",
+                data=dfc.to_csv(index=False, sep=";").encode("utf-8"),
+                file_name="break_even_offerte.csv", mime="text/csv",
+                key="be217_csv",
+                help="Costo annuo totale delle due offerte al variare del volume.")
 
 # Footer
 
