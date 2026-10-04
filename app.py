@@ -26361,6 +26361,181 @@ def calcola_pca_forma_prezzo(prezzi, n_fattori=3, min_giorni=30):
             "verdetto": verdetto}
 
 
+def calcola_copertura_proxy(pa, pb, forward_hub, mw=1.0):
+    """Copertura proxy (cross-hedge) dello Swissix con il prodotto di un hub vicino.
+
+    Domanda operativa: "Non esistono future liquidi sullo Swissix: mi copro
+    comprando baseload tedesco (o francese) a termine. Quanto rischio mi resta
+    davvero?" -- il buyer paga lo spot Swissix pa ogni ora e compra h MW di
+    forward sull'hub B al prezzo F: costo netto unitario
+      c(h) = pa - h * (pb - F)
+    (il forward incassa a scadenza la differenza tra spot hub realizzato e
+    prezzo fissato). Il ratio di minima varianza e' h* = Cov(pa, pb)/Var(pb);
+    l'efficacia e' 1 - Var(c(h*))/Var(pa) = R^2 della regressione di pa su pb.
+    Quello che resta e' il BASIS RISK: la basis b = pa - pb non e' copribile
+    col prodotto hub.
+
+    Differenza dalle altre tab: tab52 "Hedge ratio" calcola il ratio ottimale
+    su un forward SINTETICO (media mobile della stessa serie); tab112 "Spread
+    transfrontaliero" valorizza la capacita' di interconnessione (lato offerta
+    di trasporto); tab131 "Test efficacia hedge" monitora nel tempo una
+    copertura esistente su fixing interno. Qui si dimensiona e si prezza una
+    copertura REALE su un SECONDO mercato (due serie storiche allineate), con
+    il prezzo forward inserito dall'utente e il confronto tra hedge naive 1:1
+    e hedge ottimale di minima varianza.
+
+    Parametri:
+      pa: serie oraria spot Swissix (€/MWh);
+      pb: serie oraria spot hub B (€/MWh), allineata per timestamp (inner join);
+      forward_hub: prezzo forward bloccabile sull'hub (€/MWh);
+      mw: MW di consumo da coprire (scala i controvalori).
+
+    Ritorna dict con: valido, errore, n_ore, h_star, correlazione, r2,
+    std_spot, std_residua_star, std_residua_naive, eff_naive,
+    costo_atteso_spot, costo_atteso_star, costo_atteso_naive (€/MWh),
+    controvalore_spot, controvalore_star (€ totali),
+    basis_media, basis_std, basis_min, basis_max, profilo_basis (lista 24),
+    df_h (h, efficacia), df_basis (Ora, Basis media),
+    pa_allineata, pb_allineata, verdetto.
+
+    NaN-safe: serie vuote / non allineabili / < 24 ore valide / varianza
+    nulla di pb o pa / indice non orario / parametri non validi -> errore
+    pulito; mai eccezioni. Deterministico.
+    """
+    colonne_h = ["h (ratio)", "Efficacia (R^2)"]
+    colonne_b = ["Ora", "Basis media (€/MWh)"]
+
+    def _err(msg):
+        return {"errore": msg, "valido": False, "n_ore": 0, "h_star": None,
+                "correlazione": None, "r2": 0.0, "std_spot": None,
+                "std_residua_star": None, "std_residua_naive": None,
+                "eff_naive": 0.0, "costo_atteso_spot": None,
+                "costo_atteso_star": None, "costo_atteso_naive": None,
+                "controvalore_spot": None, "controvalore_star": None,
+                "basis_media": None, "basis_std": None, "basis_min": None,
+                "basis_max": None, "profilo_basis": [float("nan")] * 24,
+                "df_h": pd.DataFrame(columns=colonne_h),
+                "df_basis": pd.DataFrame(columns=colonne_b),
+                "pa_allineata": pd.Series(dtype=float),
+                "pb_allineata": pd.Series(dtype=float),
+                "verdetto": ""}
+
+    def _num(x):
+        if isinstance(x, bool):
+            return None
+        try:
+            v = float(x)
+        except (TypeError, ValueError):
+            return None
+        return v if np.isfinite(v) else None
+
+    fwd = _num(forward_hub)
+    w = _num(mw)
+    if fwd is None:
+        return _err("Prezzo forward hub non valido: serve un numero finito (€/MWh).")
+    if w is None or w <= 0:
+        return _err("MW da coprire non validi: serve un numero > 0.")
+    try:
+        a = pd.to_numeric(pd.Series(pa), errors="coerce")
+        b = pd.to_numeric(pd.Series(pb), errors="coerce")
+        df = pd.concat({"a": a, "b": b}, axis=1).dropna()
+    except Exception:
+        return _err("Serie di prezzo non valide.")
+    if len(df) < 24:
+        return _err("Ore valide insufficienti dopo l'allineamento: %d trovate, "
+                    "ne servono almeno 24." % len(df))
+    x = df["a"].to_numpy(dtype=float)
+    y = df["b"].to_numpy(dtype=float)
+    var_x = float(np.var(x, ddof=1))
+    var_y = float(np.var(y, ddof=1))
+    if not np.isfinite(var_x) or not np.isfinite(var_y):
+        return _err("Serie di prezzo non valide (valori non finiti).")
+    if var_y <= 0:
+        return _err("Serie hub senza varianza: regressione impossibile, "
+                    "scegli un altro hub.")
+    if var_x <= 0:
+        return _err("Serie Swissix senza varianza: niente da coprire.")
+    cov = float(np.cov(x, y, ddof=1)[0, 1])
+    h_star = cov / var_y
+    if not np.isfinite(h_star):
+        return _err("Ratio di copertura non calcolabile.")
+    var_resid = float(np.var(x - h_star * y, ddof=1))
+    r2 = max(0.0, min(1.0, 1.0 - var_resid / var_x))
+    corr = float(np.corrcoef(x, y)[0, 1])
+    corr = max(-1.0, min(1.0, corr)) if np.isfinite(corr) else 0.0
+    std_spot = float(np.sqrt(var_x))
+    std_star = float(np.sqrt(max(var_resid, 0.0)))
+    # hedge naive 1:1, per confronto
+    var_n = float(np.var(x - y, ddof=1))
+    eff_n = max(0.0, min(1.0, 1.0 - var_n / var_x))
+    std_n = float(np.sqrt(max(var_n, 0.0)))
+    # costi attesi (€/MWh): E[pa] - h * (E[pb] - F)
+    mx, my = float(np.mean(x)), float(np.mean(y))
+    c_spot = mx
+    c_star = mx - h_star * (my - fwd)
+    c_naive = mx - (my - fwd)
+    n = len(df)
+    # basis b = pa - pb: il rischio non copribile
+    basis = x - y
+    b_mean = float(np.mean(basis))
+    b_std = float(np.std(basis, ddof=1))
+    b_min = float(np.min(basis))
+    b_max = float(np.max(basis))
+    try:
+        ore_idx = df.index.hour.to_numpy()
+    except Exception:
+        return _err("Indice non orario: impossibile calcolare il profilo della basis.")
+    prof = [float(np.mean(basis[ore_idx == h])) if (ore_idx == h).any()
+            else float("nan") for h in range(24)]
+    # curva efficacia vs h (per il grafico)
+    h_max = max(2.0 * abs(h_star), 2.0)
+    hs = np.linspace(0.0, h_max, 81)
+    effs = [max(0.0, min(1.0, 1.0 - float(np.var(x - h * y, ddof=1)) / var_x))
+            for h in hs]
+    df_h = pd.DataFrame({"h (ratio)": np.round(hs, 4),
+                         "Efficacia (R^2)": np.round(effs, 4)})
+    df_b = pd.DataFrame({"Ora": list(range(24)),
+                         "Basis media (€/MWh)": [round(v, 2) if np.isfinite(v)
+                                                 else None for v in prof]})
+    if r2 >= 0.80:
+        giudizio = ("copertura proxy MOLTO EFFICACE: l'hub replica bene lo "
+                    "Swissix, il basis risk residuo e' contenuto.")
+    elif r2 >= 0.50:
+        giudizio = ("copertura proxy EFFICACE, ma resta un basis risk "
+                    "significativo: valuta prodotti hub piu' granulari "
+                    "(peak/off-peak) o un ratio dinamico.")
+    else:
+        giudizio = ("copertura proxy POCO EFFICACE: l'hub non replica lo "
+                    "Swissix, il basis risk domina -- cosi' com'e' il "
+                    "cross-hedge serve a poco.")
+    if abs(h_star - 1.0) > 0.15:
+        nota_h = ("Il ratio ottimale si discosta parecchio dall'1:1 naive: "
+                  "coprire 'un tanto al chilo' lascia sul tavolo rischio "
+                  "evitabile.")
+    else:
+        nota_h = "Il ratio ottimale e' vicino a 1: la copertura naive 1:1 e' quasi ottimale."
+    verdetto = ("h* = %.3f (%.1f MW di hub ogni 100 MW di consumo): R^2 = %.1f%%, "
+                "la deviazione std del costo orario scende da %.1f a %.1f €/MWh "
+                "(naive 1:1: %.1f €/MWh, R^2 = %.1f%%). %s %s" % (
+                    h_star, h_star * 100.0, 100.0 * r2, std_spot, std_star,
+                    std_n, 100.0 * eff_n, giudizio, nota_h))
+    return {"errore": None, "valido": True, "n_ore": int(n),
+            "h_star": float(h_star), "correlazione": corr, "r2": float(r2),
+            "std_spot": std_spot, "std_residua_star": std_star,
+            "std_residua_naive": std_n, "eff_naive": float(eff_n),
+            "costo_atteso_spot": float(c_spot),
+            "costo_atteso_star": float(c_star),
+            "costo_atteso_naive": float(c_naive),
+            "controvalore_spot": float(c_spot * w * n),
+            "controvalore_star": float(c_star * w * n),
+            "basis_media": b_mean, "basis_std": b_std,
+            "basis_min": b_min, "basis_max": b_max,
+            "profilo_basis": prof, "df_h": df_h, "df_basis": df_b,
+            "pa_allineata": df["a"], "pb_allineata": df["b"],
+            "verdetto": verdetto}
+
+
+
 # ==========================================
 # WORKSPACE 1: SIMULATORE STRATEGICO
 # ==========================================
@@ -27005,7 +27180,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -44067,6 +44242,114 @@ elif workspace == _('ws8'):
                                key="pca194_csv_sco",
                                help="Score giornalieri dei fattori (una riga per giorno).")
 
+
+    with tab195:
+        if sorgente.startswith("🧪"):
+            banner_demo("serie CH + hub sintetico deterministico (mock per zona B)")
+        titolo_pxb = edu("Copertura proxy (basis risk)", "Non esistono future liquidi sullo Swissix: per coprirsi si compra a termine il baseload dell'hub vicino (Germania, Francia...). Ma l'hub non replica perfettamente lo Swissix: la differenza tra i due prezzi (la BASIS) resta scoperta. Questa tab dimensiona il cross-hedge di minima varianza, lo confronta con la copertura ingenua 1:1 e misura quanto rischio residuo resta davvero.")
+        st.markdown(f"<h1>🛡️ {titolo_pxb}</h1>", unsafe_allow_html=True)
+        st.caption("Cross-hedge dello Swissix col prodotto dell'hub vicino: ratio ottimale, efficacia e basis risk residuo.")
+        px1, px2, px3 = st.columns(3)
+        with px1:
+            zona_pxb = st.selectbox("Hub di copertura (zona B)", list(ZONE_XB.keys()), index=0, key="pxb195_zona")
+        with px2:
+            mw_pxb = st.number_input("Consumo da coprire (MW)", value=10.0, min_value=0.1, step=1.0, key="pxb195_mw")
+        with px3:
+            fwd_pxb = st.number_input("Forward hub bloccabile (€/MWh)", value=80.0, step=1.0, key="pxb195_fwd",
+                                      help="Prezzo a cui puoi davvero comprare il prodotto hub a termine dal tuo broker o sulla borsa.")
+        st.caption("Senso: compri h MW di forward hub a %.1f €/MWh contro il consumo pagato a spot Swissix." % float(fwd_pxb))
+
+        def carica_hub_pxb(a, b):
+            if sorgente.startswith("🌐"):
+                key = get_entsoe_key()
+                if not key:
+                    st.warning("🔑 Chiave API ENTSO-E non configurata: aggiungi `ENTSOE_API_KEY` a `.streamlit/secrets.toml`.")
+                    st.stop()
+                return scarica_dati_entsoe(key, a, b, country=ZONE_XB[zona_pxb]["codice"]).dropna()
+            return generate_mock_zona(a, b, zona_pxb).dropna()
+
+        try:
+            with st.spinner("⏳ Caricamento hub..."):
+                prezzi_hub = carica_hub_pxb(d0, d1)
+        except Exception as e:
+            st.error(f"Errore nel caricamento dell'hub: {e}")
+            prezzi_hub = pd.Series(dtype=float)
+        ris_pxb = calcola_copertura_proxy(prezzi, prezzi_hub, float(fwd_pxb), float(mw_pxb))
+        if not ris_pxb["valido"]:
+            st.error(ris_pxb["errore"])
+        else:
+            kp1, kp2, kp3, kp4 = st.columns(4)
+            with kp1:
+                st.metric("h* ottimale", f"{ris_pxb['h_star']:.3f}",
+                          f"{ris_pxb['h_star'] * float(mw_pxb):.1f} MW di hub",
+                          help="Ratio di minima varianza: Cov(Swissix, hub) / Var(hub). Quanti MW di prodotto hub comprare per ogni MW di consumo.")
+            with kp2:
+                st.metric("Efficacia copertura", f"{100.0 * ris_pxb['r2']:.1f}%",
+                          f"naive 1:1: {100.0 * ris_pxb['eff_naive']:.1f}%",
+                          help="Quota di varianza del costo eliminata dal cross-hedge (R^2 della regressione Swissix su hub). Il resto e' basis risk.")
+            with kp3:
+                st.metric("Std costo orario", f"{ris_pxb['std_residua_star']:.1f} €/MWh",
+                          f"da {ris_pxb['std_spot']:.1f} scoperto",
+                          help="Deviazione standard del costo orario: scoperto vs coperto con h*.")
+            with kp4:
+                st.metric("Costo atteso coperto", f"{ris_pxb['costo_atteso_star']:.1f} €/MWh",
+                          f"spot atteso: {ris_pxb['costo_atteso_spot']:.1f}",
+                          help="Costo medio atteso = E[Swissix] - h* x (E[hub] - forward). Include il controvalore in € sotto.")
+            st.info(f"🛡️ {ris_pxb['verdetto']}")
+            st.caption(f"Ore analizzate: {ris_pxb['n_ore']:,} — controvalore periodo su {float(mw_pxb):.0f} MW: "
+                       f"{ris_pxb['controvalore_spot']:,.0f} € scoperto vs {ris_pxb['controvalore_star']:,.0f} € coperto con h*. "
+                       f"Basis media {ris_pxb['basis_media']:+.1f} €/MWh (std {ris_pxb['basis_std']:.1f}, min {ris_pxb['basis_min']:.0f}, max {ris_pxb['basis_max']:.0f}).")
+
+            xa = ris_pxb["pb_allineata"].to_numpy(dtype=float)
+            ya = ris_pxb["pa_allineata"].to_numpy(dtype=float)
+            intercetta = float(np.mean(ya)) - ris_pxb["h_star"] * float(np.mean(xa))
+            fig_sc = go.Figure()
+            fig_sc.add_trace(go.Scatter(x=xa, y=ya, mode="markers",
+                                        marker=dict(size=3, opacity=0.35, color="#38bdf8"),
+                                        name="Ore (hub vs Swissix)"))
+            x_line = np.array([float(np.min(xa)), float(np.max(xa))])
+            fig_sc.add_trace(go.Scatter(x=x_line, y=intercetta + ris_pxb["h_star"] * x_line,
+                                        mode="lines", line=dict(color="#22c55e", width=2),
+                                        name=f"OLS: Swissix = {intercetta:.1f} + {ris_pxb['h_star']:.3f} x hub"))
+            fig_sc.update_layout(title="Regressione Swissix su hub (la pendenza e' h*)",
+                                 xaxis_title="Hub (€/MWh)", yaxis_title="Swissix (€/MWh)")
+            st.plotly_chart(fig_sc, use_container_width=True)
+
+            df_hh = ris_pxb["df_h"]
+            fig_h = go.Figure()
+            fig_h.add_trace(go.Scatter(x=df_hh["h (ratio)"], y=df_hh["Efficacia (R^2)"],
+                                       mode="lines", line=dict(color="#8b5cf6", width=2),
+                                       name="Efficacia"))
+            fig_h.add_vline(x=ris_pxb["h_star"], line_dash="solid", line_color="#22c55e",
+                            annotation_text="h* ottimale")
+            fig_h.add_vline(x=1.0, line_dash="dash", line_color="gray",
+                            annotation_text="naive 1:1")
+            fig_h.update_layout(title="Efficacia della copertura al variare del ratio h",
+                                xaxis_title="h (MW hub per MW di consumo)", yaxis_title="Efficacia (R^2)")
+            st.plotly_chart(fig_h, use_container_width=True)
+
+            df_bb = ris_pxb["df_basis"]
+            colori_b = ["#22c55e" if (v or 0) >= 0 else "#ef4444" for v in df_bb["Basis media (€/MWh)"]]
+            fig_b = go.Figure(go.Bar(x=df_bb["Ora"], y=df_bb["Basis media (€/MWh)"].fillna(0.0),
+                                     marker_color=colori_b, name="Basis media"))
+            fig_b.add_hline(y=0, line_dash="dash", line_color="gray")
+            fig_b.update_layout(title="Profilo orario della basis (Swissix − hub): quando il proxy fallisce",
+                                xaxis_title="Ora", yaxis_title="Basis media (€/MWh)",
+                                xaxis=dict(tickmode="linear", tick0=0, dtick=2))
+            st.plotly_chart(fig_b, use_container_width=True)
+
+            st.subheader("Basis oraria media")
+            st.dataframe(df_bb, use_container_width=True, hide_index=True)
+            csv_h = df_hh.to_csv(index=False, sep=";").encode("utf-8")
+            st.download_button("Scarica CSV efficacia vs h", data=csv_h,
+                               file_name="copertura_proxy_efficacia.csv", mime="text/csv",
+                               key="pxb195_csv_h",
+                               help="Curva efficacia (R^2) al variare del ratio di copertura h.")
+            csv_b = df_bb.to_csv(index=False, sep=";").encode("utf-8")
+            st.download_button("Scarica CSV basis oraria", data=csv_b,
+                               file_name="copertura_proxy_basis.csv", mime="text/csv",
+                               key="pxb195_csv_b",
+                               help="Basis media Swissix − hub per ora del giorno (24 righe).")
 
 # Footer
 
