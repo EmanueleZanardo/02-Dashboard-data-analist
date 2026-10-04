@@ -28514,6 +28514,144 @@ def calcola_costo_uscita(prezzo_fisso_eur_mwh, volume_mensile_mwh,
     }
 
 
+def calcola_confronto_offerte(offerte, volume_annuo_mwh):
+    """Confronta offerte di fornitura: rinnovo del contratto attuale contro
+    proposte alternative (switch fornitore).
+
+    Ogni offerta e' un dict con chiavi: nome, prezzo_energia_eur_mwh,
+    canone_fisso_eur_mese, durata_mesi, costo_attivazione_eur, sconto_pct
+    (opzionale, 0-100, applicato al prezzo energia).
+    TCO annuo = V * prezzo_eff + 12 * canone + attivazione; la prima offerta
+    della lista e' il riferimento (rinnovo). Volume di pareggio tra due
+    offerte i,j: V* = (12*(canone_j-canone_i) + (att_j-att_i)) /
+    (prezzo_eff_i - prezzo_eff_j); None se non esiste per volumi positivi.
+    Funzione pura: nessun accesso a Streamlit.
+    """
+    def _num(x):
+        try:
+            v = float(x)
+        except (TypeError, ValueError):
+            return None
+        return None if v != v else v
+
+    def _ko(msg):
+        return {"errore": msg, "valido": False}
+
+    vol = _num(volume_annuo_mwh)
+    if vol is None:
+        return _ko("Il volume annuo deve essere un numero.")
+    if vol <= 0:
+        return _ko("Il volume annuo deve essere > 0 MWh.")
+    if not isinstance(offerte, (list, tuple)) or len(offerte) < 2:
+        return _ko("Servono almeno 2 offerte da confrontare.")
+
+    righe = []
+    for i, o in enumerate(offerte):
+        if not isinstance(o, dict):
+            return _ko("L'offerta #%d non e' valida." % (i + 1))
+        nome = str(o.get("nome", "Offerta %d" % (i + 1)))
+        prezzo = _num(o.get("prezzo_energia_eur_mwh"))
+        canone = _num(o.get("canone_fisso_eur_mese"))
+        durata = _num(o.get("durata_mesi"))
+        att = _num(o.get("costo_attivazione_eur"))
+        sconto = _num(o.get("sconto_pct", 0.0))
+        if None in (prezzo, canone, durata, att, sconto):
+            return _ko("L'offerta '%s' ha parametri non numerici." % nome)
+        if prezzo < 0:
+            return _ko("L'offerta '%s': il prezzo energia non puo' essere "
+                       "negativo." % nome)
+        if canone < 0:
+            return _ko("L'offerta '%s': il canone fisso non puo' essere "
+                       "negativo." % nome)
+        if durata != int(durata) or not (1 <= durata <= 120):
+            return _ko("L'offerta '%s': la durata deve essere un intero tra "
+                       "1 e 120 mesi." % nome)
+        if att < 0:
+            return _ko("L'offerta '%s': il costo di attivazione non puo' "
+                       "essere negativo." % nome)
+        if not (0 <= sconto <= 100):
+            return _ko("L'offerta '%s': lo sconto deve stare tra 0 e "
+                       "100 %%." % nome)
+        prezzo_eff = prezzo * (1.0 - sconto / 100.0)
+        costo_energia = vol * prezzo_eff
+        fisso_annuo = 12.0 * canone
+        tco = costo_energia + fisso_annuo + att
+        righe.append({
+            "Offerta": nome,
+            "Prezzo eff. (€/MWh)": round(prezzo_eff, 2),
+            "Canone annuo (€)": round(fisso_annuo, 0),
+            "Attivazione (€)": round(att, 0),
+            "Durata (mesi)": int(durata),
+            "TCO annuo (€)": round(tco, 0),
+            "All-in (€/MWh)": round(tco / vol, 2),
+            "_pe": prezzo_eff, "_canone": canone, "_att": att, "_tco": tco,
+        })
+
+    df = pd.DataFrame(righe).drop(columns=["_pe", "_canone", "_att", "_tco"])
+    tco_vals = [r["_tco"] for r in righe]
+    nomi = [r["Offerta"] for r in righe]
+    pes = [r["_pe"] for r in righe]
+    canoni = [r["_canone"] for r in righe]
+    atts = [r["_att"] for r in righe]
+    i_best = int(min(range(len(tco_vals)), key=lambda k: tco_vals[k]))
+    tco_rinnovo = tco_vals[0]
+    risparmio = tco_rinnovo - tco_vals[i_best]
+    # Verdetto relativo al rinnovo (prima offerta della lista)
+    tco_alt_min = min(tco_vals[1:])
+    if tco_alt_min < tco_rinnovo:
+        verdetto = "CONVIENE LO SWITCH"
+    elif tco_alt_min > tco_rinnovo:
+        verdetto = "RESTA NEL CONTRATTO"
+    else:
+        verdetto = "INDIFFERENTE"
+
+    pareggi = []
+    for i in range(len(righe)):
+        for j in range(i + 1, len(righe)):
+            a = pes[i] - pes[j]
+            num = 12.0 * (canoni[j] - canoni[i]) + (atts[j] - atts[i])
+            if a == 0.0:
+                v_star = None
+            else:
+                v_star = num / a
+                if not (v_star is not None and v_star > 0):
+                    v_star = None
+            if v_star is None:
+                vincitore = nomi[i] if tco_vals[i] <= tco_vals[j] else nomi[j]
+                lettura = ("%s sempre piu' economica "
+                           "(nessun incrocio)" % vincitore)
+                v_out = None
+            else:
+                # A volume -> 0 vince chi ha costi fissi minori:
+                # TCO_i - TCO_j = a*V - num, a V=0 vale -num.
+                vinc_basso = nomi[i] if num > 0 else nomi[j]
+                vinc_alto = nomi[j] if num > 0 else nomi[i]
+                v_fmt = "{:,.0f}".format(v_star).replace(",", ".")
+                lettura = ("Fino a %s MWh/anno conviene %s, "
+                           "oltre conviene %s" % (v_fmt, vinc_basso,
+                                                 vinc_alto))
+                v_out = round(v_star, 0)
+            pareggi.append({
+                "Coppia": "%s vs %s" % (nomi[i], nomi[j]),
+                "Volume pareggio (MWh/anno)": v_out,
+                "Lettura": lettura,
+            })
+    df_par = pd.DataFrame(pareggi)
+
+    return {
+        "errore": None, "valido": True,
+        "df": df, "df_pareggi": df_par,
+        "nomi": nomi, "tco": tco_vals,
+        "migliore": nomi[i_best],
+        "tco_migliore": tco_vals[i_best],
+        "allin_migliore": tco_vals[i_best] / vol,
+        "tco_rinnovo": tco_rinnovo,
+        "risparmio_vs_rinnovo": risparmio,
+        "verdetto": verdetto,
+        "volume_annuo": vol,
+    }
+
+
 def calcola_opzione_differimento(V, K, T_anni, vol_pct, tasso_pct,
                                dy_pct=0.0, n_step=200):
     """Opzione REALE di differimento di un investimento energetico.
@@ -29344,7 +29482,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -48148,6 +48286,92 @@ elif workspace == _('ws8'):
                 file_name="costo_uscita_contratto.csv", mime="text/csv",
                 key="usc212_csv",
                 help="Mesi residui: prezzo fisso, forward, risparmi mensili attualizzati e cumulato.")
+
+    with tab213:
+        titolo_cfo = edu("Rinnovo vs switch fornitore", "Quando il fornitore manda la proposta di RINNOVO e arrivano offerte concorrenti, il prezzo energia da solo non basta: contano anche canone fisso mensile (PCV + corrispettivo commerciale), costo di attivazione e sconti. Questa tab calcola il TCO annuo di ciascuna offerta e il volume di pareggio tra coppie di offerte.")
+        st.markdown(f"<h1>🔄 {titolo_cfo}</h1>", unsafe_allow_html=True)
+        st.caption("Rinnovo del contratto attuale contro offerte concorrenti: TCO annuo, costo all-in €/MWh e volumi di pareggio.")
+        vol_cfo = st.number_input("Volume annuo stimato (MWh)", min_value=1.0,
+                                  value=1000.0, key="cfo213_volume",
+                                  help="Consumo annuo atteso: il TCO e il pareggio dipendono da questo volume.")
+        col_r, col_a, col_b = st.columns(3)
+        offerte_cfo = []
+        for idx_o, (col_o, nome_o, key_o) in enumerate([
+                (col_r, "Rinnovo (attuale)", "rin"),
+                (col_a, "Alternativa A", "altA"),
+                (col_b, "Alternativa B", "altB")]):
+            with col_o:
+                st.markdown(f"**{nome_o}**")
+                p_o = st.number_input("Prezzo energia (€/MWh)",
+                                      min_value=0.0, value=[120.0, 100.0, 110.0][idx_o],
+                                      key=f"cfo213_{key_o}_prezzo")
+                c_o = st.number_input("Canone fisso (€/mese)",
+                                      min_value=0.0, value=[50.0, 200.0, 30.0][idx_o],
+                                      key=f"cfo213_{key_o}_canone")
+                d_o = st.number_input("Durata (mesi)",
+                                      min_value=1, max_value=120, value=12, step=1,
+                                      key=f"cfo213_{key_o}_durata")
+                a_o = st.number_input("Attivazione una tantum (€)",
+                                      min_value=0.0, value=[0.0, 500.0, 0.0][idx_o],
+                                      key=f"cfo213_{key_o}_att")
+                s_o = st.number_input("Sconto su prezzo energia (%)",
+                                      min_value=0.0, max_value=100.0, value=[0.0, 0.0, 5.0][idx_o],
+                                      key=f"cfo213_{key_o}_sconto")
+                offerte_cfo.append({
+                    "nome": nome_o,
+                    "prezzo_energia_eur_mwh": p_o,
+                    "canone_fisso_eur_mese": c_o,
+                    "durata_mesi": d_o,
+                    "costo_attivazione_eur": a_o,
+                    "sconto_pct": s_o,
+                })
+        ris_cfo = calcola_confronto_offerte(offerte_cfo, vol_cfo)
+        if ris_cfo["errore"]:
+            st.error(ris_cfo["errore"])
+        else:
+            v_cfo = ris_cfo["verdetto"]
+            if v_cfo == "CONVIENE LO SWITCH":
+                st.success("🔄 CONVIENE LO SWITCH — '%s' ha il TCO annuo piu' basso: il passaggio fa risparmiare € %s/anno rispetto al rinnovo." % (
+                    ris_cfo["migliore"],
+                    "{:,.0f}".format(ris_cfo["risparmio_vs_rinnovo"]).replace(",", ".")))
+            elif v_cfo == "RESTA NEL CONTRATTO":
+                st.error("🔄 RESTA NEL CONTRATTO — il rinnovo resta l'offerta piu' economica a questo volume.")
+            else:
+                st.warning("🔄 INDIFFERENTE — rinnovo e miglior alternativa si equivalgono: decidono durata e condizioni non economiche.")
+            k1c, k2c, k3c, k4c = st.columns(4)
+            with k1c:
+                st.metric("Miglior TCO annuo",
+                          "€ {:,.0f}".format(ris_cfo["tco_migliore"]).replace(",", "."),
+                          help="Costo totale annuo dell'offerta piu' economica (energia + canone x12 + attivazione).")
+            with k2c:
+                st.metric("Risparmio vs rinnovo",
+                          "€ {:,.0f}".format(ris_cfo["risparmio_vs_rinnovo"]).replace(",", "."),
+                          help="TCO rinnovo meno TCO miglior offerta: > 0 conviene cambiare fornitore.")
+            with k3c:
+                st.metric("All-in migliore", "%.2f €/MWh" % ris_cfo["allin_migliore"],
+                          help="TCO dell'offerta migliore diviso per il volume annuo.")
+            with k4c:
+                st.metric("TCO rinnovo",
+                          "€ {:,.0f}".format(ris_cfo["tco_rinnovo"]).replace(",", "."),
+                          help="Costo totale annuo restando con il fornitore attuale.")
+            fig_cfo = go.Figure()
+            fig_cfo.add_trace(go.Bar(
+                x=ris_cfo["df"]["Offerta"], y=ris_cfo["df"]["TCO annuo (€)"],
+                name="TCO annuo",
+                hovertemplate="%{x}: € %{y:,.0f}<extra></extra>"))
+            fig_cfo.update_layout(title="TCO annuo per offerta",
+                                  template="plotly_dark", height=400)
+            st.plotly_chart(fig_cfo, use_container_width=True)
+            st.markdown("**Confronto offerte**")
+            st.dataframe(ris_cfo["df"], use_container_width=True, hide_index=True)
+            st.markdown("**Volumi di pareggio tra coppie di offerte**")
+            st.dataframe(ris_cfo["df_pareggi"], use_container_width=True, hide_index=True)
+            st.download_button(
+                "Scarica CSV confronto offerte",
+                data=ris_cfo["df"].to_csv(index=False, sep=";").encode("utf-8"),
+                file_name="confronto_offerte_fornitura.csv", mime="text/csv",
+                key="cfo213_csv",
+                help="TCO annuo, all-in e pareggi: rinnovo vs alternative.")
 
 # Footer
 
