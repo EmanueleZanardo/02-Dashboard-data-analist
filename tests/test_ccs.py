@@ -167,6 +167,6 @@ class TestRegistryTab193:
         withs = re.findall(r"^    with (tab\d+):", src, re.M)
         assert "tab193" in withs
         assert withs == ["tab%d" % i for i in range(1, len(withs) + 1)]
-        assert len(withs) == len(dvars) == 196
+        assert len(withs) == len(dvars) == 197
         keys = re.findall(r'key="(ccs193_[^"]+)"', src)
         assert len(keys) == len(set(keys)) and len(keys) >= 8
