@@ -27671,6 +27671,147 @@ def calcola_concentrazione_controparte(df_contratti, prezzo_mercato_eur_mwh,
     except Exception as e:  # pragma: no cover - guardia totale
         return {"errore": "Errore interno: %s" % e, "valido": False}
 
+
+def calcola_costo_liquidazione(df_posizioni, spread_bps=10.0,
+                               partecipazione_max=0.2, giorni_max=10,
+                               fattore_impatto=1.0):
+    """Costo stimato di liquidazione delle posizioni forward.
+
+    df_posizioni: colonne Prodotto, MW (segno = direzione long/short, il
+    volume usa |MW|), Ore (ore di consegna, es. 744 per un mese base),
+    Prezzo_EUR_MWh (mid di riferimento), Vol_medio_giornaliero_MWh (volume
+    medio scambiato al giorno su quel prodotto).
+    spread_bps: bid-ask spread in bps; partecipazione_max: quota max del
+    volume giornaliero che si e' disposti a prendere (0,1]; giorni_max:
+    orizzonte entro cui chiudere; fattore_impatto: moltiplicatore
+    dell'impatto di mercato rispetto allo spread.
+
+    Per riga: volume = |MW|*Ore; nozionale = volume*prezzo;
+    costo_spread = volume*prezzo*spread_bps/20000 (attraversare meta' spread);
+    giorni_necessari = ceil(volume/(partecipazione_max*vol_medio));
+    partecipazione_media = volume/(giorni_necessari*vol_medio) (<= max);
+    impatto_bps = spread_bps*fattore_impatto*(partecipazione_media/
+    partecipazione_max); costo_impatto = volume*prezzo*impatto_bps/10000;
+    costo_totale = spread + impatto; costo_per_MWh = costo_totale/volume.
+    Alert: giorni_necessari > giorni_max -> 'FUORI TEMPO'.
+    Verdetto: CRITICO se posizioni fuori tempo; ELEVATO se costo > 1%
+    del nozionale; altrimenti CONTENUTO.
+    Ritorna dict con 'errore' (None se ok), 'valido', df_dettaglio e
+    aggregati; mai eccezioni.
+    """
+    def _err(msg):
+        return {"errore": msg, "valido": False}
+
+    try:
+        cols = ["Prodotto", "MW", "Ore", "Prezzo_EUR_MWh",
+                "Vol_medio_giornaliero_MWh"]
+        if not isinstance(df_posizioni, pd.DataFrame) or df_posizioni.empty:
+            return _err("Tabella posizioni mancante o vuota.")
+        manc = [c for c in cols if c not in df_posizioni.columns]
+        if manc:
+            return _err("Colonne mancanti: %s." % ", ".join(manc))
+
+        def _num_ok(x, cond):
+            if isinstance(x, bool) or not isinstance(x, (int, float)):
+                return False
+            if not np.isfinite(x):
+                return False
+            return cond(x)
+
+        if not _num_ok(spread_bps, lambda v: v >= 0):
+            return _err("spread_bps non valido (deve essere >= 0).")
+        if not _num_ok(partecipazione_max, lambda v: 0 < v <= 1):
+            return _err("partecipazione_max non valida (0 < p <= 1).")
+        if not _num_ok(giorni_max, lambda v: v >= 1):
+            return _err("giorni_max non valido (deve essere >= 1).")
+        if not _num_ok(fattore_impatto, lambda v: v >= 0):
+            return _err("fattore_impatto non valido (deve essere >= 0).")
+        spread_bps = float(spread_bps)
+        partecipazione_max = float(partecipazione_max)
+        giorni_max = int(giorni_max)
+        fattore_impatto = float(fattore_impatto)
+
+        df = df_posizioni[cols].copy()
+        prod = df["Prodotto"].astype(str).str.strip()
+        if (prod == "").any() or prod.isna().any():
+            return _err("Prodotto mancante in una o piu' righe.")
+        mw = pd.to_numeric(df["MW"], errors="coerce")
+        if mw.isna().any() or (mw == 0).any():
+            return _err("MW non valido (deve essere != 0).")
+        ore = pd.to_numeric(df["Ore"], errors="coerce")
+        if ore.isna().any() or (ore <= 0).any():
+            return _err("Ore non valide (devono essere > 0).")
+        prezzo = pd.to_numeric(df["Prezzo_EUR_MWh"], errors="coerce")
+        if prezzo.isna().any() or (prezzo <= 0).any():
+            return _err("Prezzo_EUR_MWh non valido (deve essere > 0).")
+        volm = pd.to_numeric(df["Vol_medio_giornaliero_MWh"],
+                             errors="coerce")
+        if volm.isna().any() or (volm <= 0).any():
+            return _err("Vol_medio_giornaliero_MWh non valido "
+                        "(deve essere > 0).")
+
+        vol = mw.abs() * ore
+        noz = vol * prezzo
+        costo_spread = noz * (spread_bps / 20000.0)
+        capacita_gg = partecipazione_max * volm
+        giorni_nec = np.ceil(vol / capacita_gg).astype(int)
+        giorni_nec = np.maximum(giorni_nec, 1)
+        part_media = vol / (giorni_nec * volm)
+        impatto_bps = (spread_bps * fattore_impatto
+                       * (part_media / partecipazione_max))
+        costo_impatto = noz * (impatto_bps / 10000.0)
+        costo_tot = costo_spread + costo_impatto
+        costo_mwh = costo_tot / vol
+        fuori = giorni_nec > giorni_max
+
+        g = pd.DataFrame({
+            "Prodotto": prod,
+            "Direzione": np.where(mw > 0, "Long", "Short"),
+            "Volume (MWh)": np.round(vol, 1),
+            "Nozionale (EUR)": np.round(noz, 2),
+            "Costo spread (EUR)": np.round(costo_spread, 2),
+            "Impatto (bps)": np.round(impatto_bps, 2),
+            "Costo impatto (EUR)": np.round(costo_impatto, 2),
+            "Costo totale (EUR)": np.round(costo_tot, 2),
+            "Costo (EUR/MWh)": np.round(costo_mwh, 4),
+            "Giorni necessari": giorni_nec,
+            "Stato": np.where(fuori, "FUORI TEMPO", "OK")})
+
+        costo_totale = float(costo_tot.sum())
+        nozionale_totale = float(noz.sum())
+        volume_totale = float(vol.sum())
+        pct = (100.0 * costo_totale / nozionale_totale
+               if nozionale_totale > 0 else None)
+        n_fuori = int(fuori.sum())
+        if n_fuori > 0:
+            verdetto = ("CRITICO: %d posizione/i non liquidabile/i entro %d "
+                        "giorni con partecipazione <= %.0f%% — ridurre la "
+                        "taglia o allungare l'orizzonte."
+                        % (n_fuori, giorni_max, partecipazione_max * 100))
+        elif pct is not None and pct > 1.0:
+            verdetto = ("ELEVATO: il costo di liquidazione supera l'1%% del "
+                        "nozionale (%.2f%%) — spread o impatto alti rispetto "
+                        "alla liquidita'." % pct)
+        else:
+            verdetto = ("CONTENUTO: costo di liquidazione %.2f%% del "
+                        "nozionale, tutte le posizioni liquidabili entro "
+                        "%d giorni." % (pct if pct is not None else 0.0,
+                                        giorni_max))
+
+        return {"errore": None, "valido": True,
+                "n_posizioni": len(g),
+                "volume_totale": volume_totale,
+                "nozionale_totale": nozionale_totale,
+                "costo_totale": costo_totale,
+                "costo_medio_mwh": (costo_totale / volume_totale
+                                    if volume_totale > 0 else None),
+                "costo_pct_nozionale": pct,
+                "giorni_max_riga": int(giorni_nec.max()),
+                "n_fuori_tempo": n_fuori,
+                "df_dettaglio": g, "verdetto": verdetto}
+    except Exception as e:  # pragma: no cover - guardia totale
+        return {"errore": "Errore interno: %s" % e, "valido": False}
+
 # WORKSPACE 1: SIMULATORE STRATEGICO
 # =========================================="
 if workspace == _('ws1'):
@@ -28314,7 +28455,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -46291,6 +46432,108 @@ elif workspace == _('ws8'):
                 file_name="concentrazione_controparte.csv", mime="text/csv",
                 key="cc202_csv_out",
                 help="Tabella per controparte: contratti, volumi, quote, MtM ed esposizione.")
+
+    with tab203:
+        titolo_liq = edu("Costo di liquidazione", "Quanto costa chiudere una posizione forward senza farsi male? Oltre al bid-ask spread (attraversare meta' spread per uscire) c'e' l'impatto di mercato: se la tua posizione pesa troppo rispetto al volume giornaliero scambiato, muovi il prezzo contro di te. Qui stimi entrambi e i giorni necessari a liquidare senza superare la quota di partecipazione che scegli.")
+        st.markdown(f"<h1>💧 {titolo_liq}</h1>", unsafe_allow_html=True)
+        st.caption("Costo di uscita dalle posizioni forward: bid-ask spread + impatto di mercato, giorni necessari a liquidare.")
+        demo_liq = pd.DataFrame({
+            "Prodotto": ["Nov-26 Base", "Dic-26 Peak", "Q1-27 Base"],
+            "MW": [3.0, -2.0, 1.0],
+            "Ore": [720.0, 300.0, 2160.0],
+            "Prezzo_EUR_MWh": [92.5, 128.0, 88.0],
+            "Vol_medio_giornaliero_MWh": [5000.0, 1500.0, 20000.0]})
+        st.markdown("**Posizioni** (modifica, aggiungi o elimina righe)")
+        edit_liq = st.data_editor(
+            demo_liq, num_rows="dynamic", use_container_width=True,
+            key="liq203_editor",
+            column_config={
+                "Prodotto": st.column_config.TextColumn("Prodotto",
+                                                        required=True),
+                "MW": st.column_config.NumberColumn(
+                    "MW (segno = direzione)", format="%.2f"),
+                "Ore": st.column_config.NumberColumn(
+                    "Ore di consegna", min_value=1.0, format="%.0f"),
+                "Prezzo_EUR_MWh": st.column_config.NumberColumn(
+                    "Prezzo (€/MWh)", min_value=0.01, format="%.2f"),
+                "Vol_medio_giornaliero_MWh": st.column_config.NumberColumn(
+                    "Vol. medio giornaliero (MWh)", min_value=1.0,
+                    format="%.0f")})
+        c1l, c2l, c3l, c4l = st.columns(4)
+        with c1l:
+            sp_liq = st.slider("Bid-ask spread (bps)", 0.0, 100.0, 10.0,
+                               0.5, key="liq203_spread",
+                               help="Distanza denaro-lettera sul prodotto: chiudere la posizione costa meta' spread per MWh.")
+        with c2l:
+            pa_liq = st.slider("Partecipazione max (% vol. gg.)", 5.0, 50.0,
+                               20.0, 1.0, key="liq203_part",
+                               help="Quota massima del volume giornaliero che sei disposto a prendere: piu' e' alta, meno giorni servono ma piu' impatto paghi.")
+        with c3l:
+            gg_liq = st.slider("Orizzonte max (giorni)", 1, 30, 10, 1,
+                               key="liq203_giorni")
+        with c4l:
+            fa_liq = st.slider("Moltiplicatore impatto", 0.0, 3.0, 1.0, 0.1,
+                               key="liq203_fattore",
+                               help="Quanto l'impatto di mercato pesa rispetto allo spread (1.0 = impatto pari allo spread a partecipazione massima).")
+        ris_liq = calcola_costo_liquidazione(
+            edit_liq, spread_bps=float(sp_liq),
+            partecipazione_max=float(pa_liq) / 100.0, giorni_max=int(gg_liq),
+            fattore_impatto=float(fa_liq))
+        if ris_liq["errore"]:
+            st.error(ris_liq["errore"])
+        else:
+            k1, k2, k3, k4 = st.columns(4)
+            with k1:
+                st.metric("Costo di liquidazione",
+                          "%.0f €" % ris_liq["costo_totale"],
+                          help="Bid-ask spread (meta' spread per MWh) + impatto di mercato sul volume residuo.")
+            with k2:
+                st.metric("% del nozionale",
+                          "%.3f%%" % ris_liq["costo_pct_nozionale"],
+                          help="Costo totale / nozionale delle posizioni.")
+            with k3:
+                st.metric("Costo medio",
+                          "%.3f €/MWh" % ris_liq["costo_medio_mwh"])
+            with k4:
+                st.metric("Giorni (riga peggiore)",
+                          "%d" % ris_liq["giorni_max_riga"],
+                          help="Giorni necessari a liquidare la posizione piu' pesante senza superare la partecipazione massima.")
+            if "CRITICO" in ris_liq["verdetto"]:
+                st.error("💧 %s" % ris_liq["verdetto"])
+            elif "ELEVATO" in ris_liq["verdetto"]:
+                st.warning("💧 %s" % ris_liq["verdetto"])
+            else:
+                st.success("💧 %s" % ris_liq["verdetto"])
+            dfl = ris_liq["df_dettaglio"]
+            fig_liq = go.Figure()
+            fig_liq.add_trace(go.Bar(
+                x=dfl["Prodotto"], y=dfl["Costo spread (EUR)"],
+                name="Spread", marker_color="#38bdf8",
+                hovertemplate="%{x}<br>Spread: %{y:,.2f} €<extra></extra>"))
+            fig_liq.add_trace(go.Bar(
+                x=dfl["Prodotto"], y=dfl["Costo impatto (EUR)"],
+                name="Impatto", marker_color="#f59e0b",
+                customdata=np.stack(
+                    [dfl["Giorni necessari"], dfl["Impatto (bps)"],
+                     dfl["Stato"]], axis=1),
+                hovertemplate=(
+                    "%{x}<br>Impatto: %{y:,.2f} €<br>"
+                    "Giorni: %{customdata[0]:.0f}<br>"
+                    "Impatto: %{customdata[1]:.2f} bps<br>"
+                    "Stato: %{customdata[2]}<extra></extra>")))
+            fig_liq.update_layout(title="Costo di liquidazione per prodotto (spread + impatto)",
+                                  xaxis_title="", yaxis_title="EUR",
+                                  barmode="stack", template="plotly_dark",
+                                  height=340)
+            st.plotly_chart(fig_liq, use_container_width=True)
+            st.markdown("**Dettaglio per posizione**")
+            st.dataframe(dfl, use_container_width=True, hide_index=True)
+            st.download_button(
+                "Scarica CSV costo di liquidazione",
+                data=dfl.to_csv(index=False, sep=";").encode("utf-8"),
+                file_name="costo_liquidazione.csv", mime="text/csv",
+                key="liq203_csv_out",
+                help="Tabella per posizione: volumi, nozionali, spread, impatto, giorni necessari e stato.")
 
 
 # Footer
