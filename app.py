@@ -25621,6 +25621,194 @@ def calcola_strategia_offerta(prezzi, potenza_mw=5.0, costo_marginale=45.0,
     }
 
 
+def calcola_valore_capacita(prezzi, potenza_mw=100.0, costo_marginale=60.0,
+                          derating_pct=85.0, prezzo_asta_eur_kw=30.0,
+                          opex_fisso_eur_kw=25.0, ore_indisponibili=500.0,
+                          quota_ore_critiche_pct=2.0,
+                          penalita_eur_mw_h=5000.0, n_punti=11,
+                          min_ore=168):
+    """Remunerazione della capacita' (capacity market) per un produttore.
+
+    Domanda operativa: "Ho un impianto termico da P MW con costo marginale
+    cm: quanto mi rende partecipare al mercato della capacita' (asta a
+    prezzo fisso EUR/kW/anno sulla potenza de-ratata), tenuto conto del
+    margine che farei comunque sull'energia e delle penalita' se sono
+    indisponibile nelle ore critiche di sistema?"
+
+    Modello (lato produttore, price-taker sull'energia):
+      margine energia = somma oraria max(spot - cm, 0) * P, annualizzato
+                        (fattore 8760 / n_ore osservate): l'impianto
+                        dispaccia solo quando in-the-money;
+      ricavo capacita' = P * derating% * prezzo_asta (EUR/kW/anno);
+      penalita'         = P * derating% * penalita' (EUR/MW/h) *
+                        ore_indisponibili * quota_ore_critiche% :
+                        l'indisponibilita' e' ripartita in modo
+                        proporzionale sulle ore dell'anno, quindi la quota
+                        attesa di indisponibilita' nelle ore critiche e'
+                        ore_indisponibili * quota_critiche%;
+      netto annuo       = ricavo_capacita' + margine_energia - penalita'
+                        - opex_fisso;
+      prezzo_asta break-even = (opex_fisso + penalita' - margine_energia)
+                        / (P * derating% in kW), mai negativo.
+
+    La tabella di sensibilita' mostra il netto annuo al variare del
+    prezzo d'asta (0 .. 2x il prezzo inserito), per leggere a colpo
+    d'occhio il margine di sicurezza sul prezzo.
+
+    Differenza vs tab63 "Margine per impianto" (margine energia puro,
+    senza capacita'/penalita'/opex) e vs tab191 (strategia di offerta
+    sul day-ahead): questa e' l'economia complessiva dell'impianto in
+    un mercato con remunerazione della capacita'.
+
+    Ritorna dict con: valido, errore, n_ore, margine_energia_annuo,
+    ore_run_annue, prezzo_medio_run, potenza_derated_mw, ricavo_capacita,
+    penalita_annua, opex_fisso_annuo, netto_annuo,
+    prezzo_asta_break_even, df_sensibilita (pd.DataFrame),
+    df_mensile (pd.DataFrame: margine energia e ore di funzionamento
+    per mese del periodo osservato), giudizio, verdetto.
+
+    NaN-safe: serie vuota / non Series / indice non-datetime /
+    <min_ore ore / parametri non validi -> errore pulito; tz-aware reso
+    naive; duplicati keep-first; deterministico (nessuna componente
+    casuale).
+    """
+    def _err(msg):
+        return {"errore": msg, "valido": False}
+
+    def _num(x, nome, minimo=None, massimo=None, intero=False):
+        try:
+            v = float(x)
+        except (TypeError, ValueError):
+            return None
+        if intero:
+            if v != int(v):
+                return None
+            v = int(v)
+        if minimo is not None and v < minimo:
+            return None
+        if massimo is not None and v > massimo:
+            return None
+        return v
+
+    pmw = _num(potenza_mw, "potenza_mw", minimo=0.01)
+    cm = _num(costo_marginale, "costo_marginale")
+    dr = _num(derating_pct, "derating_pct", minimo=0.01, massimo=100.0)
+    pa = _num(prezzo_asta_eur_kw, "prezzo_asta_eur_kw", minimo=0.0)
+    ox = _num(opex_fisso_eur_kw, "opex_fisso_eur_kw", minimo=0.0)
+    oi = _num(ore_indisponibili, "ore_indisponibili", minimo=0.0)
+    qc = _num(quota_ore_critiche_pct, "quota_ore_critiche_pct",
+              minimo=0.0, massimo=100.0)
+    pe = _num(penalita_eur_mw_h, "penalita_eur_mw_h", minimo=0.0)
+    npt = _num(n_punti, "n_punti", minimo=3, intero=True)
+    mho = _num(min_ore, "min_ore", minimo=24, intero=True)
+    if None in (pmw, cm, dr, pa, ox, oi, qc, pe, npt, mho):
+        return _err("Parametri non validi: potenza > 0, derating in "
+                    "(0, 100], prezzo asta / opex / indisponibilita' / "
+                    "penalita' >= 0, quota ore critiche in [0, 100], "
+                    "n_punti >= 3 intero.")
+
+    if not isinstance(prezzi, pd.Series):
+        return _err("La serie dei prezzi deve essere una pd.Series.")
+    if not isinstance(prezzi.index, pd.DatetimeIndex):
+        return _err("L'indice della serie prezzi deve essere datetime.")
+    s = prezzi.copy()
+    try:
+        if s.index.tz is not None:
+            s.index = s.index.tz_convert(None)
+    except Exception:
+        return _err("Impossibile normalizzare il fuso orario "
+                    "dell'indice prezzi.")
+    s = s[~s.index.duplicated(keep="first")].sort_index()
+    s = pd.to_numeric(s, errors="coerce").dropna()
+    n = int(len(s))
+    if n < mho:
+        return _err(f"Servono almeno {mho} ore di prezzi (trovate {n}).")
+
+    # --- margine energia (dispatch in-the-money) ---
+    vals = s.to_numpy(dtype=float)
+    run = vals >= cm
+    marg_ore = np.where(run, (vals - cm) * pmw, 0.0)
+    fattore = 8760.0 / n
+    marg_energia_annuo = float(marg_ore.sum() * fattore)
+    ore_run_annue = float(run.sum() * fattore)
+    prezzo_medio_run = (float(vals[run].mean()) if run.any() else 0.0)
+
+    # --- mercato della capacita' ---
+    derated_mw = pmw * dr / 100.0
+    derated_kw = derated_mw * 1000.0
+    ricavo_capacita = derated_kw * pa
+    ore_critiche_indisp = oi * qc / 100.0
+    penalita_annua = derated_mw * pe * ore_critiche_indisp
+    opex_annuo = pmw * 1000.0 * ox
+    netto_annuo = ricavo_capacita + marg_energia_annuo - penalita_annua - opex_annuo
+    prezzo_asta_be = max(0.0, (opex_annuo + penalita_annua - marg_energia_annuo)
+                         / derated_kw)
+
+    # --- giudizio ---
+    if netto_annuo >= 0.0:
+        giudizio = "CONVENIENTE"
+        verdetto = (f"Ricavo netto annuo {netto_annuo:,.0f} EUR: la "
+                    f"capacita' ({ricavo_capacita:,.0f} EUR) piu' il margine "
+                    f"energia ({marg_energia_annuo:,.0f} EUR) coprono opex "
+                    f"fisso ({opex_annuo:,.0f} EUR) e penalita' attese "
+                    f"({penalita_annua:,.0f} EUR).")
+    elif netto_annuo >= -0.5 * opex_annuo:
+        giudizio = "MARGINALE"
+        verdetto = (f"Ricavo netto annuo {netto_annuo:,.0f} EUR: perdita "
+                    f"contenuta (entro il 50% dell'opex fisso). Alza il "
+                    f"prezzo d'asta sopra {prezzo_asta_be:,.2f} EUR/kW/anno "
+                    f"per andare a break-even.")
+    else:
+        giudizio = "NON CONVENIENTE"
+        verdetto = (f"Ricavo netto annuo {netto_annuo:,.0f} EUR: la perdita "
+                    f"supera il 50% dell'opex fisso. Servirebbe un prezzo "
+                    f"d'asta di almeno {prezzo_asta_be:,.2f} EUR/kW/anno "
+                    f"per il break-even.")
+
+    # --- sensibilita' al prezzo d'asta ---
+    pa_max = max(2.0 * pa, prezzo_asta_be * 1.5, 1.0)
+    grid = np.linspace(0.0, pa_max, npt)
+    df_sens = pd.DataFrame({
+        "Prezzo asta (EUR/kW/anno)": np.round(grid, 2),
+        "Ricavo capacita' (EUR/anno)": np.round(derated_kw * grid, 0),
+        "Netto annuo (EUR)": np.round(derated_kw * grid + marg_energia_annuo
+                                     - penalita_annua - opex_annuo, 0),
+    })
+
+    # --- margine energia per mese (periodo osservato, non annualizzato) ---
+    df_m = pd.DataFrame({"margine_ore": marg_ore, "run": run.astype(int)},
+                        index=s.index)
+    mens = df_m.groupby(pd.Grouper(freq="M")).agg(
+        margine_eur=("margine_ore", "sum"),
+        ore_funzionamento=("run", "sum"))
+    mens.index = mens.index.strftime("%Y-%m")
+    mens = mens.reset_index().rename(columns={"index": "Mese"})
+    mens["Margine energia (EUR)"] = mens["margine_eur"].round(0)
+    mens["Ore di funzionamento"] = mens["ore_funzionamento"].astype(int)
+    df_mensile = mens[["Mese", "Margine energia (EUR)",
+                       "Ore di funzionamento"]]
+
+    return {
+        "valido": True, "errore": None,
+        "n_ore": n, "fattore_annuo": fattore,
+        "potenza_mw": pmw, "costo_marginale": cm,
+        "derating_pct": dr, "prezzo_asta_eur_kw": pa,
+        "opex_fisso_eur_kw": ox, "ore_indisponibili": oi,
+        "quota_ore_critiche_pct": qc, "penalita_eur_mw_h": pe,
+        "margine_energia_annuo": marg_energia_annuo,
+        "ore_run_annue": ore_run_annue,
+        "prezzo_medio_run": prezzo_medio_run,
+        "potenza_derated_mw": derated_mw,
+        "ricavo_capacita_annuo": ricavo_capacita,
+        "penalita_annua": penalita_annua,
+        "opex_fisso_annuo": opex_annuo,
+        "netto_annuo": netto_annuo,
+        "prezzo_asta_break_even": prezzo_asta_be,
+        "df_sensibilita": df_sens,
+        "df_mensile": df_mensile,
+        "giudizio": giudizio, "verdetto": verdetto,
+    }
+
 def calcola_cogenerazione(prezzi, potenza_mw=1.0, rend_elettrico=0.38,
                           rend_termico=0.45, prezzo_gas=40.0, prezzo_co2=80.0,
                           fattore_emissione=0.202, valore_calore=55.0,
@@ -26449,7 +26637,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -43206,6 +43394,103 @@ elif workspace == _('ws8'):
                                mime="text/csv",
                                key="off191_csv",
                                help="Una riga per mese: margine atteso e quota venduta per politica di offerta.",
+                               )
+
+    with tab192:
+        titolo_cap = edu("Remunerazione capacità", "Il MERCATO DELLA CAPACITÀ paga gli impianti per essere DISPONIBILI (EUR/kW/anno sulla potenza de-ratata), non per produrre: copre i costi fissi degli impianti di punta che il solo mercato dell'energia non remunererebbe. Qui calcoli l'economia completa: ricavo da asta di capacità + margine energia (l'impianto dispaccia solo quando il prezzo copre il costo marginale) − penalità attese per indisponibilità nelle ore critiche − costi fissi. Il prezzo d'asta di break-even dice a che prezzo d'asta l'impianto sta in piedi.")
+        st.markdown(f"<h1>⚡ {titolo_cap}</h1>", unsafe_allow_html=True)
+        st.caption("Lato produttore: quanto rende un impianto termico in un mercato con remunerazione della capacità — ricavo da asta, margine energia, penalità di indisponibilità, break-even del prezzo d'asta.")
+        c1a_cap, c1b_cap = st.columns(2)
+        with c1a_cap:
+            pmw_cap = st.number_input("Potenza nominale (MW)", min_value=0.1,
+                                     value=100.0, step=10.0, key="mi192_pmw",
+                                     help="Potenza nominale dell'impianto.")
+            cm_cap = st.number_input("Costo marginale (EUR/MWh)",
+                                    min_value=0.0, value=60.0, step=5.0,
+                                    key="mi192_cm",
+                                    help="Costo variabile per MWh: l'impianto dispaccia solo nelle ore in cui il prezzo lo copre.")
+            dr_cap = st.number_input("De-rating (%)", min_value=0.1,
+                                    max_value=100.0, value=85.0, step=1.0,
+                                    key="mi192_dr",
+                                    help="Quota di potenza riconosciuta disponibile dal mercato della capacità (conta affidabilità storica).")
+            pa_cap = st.number_input("Prezzo asta (EUR/kW/anno)", min_value=0.0,
+                                     value=30.0, step=5.0, key="mi192_pa",
+                                     help="Prezzo di clearing dell'asta di capacità sulla potenza de-ratata.")
+        with c1b_cap:
+            ox_cap = st.number_input("Opex fisso (EUR/kW/anno)", min_value=0.0,
+                                     value=25.0, step=1.0, key="mi192_ox",
+                                     help="Costi fissi annui per kW installato (personale, manutenzione programmata, assicurazioni).")
+            oi_cap = st.number_input("Indisponibilità (ore/anno)", min_value=0.0,
+                                     value=500.0, step=50.0, key="mi192_oi",
+                                     help="Ore annue di fermo non programmato attese.")
+            qc_cap = st.number_input("Quota ore critiche (%)", min_value=0.0,
+                                     max_value=100.0, value=2.0, step=0.5,
+                                     key="mi192_qc",
+                                     help="Quota di ore dell'anno in cui il sistema è in stress (scarsità): la penalità scatta se sei fermo proprio lì.")
+            pe_cap = st.number_input("Penalità (EUR/MW/h)", min_value=0.0,
+                                     value=5000.0, step=500.0, key="mi192_pe",
+                                     help="Penalità per MW di capacità impegnata indisponibile in un'ora critica.")
+
+        ris_cap = calcola_valore_capacita(
+            prezzi, potenza_mw=pmw_cap, costo_marginale=cm_cap,
+            derating_pct=dr_cap, prezzo_asta_eur_kw=pa_cap,
+            opex_fisso_eur_kw=ox_cap, ore_indisponibili=oi_cap,
+            quota_ore_critiche_pct=qc_cap, penalita_eur_mw_h=pe_cap)
+        if not ris_cap["valido"]:
+            st.error(ris_cap["errore"])
+        else:
+            k1_cap, k2_cap, k3_cap, k4_cap = st.columns(4)
+            with k1_cap:
+                st.metric("Ricavo capacità (EUR/anno)",
+                          f"{ris_cap['ricavo_capacita_annuo']:,.0f}",
+                          help=f"Potenza de-ratata {ris_cap['potenza_derated_mw']:,.1f} MW × {pa_cap:,.2f} EUR/kW/anno.")
+            with k2_cap:
+                st.metric("Margine energia (EUR/anno)",
+                          f"{ris_cap['margine_energia_annuo']:,.0f}",
+                          help=f"Dispatch in-the-money annualizzato: {ris_cap['ore_run_annue']:,.0f} ore/anno a prezzo medio {ris_cap['prezzo_medio_run']:,.1f} EUR/MWh.")
+            with k3_cap:
+                st.metric("Ricavo netto (EUR/anno)",
+                          f"{ris_cap['netto_annuo']:,.0f}",
+                          help=f"Capacità + margine energia − penalità attese ({ris_cap['penalita_annua']:,.0f} EUR) − opex fisso ({ris_cap['opex_fisso_annuo']:,.0f} EUR).")
+            with k4_cap:
+                st.metric("Prezzo asta break-even",
+                          f"{ris_cap['prezzo_asta_break_even']:,.2f} EUR/kW",
+                          help="Prezzo d'asta minimo per coprire opex fisso e penalità con il margine energia stimato.")
+            if ris_cap["giudizio"] == "CONVENIENTE":
+                st.success(f"✅ {ris_cap['giudizio']}: {ris_cap['verdetto']}")
+            elif ris_cap["giudizio"] == "MARGINALE":
+                st.warning(f"⚠️ {ris_cap['giudizio']}: {ris_cap['verdetto']}")
+            else:
+                st.error(f"🛑 {ris_cap['giudizio']}: {ris_cap['verdetto']}")
+            st.caption("Modello: margine energia = Σ max(prezzo − costo marginale, 0) × potenza, annualizzato dal periodo osservato; penalità attesa = potenza de-ratata × penalità × indisponibilità × quota ore critiche. Price-taker: l'impianto non sposta il prezzo.")
+
+            fig_cap = go.Figure()
+            df_sens_cap = ris_cap["df_sensibilita"]
+            fig_cap.add_trace(go.Scatter(
+                x=df_sens_cap["Prezzo asta (EUR/kW/anno)"],
+                y=df_sens_cap["Netto annuo (EUR)"],
+                mode="lines+markers", name="Netto annuo"))
+            fig_cap.add_hline(y=0, line_dash="dash", line_color="gray")
+            fig_cap.add_vline(x=pa_cap, line_dash="dot", line_color="green",
+                              annotation_text="Prezzo inserito")
+            fig_cap.add_vline(x=ris_cap["prezzo_asta_break_even"],
+                              line_dash="dot", line_color="red",
+                              annotation_text="Break-even")
+            fig_cap.update_layout(
+                title="Sensibilità del ricavo netto al prezzo d'asta",
+                xaxis_title="Prezzo asta (EUR/kW/anno)",
+                yaxis_title="Netto annuo (EUR)")
+            st.plotly_chart(fig_cap, use_container_width=True)
+
+            st.subheader("Margine energia per mese (periodo osservato)")
+            st.dataframe(ris_cap["df_mensile"], use_container_width=True)
+            csv_cap = ris_cap["df_mensile"].to_csv(index=False, sep=";").encode("utf-8")
+            st.download_button("Scarica CSV mensile",
+                               data=csv_cap,
+                               file_name="valore_capacita.csv",
+                               mime="text/csv",
+                               key="mi192_csv",
+                               help="Una riga per mese: margine energia e ore di funzionamento.",
                                )
 
 
