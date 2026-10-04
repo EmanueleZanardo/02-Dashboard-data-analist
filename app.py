@@ -28421,6 +28421,99 @@ def calcola_valore_tee(risparmio_mwh_anno, vettore, anni_vita_utile,
     }
 
 
+def calcola_costo_uscita(prezzo_fisso_eur_mwh, volume_mensile_mwh,
+                         mesi_residui, forward_eur_mwh,
+                         tasso_annuo_pct, penale_eur=0.0):
+    """Costo/beneficio di uscita anticipata da un contratto di fornitura a
+    prezzo fisso.
+
+    Restare nel contratto costa P_fisso per ogni MWh; uscire e ricomprare a
+    mercato costa il forward F. Risparmio mensile = (P_fisso - F) * volume.
+    VAN_uscita = somma attualizzata dei risparmi mensili - penale di uscita
+    (se positiva conviene uscire, se negativa conviene restare).
+    Forward di pareggio F* = P_fisso - penale / (volume * A), con A fattore
+    di rendita mensile al tasso annuo: se il forward scende sotto F*
+    l'uscita torna conveniente. Funzione pura: nessun accesso a Streamlit.
+    """
+    def _num(x):
+        try:
+            v = float(x)
+        except (TypeError, ValueError):
+            return None
+        return None if v != v else v
+
+    def _ko(msg):
+        return {"errore": msg, "valido": False}
+
+    pfix = _num(prezzo_fisso_eur_mwh)
+    vol = _num(volume_mensile_mwh)
+    mesi = _num(mesi_residui)
+    fwd = _num(forward_eur_mwh)
+    tasso = _num(tasso_annuo_pct)
+    penale = _num(penale_eur)
+    if None in (pfix, vol, mesi, fwd, tasso, penale):
+        return _ko("Tutti i parametri numerici devono essere numeri.")
+    if pfix <= 0:
+        return _ko("Il prezzo fisso contrattuale deve essere > 0 EUR/MWh.")
+    if vol <= 0:
+        return _ko("Il volume mensile deve essere > 0 MWh.")
+    if mesi != int(mesi) or not (1 <= mesi <= 60):
+        return _ko("I mesi residui devono essere un intero tra 1 e 60.")
+    if fwd <= 0:
+        return _ko("Il prezzo forward deve essere > 0 EUR/MWh.")
+    if tasso < 0:
+        return _ko("Il tasso annuo non puo' essere negativo.")
+    if penale < 0:
+        return _ko("La penale di uscita non puo' essere negativa.")
+    n = int(mesi)
+    r = tasso / 100.0
+
+    risparmio_unitario = pfix - fwd
+    risparmio_mensile = risparmio_unitario * vol
+    fattori = [(1.0 + r) ** (k / 12.0) for k in range(1, n + 1)]
+    attualizzati = [risparmio_mensile / f for f in fattori]
+    a_rendita = sum(1.0 / f for f in fattori)
+    van_uscita = sum(attualizzati) - penale
+    # Forward di pareggio: (P - F*) * V * A = penale
+    f_pareggio = pfix - (penale / (vol * a_rendita) if a_rendita > 0 else 0.0)
+
+    if van_uscita > 0:
+        verdetto = "CONVIENE USCIRE"
+    elif van_uscita < 0:
+        verdetto = "RESTA NEL CONTRATTO"
+    else:
+        verdetto = "INDIFFERENTE"
+
+    righe = []
+    cumulato = 0.0
+    for k in range(1, n + 1):
+        att = attualizzati[k - 1]
+        cumulato += att
+        righe.append({
+            "Mese": k,
+            "Prezzo fisso (€/MWh)": round(pfix, 2),
+            "Forward (€/MWh)": round(fwd, 2),
+            "Risparmio unitario (€/MWh)": round(risparmio_unitario, 2),
+            "Risparmio mensile (€)": round(risparmio_mensile, 0),
+            "Risparmio attualizzato (€)": round(att, 0),
+            "Cumulato attualizzato (€)": round(cumulato, 0),
+        })
+    cols = ["Mese", "Prezzo fisso (€/MWh)", "Forward (€/MWh)",
+            "Risparmio unitario (€/MWh)", "Risparmio mensile (€)",
+            "Risparmio attualizzato (€)", "Cumulato attualizzato (€)"]
+    df = pd.DataFrame(righe, columns=cols)
+    return {
+        "errore": None, "valido": True,
+        "risparmio_unitario": risparmio_unitario,
+        "risparmio_mensile": risparmio_mensile,
+        "risparmio_totale": risparmio_mensile * n,
+        "van_uscita": van_uscita,
+        "forward_pareggio": f_pareggio,
+        "verdetto": verdetto,
+        "df": df,
+    }
+
+
 def calcola_opzione_differimento(V, K, T_anni, vol_pct, tasso_pct,
                                dy_pct=0.0, n_step=200):
     """Opzione REALE di differimento di un investimento energetico.
@@ -29251,7 +29344,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -47984,6 +48077,77 @@ elif workspace == _('ws8'):
                 file_name="certificati_bianchi_tee.csv", mime="text/csv",
                 key="tee211_csv",
                 help="Flussi annui: TEE generati, ricavi, istruttoria, flussi netti e cumulato.")
+
+    with tab212:
+        titolo_usc = edu("Costo di uscita contratto", "Se hai un contratto di fornitura a PREZZO FISSO e il mercato (forward) e' sceso sotto quel prezzo, uscire prima della scadenza e ricomprare a mercato puo' far risparmiare — ma c'e' la penale di uscita. Questa tab confronta mese per mese il costo di restare contro il costo di uscire: VAN positivo = conviene uscire.")
+        st.markdown(f"<h1>🚪 {titolo_usc}</h1>", unsafe_allow_html=True)
+        st.caption("Conviene rescindere il contratto a prezzo fisso e ricomprare a mercato? Confronto contro la curva forward, penale inclusa.")
+        c1u, c2u, c3u = st.columns(3)
+        with c1u:
+            pfix_u = st.number_input("Prezzo fisso contrattuale (€/MWh)",
+                                     min_value=0.01, value=120.0,
+                                     key="usc212_prezzo")
+            vol_u = st.number_input("Volume mensile (MWh)",
+                                    min_value=0.01, value=500.0,
+                                    key="usc212_volume")
+        with c2u:
+            mesi_u = st.number_input("Mesi residui di contratto",
+                                     min_value=1, max_value=60, value=12,
+                                     step=1, key="usc212_mesi")
+            fwd_u = st.number_input("Forward di mercato (€/MWh)",
+                                    min_value=0.01, value=95.0,
+                                    key="usc212_forward")
+        with c3u:
+            tasso_u = st.number_input("Tasso annuo attualizzazione (%)",
+                                      min_value=0.0, value=6.0,
+                                      key="usc212_tasso")
+            penale_u = st.number_input("Penale di uscita (€)",
+                                       min_value=0.0, value=0.0,
+                                       key="usc212_penale")
+        ris_u = calcola_costo_uscita(pfix_u, vol_u, mesi_u, fwd_u,
+                                     tasso_u, penale_u)
+        if ris_u["errore"]:
+            st.error(ris_u["errore"])
+        else:
+            v_u = ris_u["verdetto"]
+            if v_u == "CONVIENE USCIRE":
+                st.success("🚪 CONVIENE USCIRE — il VAN dell'uscita e' positivo: rescindere e ricomprare a mercato fa risparmiare, penale inclusa.")
+            elif v_u == "RESTA NEL CONTRATTO":
+                st.error("🚪 RESTA NEL CONTRATTO — il VAN dell'uscita e' negativo: il contratto a prezzo fisso resta piu' conveniente del mercato.")
+            else:
+                st.warning("🚪 INDIFFERENTE — uscita e permanenza si equivalgono: decide la penale negoziabile.")
+            k1u, k2u, k3u, k4u = st.columns(4)
+            with k1u:
+                st.metric("VAN uscita", "€ {:,.0f}".format(ris_u["van_uscita"]).replace(",", "."),
+                          help="Somma attualizzata dei risparmi mensili meno la penale: > 0 conviene uscire.")
+            with k2u:
+                st.metric("Risparmio totale", "€ {:,.0f}".format(ris_u["risparmio_totale"]).replace(",", "."),
+                          help="Risparmio lordo non attualizzato su tutti i mesi residui.")
+            with k3u:
+                st.metric("Forward di pareggio", "%.2f €/MWh" % ris_u["forward_pareggio"],
+                          help="Sotto questo forward l'uscita diventa conveniente (penale inclusa).")
+            with k4u:
+                st.metric("Risparmio unitario", "%.2f €/MWh" % ris_u["risparmio_unitario"],
+                          help="Prezzo fisso meno forward: risparmio per ogni MWh ricomprato a mercato.")
+            fig_u = go.Figure()
+            df_u = ris_u["df"]
+            fig_u.add_trace(go.Bar(x=df_u["Mese"], y=df_u["Risparmio attualizzato (€)"],
+                                   name="Risparmio attualizzato",
+                                   hovertemplate="Mese %{x}: € %{y:,.0f}<extra></extra>"))
+            fig_u.add_trace(go.Scatter(x=df_u["Mese"], y=df_u["Cumulato attualizzato (€)"],
+                                       mode="lines+markers", name="Cumulato",
+                                       hovertemplate="Mese %{x}: € %{y:,.0f}<extra></extra>"))
+            fig_u.update_layout(title="Risparmio mensile attualizzato da uscita anticipata",
+                                template="plotly_dark", height=420)
+            st.plotly_chart(fig_u, use_container_width=True)
+            st.markdown("**Tabella mensile**")
+            st.dataframe(df_u, use_container_width=True, hide_index=True)
+            st.download_button(
+                "Scarica CSV costo di uscita",
+                data=df_u.to_csv(index=False, sep=";").encode("utf-8"),
+                file_name="costo_uscita_contratto.csv", mime="text/csv",
+                key="usc212_csv",
+                help="Mesi residui: prezzo fisso, forward, risparmi mensili attualizzati e cumulato.")
 
 # Footer
 
