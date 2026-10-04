@@ -206,7 +206,7 @@ class TestRegistryTab188:
         withs = re.findall(r"^    with (tab\d+):", src, re.M)
         assert withs == ["tab%d" % i for i in range(1, len(withs) + 1)]
         assert "tab188" in withs
-        assert len(withs) == len(dvars) == 213
+        assert len(withs) == len(dvars) == 214
         assert '"🤝 Comunità energetica"' in src
         assert "calcola_comunita_energetica" in src
         keys = re.findall(r'key="(cer188_[^"]+)"', src)
