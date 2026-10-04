@@ -28652,6 +28652,140 @@ def calcola_confronto_offerte(offerte, volume_annuo_mwh):
     }
 
 
+def calcola_backtest_indicizzato(prezzi, prezzo_fisso_eur_mwh, spread_eur_mwh,
+                                 cap_eur_mwh=None, floor_eur_mwh=None,
+                                 volume_mensile_mwh=100.0):
+    """Backtest ex-post di un'offerta a prezzo indicizzato contro un'offerta a
+    prezzo fisso, sulla serie spot oraria del periodo selezionato.
+
+    Formula indicizzata (tipica delle offerte luce business):
+        prezzo_indicizzato_mese = clamp(media_spot_mese + spread, floor, cap)
+    - media_spot_mese: media aritmetica delle ore spot osservate nel mese;
+    - spread: maggiorazione (o sconto, se negativo) del fornitore in EUR/MWh;
+    - cap/floor opzionali: tetto e pavimento mensili sul prezzo indicizzato
+      (None = nessun limite).
+
+    Il volume mensile e' scalato sulle ore osservate
+    (mesi DST da 23/25 ore, periodi parziali):
+        vol_mese = volume_mensile_mwh * ore_osservate / ore_mese_calendario.
+
+    Differenza dalle altre tab: 'Fisso vs indicizzato' confronta due prezzi
+    teorici; qui si REGOLA ex-post una clausola specifica (spread + cap/floor)
+    sulla storia spot, e si ricava il PREZZO FISSO DI PAREGGIO: il fisso che
+    avrebbe eguagliato il costo totale dell'indicizzato — utile in trattativa
+    ("l'indicizzato mi conviene se il fisso supera X").
+
+    NaN-safe: serie vuota o indice non datetime -> valido=False con 'errore'.
+    Ore con prezzo NaN escluse dalle medie; mesi senza ore osservate esclusi.
+
+    Ritorna dict con 'errore', 'valido', 'df_mesi' (Mese, Ore osservate,
+    Prezzo spot medio (EUR/MWh), Prezzo indicizzato (EUR/MWh),
+    Costo indicizzato (EUR), Costo fisso (EUR), Risparmio indicizzato (EUR)),
+    'volume_totale_mwh', 'costo_totale_indicizzato', 'costo_totale_fisso',
+    'risparmio_totale', 'risparmio_pct', 'pmp_indicizzato',
+    'prezzo_fisso_pareggio', 'mesi', 'mesi_vinti_indicizzato'.
+    """
+    colonne = ["Mese", "Ore osservate", "Prezzo spot medio (\u20ac/MWh)",
+               "Prezzo indicizzato (\u20ac/MWh)", "Costo indicizzato (\u20ac)",
+               "Costo fisso (\u20ac)", "Risparmio indicizzato (\u20ac)"]
+    vuoto = {"errore": None, "valido": False, "df_mesi": pd.DataFrame(columns=colonne),
+             "volume_totale_mwh": 0.0, "costo_totale_indicizzato": 0.0,
+             "costo_totale_fisso": 0.0, "risparmio_totale": 0.0,
+             "risparmio_pct": 0.0, "pmp_indicizzato": None,
+             "prezzo_fisso_pareggio": None, "mesi": 0,
+             "mesi_vinti_indicizzato": 0}
+
+    def _ko(msg):
+        out = dict(vuoto)
+        out["errore"] = msg
+        return out
+
+    def _num(x):
+        try:
+            v = float(x)
+        except (TypeError, ValueError):
+            return None
+        return None if v != v else v
+
+    pf = _num(prezzo_fisso_eur_mwh)
+    sp = _num(spread_eur_mwh)
+    cap = _num(cap_eur_mwh) if cap_eur_mwh is not None else None
+    flr = _num(floor_eur_mwh) if floor_eur_mwh is not None else None
+    vol = _num(volume_mensile_mwh)
+    if pf is None or sp is None or vol is None:
+        return _ko("Prezzo fisso, spread e volume mensile devono essere numeri.")
+    if pf < 0:
+        return _ko("Il prezzo fisso non puo' essere negativo.")
+    if vol <= 0:
+        return _ko("Il volume mensile deve essere > 0 MWh.")
+    if cap is not None and cap < 0:
+        return _ko("Il cap non puo' essere negativo.")
+    if flr is not None and flr < 0:
+        return _ko("Il floor non puo' essere negativo.")
+    if cap is not None and flr is not None and flr > cap:
+        return _ko("Il floor non puo' superare il cap.")
+    try:
+        p = pd.Series(prezzi, dtype=float)
+    except Exception:
+        return _ko("Serie prezzi non valida.")
+    p = p[~p.index.duplicated(keep="first")].sort_index()
+    p = p[np.isfinite(p.values)]
+    if p.empty:
+        return _ko("Serie prezzi vuota: nessun dato spot nel periodo selezionato.")
+    if not isinstance(p.index, pd.DatetimeIndex):
+        return _ko("La serie prezzi deve avere un indice temporale.")
+
+    righe = []
+    vol_mesi = []
+    for mese_ts, grp in p.groupby(pd.Grouper(freq="M")):
+        ore_oss = int(len(grp))
+        if ore_oss == 0:
+            continue
+        media_spot = float(grp.mean())
+        px_idx = media_spot + sp
+        if flr is not None:
+            px_idx = max(px_idx, flr)
+        if cap is not None:
+            px_idx = min(px_idx, cap)
+        ore_cal = mese_ts.days_in_month * 24
+        vol_mese = vol * ore_oss / ore_cal if ore_cal else 0.0
+        vol_mesi.append(vol_mese)
+        costo_idx = vol_mese * px_idx
+        costo_fix = vol_mese * pf
+        righe.append({
+            "Mese": mese_ts.strftime("%Y-%m"),
+            "Ore osservate": ore_oss,
+            "Prezzo spot medio (\u20ac/MWh)": round(media_spot, 2),
+            "Prezzo indicizzato (\u20ac/MWh)": round(px_idx, 2),
+            "Costo indicizzato (\u20ac)": round(costo_idx, 2),
+            "Costo fisso (\u20ac)": round(costo_fix, 2),
+            "Risparmio indicizzato (\u20ac)": round(costo_fix - costo_idx, 2),
+        })
+    if not righe:
+        return _ko("Nessun mese con ore osservate nel periodo selezionato.")
+
+    df = pd.DataFrame(righe, columns=colonne)
+    vol_tot = float(sum(vol_mesi))
+    costo_idx = float(df["Costo indicizzato (\u20ac)"].sum())
+    costo_fix = float(df["Costo fisso (\u20ac)"].sum())
+    risparmio = costo_fix - costo_idx
+    out = dict(vuoto)
+    out.update({
+        "valido": True,
+        "df_mesi": df,
+        "volume_totale_mwh": round(vol_tot, 3),
+        "costo_totale_indicizzato": round(costo_idx, 2),
+        "costo_totale_fisso": round(costo_fix, 2),
+        "risparmio_totale": round(risparmio, 2),
+        "risparmio_pct": round(100.0 * risparmio / costo_fix, 2) if costo_fix else 0.0,
+        "pmp_indicizzato": round(costo_idx / vol_tot, 2) if vol_tot else None,
+        "prezzo_fisso_pareggio": round(costo_idx / vol_tot, 2) if vol_tot else None,
+        "mesi": len(righe),
+        "mesi_vinti_indicizzato": int((df["Risparmio indicizzato (\u20ac)"] > 0).sum()),
+    })
+    return out
+
+
 def calcola_opzione_differimento(V, K, T_anni, vol_pct, tasso_pct,
                                dy_pct=0.0, n_step=200):
     """Opzione REALE di differimento di un investimento energetico.
@@ -29482,7 +29616,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -48372,6 +48506,109 @@ elif workspace == _('ws8'):
                 file_name="confronto_offerte_fornitura.csv", mime="text/csv",
                 key="cfo213_csv",
                 help="TCO annuo, all-in e pareggi: rinnovo vs alternative.")
+
+    with tab214:
+        titolo_idx = edu("Backtest offerta indicizzata", "Molte offerte luce business non hanno un prezzo fisso: il prezzo si FORMA ogni mese come media dello spot (es. PUN/Swissix) piu' uno spread del fornitore, a volte con un tetto (cap) e un pavimento (floor). Questa tab REGOLA ex-post la clausola sulla storia spot: quanto avresti pagato davvero con l'indicizzato rispetto a un fisso, e qual e' il prezzo fisso di pareggio.")
+        st.markdown(f"<h1>📉 {titolo_idx}</h1>", unsafe_allow_html=True)
+        st.caption("Regolazione ex-post di una clausola indicizzata (spot medio mensile + spread, con cap/floor) contro un'offerta a prezzo fisso.")
+        if sorgente.startswith("🧪"):
+            banner_demo("serie oraria Swissix sintetica (Mock): profilo giornaliero + stagionalita', non prezzi reali")
+        c1i, c2i, c3i = st.columns(3)
+        with c1i:
+            fisso_idx = st.number_input("Prezzo fisso alternativo (€/MWh)",
+                                        min_value=0.0, value=120.0, step=1.0,
+                                        key="idx214_fisso",
+                                        help="Prezzo energia dell'offerta a prezzo fisso da confrontare.")
+            vol_idx = st.number_input("Volume mensile (MWh)",
+                                      min_value=1.0, value=100.0, step=10.0,
+                                      key="idx214_volume",
+                                      help="Consumo mensile atteso: scalato sulle ore osservate nei mesi parziali/DST.")
+        with c2i:
+            spread_idx = st.number_input("Spread fornitore (€/MWh)",
+                                         value=8.0, step=0.5,
+                                         key="idx214_spread",
+                                         help="Maggiorazione del fornitore sulla media spot mensile (puo' essere negativa = sconto).")
+        with c3i:
+            usa_cap = st.checkbox("Applica cap mensile", value=False, key="idx214_usa_cap",
+                                  help="Tetto al prezzo indicizzato mensile.")
+            cap_idx = st.number_input("Cap (€/MWh)", min_value=0.0, value=200.0, step=5.0,
+                                      key="idx214_cap", disabled=not usa_cap)
+            usa_floor = st.checkbox("Applica floor mensile", value=False, key="idx214_usa_floor",
+                                    help="Pavimento al prezzo indicizzato mensile.")
+            floor_idx = st.number_input("Floor (€/MWh)", min_value=0.0, value=40.0, step=5.0,
+                                        key="idx214_floor", disabled=not usa_floor)
+        ris_idx = calcola_backtest_indicizzato(
+            prezzi, fisso_idx, spread_idx,
+            cap_eur_mwh=cap_idx if usa_cap else None,
+            floor_eur_mwh=floor_idx if usa_floor else None,
+            volume_mensile_mwh=vol_idx)
+        if ris_idx["errore"]:
+            st.error(ris_idx["errore"])
+        else:
+            r_tot = ris_idx["risparmio_totale"]
+            if r_tot > 0:
+                st.success("📉 L'INDICIZZATO AVREBBE VINTO — sulla storia spot del periodo, la clausola indicizzata sarebbe costata € %s in meno del fisso (%.1f %%)." % (
+                    "{:,.0f}".format(r_tot).replace(",", "."),
+                    ris_idx["risparmio_pct"]))
+            elif r_tot < 0:
+                st.error("📉 IL FISSO AVREBBE VINTO — sulla storia spot del periodo, il prezzo fisso sarebbe costato € %s in meno dell'indicizzato." % (
+                    "{:,.0f}".format(-r_tot).replace(",", ".")))
+            else:
+                st.warning("📉 PAREGGIO — indicizzato e fisso si equivalgono sul periodo.")
+            k1i, k2i, k3i, k4i = st.columns(4)
+            with k1i:
+                st.metric("Costo totale indicizzato",
+                          "€ {:,.0f}".format(ris_idx["costo_totale_indicizzato"]).replace(",", "."),
+                          help="Volume mensile x prezzo indicizzato mensile (spot medio + spread, con cap/floor).")
+            with k2i:
+                st.metric("Costo totale fisso",
+                          "€ {:,.0f}".format(ris_idx["costo_totale_fisso"]).replace(",", "."),
+                          help="Volume mensile x prezzo fisso, stesso periodo.")
+            with k3i:
+                st.metric("Risparmio indicizzato",
+                          "€ {:,.0f}".format(r_tot).replace(",", "."),
+                          delta="%.1f %%" % ris_idx["risparmio_pct"],
+                          help="Costo fisso meno costo indicizzato: > 0 l'indicizzato ha fatto risparmiare.")
+            with k4i:
+                st.metric("Fisso di pareggio", "%.2f €/MWh" % ris_idx["prezzo_fisso_pareggio"],
+                          help="Il prezzo fisso che avrebbe eguagliato il costo dell'indicizzato: se il fisso offerto supera questo valore, conviene l'indicizzato.")
+            st.caption("Mesi analizzati: %d — mesi in cui l'indicizzato ha vinto: %d." % (
+                ris_idx["mesi"], ris_idx["mesi_vinti_indicizzato"]))
+            fig_idx = go.Figure()
+            fig_idx.add_trace(go.Scatter(
+                x=ris_idx["df_mesi"]["Mese"],
+                y=ris_idx["df_mesi"]["Prezzo indicizzato (\u20ac/MWh)"],
+                mode="lines+markers", name="Prezzo indicizzato",
+                line=dict(color="#3b82f6", width=2.5)))
+            fig_idx.add_trace(go.Scatter(
+                x=ris_idx["df_mesi"]["Mese"],
+                y=[fisso_idx] * ris_idx["mesi"],
+                mode="lines", name="Prezzo fisso",
+                line=dict(color="#ef4444", width=2, dash="dash")))
+            fig_idx.update_layout(title="Prezzo mensile: indicizzato vs fisso",
+                                  template="plotly_dark", height=380,
+                                  xaxis_title="Mese", yaxis_title="€/MWh")
+            st.plotly_chart(fig_idx, use_container_width=True)
+            fig_ris = go.Figure()
+            colori_ris = ["#22c55e" if v >= 0 else "#ef4444"
+                          for v in ris_idx["df_mesi"]["Risparmio indicizzato (\u20ac)"]]
+            fig_ris.add_trace(go.Bar(
+                x=ris_idx["df_mesi"]["Mese"],
+                y=ris_idx["df_mesi"]["Risparmio indicizzato (\u20ac)"],
+                name="Risparmio mensile", marker_color=colori_ris,
+                hovertemplate="%{x}: € %{y:,.0f}<extra></extra>"))
+            fig_ris.update_layout(title="Risparmio mensile dell'indicizzato vs fisso",
+                                  template="plotly_dark", height=320,
+                                  xaxis_title="Mese", yaxis_title="€")
+            st.plotly_chart(fig_ris, use_container_width=True)
+            st.markdown("**Regolazione mensile**")
+            st.dataframe(ris_idx["df_mesi"], use_container_width=True, hide_index=True)
+            st.download_button(
+                "Scarica CSV backtest indicizzato",
+                data=ris_idx["df_mesi"].to_csv(index=False, sep=";").encode("utf-8"),
+                file_name="backtest_offerta_indicizzata.csv", mime="text/csv",
+                key="idx214_csv",
+                help="Prezzo indicizzato mensile, costi e risparmi vs fisso.")
 
 # Footer
 
