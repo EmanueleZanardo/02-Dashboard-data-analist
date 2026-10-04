@@ -15,7 +15,7 @@ Dashboard Streamlit per analisi quantitativa del mercato elettrico svizzero
 5. 📈 Exotics & Structuring
 6. 🏛️ Enterprise Risk & XVA
 7. 📈 Metodo STAR & Ottimizzazione
-8. 📊 Price Analytics (Swissix) — 200 tab analitiche
+8. 📊 Price Analytics (Swissix) — 201 tab analitiche
 
 ### Price Analytics (Swissix)
 
@@ -232,6 +232,7 @@ stoccaggio gas, PPA, idroelettrico, power-to-heat.
 198. 🎲 VaR di portafoglio
 199. 📊 Basis risk
 200. 🌀 Rolling VaR
+201. 📅 Radar scadenze contratti
 </details>
 
 ## Avvio locale
