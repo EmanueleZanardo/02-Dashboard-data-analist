@@ -194,16 +194,16 @@ class TestRegistry:
                                 "lower", lambda: "")() == "tabs"):
                 titoli = [t.value for t in node.value.args[0].elts]
         assert titoli is not None
-        assert len(titoli) == 216
-        assert titoli[-1] == "💰 VAN offerte pluriennali"
-        # variabili tabN: devono essere 216 e tab215 presente (non più ultima)
-        m = re.search(r"((?:tab\d+, )+tab216) = st\.tabs\(\[", src)
+        assert len(titoli) == 217
+        assert titoli[-1] == "🎯 Break-even offerte"
+        # variabili tabN: devono essere 217 e tab216 presente (non più ultima)
+        m = re.search(r"((?:tab\d+, )+tab217) = st\.tabs\(\[", src)
         assert m is not None
         vars_tab = [v.strip() for v in m.group(1).split(",")]
-        assert len(vars_tab) == 216
+        assert len(vars_tab) == 217
         assert "tab212" in vars_tab and "tab213" in vars_tab
         withs = re.findall(r"^\s*with (tab\d+):", src, re.M)
-        assert len(withs) == len(vars_tab) == 216
+        assert len(withs) == len(vars_tab) == 217
         assert "tab213" in withs and "tab214" in withs
         # key widget uniche: 2 letterali + 5 template f-string (x3 offerte)
         keys = re.findall(r'key=f?"(cfo213_[^"]+)"', src)
