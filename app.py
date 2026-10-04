@@ -27513,6 +27513,164 @@ def calcola_radar_scadenze(df_contratti, prezzo_mercato_eur_mwh,
     except Exception as e:  # pragma: no cover - guardia totale
         return {"errore": "Errore interno: %s" % e, "valido": False}
 
+def calcola_concentrazione_controparte(df_contratti, prezzo_mercato_eur_mwh,
+                                        data_rif=None):
+    """Concentrazione del rischio controparte nel portafoglio contratti.
+
+    df_contratti: stesso schema della tab radar scadenze (Fornitore,
+    Inizio, Fine, Volume_MWh_anno, Prezzo_EUR_MWh, Tipo Fisso/Indicizzato).
+    Si considerano solo i contratti ATTIVI (Fine >= data_rif).
+    prezzo_mercato_eur_mwh: prezzo di mercato (> 0) per stimare il MtM dei
+    contratti a prezzo fisso. data_rif: data di valutazione (default oggi).
+    Per controparte: volume annuo aggregato, quota %, MtM sul volume
+    residuo (vol_residuo x (mercato - prezzo fisso); 0 per gli indicizzati)
+    ed esposizione positiva = max(MtM, 0) = costo di sostituzione se la
+    controparte fallisce quando il mercato e' sopra il prezzo fissato.
+    Indice HHI sulle quote volume (bande: <1500 bassa, 1500-2500 moderata,
+    >2500 alta concentrazione); alert quota top > 50% critica, > 30% warning.
+    Ritorna dict con 'errore' (None se ok); mai eccezioni.
+    """
+    def _err(msg):
+        return {"errore": msg, "valido": False}
+
+    try:
+        cols = ["Fornitore", "Inizio", "Fine", "Volume_MWh_anno",
+                "Prezzo_EUR_MWh", "Tipo"]
+        if not isinstance(df_contratti, pd.DataFrame) or df_contratti.empty:
+            return _err("Tabella contratti mancante o vuota.")
+        manc = [c for c in cols if c not in df_contratti.columns]
+        if manc:
+            return _err("Colonne mancanti: %s." % ", ".join(manc))
+
+        if data_rif is None:
+            rif = pd.Timestamp.today().normalize()
+        else:
+            rif = pd.to_datetime(data_rif, errors="coerce")
+            if pd.isna(rif):
+                return _err("Data di riferimento non valida.")
+            rif = pd.Timestamp(rif).normalize()
+        if rif.tzinfo is not None:
+            rif = rif.tz_localize(None)
+
+        pm = prezzo_mercato_eur_mwh
+        if (isinstance(pm, bool) or not isinstance(pm, (int, float))
+                or not np.isfinite(pm) or pm <= 0):
+            return _err("Prezzo di mercato non valido (> 0 EUR/MWh).")
+        pm = float(pm)
+
+        df = df_contratti[cols].copy()
+        forn = df["Fornitore"].astype(str).str.strip()
+        if (forn == "").any() or forn.isna().any():
+            return _err("Fornitore mancante in una o piu' righe.")
+
+        def _naive(s):
+            s = pd.to_datetime(s, errors="coerce")
+            try:
+                if s.dt.tz is not None:
+                    s = s.dt.tz_localize(None)
+            except (TypeError, AttributeError):
+                pass
+            return s.dt.normalize()
+
+        ini = _naive(df["Inizio"])
+        fin = _naive(df["Fine"])
+        if ini.isna().any() or fin.isna().any():
+            return _err("Date Inizio/Fine non valide in una o piu' righe.")
+        if (fin < ini).any():
+            return _err("Fine precedente a Inizio in una o piu' righe.")
+
+        vol = pd.to_numeric(df["Volume_MWh_anno"], errors="coerce")
+        if vol.isna().any() or (vol <= 0).any():
+            return _err("Volume_MWh_anno non valido (deve essere > 0).")
+
+        tipo = df["Tipo"].astype(str).str.strip().str.lower()
+        if (~tipo.isin(["fisso", "indicizzato"])).any():
+            return _err("Tipo non valido (usare Fisso o Indicizzato).")
+        m_fisso = tipo == "fisso"
+
+        prezzo = pd.to_numeric(df["Prezzo_EUR_MWh"], errors="coerce")
+        if prezzo[m_fisso].isna().any() or (prezzo[m_fisso] <= 0).any():
+            return _err("Prezzo_EUR_MWh non valido per i contratti Fisso "
+                        "(deve essere > 0).")
+
+        attivi = fin >= rif
+        if not attivi.any():
+            return _err("Nessun contratto attivo alla data di riferimento.")
+        forn_a = forn[attivi]
+        vol_a = vol[attivi]
+        prezzo_a = prezzo[attivi]
+        fisso_a = m_fisso[attivi]
+        fin_a = fin[attivi]
+
+        # Volume residuo pro-rata sui prossimi 12 mesi (cap 365 giorni).
+        giorni_res = (fin_a - rif).dt.days.clip(lower=0)
+        vol_res = vol_a * np.minimum(giorni_res, 365) / 365.0
+        mtm = np.where(fisso_a, vol_res * (pm - prezzo_a), 0.0)
+        esposizione = np.maximum(mtm, 0.0)
+
+        agg = pd.DataFrame({"Fornitore": forn_a.values,
+                            "Volume (MWh/anno)": vol_a.values,
+                            "Volume residuo (MWh)": vol_res.values,
+                            "MtM (€)": mtm,
+                            "Esposizione (€)": esposizione})
+        g = agg.groupby("Fornitore", as_index=False).agg(
+            {"Volume (MWh/anno)": "sum",
+             "Volume residuo (MWh)": "sum",
+             "MtM (€)": "sum",
+             "Esposizione (€)": "sum"})
+        conteggi = agg.groupby("Fornitore").size()
+        g["Contratti"] = g["Fornitore"].map(conteggi).astype(int).values
+        vol_tot = float(g["Volume (MWh/anno)"].sum())
+        g["Quota volume (%)"] = 100.0 * g["Volume (MWh/anno)"] / vol_tot
+        g = g.sort_values("Quota volume (%)", ascending=False).reset_index(
+            drop=True)
+        g = g[["Fornitore", "Contratti", "Volume (MWh/anno)",
+               "Quota volume (%)", "Volume residuo (MWh)", "MtM (€)",
+               "Esposizione (€)"]]
+
+        quote = g["Quota volume (%)"].to_numpy()
+        hhi = float(np.sum(quote ** 2))
+        cr1 = float(quote[0])
+        cr2 = float(quote[:2].sum())
+        esp_tot = float(g["Esposizione (€)"].sum())
+        mtm_tot = float(g["MtM (€)"].sum())
+        n_cp = int(len(g))
+
+        if cr1 > 50.0:
+            verdetto = ("🔴 CONCENTRAZIONE CRITICA: la prima controparte "
+                        "(%s) copre il %.1f%% del volume annuo attivo: "
+                        "se fallisce o rinegozia, meta' della fornitura e' "
+                        "a rischio. Riduci la quota sotto il 50%% "
+                        "diversificando su nuovi fornitori."
+                        % (g.loc[0, "Fornitore"], cr1))
+        elif cr1 > 30.0:
+            verdetto = ("🟡 Concentrazione ELEVATA: %s copre il %.1f%% del "
+                        "volume (soglia di attenzione 30%%). Valuta di "
+                        "spostare parte del volume su altre controparti."
+                        % (g.loc[0, "Fornitore"], cr1))
+        elif hhi > 2500.0:
+            verdetto = ("🟡 HHI alto (%.0f): il portafoglio e' concentrato "
+                        "su poche controparti anche se nessuna supera il "
+                        "30%%. Monitora le esposizioni positive."
+                        % hhi)
+        else:
+            verdetto = ("🟢 Portafoglio diversificato: HHI %.0f, prima "
+                        "controparte al %.1f%%. Nessun alert di "
+                        "concentrazione." % (hhi, cr1))
+
+        classe_hhi = ("Alta concentrazione" if hhi > 2500.0
+                      else "Moderata" if hhi > 1500.0 else "Bassa")
+
+        return {"errore": None, "valido": True, "n_controparti": n_cp,
+                "n_contratti_attivi": int(attivi.sum()),
+                "volume_totale": vol_tot, "hhi": hhi,
+                "classe_hhi": classe_hhi, "cr1_pct": cr1, "cr2_pct": cr2,
+                "mtm_totale": mtm_tot, "esposizione_totale": esp_tot,
+                "df_controparti": g, "data_rif": rif,
+                "verdetto": verdetto}
+    except Exception as e:  # pragma: no cover - guardia totale
+        return {"errore": "Errore interno: %s" % e, "valido": False}
+
 # WORKSPACE 1: SIMULATORE STRATEGICO
 # =========================================="
 if workspace == _('ws1'):
@@ -28156,7 +28314,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -46034,6 +46192,105 @@ elif workspace == _('ws8'):
                 file_name="radar_scadenze.csv", mime="text/csv",
                 key="rs201_csv_out",
                 help="Dettaglio contratti con giorni rimanenti, classe e repricing stimato.")
+
+    with tab202:
+        titolo_cc = edu("Concentrazione controparte", "Quanto del tuo volume dipende da un singolo fornitore? Se una controparte copre meta' della fornitura e fallisce o rinegozia, il danno e' enorme. Qui aggreghi i contratti attivi per fornitore, calcoli quota di volume, MtM ed esposizione positiva (il costo di sostituzione se la controparte viene meno) e l'indice HHI di concentrazione, con soglie di alert 30% e 50%.")
+        st.markdown(f"<h1>⚖️ {titolo_cc}</h1>", unsafe_allow_html=True)
+        st.caption("Rischio di concentrazione: quote di volume, MtM ed esposizione per controparte, indice HHI.")
+        oggi_cc = datetime.date.today()
+        demo_cc = pd.DataFrame({
+            "Fornitore": ["Alfa Energia", "Alfa Energia", "Beta Power",
+                          "Gamma Trading", "Delta Supply"],
+            "Inizio": [oggi_cc - datetime.timedelta(days=400),
+                       oggi_cc - datetime.timedelta(days=100),
+                       oggi_cc - datetime.timedelta(days=200),
+                       oggi_cc - datetime.timedelta(days=100),
+                       oggi_cc - datetime.timedelta(days=500)],
+            "Fine": [oggi_cc + datetime.timedelta(days=300),
+                     oggi_cc + datetime.timedelta(days=700),
+                     oggi_cc + datetime.timedelta(days=200),
+                     oggi_cc + datetime.timedelta(days=500),
+                     oggi_cc - datetime.timedelta(days=15)],
+            "Volume_MWh_anno": [12000.0, 6000.0, 8000.0, 5000.0, 3000.0],
+            "Prezzo_EUR_MWh": [78.5, 82.0, 0.0, 95.0, 110.0],
+            "Tipo": ["Fisso", "Fisso", "Indicizzato", "Fisso", "Fisso"]})
+        st.markdown("**Portafoglio contratti** (modifica, aggiungi o elimina righe)")
+        edit_cc = st.data_editor(
+            demo_cc, num_rows="dynamic", use_container_width=True,
+            key="cc202_editor",
+            column_config={
+                "Fornitore": st.column_config.TextColumn("Fornitore",
+                                                         required=True),
+                "Inizio": st.column_config.DateColumn("Inizio",
+                                                      required=True),
+                "Fine": st.column_config.DateColumn("Fine", required=True),
+                "Volume_MWh_anno": st.column_config.NumberColumn(
+                    "Volume (MWh/anno)", min_value=0.0, format="%.0f"),
+                "Prezzo_EUR_MWh": st.column_config.NumberColumn(
+                    "Prezzo (€/MWh, solo Fisso)", min_value=0.0,
+                    format="%.2f"),
+                "Tipo": st.column_config.SelectboxColumn(
+                    "Tipo", options=["Fisso", "Indicizzato"],
+                    required=True)})
+        pm_cc = st.number_input("Prezzo di mercato di riferimento (€/MWh)",
+                                min_value=0.0, value=95.0, step=1.0,
+                                key="cc202_prezzo_mercato",
+                                help="Serve a stimare MtM ed esposizione dei contratti a prezzo fisso: se il mercato e' sopra il prezzo fissato, la controparte ti sta 'regalando' la differenza e il tuo costo di sostituzione e' positivo.")
+        ris_cc = calcola_concentrazione_controparte(
+            edit_cc, prezzo_mercato_eur_mwh=float(pm_cc))
+        if ris_cc["errore"]:
+            st.error(ris_cc["errore"])
+        else:
+            def _fcc(x, fmt="%.0f"):
+                return (fmt % x) if x is not None and np.isfinite(x) else "n.d."
+            ck1, ck2, ck3, ck4 = st.columns(4)
+            with ck1:
+                st.metric("Indice HHI", _fcc(ris_cc["hhi"]),
+                          help="Herfindahl-Hirschman sulle quote di volume: <1500 bassa, 1500-2500 moderata, >2500 alta concentrazione.")
+            with ck2:
+                st.metric("Classe HHI", ris_cc["classe_hhi"])
+            with ck3:
+                top_cc = ris_cc["df_controparti"].iloc[0]
+                st.metric("Top controparte",
+                          "%s (%.1f%%)" % (top_cc["Fornitore"],
+                                           top_cc["Quota volume (%)"]),
+                          help="La controparte con la quota di volume maggiore; alert sopra il 30%, critica sopra il 50%.")
+            with ck4:
+                st.metric("Esposizione totale",
+                          "%s €" % _fcc(ris_cc["esposizione_totale"]),
+                          help="Somma delle esposizioni positive: costo di sostituzione del volume residuo se le controparti in-the-money per te venissero meno.")
+            st.info("⚖️ %s" % ris_cc["verdetto"])
+            dfc = ris_cc["df_controparti"]
+            colori_cc = ["#ef4444" if q > 50.0 else "#f59e0b" if q > 30.0
+                         else "#22c55e" for q in dfc["Quota volume (%)"]]
+            fig_cc = go.Figure()
+            fig_cc.add_trace(go.Bar(
+                x=dfc["Fornitore"], y=dfc["Quota volume (%)"],
+                marker_color=colori_cc, name="Quota volume",
+                customdata=np.stack(
+                    [dfc["Contratti"], dfc["Volume (MWh/anno)"],
+                     dfc["Esposizione (€)"]], axis=1),
+                hovertemplate=("%{x}<br>Quota volume: %{y:.1f}%<br>"
+                               "Contratti: %{customdata[0]:.0f}<br>"
+                               "Volume annuo: %{customdata[1]:,.0f} MWh<br>"
+                               "Esposizione: %{customdata[2]:,.0f} €"
+                               "<extra></extra>")))
+            fig_cc.add_hline(y=30.0, line_dash="dot", line_color="#f59e0b",
+                             annotation_text="soglia 30%")
+            fig_cc.add_hline(y=50.0, line_dash="dash", line_color="#ef4444",
+                             annotation_text="soglia 50%")
+            fig_cc.update_layout(title="Quota di volume per controparte (contratti attivi)",
+                                 xaxis_title="", yaxis_title="% volume",
+                                 template="plotly_dark", height=340)
+            st.plotly_chart(fig_cc, use_container_width=True)
+            st.markdown("**Dettaglio per controparte**")
+            st.dataframe(dfc, use_container_width=True, hide_index=True)
+            st.download_button(
+                "Scarica CSV concentrazione controparte",
+                data=dfc.to_csv(index=False, sep=";").encode("utf-8"),
+                file_name="concentrazione_controparte.csv", mime="text/csv",
+                key="cc202_csv_out",
+                help="Tabella per controparte: contratti, volumi, quote, MtM ed esposizione.")
 
 
 # Footer
