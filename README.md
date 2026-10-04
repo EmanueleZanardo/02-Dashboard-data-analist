@@ -15,7 +15,7 @@ Dashboard Streamlit per analisi quantitativa del mercato elettrico svizzero
 5. 📈 Exotics & Structuring
 6. 🏛️ Enterprise Risk & XVA
 7. 📈 Metodo STAR & Ottimizzazione
-8. 📊 Price Analytics (Swissix) — 204 tab analitiche
+8. 📊 Price Analytics (Swissix) — 205 tab analitiche
 
 ### Price Analytics (Swissix)
 
@@ -30,7 +30,7 @@ opzioni energetiche (Black-76, spark spread, swing, tolling, asiatiche…),
 stoccaggio gas, PPA, idroelettrico, power-to-heat.
 
 <details>
-<summary>Elenco completo delle 204 tab dello Swissix</summary>
+<summary>Elenco completo delle 205 tab dello Swissix</summary>
 
 1. ⏱️ Profilo giornaliero
 2. 🔥 Heatmap oraria
@@ -236,6 +236,7 @@ stoccaggio gas, PPA, idroelettrico, power-to-heat.
 202. ⚖️ Concentrazione controparte
 203. 💧 Costo di liquidazione
 204. ⏳ Opzione di differimento
+205. 🏦 Dimensionamento debito (DSCR)
 </details>
 
 ## Avvio locale
