@@ -27813,6 +27813,143 @@ def calcola_costo_liquidazione(df_posizioni, spread_bps=10.0,
         return {"errore": "Errore interno: %s" % e, "valido": False}
 
 
+def calcola_debt_sizing(potenza_mw, ore_eq, prezzo_catturato, capex_eur_kw,
+                        opex_eur_kw_anno, degrado_pct, tasso_pct,
+                        durata_anni, dscr_target, vita_anni):
+    """Dimensionamento del debito project-finance con debt service sculpted.
+
+    Debt service annuo = CFADS_anno / dscr_target (sculpting a DSCR costante);
+    debito massimo = valore attuale del debt service al tasso del debito.
+    Funzione pura: nessun accesso a Streamlit.
+    """
+    def _num(x):
+        try:
+            v = float(x)
+        except (TypeError, ValueError):
+            return None
+        return None if v != v else v
+
+    def _ko(msg):
+        return {"errore": msg, "valido": False}
+
+    def _irr(flussi, lo=-0.9999, hi=5.0, tol=1e-7, it=200):
+        def _npv(t):
+            s = 0.0
+            d = 1.0
+            for c in flussi:
+                s += c / d
+                d *= (1.0 + t)
+            return s
+        vlo, vhi = _npv(lo), _npv(hi)
+        if vlo == 0.0:
+            return lo
+        if vhi == 0.0:
+            return hi
+        if vlo * vhi > 0:
+            return None
+        for _ in range(it):
+            mid = 0.5 * (lo + hi)
+            vm = _npv(mid)
+            if abs(vm) < tol:
+                return mid
+            if vlo * vm <= 0:
+                hi, vhi = mid, vm
+            else:
+                lo, vlo = mid, vm
+        return 0.5 * (lo + hi)
+
+    p = _num(potenza_mw); ore = _num(ore_eq); prz = _num(prezzo_catturato)
+    ck = _num(capex_eur_kw); ok = _num(opex_eur_kw_anno); dg = _num(degrado_pct)
+    r = _num(tasso_pct); dur = _num(durata_anni)
+    dscr_t = _num(dscr_target); vita = _num(vita_anni)
+    if None in (p, ore, prz, ck, ok, dg, r, dur, dscr_t, vita):
+        return _ko("Tutti i parametri devono essere numerici.")
+    if p <= 0:
+        return _ko("La potenza deve essere > 0 MW.")
+    if ore <= 0:
+        return _ko("Le ore equivalenti devono essere > 0.")
+    if prz <= 0:
+        return _ko("Il prezzo catturato deve essere > 0 EUR/MWh.")
+    if ck <= 0:
+        return _ko("Il CAPEX deve essere > 0 EUR/kW.")
+    if ok < 0:
+        return _ko("L'OPEX non puo' essere negativo.")
+    if not 0.0 <= dg < 100.0:
+        return _ko("Il degrado deve essere tra 0 (incluso) e 100 (escluso) %/anno.")
+    if r < 0:
+        return _ko("Il tasso del debito non puo' essere negativo.")
+    if dur < 1:
+        return _ko("La durata del debito deve essere >= 1 anno.")
+    if dscr_t < 1.0:
+        return _ko("Il DSCR target deve essere >= 1.0.")
+    if vita < 1:
+        return _ko("La vita del progetto deve essere >= 1 anno.")
+    dur = int(round(dur)); vita = int(round(vita))
+    tenor = min(dur, vita)
+
+    capex = p * 1000.0 * ck
+    opex = p * 1000.0 * ok
+    energia = [p * ore * (1.0 - dg / 100.0) ** (y - 1)
+               for y in range(1, vita + 1)]
+    ricavi = [e * prz for e in energia]
+    cfads = [rv - opex for rv in ricavi]
+    if cfads[0] <= 0:
+        return _ko("CFADS anno 1 non positivo: i ricavi non coprono l'OPEX.")
+    if any(c <= 0 for c in cfads[:tenor]):
+        return _ko("CFADS non positivo in uno degli anni del debito: "
+                   "progetto non finanziabile a questo DSCR.")
+
+    ds = [c / dscr_t for c in cfads[:tenor]]
+    if r == 0.0:
+        debt = float(sum(ds))
+        pv_tenor = float(sum(cfads[:tenor]))
+        pv_vita = float(sum(cfads))
+    else:
+        rf = 1.0 + r / 100.0
+        debt = float(sum(d / rf ** (y + 1) for y, d in enumerate(ds)))
+        pv_tenor = float(sum(c / rf ** (y + 1)
+                             for y, c in enumerate(cfads[:tenor])))
+        pv_vita = float(sum(c / rf ** (y + 1)
+                            for y, c in enumerate(cfads)))
+    gearing = debt / capex
+    finanziabile = bool(gearing <= 1.0)
+    llcr = pv_tenor / debt if debt > 0 else None
+    plcr = pv_vita / debt if debt > 0 else None
+    equity = capex - debt
+    dscr_prof = [cfads[y] / ds[y] for y in range(tenor)]
+    dscr_min = min(dscr_prof)
+    dscr_medio = sum(dscr_prof) / len(dscr_prof)
+
+    irr_eq = None
+    if equity > 0:
+        cf_eq = [-equity] + [cfads[y] - (ds[y] if y < tenor else 0.0)
+                             for y in range(vita)]
+        if any(c > 0 for c in cf_eq[1:]):
+            irr_eq = _irr(cf_eq)
+
+    df = pd.DataFrame({
+        "Anno": list(range(1, vita + 1)),
+        "Energia (MWh)": [round(e, 1) for e in energia],
+        "Ricavi (EUR)": [round(rv, 0) for rv in ricavi],
+        "OPEX (EUR)": [round(opex, 0)] * vita,
+        "CFADS (EUR)": [round(c, 0) for c in cfads],
+        "Debt service (EUR)": [round(ds[y], 0) if y < tenor else 0.0
+                               for y in range(vita)],
+        "DSCR": [round(dscr_prof[y], 3) if y < tenor else None
+                 for y in range(vita)],
+    })
+    return {
+        "errore": None, "valido": True,
+        "capex": capex, "debito_max": debt, "gearing": gearing,
+        "finanziabile": finanziabile, "equity": equity,
+        "llcr": llcr, "plcr": plcr, "tenor": tenor,
+        "dscr_min": dscr_min, "dscr_medio": dscr_medio,
+        "dscr_target": dscr_t, "irr_equity": irr_eq,
+        "cfads_anno1": cfads[0], "energia_anno1": energia[0],
+        "df_annuale": df,
+    }
+
+
 def calcola_opzione_differimento(V, K, T_anni, vol_pct, tasso_pct,
                                dy_pct=0.0, n_step=200):
     """Opzione REALE di differimento di un investimento energetico.
@@ -28643,7 +28780,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -46822,6 +46959,121 @@ elif workspace == _('ws8'):
                 file_name="opzione_differimento.csv", mime="text/csv",
                 key="dif204_csv_out",
                 help="Tabella di sensibilità: V, opzione, VAN immediato e valore dell'attesa.")
+
+
+    with tab205:
+        titolo_deb = edu("Dimensionamento debito (DSCR)", "In un project finance il debito si dimensiona sul cash flow disponibile (CFADS): il debt service annuo viene 'scolpito' (sculpted) per mantenere un DSCR costante. Il debito massimo e' il valore attuale del debt service al tasso del finanziamento; LLCR e gearing dicono se la banca ci sta.")
+        st.markdown(f"<h1>🏦 {titolo_deb}</h1>", unsafe_allow_html=True)
+        st.caption("Quanto debito puo' sostenere il progetto mantenendo il DSCR target: debt service sculpted, gearing, LLCR e IRR dell'equity.")
+        c1b, c2b, c3b = st.columns(3)
+        with c1b:
+            p_deb = st.number_input("Potenza (MW)",
+                                    min_value=0.1, value=10.0, step=1.0,
+                                    key="deb205_P",
+                                    help="Potenza nominale dell'impianto.")
+            ore_deb = st.number_input("Ore equivalenti / anno",
+                                      min_value=1.0, value=1500.0,
+                                      step=50.0, key="deb205_ore",
+                                      help="Energia annua per MW installato.")
+            prz_deb = st.number_input("Prezzo catturato (EUR/MWh)",
+                                      min_value=0.1, value=80.0, step=1.0,
+                                      key="deb205_prezzo",
+                                      help="Prezzo medio catturato dalla produzione (capture price).")
+        with c2b:
+            ck_deb = st.number_input("CAPEX (EUR/kW)",
+                                    min_value=1.0, value=800.0, step=10.0,
+                                    key="deb205_capex",
+                                    help="Costo di investimento per kW installato.")
+            ok_deb = st.number_input("OPEX (EUR/kW/anno)",
+                                    min_value=0.0, value=15.0, step=1.0,
+                                    key="deb205_opex",
+                                    help="Costi operativi annui per kW installato.")
+            dg_deb = st.slider("Degrado produzione (%/anno)", 0.0, 5.0,
+                               0.5, 0.1, key="deb205_degrado",
+                               help="Perdita annua di produzione (pannelli, turbine).")
+        with c3b:
+            r_deb = st.slider("Tasso del debito (%)", 0.0, 15.0,
+                              5.0, 0.25, key="deb205_tasso",
+                              help="Tasso di interesse del finanziamento.")
+            dur_deb = st.slider("Durata del debito (anni)", 1, 30,
+                                15, 1, key="deb205_durata",
+                                help="Tenor del finanziamento (limitato alla vita del progetto).")
+            dscr_deb = st.slider("DSCR target", 1.0, 2.5,
+                                 1.4, 0.05, key="deb205_dscr",
+                                 help="Debt Service Coverage Ratio minimo richiesto dalla banca.")
+            vita_deb = st.slider("Vita del progetto (anni)", 1, 40,
+                                 25, 1, key="deb205_vita",
+                                 help="Orizzonte di analisi dei flussi di cassa.")
+        ris_deb = calcola_debt_sizing(
+            p_deb, ore_deb, prz_deb, ck_deb, ok_deb, dg_deb,
+            r_deb, dur_deb, dscr_deb, vita_deb)
+        if ris_deb["errore"]:
+            st.error(ris_deb["errore"])
+        else:
+            k1b, k2b, k3b, k4b, k5b = st.columns(5)
+            with k1b:
+                st.metric("Debito massimo",
+                          "%.0f €" % ris_deb["debito_max"],
+                          help="Valore attuale del debt service sculpted al tasso del debito.")
+            with k2b:
+                st.metric("Gearing",
+                          "%.1f %%" % (ris_deb["gearing"] * 100.0),
+                          help="Debito / CAPEX: sopra il 100% la banca non finanzia a questo DSCR.")
+            with k3b:
+                st.metric("LLCR",
+                          "%.2f x" % ris_deb["llcr"],
+                          help="Loan Life Coverage Ratio: VAN dei CFADS sul tenor / debito.")
+            with k4b:
+                irr_eq = ris_deb["irr_equity"]
+                st.metric("IRR equity",
+                          "%.1f %%" % (irr_eq * 100.0) if irr_eq is not None else "n.d.",
+                          help="Rendimento dell'equity dopo il servizio del debito.")
+            with k5b:
+                st.metric("DSCR minimo",
+                          "%.2f x" % ris_deb["dscr_min"],
+                          help="DSCR piu' basso sul tenor (per costruzione = target).")
+            if ris_deb["finanziabile"]:
+                st.success("🏦 FINANZIABILE — gearing %.1f%%, LLCR %.2fx: il progetto sostiene il debito al DSCR target."
+                           % (ris_deb["gearing"] * 100.0, ris_deb["llcr"]))
+            else:
+                st.error("🏦 NON FINANZIABILE — gearing %.1f%% oltre il 100%%: alza il prezzo catturato, riduci il CAPEX o alza il DSCR target."
+                         % (ris_deb["gearing"] * 100.0))
+            dfd = ris_deb["df_annuale"]
+            fig_deb = go.Figure()
+            fig_deb.add_trace(go.Bar(
+                x=dfd["Anno"], y=dfd["CFADS (EUR)"],
+                name="CFADS", marker_color="#38bdf8",
+                hovertemplate="Anno %{x}<br>CFADS: %{y:,.0f} €<extra></extra>"))
+            fig_deb.add_trace(go.Bar(
+                x=dfd["Anno"], y=dfd["Debt service (EUR)"],
+                name="Debt service", marker_color="#f59e0b",
+                hovertemplate="Anno %{x}<br>DS: %{y:,.0f} €<extra></extra>"))
+            fig_deb.update_layout(title="CFADS vs debt service sculpted",
+                                  xaxis_title="Anno", yaxis_title="€",
+                                  barmode="group", template="plotly_dark",
+                                  height=340)
+            st.plotly_chart(fig_deb, use_container_width=True)
+            fig_deb2 = go.Figure()
+            fig_deb2.add_trace(go.Scatter(
+                x=dfd["Anno"], y=dfd["DSCR"],
+                mode="lines+markers", name="DSCR",
+                line=dict(color="#22c55e", width=2.5),
+                hovertemplate="Anno %{x}<br>DSCR: %{y:.2f}x<extra></extra>"))
+            fig_deb2.add_hline(y=ris_deb["dscr_target"], line_dash="dot",
+                               line_color="#f59e0b",
+                               annotation_text="DSCR target")
+            fig_deb2.update_layout(title="Profilo DSCR sul tenor del debito",
+                                   xaxis_title="Anno", yaxis_title="DSCR (x)",
+                                   template="plotly_dark", height=300)
+            st.plotly_chart(fig_deb2, use_container_width=True)
+            st.markdown("**Piano annuo: CFADS, debt service e DSCR**")
+            st.dataframe(dfd, use_container_width=True, hide_index=True)
+            st.download_button(
+                "Scarica CSV dimensionamento debito",
+                data=dfd.to_csv(index=False, sep=";").encode("utf-8"),
+                file_name="debt_sizing.csv", mime="text/csv",
+                key="deb205_csv_out",
+                help="Tabella annuale: energia, ricavi, OPEX, CFADS, debt service e DSCR.")
 
 
 # Footer
