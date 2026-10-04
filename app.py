@@ -29015,6 +29015,146 @@ def calcola_robustezza_offerta(prezzi, mw_f1=1.0, mw_f2=1.0, mw_f3=1.0,
     return out
 
 
+def calcola_van_offerte_pluriennali(offerte, volume_annuo_mwh, tasso_annuo_pct,
+                                    forward_base_eur_mwh,
+                                    escalation_annua_pct=0.0):
+    """VAN di offerte di fornitura pluriennali con durate diverse.
+
+    Domanda operativa: "mi conviene il fisso a 1 anno a 120 €/MWh o il
+    fisso a 3 anni a 132 €/MWh?" Le offerte con durata diversa non si
+    confrontano sul solo prezzo energia: l'offerta corta va "rinnovata"
+    negli anni oltre la sua durata al prezzo forward atteso, e tutti i
+    flussi vanno attualizzati al tasso di sconto. Vince il VAN (Valore
+    Attuale Netto) minore, calcolato sul comune orizzonte
+    H = durata massima tra le offerte.
+
+    Ogni offerta e' un dict con: nome (str), prezzo_eur_mwh (> 0),
+    durata_anni (intero 1..10), canone_fisso_eur_mese (default 0),
+    attivazione_eur (default 0, una tantum a t=0, non attualizzata).
+    Costo anno k (1..H): se k <= durata: V*P + 12*canone, altrimenti
+    V*F_k + 12*canone, con F_k = forward_base*(1+g)^(k-1).
+    VAN = attivazione + Σ costo_k/(1+r)^k.
+    Rata equivalente annua = VAN*r/(1-(1+r)^-H) se r > 0, altrimenti VAN/H.
+
+    Differenza dagli altri tab: 'Rinnovo vs switch' confronta TCO annui a
+    parita' di orizzonte; qui durate diverse si confrontano in VAN con
+    rinnovo al forward atteso oltre la scadenza.
+
+    NaN-safe: input non numerici / durate non intere / valori fuori range
+    -> errore pulito, mai eccezioni. Deterministica.
+    """
+    def _num(x):
+        return (isinstance(x, (int, float)) and not isinstance(x, bool)
+                and x == x and abs(x) != float("inf"))
+
+    vuoto = {"ok": False, "valido": False, "errore": None}
+    if not isinstance(offerte, (list, tuple)) or len(offerte) < 2:
+        return dict(vuoto, errore="Servono almeno 2 offerte da confrontare.")
+    righe = []
+    visti = set()
+    for i, off in enumerate(offerte):
+        tag = "Offerta #%d" % (i + 1)
+        if not isinstance(off, dict):
+            return dict(vuoto, errore="%s: formato non valido (serve un dict)." % tag)
+        nome = off.get("nome")
+        if not isinstance(nome, str) or not nome.strip():
+            return dict(vuoto, errore="%s: nome mancante." % tag)
+        nome = nome.strip()
+        if nome in visti:
+            return dict(vuoto, errore="Nome offerta duplicato: «%s»." % nome)
+        visti.add(nome)
+        prezzo = off.get("prezzo_eur_mwh")
+        durata = off.get("durata_anni")
+        canone = off.get("canone_fisso_eur_mese", 0.0)
+        attiv = off.get("attivazione_eur", 0.0)
+        if not _num(prezzo) or prezzo <= 0:
+            return dict(vuoto, errore="«%s»: prezzo €/MWh deve essere > 0." % nome)
+        _di = None
+        if isinstance(durata, bool):
+            pass
+        elif isinstance(durata, int):
+            _di = durata
+        elif isinstance(durata, float) and durata.is_integer():
+            _di = int(durata)
+        elif isinstance(durata, (np.integer,)) and not isinstance(durata, bool):
+            _di = int(durata)
+        elif isinstance(durata, (np.floating,)) and float(durata).is_integer():
+            _di = int(durata)
+        if _di is None or not (1 <= _di <= 10):
+            return dict(vuoto,
+                        errore="«%s»: durata_anni deve essere un intero tra 1 e 10." % nome)
+        if not _num(canone) or canone < 0:
+            return dict(vuoto, errore="«%s»: canone €/mese deve essere >= 0." % nome)
+        if not _num(attiv) or attiv < 0:
+            return dict(vuoto, errore="«%s»: attivazione € deve essere >= 0." % nome)
+        righe.append({"nome": nome, "prezzo": float(prezzo), "durata": _di,
+                      "canone": float(canone), "attiv": float(attiv)})
+    for etichetta, val, ok in (
+            ("Volume annuo MWh", volume_annuo_mwh, lambda v: v > 0),
+            ("Tasso annuo %", tasso_annuo_pct, lambda v: 0.0 <= v <= 50.0),
+            ("Forward base €/MWh", forward_base_eur_mwh, lambda v: v > 0),
+            ("Escalation annua %", escalation_annua_pct, lambda v: -50.0 <= v <= 100.0)):
+        if not _num(val) or not ok(val):
+            return dict(vuoto, errore="%s: valore non valido." % etichetta)
+    V = float(volume_annuo_mwh)
+    r = float(tasso_annuo_pct) / 100.0
+    F0 = float(forward_base_eur_mwh)
+    g = float(escalation_annua_pct) / 100.0
+    H = max(o["durata"] for o in righe)
+    fwd = [F0 * (1.0 + g) ** (k - 1) for k in range(1, H + 1)]
+    van, rata, costi_att = {}, {}, {}
+    for o in righe:
+        ck = []
+        for k in range(1, H + 1):
+            p = o["prezzo"] if k <= o["durata"] else fwd[k - 1]
+            ck.append((V * p + 12.0 * o["canone"]) / (1.0 + r) ** k)
+        v = o["attiv"] + sum(ck)
+        van[o["nome"]] = v
+        rata[o["nome"]] = (v * r / (1.0 - (1.0 + r) ** (-H)) if r > 0
+                           else v / H)
+        costi_att[o["nome"]] = ck
+    nomi = [o["nome"] for o in righe]
+    vincitore = min(nomi, key=lambda n: van[n])
+    peggiore = max(nomi, key=lambda n: van[n])
+    risparmio = van[peggiore] - van[vincitore]
+    df_anni = pd.DataFrame({"Anno": list(range(1, H + 1)),
+                            "Forward €/MWh": [round(f, 2) for f in fwd]})
+    for n in nomi:
+        df_anni["Costo att. «%s» €" % n] = [round(c, 2) for c in costi_att[n]]
+    df_riep = pd.DataFrame([{
+        "Offerta": o["nome"],
+        "Prezzo €/MWh": o["prezzo"],
+        "Durata anni": o["durata"],
+        "Canone €/mese": o["canone"],
+        "Attivazione €": o["attiv"],
+        "VAN €": round(van[o["nome"]], 2),
+        "Rata equiv. €/anno": round(rata[o["nome"]], 2),
+    } for o in righe]).sort_values("VAN €").reset_index(drop=True)
+    verdetto = ("«%s» vince sul VAN a %d anni: € %s contro € %s della peggiore "
+                "(«%s»), risparmio € %s. Rata equivalente € %s/anno." % (
+                    vincitore, H,
+                    "{:,.0f}".format(van[vincitore]).replace(",", "."),
+                    "{:,.0f}".format(van[peggiore]).replace(",", "."),
+                    peggiore,
+                    "{:,.0f}".format(risparmio).replace(",", "."),
+                    "{:,.0f}".format(rata[vincitore]).replace(",", ".")))
+    out = dict(vuoto)
+    out.update({
+        "valido": True,
+        "orizzonte_anni": H,
+        "forward_annui": fwd,
+        "van": van,
+        "rata_equivalente": rata,
+        "vincitore": vincitore,
+        "peggiore": peggiore,
+        "risparmio": risparmio,
+        "df_anni": df_anni,
+        "df_riepilogo": df_riep,
+        "verdetto": verdetto,
+    })
+    return out
+
+
 def calcola_opzione_differimento(V, K, T_anni, vol_pct, tasso_pct,
                                dy_pct=0.0, n_step=200):
     """Opzione REALE di differimento di un investimento energetico.
@@ -29845,7 +29985,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -48930,6 +49070,100 @@ elif workspace == _('ws8'):
                 file_name="robustezza_offerta.csv", mime="text/csv",
                 key="rob215_csv",
                 help="Costi per offerta in ciascuno scenario + vincitore.")
+
+    with tab216:
+        titolo_van = edu("VAN offerte pluriennali", "Confronti prezzi a 1 anno contro prezzi a 3 anni? Un'offerta corta va rinnovata al prezzo forward atteso negli anni oltre la sua durata, e tutti i flussi vanno attualizzati al tasso di sconto: vince il VAN (Valore Attuale Netto) minore sull'orizzonte comune, non il prezzo piu' basso.")
+        st.markdown(f"<h1>💰 {titolo_van}</h1>", unsafe_allow_html=True)
+        st.caption("Offerte con durate diverse confrontate in Valore Attuale Netto: quelle corte vengono rinnovate al forward atteso, tutti i flussi sono attualizzati al tasso di sconto.")
+        vn1, vn2, vn3, vn4 = st.columns(4)
+        with vn1:
+            van_vol = st.number_input("Volume annuo (MWh)", min_value=1.0,
+                                      value=1200.0, step=50.0, key="van216_vol",
+                                      help="Volume annuo costante su tutto l'orizzonte.")
+        with vn2:
+            van_tasso = st.number_input("Tasso di sconto annuo (%)", min_value=0.0,
+                                        max_value=50.0, value=5.0, step=0.5,
+                                        key="van216_tasso")
+        with vn3:
+            van_fwd = st.number_input("Forward base €/MWh", min_value=0.01,
+                                      value=130.0, step=5.0, key="van216_fwd",
+                                      help="Prezzo atteso di rinnovo dal primo anno oltre la durata dell'offerta.")
+        with vn4:
+            van_esc = st.number_input("Escalation forward annua (%)", min_value=-50.0,
+                                      max_value=100.0, value=0.0, step=1.0,
+                                      key="van216_esc")
+        st.markdown("**Offerte da confrontare** (durata in anni interi 1–10)")
+        df_van_def = pd.DataFrame([
+            {"Nome": "Fisso 1 anno", "Prezzo €/MWh": 120.0, "Durata anni": 1,
+             "Canone €/mese": 40.0, "Attivazione €": 0.0},
+            {"Nome": "Fisso 2 anni", "Prezzo €/MWh": 126.0, "Durata anni": 2,
+             "Canone €/mese": 30.0, "Attivazione €": 300.0},
+            {"Nome": "Fisso 3 anni", "Prezzo €/MWh": 132.0, "Durata anni": 3,
+             "Canone €/mese": 25.0, "Attivazione €": 0.0},
+        ])
+        edit_van = st.data_editor(df_van_def, num_rows="dynamic", key="van216_edit",
+                                  help="Una riga per offerta: prezzo fisso per la durata, poi rinnovo al forward.")
+        offerte_van = []
+        try:
+            for _, rr in pd.DataFrame(edit_van).iterrows():
+                nm = rr["Nome"]
+                if pd.isna(nm) or not str(nm).strip():
+                    continue
+                d_raw = rr["Durata anni"]
+                d_int = int(d_raw) if pd.notna(d_raw) and float(d_raw).is_integer() else d_raw
+                offerte_van.append({
+                    "nome": str(nm).strip(),
+                    "prezzo_eur_mwh": rr["Prezzo €/MWh"],
+                    "durata_anni": d_int,
+                    "canone_fisso_eur_mese": rr["Canone €/mese"],
+                    "attivazione_eur": rr["Attivazione €"],
+                })
+        except (TypeError, ValueError, KeyError):
+            offerte_van = []
+        ris_van = calcola_van_offerte_pluriennali(
+            offerte_van, float(van_vol), float(van_tasso), float(van_fwd),
+            escalation_annua_pct=float(van_esc))
+        if ris_van["errore"]:
+            st.error(ris_van["errore"])
+        else:
+            st.success(f"✅ {ris_van['verdetto']}")
+            k1v, k2v, k3v, k4v = st.columns(4)
+            with k1v:
+                st.metric("Vince sul VAN", ris_van["vincitore"],
+                          help="Offerta col Valore Attuale Netto minore sull'orizzonte comune.")
+            with k2v:
+                st.metric("VAN vincitore",
+                          "€ {:,.0f}".format(ris_van["van"][ris_van["vincitore"]]).replace(",", "."))
+            with k3v:
+                st.metric("Risparmio vs peggiore",
+                          "€ {:,.0f}".format(ris_van["risparmio"]).replace(",", "."),
+                          help="Differenza di VAN tra la peggiore e la vincitrice.")
+            with k4v:
+                st.metric("Orizzonte", "%d anni" % ris_van["orizzonte_anni"],
+                          help="Durata massima tra le offerte confrontate.")
+            fig_van = go.Figure()
+            colori_van = ["#3b82f6", "#22c55e", "#f59e0b", "#ef4444", "#a855f7", "#06b6d4"]
+            nomi_van = list(ris_van["van"].keys())
+            for i, nm in enumerate(nomi_van):
+                col = "Costo att. «%s» €" % nm
+                fig_van.add_trace(go.Bar(
+                    x=ris_van["df_anni"]["Anno"], y=ris_van["df_anni"][col],
+                    name=nm, marker_color=colori_van[i % len(colori_van)],
+                    hovertemplate="Anno %{x}<br>" + nm + ": € %{y:,.0f}<extra></extra>"))
+            fig_van.update_layout(title="Costo annuo attualizzato per offerta",
+                                  template="plotly_dark", height=380, barmode="group",
+                                  xaxis_title="Anno", yaxis_title="€ attualizzati")
+            st.plotly_chart(fig_van, use_container_width=True)
+            st.markdown("**Riepilogo offerte (ordinate per VAN)**")
+            st.dataframe(ris_van["df_riepilogo"], use_container_width=True, hide_index=True)
+            st.markdown("**Dettaglio annuo** (forward atteso + costi attualizzati)")
+            st.dataframe(ris_van["df_anni"], use_container_width=True, hide_index=True)
+            st.download_button(
+                "Scarica CSV VAN offerte",
+                data=ris_van["df_anni"].to_csv(index=False, sep=";").encode("utf-8"),
+                file_name="van_offerte_pluriennali.csv", mime="text/csv",
+                key="van216_csv",
+                help="Forward atteso e costi annui attualizzati per offerta.")
 
 # Footer
 
