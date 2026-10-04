@@ -179,7 +179,7 @@ class TestRegistry:
         assert titoli[-1] == "🚨 Anomalie di carico"
         # variabili tabN: devono essere 204 e tab203 presente (non più ultima)
         import re as _re
-        m = _re.search(r"((?:tab\d+, )+tab218) = st\.tabs\(\[", src)
+        m = _re.search(r"((?:tab\d+, )+tab219) = st\.tabs\(\[", src)
         assert m is not None
         vars_tab = [v.strip() for v in m.group(1).split(",")]
         assert len(vars_tab) == 219
