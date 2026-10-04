@@ -26153,6 +26153,214 @@ def calcola_cogenerazione(prezzi, potenza_mw=1.0, rend_elettrico=0.38,
             "n_ore": n, "n_giorni": int(df_giornaliera.shape[0])}
 
 
+def calcola_pca_forma_prezzo(prezzi, n_fattori=3, min_giorni=30):
+    """PCA dei profili orari di prezzo (24h): i fattori di forma della curva.
+
+    Domanda operativa: "Quando il prezzo si muove durante il giorno, cosa
+    si muove davvero -- il livello generale, lo spread giorno/notte, la
+    forma dei picchi?" La PCA sui profili orari giornalieri (matrice
+    giorni x 24 ore) estrae i fattori ortogonali che spiegano la varianza:
+    gli stessi "livello / pendenza / curvatura" della curva dei rendimenti,
+    qui applicati alla curva oraria del prezzo spot.
+
+    Metodo: si tengono solo i giorni completi (24 ore; i giorni con ore
+    mancanti -- es. cambi d'ora -- sono scartati e conteggiati); centratura
+    sulle medie di colonna; autodecomposizione della covarianza 24x24 con
+    eigh (deterministico a meno del segno: il segno di ciascun fattore e'
+    fissato per convenzione -- correlazione positiva con la forma di
+    riferimento meglio corrispondente -- cosi' l'output e' stabile tra
+    esecuzioni); loadings = autovettori, scores = proiezione dei profili
+    centrati sui fattori.
+
+    Interpretazione automatica di ciascun fattore:
+      - "Livello": loadings quasi costanti (shift parallelo del profilo;
+        CV = std/|media| < 0.5);
+      - "Pendenza giorno/notte": |corr| >= 0.60 con la rampa 0..23;
+      - "Curvatura (picchi)": |corr| >= 0.60 con (ora-11.5)^2;
+      altrimenti "Forma residua". Per il Livello la colonna
+    "|Correlazione|" riporta l'indice di piattezza 1-CV.
+
+    Differenza vs tab36 "Decomposizione" (scomposizione temporale
+    trend/stagionale/residuo della serie) e vs tab71 "Struttura a termine"
+    (curva forward): qui si scompone la FORMA ORARIA del prezzo in fattori
+    di rischio indipendenti, utili per disegnare coperture per fascia.
+
+    Ritorna dict con: valido, errore, giorni_validi, giorni_scartati,
+    n_fattori, autovalori (tutti i 24, decrescenti), var_spiegata_pct,
+    var_cumulata_pct, k_95 (fattori per il 95% della varianza),
+    df_loadings (Ora + Fattore 1..k), df_scores (Giorno + Score F1..Fk),
+    interpretazione (DataFrame), profilo_medio (Series 0..23), verdetto.
+
+    NaN-safe: serie vuota / indice non-datetime / meno di min_giorni
+    giorni completi / varianza nulla -> errore pulito; mai eccezioni.
+    """
+    def _err(msg):
+        return {"errore": msg, "valido": False, "giorni_validi": 0,
+                "giorni_scartati": 0, "n_fattori": 0, "autovalori": [],
+                "var_spiegata_pct": [], "var_cumulata_pct": [], "k_95": 0,
+                "df_loadings": pd.DataFrame(), "df_scores": pd.DataFrame(),
+                "interpretazione": pd.DataFrame(),
+                "profilo_medio": pd.Series(dtype=float), "verdetto": ""}
+
+    def _num_int(x, minimo, massimo):
+        if isinstance(x, bool):
+            return None
+        try:
+            v = float(x)
+        except (TypeError, ValueError):
+            return None
+        if not np.isfinite(v) or v != int(v):
+            return None
+        v = int(v)
+        if v < minimo or v > massimo:
+            return None
+        return v
+
+    k = _num_int(n_fattori, 1, 24)
+    mg = _num_int(min_giorni, 5, 3650)
+    if k is None or mg is None:
+        return _err("Parametri non validi: n_fattori intero in [1, 24], "
+                    "min_giorni intero >= 5.")
+    try:
+        p = pd.to_numeric(pd.Series(prezzi), errors="coerce").dropna()
+    except Exception:
+        return _err("Serie prezzi non valida.")
+    if len(p) == 0:
+        return _err("Serie prezzi vuota.")
+    if not isinstance(p.index, pd.DatetimeIndex):
+        return _err("La serie deve avere un indice datetime orario.")
+    idxn = p.index.tz_localize(None) if p.index.tz is not None else p.index
+    try:
+        d = pd.DataFrame({"p": p.to_numpy(dtype=float),
+                          "giorno": idxn.date, "ora": idxn.hour})
+    except Exception:
+        return _err("Serie prezzi non valida.")
+    n_date_totali = int(d["giorno"].nunique())
+    pv = d.pivot_table(index="giorno", columns="ora", values="p",
+                       aggfunc="mean")
+    pv = pv.reindex(columns=list(range(24))).dropna()
+    scartati = n_date_totali - len(pv)
+    if len(pv) < mg:
+        return _err("Giorni completi insufficienti: %d trovati, ne "
+                    "servono almeno %d." % (len(pv), mg))
+    X = pv.to_numpy(dtype=float)
+    n = X.shape[0]
+    profilo = X.mean(axis=0)
+    Xc = X - profilo
+    var_tot = float(np.sum(Xc ** 2) / (n - 1)) if n > 1 else 0.0
+    if not np.isfinite(var_tot) or var_tot <= 0:
+        return _err("Serie senza varianza: tutti i profili giornalieri "
+                    "sono identici.")
+    cov = (Xc.T @ Xc) / (n - 1)
+    try:
+        autoval, autovet = np.linalg.eigh(cov)
+    except Exception:
+        return _err("Decomposizione non riuscita.")
+    order = np.argsort(autoval)[::-1]
+    autoval = np.clip(autoval[order], 0.0, None)
+    autovet = autovet[:, order]
+    somma = float(autoval.sum())
+    if not np.isfinite(somma) or somma <= 0:
+        return _err("Serie senza varianza: tutti i profili giornalieri "
+                    "sono identici.")
+    var_pct = 100.0 * autoval / somma
+    cum_pct = np.cumsum(var_pct)
+    k95 = int(np.searchsorted(cum_pct, 95.0) + 1)
+
+    ore = np.arange(24, dtype=float)
+    rif_pen = ore - ore.mean()
+    rif_cur = (ore - 11.5) ** 2
+    rif_cur = rif_cur - rif_cur.mean()
+
+    def _corr(a, b):
+        a = np.asarray(a, dtype=float)
+        b = np.asarray(b, dtype=float)
+        sa = a.std(ddof=0)
+        sb = b.std(ddof=0)
+        if not np.isfinite(sa) or not np.isfinite(sb) or sa == 0 or sb == 0:
+            return 0.0
+        r = float(np.mean((a - a.mean()) * (b - b.mean())) / (sa * sb))
+        return max(-1.0, min(1.0, r))
+
+    kk = min(k, 24)
+    loadings = autovet[:, :kk].copy()
+    scores = Xc @ loadings
+    tipi, corrs = [], []
+    for j in range(kk):
+        v = loadings[:, j]
+        mv = float(np.mean(v))
+        sv = float(v.std(ddof=0))
+        cv = sv / (abs(mv) + 1e-12)
+        if cv < 0.5 and abs(mv) > 1e-12:
+            # shift (quasi) parallelo del profilo -> livello
+            if mv < 0:
+                loadings[:, j] = -v
+                scores[:, j] = -scores[:, j]
+            tipi.append("Livello")
+            corrs.append(round(max(0.0, 1.0 - cv), 3))
+            continue
+        r_pen = _corr(v, rif_pen)
+        r_cur = _corr(v, rif_cur)
+        if abs(r_pen) >= abs(r_cur):
+            nome, r = "pen", r_pen
+        else:
+            nome, r = "cur", r_cur
+        if r < 0:
+            loadings[:, j] = -v
+            scores[:, j] = -scores[:, j]
+            r = -r
+        if nome == "pen" and r >= 0.60:
+            tipo = "Pendenza giorno/notte"
+        elif nome == "cur" and r >= 0.60:
+            tipo = "Curvatura (picchi)"
+        else:
+            tipo = "Forma residua"
+        tipi.append(tipo)
+        corrs.append(round(r, 3))
+
+    df_load = pd.DataFrame({"Ora": list(range(24))})
+    for j in range(kk):
+        df_load["Fattore %d" % (j + 1)] = np.round(loadings[:, j], 4)
+    df_sco = pd.DataFrame({"Giorno": [str(g) for g in pv.index]})
+    for j in range(kk):
+        df_sco["Score F%d" % (j + 1)] = np.round(scores[:, j], 2)
+    df_int = pd.DataFrame({
+        "Fattore": ["F%d" % (j + 1) for j in range(kk)],
+        "Varianza spiegata %": [round(float(var_pct[j]), 2)
+                                for j in range(kk)],
+        "Varianza cumulata %": [round(float(cum_pct[j]), 2)
+                                for j in range(kk)],
+        "Tipo": tipi,
+        "|Correlazione|": corrs,
+    })
+    if k95 <= 2:
+        hint = ("Il movimento del prezzo e' quasi unidimensionale: per "
+                "l'hedging basta coprire il livello, la forma oraria e' "
+                "stabile.")
+    elif k95 <= 4:
+        hint = ("Il prezzo si muove su poche dimensioni indipendenti: "
+                "gestisci livello e forma (spread giorno/notte, picchi) "
+                "come rischi separati.")
+    else:
+        hint = ("Il prezzo ha molte dimensioni indipendenti: servono "
+                "coperture granulari per fascia oraria, un solo prodotto "
+                "base/peak non basta.")
+    verdetto = ("%d %s il 95%% della varianza dei profili giornalieri "
+                "(%d giorni completi). Fattore dominante: %s (%.1f%% della "
+                "varianza). %s" % (
+                    k95, "fattore spiega" if k95 == 1 else "fattori spiegano",
+                    n, tipi[0], float(var_pct[0]), hint))
+    return {"errore": None, "valido": True, "giorni_validi": int(n),
+            "giorni_scartati": int(scartati), "n_fattori": int(kk),
+            "autovalori": [float(v) for v in autoval],
+            "var_spiegata_pct": [float(v) for v in var_pct],
+            "var_cumulata_pct": [float(v) for v in cum_pct],
+            "k_95": k95, "df_loadings": df_load, "df_scores": df_sco,
+            "interpretazione": df_int,
+            "profilo_medio": pd.Series(profilo, index=list(range(24))),
+            "verdetto": verdetto}
+
+
 # ==========================================
 # WORKSPACE 1: SIMULATORE STRATEGICO
 # ==========================================
@@ -26797,7 +27005,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -43754,6 +43962,110 @@ elif workspace == _('ws8'):
                                key="ccs193_csv",
                                help="Una riga per prezzo CO2: risparmio ETS e beneficio netto annuo.",
                                )
+
+
+    with tab194:
+        titolo_pca = edu("Fattori di forma del prezzo (PCA)", "La PCA (analisi delle componenti principali) scompone i profili orari giornalieri del prezzo nei pochi fattori indipendenti che spiegano davvero il movimento: di solito LIVELLO (tutto il profilo si alza o si abbassa insieme), PENDENZA (lo spread giorno/notte si allarga o si chiude) e CURVATURA (i picchi cambiano forma). Sapere su quanti fattori si muove il prezzo dice come coprirsi: se il 95% della varianza sta in 2 fattori, bastano due prodotti di copertura; se ne servono 8, serve granularita' oraria.")
+        st.markdown(f"<h1>🧬 {titolo_pca}</h1>", unsafe_allow_html=True)
+        st.caption("PCA sui profili orari 24h: livello, pendenza e curvatura del prezzo — i veri driver del movimento giornaliero.")
+        p1_pca, p2_pca = st.columns(2)
+        with p1_pca:
+            k_pca = st.slider("Fattori da mostrare", min_value=1, max_value=6,
+                              value=3, step=1, key="pca194_k",
+                              help="Quanti fattori (componenti principali) visualizzare. La varianza spiegata e' calcolata su tutti i 24.")
+        with p2_pca:
+            mg_pca = st.number_input("Giorni minimi richiesti", min_value=5,
+                                     max_value=3650, value=30, step=5,
+                                     key="pca194_mg",
+                                     help="Giorni completi (24 ore) minimi per stimare la PCA. I giorni con ore mancanti sono scartati.")
+        ris_pca = calcola_pca_forma_prezzo(prezzi, n_fattori=k_pca,
+                                           min_giorni=mg_pca)
+        if not ris_pca["valido"]:
+            st.error(ris_pca["errore"])
+        else:
+            kp1, kp2, kp3, kp4 = st.columns(4)
+            with kp1:
+                st.metric("Giorni analizzati", f"{ris_pca['giorni_validi']}",
+                          f"{ris_pca['giorni_scartati']} scartati",
+                          help="Giorni con 24 ore complete usati nella PCA; gli altri (ore mancanti, cambi d'ora) sono scartati.")
+            with kp2:
+                st.metric("Varianza primi %d fattori" % ris_pca["n_fattori"],
+                          f"{ris_pca['var_cumulata_pct'][ris_pca['n_fattori'] - 1]:.1f}%",
+                          help="Quota di varianza dei profili giornalieri spiegata dai fattori mostrati.")
+            with kp3:
+                st.metric("Fattori per il 95%", f"{ris_pca['k_95']}",
+                          help="Numero minimo di fattori che spiega il 95% della varianza: la dimensionalita' reale del rischio prezzo.")
+            with kp4:
+                st.metric("Fattore dominante",
+                          ris_pca["interpretazione"]["Tipo"].iloc[0],
+                          f"{ris_pca['var_spiegata_pct'][0]:.1f}% varianza",
+                          help="Interpretazione automatica del primo fattore per correlazione con le forme di riferimento.")
+            st.info(f"🧬 {ris_pca['verdetto']}")
+            st.caption("Modello: giorni completi (24h) → centratura → autodecomposizione della covarianza 24×24. Segno dei fattori fissato per convenzione (correlazione positiva con la forma di riferimento).")
+
+            fig_load = go.Figure()
+            df_ld = ris_pca["df_loadings"]
+            for j in range(ris_pca["n_fattori"]):
+                col = "Fattore %d" % (j + 1)
+                fig_load.add_trace(go.Scatter(
+                    x=df_ld["Ora"], y=df_ld[col], mode="lines+markers",
+                    name="%s (%s, %.1f%%)" % (col, ris_pca["interpretazione"]["Tipo"].iloc[j],
+                                              ris_pca["var_spiegata_pct"][j])))
+            fig_load.add_hline(y=0, line_dash="dash", line_color="gray")
+            fig_load.update_layout(
+                title="Loadings dei fattori per ora del giorno",
+                xaxis_title="Ora", yaxis_title="Loading",
+                xaxis=dict(tickmode="linear", tick0=0, dtick=2))
+            st.plotly_chart(fig_load, use_container_width=True)
+
+            nv = min(12, len(ris_pca["var_spiegata_pct"]))
+            fig_scree = go.Figure()
+            fig_scree.add_trace(go.Bar(
+                x=["F%d" % (i + 1) for i in range(nv)],
+                y=[ris_pca["var_spiegata_pct"][i] for i in range(nv)],
+                name="Varianza spiegata %"))
+            fig_scree.add_trace(go.Scatter(
+                x=["F%d" % (i + 1) for i in range(nv)],
+                y=[ris_pca["var_cumulata_pct"][i] for i in range(nv)],
+                mode="lines+markers", name="Cumulata %", yaxis="y2"))
+            fig_scree.add_hline(y=95, line_dash="dot", line_color="red",
+                                yref="y2", annotation_text="95%")
+            fig_scree.update_layout(
+                title="Scree plot: quanta varianza spiega ciascun fattore",
+                xaxis_title="Fattore", yaxis_title="Varianza spiegata %",
+                yaxis2=dict(title="Cumulata %", overlaying="y", side="right",
+                            range=[0, 100]))
+            st.plotly_chart(fig_scree, use_container_width=True)
+
+            fig_sco = go.Figure()
+            df_sc = ris_pca["df_scores"]
+            fig_sco.add_trace(go.Scatter(
+                x=df_sc["Giorno"], y=df_sc["Score F1"], mode="lines",
+                name="Score F1 (%s)" % ris_pca["interpretazione"]["Tipo"].iloc[0]))
+            fig_sco.update_layout(
+                title="Realizzazione giornaliera del fattore dominante",
+                xaxis_title="Giorno", yaxis_title="Score F1")
+            st.plotly_chart(fig_sco, use_container_width=True)
+
+            st.subheader("Interpretazione dei fattori")
+            st.dataframe(ris_pca["interpretazione"], use_container_width=True,
+                         hide_index=True)
+            csv_load = ris_pca["df_loadings"].to_csv(index=False,
+                                                     sep=";").encode("utf-8")
+            st.download_button("Scarica CSV loadings",
+                               data=csv_load,
+                               file_name="pca_loadings.csv",
+                               mime="text/csv",
+                               key="pca194_csv_load",
+                               help="Loadings dei fattori per ora (24 righe).")
+            csv_sco = ris_pca["df_scores"].to_csv(index=False,
+                                                  sep=";").encode("utf-8")
+            st.download_button("Scarica CSV scores",
+                               data=csv_sco,
+                               file_name="pca_scores.csv",
+                               mime="text/csv",
+                               key="pca194_csv_sco",
+                               help="Score giornalieri dei fattori (una riga per giorno).")
 
 
 # Footer
