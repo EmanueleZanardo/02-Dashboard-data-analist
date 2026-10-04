@@ -72,7 +72,13 @@
 
 # STATUS.md — 02-Dashboard-data-analist (Singularity Quant ETRM)
 
-**Ultimo aggiornamento: 03/10/2026 ~02:00 CEST**
+**Ultimo aggiornamento: 04/10/2026 ~02:00 CEST**
+
+## 04/10/2026 ~02:00 CEST — aggiornamento documentale giornaliero
+- **03/10 00:17 — creato e abilitato job `streamlit-keepalive-6h`** su ordine di Emanuele ("non deve più accadere" lo sleep). Ping ogni 6h a `czpox8o8x6arnxw96txnvt.streamlit.app`: HTTP 303, nessun "waking up" tutto il giorno.
+- **25 nuove tab QA pushate il 03/10** (tab165→tab191, es. tab182 "Costo del ritardo", tab186 "Pompaggio", tab188 "Comunità energetica", tab189 "Cogenerazione CHP", tab190 "Curtailment", tab191 "Strategia di offerta"). Suite pytest sempre verde, nessun segreto hardcoded. HEAD: 52a7664 (QA 04/10 01:40, registry tab190→191).
+- Blocco aperto: vecchia chiave ENTSO-E nella storia git ancora da ruotare.
+
 ## 03/10/2026 ~02:00 CEST — aggiornamento documentale giornaliero
 - Maratona QA 02/10: **22 nuove tab (145→166)** pushate su main con test verdi e nessun segreto hardcoded: 145 Energia reattiva; 146/147 Rollover coperture; 148 Peak shaving; 149 Esponente di Hurst; 150 Tornado sensibilità; 151 Segnali tecnici; 152 Rischio orario; 153 Profili tipo; 156 EnPI energetico; 157 Impronta CO₂; 158 Event study; 159 Business case rinnovabile; 161 Rischio volume; 162 Prezzo fisso equo (test ha intercettato bug reale: pesi diurni 23 invece di 24); 163 Costo per sito; 164 Elasticità domanda; 165 Fattore di carico; 166 Heat rate implicito (regressione 188 passed).
 - **Bug critico 02/10 ~09:50 CEST (verificato e fixato):** il ciclo 09:40 (commit 949bd28) aveva troncato la suite workspace — NameError a ogni avvio, app down ~09:50. Fix: helper spostato a livello modulo, blocchi re-indentati, verificato via AST. Push_cycle.py creato come helper push riutilizzabile (NOTA: mai script push in /tmp, il tmpfs si azzera al reboot).
