@@ -26536,9 +26536,223 @@ def calcola_copertura_proxy(pa, pb, forward_hub, mw=1.0):
 
 
 
+def calcola_business_case_accumulo(prezzi, potenza_mw=10.0, energia_mwh=20.0,
+                                   capex_eur_kwh=350.0, opex_eur_kw_anno=10.0,
+                                   efficienza_pct=85.0, cicli_giorno=1.0,
+                                   degrado_pct=2.0, ricavi_fissi_eur_anno=0.0,
+                                   tasso_pct=6.0, vita_anni=15, n_punti_sens=11):
+    """Business case di un accumulo elettrochimico merchant (arbitraggio + ricavi fissi).
+
+    Domanda operativa: "Conviene investire in una batteria che compra nelle ore
+    a basso prezzo e rivende nelle ore di picco?" -- stima il ricavo annuo da
+    arbitraggio dai dati storici (spread giornaliero max-min con rendimento di
+    ciclo), lo proietta sulla vita utile con degrado della capacita', aggiunge
+    eventuali ricavi fissi (es. riserva) e sottrae opex: ne escono NPV, IRR e
+    payback.
+
+    Differenza dalle altre tab: tab6 "Arbitraggio Batteria" ottimizza il
+    DISPATCH orario (quando caricare/scaricare); tab77 "Sizing batteria"
+    dimensiona potenza/energia sul profilo; tab138 "LCOS" calcola il costo
+    livellato per MWh scaricato; tab184 "Revenue stacking" somma i flussi di
+    ricavo. Qui si risponde alla domanda d'INVESTIMENTO: con capex, opex,
+    degrado e tasso di attualizzazione, il progetto crea o distrugge valore?
+
+    Parametri:
+      prezzi: serie oraria dei prezzi spot (€/MWh), indice datetime;
+      potenza_mw: potenza nominale (MW); energia_mwh: capacita' utile (MWh);
+      capex_eur_kwh: costo d'investimento all-in (€/kWh installato);
+      opex_eur_kw_anno: O&M annuo (€/kW/anno);
+      efficienza_pct: rendimento di ciclo carica+scarica (%);
+      cicli_giorno: cicli equivalenti completi al giorno (<=4);
+      degrado_pct: perdita annua di capacita' (%), scala i ricavi;
+      ricavi_fissi_eur_anno: altri ricavi annui certi (es. riserva);
+      tasso_pct: tasso di attualizzazione (%); vita_anni: vita utile;
+      n_punti_sens: punti della sensibilita' NPV vs capex.
+
+    Ritorna dict con: valido, errore, n_giorni, capex_eur, opex_annuo_eur,
+    ricavo_arb_anno_eur, npv_eur, irr_pct (None se non esiste),
+    payback_anni (None se mai), flussi (lista annua netta),
+    df_sens (Capex, NPV), df_flussi (tabella anni), verdetto.
+
+    NaN-safe: serie vuota / < 24 ore / nessun giorno con >= 12 ore valide /
+    parametri non validi (incl. bool, inf, fuori range) -> errore pulito;
+    mai eccezioni. Deterministico.
+    """
+    colonne_s = ["Capex (€/kWh)", "NPV (€ mln)"]
+    colonne_f = ["Anno", "Ricavo arbitraggio (€)", "Ricavi fissi (€)",
+                 "Opex (€)", "Flusso netto (€)", "Cumulato (€)"]
+
+    def _err(msg):
+        return {"errore": msg, "valido": False, "n_giorni": 0,
+                "capex_eur": None, "opex_annuo_eur": None,
+                "ricavo_arb_anno_eur": None, "npv_eur": None, "irr_pct": None,
+                "payback_anni": None, "flussi": [],
+                "df_sens": pd.DataFrame(columns=colonne_s),
+                "df_flussi": pd.DataFrame(columns=colonne_f),
+                "verdetto": ""}
+
+    def _num(x):
+        if isinstance(x, bool):
+            return None
+        try:
+            v = float(x)
+        except (TypeError, ValueError):
+            return None
+        return v if np.isfinite(v) else None
+
+    p_mw = _num(potenza_mw)
+    e_mwh = _num(energia_mwh)
+    cx = _num(capex_eur_kwh)
+    ox = _num(opex_eur_kw_anno)
+    eff = _num(efficienza_pct)
+    cic = _num(cicli_giorno)
+    deg = _num(degrado_pct)
+    rf = _num(ricavi_fissi_eur_anno)
+    tasso = _num(tasso_pct)
+    vita = _num(vita_anni)
+    npt = _num(n_punti_sens)
+
+    if p_mw is None or p_mw <= 0:
+        return _err("Potenza non valida: serve un numero > 0 (MW).")
+    if e_mwh is None or e_mwh <= 0:
+        return _err("Energia non valida: serve un numero > 0 (MWh).")
+    if cx is None or cx < 0:
+        return _err("Capex non valido: serve un numero >= 0 (€/kWh).")
+    if ox is None or ox < 0:
+        return _err("Opex non valido: serve un numero >= 0 (€/kW/anno).")
+    if eff is None or eff <= 0 or eff > 100:
+        return _err("Efficienza non valida: serve un numero in (0, 100] (%).")
+    if cic is None or cic <= 0 or cic > 4:
+        return _err("Cicli/giorno non validi: serve un numero in (0, 4].")
+    if deg is None or deg < 0 or deg > 50:
+        return _err("Degrado non valido: serve un numero in [0, 50] (%/anno).")
+    if rf is None or rf < 0:
+        return _err("Ricavi fissi non validi: serve un numero >= 0 (€/anno).")
+    if tasso is None or tasso < 0 or tasso > 50:
+        return _err("Tasso non valido: serve un numero in [0, 50] (%).")
+    if vita is None or int(vita) != vita or vita < 1 or vita > 40:
+        return _err("Vita utile non valida: serve un intero in [1, 40] (anni).")
+    if npt is None or int(npt) != npt or npt < 3 or npt > 101:
+        return _err("Punti sensibilita' non validi: serve un intero in [3, 101].")
+    vita = int(vita)
+    npt = int(npt)
+
+    try:
+        s = pd.to_numeric(pd.Series(prezzi), errors="coerce").dropna()
+    except Exception:
+        return _err("Serie prezzi non valida.")
+    if len(s) < 24:
+        return _err("Servono almeno 24 ore di prezzi per stimare l'arbitraggio.")
+    try:
+        giorni = pd.to_datetime(s.index).normalize()
+    except Exception:
+        giorni = pd.Series([i // 24 for i in range(len(s))], index=s.index)
+    df_d = pd.DataFrame({"g": np.asarray(giorni), "p": s.to_numpy(dtype=float)})
+    agg = df_d.groupby("g")["p"].agg(["min", "max", "count"])
+    agg = agg[agg["count"] >= 12]
+    n_g = len(agg)
+    if n_g < 1:
+        return _err("Nessun giorno con almeno 12 ore di prezzi valide.")
+
+    eta = eff / 100.0
+    spread = agg["max"].to_numpy(dtype=float) * eta - agg["min"].to_numpy(dtype=float)
+    rev_giorno = np.maximum(0.0, e_mwh * spread) * cic
+    ric_arb_anno = float(np.sum(rev_giorno)) * (365.0 / n_g)
+
+    capex = e_mwh * 1000.0 * cx
+    opex_a = p_mw * 1000.0 * ox
+    d = deg / 100.0
+    rr = tasso / 100.0
+    flussi = [ric_arb_anno * ((1.0 - d) ** (t - 1)) + rf - opex_a
+              for t in range(1, vita + 1)]
+
+    def _npv(rate, capex_v):
+        return -capex_v + sum(cf / ((1.0 + rate) ** t)
+                              for t, cf in enumerate(flussi, start=1))
+
+    npv = _npv(rr, capex)
+
+    irr = None
+    if any(cf > 0 for cf in flussi):
+        lo, hi = -0.9999, 10.0
+        f_lo, f_hi = _npv(lo, capex), _npv(hi, capex)
+        if f_lo * f_hi < 0:
+            for _ in range(200):
+                mid = 0.5 * (lo + hi)
+                if _npv(lo, capex) * _npv(mid, capex) <= 0:
+                    hi = mid
+                else:
+                    lo = mid
+            irr = 0.5 * (lo + hi) * 100.0
+        elif f_hi > 0:
+            irr = 1000.0
+
+    payback = None
+    cum = -capex
+    for t, cf in enumerate(flussi, start=1):
+        prev = cum
+        cum += cf
+        if cum >= 0:
+            payback = float(t - 1) + (-prev) / cf if cf > 0 else float(t)
+            break
+
+    base_cx = 0.5 * cx if cx > 0 else 0.0
+    top_cx = 2.0 * cx if cx > 0 else 700.0
+    xs = np.linspace(base_cx, top_cx, npt)
+    npvs = [_npv(rr, x * e_mwh * 1000.0) / 1e6 for x in xs]
+    df_s = pd.DataFrame({"Capex (€/kWh)": np.round(xs, 2),
+                         "NPV (€ mln)": np.round(npvs, 3)})
+
+    righe = []
+    cum2 = -capex
+    for t, cf in enumerate(flussi, start=1):
+        arb_t = ric_arb_anno * ((1.0 - d) ** (t - 1))
+        cum2 += cf
+        righe.append({"Anno": t,
+                      "Ricavo arbitraggio (€)": round(arb_t, 0),
+                      "Ricavi fissi (€)": round(rf, 0),
+                      "Opex (€)": round(opex_a, 0),
+                      "Flusso netto (€)": round(cf, 0),
+                      "Cumulato (€)": round(cum2, 0)})
+    df_f = pd.DataFrame(righe, columns=colonne_f)
+
+    if irr is None or npv < 0:
+        giudizio = ("NON CONVENIENTE: a questi prezzi e costi il progetto "
+                    "distrugge valore (NPV negativo o flussi mai positivi). "
+                    "Servono spread piu' ampi, capex piu' basso o ricavi "
+                    "fissi da servizi di rete.")
+    elif tasso > 0 and irr >= 2.0 * tasso:
+        giudizio = ("MOLTO CONVENIENTE: IRR pari ad almeno il doppio del tasso "
+                    "di attualizzazione, con margine contro degrado e cali di "
+                    "spread futuri.")
+    elif irr >= tasso:
+        giudizio = ("CONVENIENTE: IRR sopra il tasso di attualizzazione, ma "
+                    "senza grande margine -- verifica la sensibilita' al capex "
+                    "e allo spread storico.")
+    else:
+        giudizio = ("MARGINALE: NPV positivo ma IRR sotto il tasso -- il "
+                    "progetto si ripaga solo se il costo del capitale e' "
+                    "davvero piu' basso.")
+    verdetto = ("Capex %.1f M€, ricavo arbitraggio %.0f k€/anno (da %d giorni "
+                "di spread storico), NPV %.2f M€, IRR %s, payback %s. %s" % (
+                    capex / 1e6, ric_arb_anno / 1e3, n_g, npv / 1e6,
+                    ("%.1f%%" % irr) if irr is not None else "n.d.",
+                    ("%.1f anni" % payback) if payback is not None else "mai",
+                    giudizio))
+    return {"errore": None, "valido": True, "n_giorni": int(n_g),
+            "capex_eur": float(capex), "opex_annuo_eur": float(opex_a),
+            "ricavo_arb_anno_eur": float(ric_arb_anno),
+            "npv_eur": float(npv),
+            "irr_pct": float(irr) if irr is not None else None,
+            "payback_anni": float(payback) if payback is not None else None,
+            "flussi": [float(c) for c in flussi],
+            "df_sens": df_s, "df_flussi": df_f, "verdetto": verdetto}
+
+
+
 # ==========================================
 # WORKSPACE 1: SIMULATORE STRATEGICO
-# ==========================================
+# =========================================="
 if workspace == _('ws1'):
     st.markdown(f"<h1>{_('ws1')}</h1>", unsafe_allow_html=True)
     banner_demo("simulatore strategico: margini, centrali e curve simulate")
@@ -27180,7 +27394,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -44350,6 +44564,90 @@ elif workspace == _('ws8'):
                                file_name="copertura_proxy_basis.csv", mime="text/csv",
                                key="pxb195_csv_b",
                                help="Basis media Swissix − hub per ora del giorno (24 righe).")
+
+    with tab196:
+        if sorgente.startswith("🧪"):
+            banner_demo("spread giornalieri da serie CH sintetica deterministica")
+        titolo_bca = edu("Business case accumulo", "Analisi d'investimento per una batteria merchant: il ricavo da arbitraggio e' stimato dallo spread giornaliero storico (max-min con rendimento di ciclo), proiettato sulla vita utile con degrado, piu' eventuali ricavi fissi da servizi di rete, meno opex. Ne escono NPV, IRR e payback: i tre numeri che decidono se il progetto si fa.")
+        st.markdown(f"<h1>🔋 {titolo_bca}</h1>", unsafe_allow_html=True)
+        st.caption("Conviene investire nella batteria? NPV, IRR e payback da spread storico, capex, opex e degrado.")
+        bc1, bc2, bc3, bc4 = st.columns(4)
+        with bc1:
+            pot_bca = st.number_input("Potenza (MW)", value=10.0, min_value=0.1, step=1.0, key="bac196_pot")
+            ene_bca = st.number_input("Energia utile (MWh)", value=20.0, min_value=0.5, step=1.0, key="bac196_ene")
+            cax_bca = st.number_input("Capex (€/kWh)", value=350.0, min_value=0.0, step=10.0, key="bac196_capex")
+        with bc2:
+            opx_bca = st.number_input("Opex (€/kW/anno)", value=10.0, min_value=0.0, step=1.0, key="bac196_opex")
+            eff_bca = st.number_input("Rendimento ciclo (%)", value=85.0, min_value=1.0, max_value=100.0, step=1.0, key="bac196_eff")
+            cic_bca = st.number_input("Cicli/giorno", value=1.0, min_value=0.1, max_value=4.0, step=0.25, key="bac196_cicli")
+        with bc3:
+            deg_bca = st.number_input("Degrado (%/anno)", value=2.0, min_value=0.0, max_value=50.0, step=0.5, key="bac196_degr",
+                                      help="Perdita annua di capacita' utile: scala i ricavi da arbitraggio anno dopo anno.")
+            rfi_bca = st.number_input("Ricavi fissi (€/anno)", value=0.0, min_value=0.0, step=10000.0, key="bac196_rf",
+                                      help="Ricavi annui certi non legati all'arbitraggio, es. riserva primaria o contratti di flessibilita'.")
+        with bc4:
+            tas_bca = st.number_input("Tasso attualizzazione (%)", value=6.0, min_value=0.0, max_value=50.0, step=0.5, key="bac196_tasso")
+            vit_bca = st.number_input("Vita utile (anni)", value=15, min_value=1, max_value=40, step=1, key="bac196_vita")
+        ris_bca = calcola_business_case_accumulo(prezzi, float(pot_bca), float(ene_bca), float(cax_bca),
+                                                float(opx_bca), float(eff_bca), float(cic_bca),
+                                                float(deg_bca), float(rfi_bca), float(tas_bca),
+                                                int(vit_bca))
+        if not ris_bca["valido"]:
+            st.error(ris_bca["errore"])
+        else:
+            kb1, kb2, kb3, kb4 = st.columns(4)
+            with kb1:
+                st.metric("NPV", f"{ris_bca['npv_eur'] / 1e6:.2f} M€",
+                          f"capex {ris_bca['capex_eur'] / 1e6:.1f} M€",
+                          help="Valore attuale netto: flussi attualizzati al tasso meno capex. > 0 crea valore.")
+            with kb2:
+                irr_txt = f"{ris_bca['irr_pct']:.1f}%" if ris_bca["irr_pct"] is not None else "n.d."
+                st.metric("IRR", irr_txt, f"tasso {float(tas_bca):.1f}%",
+                          help="Tasso interno di rendimento: il tasso che azzera il NPV. Sopra il tasso di attualizzazione il progetto conviene.")
+            with kb3:
+                pb_txt = f"{ris_bca['payback_anni']:.1f} anni" if ris_bca["payback_anni"] is not None else "mai"
+                st.metric("Payback", pb_txt, f"vita {int(vit_bca)} anni",
+                          help="Anni per recuperare il capex coi flussi cumulati (interpolato).")
+            with kb4:
+                st.metric("Ricavo arbitraggio", f"{ris_bca['ricavo_arb_anno_eur'] / 1e3:.0f} k€/anno",
+                          f"{ris_bca['n_giorni']} giorni di spread",
+                          help="Ricavo annuo da arbitraggio stimato dallo spread giornaliero storico (max-min x rendimento), annualizzato.")
+            st.info(f"🔋 {ris_bca['verdetto']}")
+            st.caption(f"Opex {ris_bca['opex_annuo_eur']:,.0f} €/anno — flussi netti anno 1: {ris_bca['flussi'][0]:,.0f} €.")
+
+            df_ss = ris_bca["df_sens"]
+            fig_s = go.Figure()
+            fig_s.add_trace(go.Scatter(x=df_ss["Capex (€/kWh)"], y=df_ss["NPV (€ mln)"],
+                                       mode="lines", line=dict(color="#f59e0b", width=2),
+                                       name="NPV"))
+            fig_s.add_hline(y=0, line_dash="dash", line_color="gray")
+            fig_s.add_vline(x=float(cax_bca), line_dash="solid", line_color="#22c55e",
+                            annotation_text="capex inserito")
+            fig_s.update_layout(title="Sensibilita' NPV al capex (a parita' di spread storico)",
+                                xaxis_title="Capex (€/kWh)", yaxis_title="NPV (€ mln)")
+            st.plotly_chart(fig_s, use_container_width=True)
+
+            df_ff = ris_bca["df_flussi"]
+            colori_f = ["#22c55e" if (v or 0) >= 0 else "#ef4444" for v in df_ff["Flusso netto (€)"]]
+            fig_f = go.Figure(go.Bar(x=df_ff["Anno"], y=df_ff["Flusso netto (€)"],
+                                     marker_color=colori_f, name="Flusso netto"))
+            fig_f.update_layout(title="Flussi di cassa netti annui (con degrado)",
+                                xaxis_title="Anno", yaxis_title="€",
+                                xaxis=dict(tickmode="linear", tick0=1, dtick=1))
+            st.plotly_chart(fig_f, use_container_width=True)
+
+            st.subheader("Flussi di cassa annui")
+            st.dataframe(df_ff, use_container_width=True, hide_index=True)
+            csv_s = df_ss.to_csv(index=False, sep=";").encode("utf-8")
+            st.download_button("Scarica CSV sensibilita' NPV", data=csv_s,
+                               file_name="business_case_accumulo_sensibilita.csv", mime="text/csv",
+                               key="bac196_csv_s",
+                               help="NPV al variare del capex (sensibilita' a parita' di spread storico).")
+            csv_f = df_ff.to_csv(index=False, sep=";").encode("utf-8")
+            st.download_button("Scarica CSV flussi annui", data=csv_f,
+                               file_name="business_case_accumulo_flussi.csv", mime="text/csv",
+                               key="bac196_csv_f",
+                               help="Flussi di cassa netti anno per anno con degrado e cumulato.")
 
 # Footer
 
