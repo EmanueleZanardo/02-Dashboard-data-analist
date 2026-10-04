@@ -175,15 +175,15 @@ class TestRegistry:
                                 "lower", lambda: "")() == "tabs"):
                 titoli = [t.value for t in node.value.args[0].elts]
         assert titoli is not None
-        assert len(titoli) == 203
-        assert titoli[-1] == "💧 Costo di liquidazione"
-        # variabili tabN: devono essere 203 e tab203 presente
+        assert len(titoli) == 204
+        assert titoli[-1] == "⏳ Opzione di differimento"
+        # variabili tabN: devono essere 204 e tab203 presente (non più ultima)
         import re as _re
-        m = _re.search(r"((?:tab\d+, )+tab203) = st\.tabs\(\[", src)
+        m = _re.search(r"((?:tab\d+, )+tab204) = st\.tabs\(\[", src)
         assert m is not None
         vars_tab = [v.strip() for v in m.group(1).split(",")]
-        assert len(vars_tab) == 203
-        assert vars_tab[-1] == "tab203"
+        assert len(vars_tab) == 204
+        assert "tab203" in vars_tab
         # key widget uniche
         keys = _re.findall(r'key="(liq203_[^"]+)"', src)
         assert len(keys) == 6
