@@ -27347,6 +27347,293 @@ def calcola_rolling_var(serie_costi, finestra=90, confidenza=0.95,
         return {"errore": "Errore interno: %s" % e, "valido": False}
 
 
+def genera_demo_carico_anomalie(seed=219, giorni=60):
+    """Profilo di carico orario sintetico deterministico con anomalie iniettate.
+
+    Base: 500 kW con profilo giornaliero (picco ~13:00, notte ~380 kW),
+    weekend al 55%, rumore gaussiano sigma 12 kW. Anomalie iniettate a
+    indici fissi (deterministiche):
+      - 6 ore a +900 kW (picco anomalo);
+      - 30 ore a 0 kW (contatore guasto / fermo);
+      - 12 ore costanti a 412.7 kW (contatore bloccato);
+      - 4 ore al 25% del carico (crollo).
+    """
+    rng = np.random.default_rng(seed)
+    idx = pd.date_range("2026-01-05", periods=giorni * 24, freq="h")
+    ora = idx.hour.to_numpy()
+    dow = idx.dayofweek.to_numpy()
+    profilo = 500.0 + 220.0 * np.sin((ora - 7.0) / 24.0 * 2.0 * np.pi)
+    profilo = np.where(ora < 6, 380.0, profilo)
+    profilo = np.where(dow >= 5, profilo * 0.55, profilo)
+    vals = np.maximum(50.0, profilo + rng.normal(0.0, 12.0, len(idx)))
+    s = pd.Series(vals, index=idx, name="Carico (kW)")
+    s.iloc[500:506] = s.iloc[500:506] + 900.0
+    s.iloc[900:930] = 0.0
+    s.iloc[1200:1212] = 412.7
+    s.iloc[1300:1304] = s.iloc[1300:1304] * 0.25
+    return s
+
+
+def calcola_anomalie_carico(carico, soglia_z=3.5, run_min_ore=3,
+                            prezzo_eur_mwh=None):
+    """Rileva anomalie nel profilo di carico orario (kW).
+
+    Domanda operativa: "il contatore misura bene e il prelievo e'
+    quello atteso?" — picchi, crolli, zeri prolungati o valori congelati
+    possono essere guasti del contatore, errori di misura, fermi impianto
+    non dichiarati o consumi anomali da indagare prima della fattura.
+
+    Metodo:
+      - baseline stagionale = mediana del carico per ora della settimana
+        (168 bucket ora x giorno);
+      - residui = carico - baseline; sigma robusta = 1.4826 * MAD
+        (fallback: deviazione standard se MAD = 0);
+      - ore con |z| >= soglia_z raggruppate in episodi contigui;
+      - controlli strutturali indipendenti dallo z-score: sequenze di zeri
+        (>= 6 ore) e di valori costanti (>= 12 ore) = contatore guasto/
+        bloccato anche quando lo z-score non scatta;
+      - ogni episodio e' classificato: "🧊 Zero", "🧱 Piatto",
+        "⚡ Picco", "📉 Crollo", "↕️ Misto";
+      - impatto energetico = somma dei residui dell'episodio (MWh);
+        con prezzo_eur_mwh si stima anche il controvalore.
+
+    Verdetto: "🔴 SOSPETTO GUASTO CONTATORE" se un episodio Zero/Piatto
+    dura >= 24 ore o l'intera serie e' piatta; "🟠 ANOMALIE RILEVANTI" se
+    >= 3 episodi oppure un episodio con |z| >= 6 o |impatto| >= 20 MWh;
+    "🟡 ANOMALIE LIEVI" se ci sono episodi minori; "🟢 SOTTO CONTROLLO"
+    se nessun episodio.
+
+    NaN-safe: serie vuota / indice non-datetime / valori non numerici /
+    < 168 ore valide / parametri fuori range -> errore pulito.
+    Deterministico a parita' di input.
+
+    Ritorna dict con 'errore', 'valido', 'verdetto', 'n_episodi',
+    'ore_anomale', 'impatto_tot_mwh', 'costo_stimato_eur',
+    'df_episodi' (Inizio, Fine, Ore, Tipo, Scostamento MWh, z max,
+    Costo stimato €), 'df_serie' (Timestamp, kW, Baseline kW, z-score,
+    Episodio).
+    """
+    colonne_ep = ["Inizio", "Fine", "Ore", "Tipo", "Scostamento (MWh)",
+                  "z max", "Costo stimato (€)"]
+    colonne_sr = ["Timestamp", "kW", "Baseline (kW)", "z-score", "Episodio"]
+    vuoto = {"errore": None, "valido": False, "verdetto": None,
+             "n_episodi": 0, "ore_anomale": 0, "impatto_tot_mwh": 0.0,
+             "costo_stimato_eur": None,
+             "df_episodi": pd.DataFrame(columns=colonne_ep),
+             "df_serie": pd.DataFrame(columns=colonne_sr)}
+
+    def _err(msg):
+        out = dict(vuoto)
+        out["df_episodi"] = pd.DataFrame(columns=colonne_ep)
+        out["df_serie"] = pd.DataFrame(columns=colonne_sr)
+        out["errore"] = msg
+        return out
+
+    try:
+        if isinstance(soglia_z, bool):
+            raise ValueError
+        soglia_z = float(soglia_z)
+        if isinstance(run_min_ore, bool):
+            raise ValueError
+        _run_f = float(run_min_ore)
+        if not _run_f.is_integer():
+            raise ValueError
+        run_min_ore = int(_run_f)
+        if prezzo_eur_mwh is not None:
+            if isinstance(prezzo_eur_mwh, bool):
+                raise ValueError
+            prezzo_eur_mwh = float(prezzo_eur_mwh)
+    except (TypeError, ValueError):
+        return _err("Parametri non validi: soglia_z numerica, "
+                    "run_min_ore intero, prezzo numerico o None.")
+    if not 0.0 < soglia_z <= 20.0:
+        return _err("Parametri non validi: soglia_z in (0, 20].")
+    if run_min_ore < 1:
+        return _err("Parametri non validi: run_min_ore >= 1.")
+    if prezzo_eur_mwh is not None and not np.isfinite(prezzo_eur_mwh):
+        return _err("Parametri non validi: prezzo non finito.")
+    if prezzo_eur_mwh is not None and prezzo_eur_mwh < 0:
+        return _err("Parametri non validi: prezzo >= 0.")
+
+    if carico is None:
+        return _err("Serie di carico vuota: niente da analizzare.")
+    try:
+        s0 = pd.Series(carico)
+    except Exception:
+        return _err("Input non interpretabile come serie di carico.")
+    if not isinstance(s0.index, pd.DatetimeIndex):
+        return _err("L'indice della serie deve essere di tipo data/ora.")
+    vals = pd.to_numeric(s0.values, errors="coerce")
+    if np.isnan(vals).all():
+        return _err("Nessun valore numerico nella serie di carico.")
+    idx = s0.index.tz_localize(None) if s0.index.tz is not None else s0.index
+    s = pd.Series(vals, index=idx).sort_index().dropna()
+    if len(s) < 168:
+        return _err("Servono almeno 168 ore valide di carico (una "
+                    "settimana) per la baseline stagionale.")
+
+    try:
+        v = s.to_numpy(dtype=float)
+        n = len(v)
+        med = float(np.median(v))
+        # --- controlli strutturali: serie intera piatta o a zero ---
+        if np.all(v <= 1.0):
+            ep = pd.DataFrame([{
+                "Inizio": s.index[0], "Fine": s.index[-1], "Ore": n,
+                "Tipo": "🧊 Zero",
+                "Scostamento (MWh)": 0.0, "z max": np.nan,
+                "Costo stimato (€)": 0.0}])
+            return {"errore": None, "valido": True,
+                    "verdetto": "🔴 SOSPETTO GUASTO CONTATORE",
+                    "n_episodi": 1, "ore_anomale": n,
+                    "impatto_tot_mwh": 0.0, "costo_stimato_eur": 0.0,
+                    "df_episodi": ep,
+                    "df_serie": pd.DataFrame({
+                        "Timestamp": s.index, "kW": v,
+                        "Baseline (kW)": np.zeros(n),
+                        "z-score": np.zeros(n),
+                        "Episodio": "🧊 Zero"})}
+        mu, sd = float(np.mean(v)), float(np.std(v))
+        if mu > 0.0 and sd / mu < 5e-4:
+            return {"errore": None, "valido": True,
+                    "verdetto": "🔴 SOSPETTO GUASTO CONTATORE",
+                    "n_episodi": 1, "ore_anomale": n,
+                    "impatto_tot_mwh": 0.0, "costo_stimato_eur": 0.0,
+                    "df_episodi": pd.DataFrame([{
+                        "Inizio": s.index[0], "Fine": s.index[-1],
+                        "Ore": n, "Tipo": "🧱 Piatto",
+                        "Scostamento (MWh)": 0.0, "z max": np.nan,
+                        "Costo stimato (€)": 0.0}]),
+                    "df_serie": pd.DataFrame({
+                        "Timestamp": s.index, "kW": v,
+                        "Baseline (kW)": np.full(n, mu),
+                        "z-score": np.zeros(n),
+                        "Episodio": "🧱 Piatto"})}
+
+        # --- baseline stagionale ora x giorno settimana ---
+        bucket = (s.index.dayofweek * 24 + s.index.hour).to_numpy()
+        base = np.empty(n)
+        for b in range(168):
+            msk = bucket == b
+            base[msk] = np.median(v[msk]) if msk.any() else med
+        resid = v - base
+        mad = float(np.median(np.abs(resid - np.median(resid))))
+        sigma = 1.4826 * mad
+        if sigma <= 1e-9:
+            sigma = float(np.std(resid))
+        z = resid / sigma if sigma > 1e-9 else np.zeros(n)
+        flag = np.abs(z) >= soglia_z
+
+        # --- controlli strutturali: run di zeri e di valori costanti ---
+        zero_tol = max(1.0, 0.005 * med)
+        flat_tol = max(0.5, 0.0005 * med)
+        is_zero = v <= zero_tol
+        # step piatto i (i>=1): v[i] ~= v[i-1]; prepend=nan -> step 0 mai piatto
+        dv = np.abs(np.diff(v, prepend=np.nan))
+        is_flat_step = dv <= flat_tol
+
+        def _runs(mask, min_len):
+            runs = []
+            i = 0
+            while i < n:
+                if mask[i]:
+                    j = i
+                    while j + 1 < n and mask[j + 1]:
+                        j += 1
+                    if j - i + 1 >= min_len:
+                        runs.append((i, j))
+                    i = j + 1
+                else:
+                    i += 1
+            return runs
+
+        intervalli = []  # (i0, i1, tipo_strutturale o None)
+        for i0, i1 in _runs(is_zero, 6):
+            intervalli.append((i0, i1, "🧊 Zero"))
+        # run di step piatti i0..i1 (i0>=1) -> valori costanti i0-1..i1:
+        # 11 step = 12 valori
+        for i0, i1 in _runs(is_flat_step, 11):
+            intervalli.append((i0 - 1, i1, "🧱 Piatto"))
+        for i0, i1 in _runs(flag, run_min_ore):
+            intervalli.append((i0, i1, None))
+
+        # --- unione intervalli sovrapposti/adiacenti ---
+        intervalli.sort(key=lambda t: (t[0], t[1]))
+        uniti = []
+        for i0, i1, tp in intervalli:
+            if uniti and i0 <= uniti[-1][1] + 1:
+                p0, p1, ptp = uniti[-1]
+                prio = {"🧊 Zero": 3, "🧱 Piatto": 2}
+                new_tp = ptp if prio.get(ptp, 0) >= prio.get(tp, 0) else tp
+                uniti[-1] = (p0, max(p1, i1), new_tp)
+            else:
+                uniti.append((i0, i1, tp))
+
+        righe = []
+        ep_label = np.array([""] * n, dtype=object)
+        for k, (i0, i1, tp) in enumerate(uniti):
+            ore = i1 - i0 + 1
+            seg_v = v[i0:i1 + 1]
+            seg_r = resid[i0:i1 + 1]
+            seg_z = z[i0:i1 + 1]
+            impatto = float(np.sum(seg_r) / 1000.0)
+            zmax = float(np.max(np.abs(seg_z)))
+            if tp == "🧊 Zero":
+                tipo = "🧊 Zero"
+            elif tp == "🧱 Piatto":
+                tipo = "🧱 Piatto"
+            elif np.all(seg_v <= zero_tol):
+                tipo = "🧊 Zero"
+            elif float(np.std(seg_v)) <= flat_tol:
+                tipo = "🧱 Piatto"
+            elif np.all(seg_r > 0):
+                tipo = "⚡ Picco"
+            elif np.all(seg_r < 0):
+                tipo = "📉 Crollo"
+            else:
+                tipo = "↕️ Misto"
+            costo = (impatto * prezzo_eur_mwh
+                     if prezzo_eur_mwh is not None else None)
+            righe.append({
+                "Inizio": s.index[i0], "Fine": s.index[i1], "Ore": ore,
+                "Tipo": tipo, "Scostamento (MWh)": round(impatto, 3),
+                "z max": round(zmax, 2),
+                "Costo stimato (€)": (round(costo, 2)
+                                      if costo is not None else None)})
+            ep_label[i0:i1 + 1] = "%d · %s" % (k + 1, tipo)
+
+        df_ep = pd.DataFrame(righe, columns=colonne_ep)
+        n_ep = len(righe)
+        ore_anom = int(sum(r["Ore"] for r in righe))
+        impatto_tot = round(float(sum(r["Scostamento (MWh)"] for r in righe)),
+                            3)
+        costo_tot = (round(impatto_tot * prezzo_eur_mwh, 2)
+                     if prezzo_eur_mwh is not None else None)
+
+        if n_ep == 0:
+            verdetto = "🟢 SOTTO CONTROLLO"
+        elif any(r["Tipo"] in ("🧊 Zero", "🧱 Piatto") and r["Ore"] >= 24
+                 for r in righe):
+            verdetto = "🔴 SOSPETTO GUASTO CONTATORE"
+        elif (n_ep >= 3 or any(r["z max"] >= 6.0 for r in righe)
+              or any(abs(r["Scostamento (MWh)"]) >= 20.0 for r in righe)):
+            verdetto = "🟠 ANOMALIE RILEVANTI"
+        else:
+            verdetto = "🟡 ANOMALIE LIEVI"
+
+        df_sr = pd.DataFrame({
+            "Timestamp": s.index, "kW": np.round(v, 3),
+            "Baseline (kW)": np.round(base, 3),
+            "z-score": np.round(z, 2), "Episodio": ep_label})
+        return {"errore": None, "valido": True, "verdetto": verdetto,
+                "n_episodi": n_ep, "ore_anomale": ore_anom,
+                "impatto_tot_mwh": impatto_tot,
+                "costo_stimato_eur": costo_tot,
+                "df_episodi": df_ep, "df_serie": df_sr}
+    except Exception as e:  # pragma: no cover - guardia totale
+        return _err("Errore interno: %s" % e)
+
+
 def calcola_radar_scadenze(df_contratti, prezzo_mercato_eur_mwh,
                            data_rif=None, orizzonte_mesi=6):
     """Radar scadenze contratti di fornitura.
@@ -30211,7 +30498,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -49594,6 +49881,111 @@ elif workspace == _('ws8'):
                 file_name="opzione_estensione.csv", mime="text/csv",
                 key="oe218_csv",
                 help="Valore Black-76 del diritto al variare del forward.")
+
+    with tab219:
+        titolo_ac = edu("Anomalie di carico", "Il contatore misura bene? Questa tab confronta il tuo profilo di carico orario con la baseline stagionale (mediana per ora della settimana) e segnala gli episodi anomali: picchi e crolli (z-score robusto sui residui), sequenze di zeri e valori congelati (contatore guasto o bloccato). Ogni episodio riporta lo scostamento energetico in MWh e, se inserisci un prezzo, il controvalore stimato: utile prima della fattura e per decidere se contestare una misura.")
+        st.markdown(f"<h1>🚨 {titolo_ac}</h1>", unsafe_allow_html=True)
+        st.caption("Il contatore misura bene? Picchi, crolli, zeri e valori congelati nel profilo di carico, con scostamento energetico per episodio.")
+        src219 = st.radio("Profilo di carico",
+                          ["🧪 Demo sintetica (seed fisso)",
+                           "📤 Carica CSV"],
+                          horizontal=True, key="ac219_src")
+        s_ac = None
+        if src219.startswith("🧪"):
+            banner_demo("profilo di carico orario sintetico con 4 anomalie iniettate (seed 219)")
+            s_ac = genera_demo_carico_anomalie()
+        else:
+            up219 = st.file_uploader(
+                "CSV carico (colonna data/ora + colonna kW/MW)",
+                type=["csv"], key="ac219_csv_up")
+            if up219 is not None:
+                try:
+                    parsed219 = parse_csv_carico(up219.getvalue())
+                    if parsed219["errore"]:
+                        st.error(parsed219["errore"])
+                    else:
+                        s_ac = parsed219["serie_mw"] * 1000.0
+                        s_ac.name = "Carico (kW)"
+                        if parsed219.get("nota_conversione"):
+                            st.info(parsed219["nota_conversione"])
+                except Exception as e:
+                    st.error("CSV non leggibile: %s" % e)
+        if s_ac is None or len(s_ac) < 168:
+            st.info("Carica un CSV con almeno 168 ore di carico per procedere.")
+        else:
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                sz219 = st.slider("Soglia z-score", 2.0, 6.0, 3.5, 0.5,
+                                  key="ac219_soglia",
+                                  help="Ore con |z-score robusto| oltre soglia = anomale.")
+            with c2:
+                run219 = st.number_input("Durata minima episodio (ore)",
+                                         min_value=1, max_value=48,
+                                         value=3, step=1, key="ac219_run")
+            with c3:
+                prz219 = st.number_input("Prezzo per controvalore (€/MWh, 0 = n.d.)",
+                                         min_value=0.0, value=0.0, step=5.0,
+                                         key="ac219_prezzo")
+            ris219 = calcola_anomalie_carico(
+                s_ac, soglia_z=float(sz219), run_min_ore=int(run219),
+                prezzo_eur_mwh=float(prz219) if prz219 > 0 else None)
+            if ris219["errore"]:
+                st.error(ris219["errore"])
+            else:
+                st.subheader(ris219["verdetto"])
+                k1, k2, k3, k4 = st.columns(4)
+                with k1:
+                    st.metric("Episodi anomali", "%d" % ris219["n_episodi"])
+                with k2:
+                    st.metric("Ore anomale", "%d" % ris219["ore_anomale"])
+                with k3:
+                    st.metric("Scostamento netto",
+                              "%.1f MWh" % ris219["impatto_tot_mwh"])
+                with k4:
+                    cst = ris219["costo_stimato_eur"]
+                    st.metric("Controvalore stimato",
+                              "€ %,.0f" % cst if cst is not None else "n.d.")
+                df_sr219 = ris219["df_serie"]
+                if len(df_sr219):
+                    import plotly.graph_objects as go
+                    fig219 = go.Figure()
+                    fig219.add_trace(go.Scatter(
+                        x=df_sr219["Timestamp"], y=df_sr219["kW"],
+                        mode="lines", name="Carico (kW)",
+                        line=dict(color="#3b82f6", width=1)))
+                    fig219.add_trace(go.Scatter(
+                        x=df_sr219["Timestamp"],
+                        y=df_sr219["Baseline (kW)"],
+                        mode="lines", name="Baseline stagionale",
+                        line=dict(color="#9ca3af", width=1, dash="dot")))
+                    anom219 = df_sr219[df_sr219["Episodio"] != ""]
+                    if len(anom219):
+                        fig219.add_trace(go.Scatter(
+                            x=anom219["Timestamp"], y=anom219["kW"],
+                            mode="markers", name="Ore anomale",
+                            marker=dict(color="#ef4444", size=4)))
+                    fig219.update_layout(
+                        title="Carico vs baseline stagionale (rosso = ore anomale)",
+                        xaxis_title="Data", yaxis_title="kW",
+                        height=380, margin=dict(l=40, r=20, t=50, b=40))
+                    st.plotly_chart(fig219, use_container_width=True,
+                                    key="ac219_fig")
+                if ris219["n_episodi"]:
+                    st.subheader("Episodi anomali")
+                    st.dataframe(ris219["df_episodi"],
+                                 use_container_width=True, hide_index=True)
+                    st.download_button(
+                        "Scarica CSV episodi",
+                        data=ris219["df_episodi"].to_csv(
+                            index=False, sep=";").encode("utf-8"),
+                        file_name="anomalie_carico.csv", mime="text/csv",
+                        key="ac219_csv",
+                        help="Episodi anomali rilevati con scostamento energetico.")
+                else:
+                    st.success("Nessun episodio anomalo nel periodo analizzato.")
+                st.caption("Metodo: baseline = mediana per ora della settimana; z-score robusto = residuo / (1.4826 × MAD). "
+                           "Sequenze di zeri (≥6h) e valori costanti (≥12h) segnalate come sospetto guasto contatore anche senza z-score. "
+                           "Lo scostamento energetico e' la somma dei residui vs baseline.")
 
 # Footer
 
