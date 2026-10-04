@@ -25809,6 +25809,166 @@ def calcola_valore_capacita(prezzi, potenza_mw=100.0, costo_marginale=60.0,
         "giudizio": giudizio, "verdetto": verdetto,
     }
 
+def calcola_ccs(emissioni_annue_t=500000.0, tasso_cattura_pct=90.0,
+                penalita_energetica_pct=20.0, costo_ccs_eur_t=90.0,
+                prezzo_co2=85.0, potenza_mw=400.0, ore_annue=6000.0,
+                n_punti=11):
+    """Cattura e stoccaggio della CO2 (CCS) su impianto termoelettrico.
+
+    Domanda operativa: "Il mio impianto emette E tCO2/anno: a che prezzo
+    della CO2 conviene installare la cattura (post-combustione) con
+    trasporto e stoccaggio geologico?"
+
+    Modello (lato produttore, costi annualizzati):
+      emissioni_lorde = E * (1 + penalita_energetica%) : la cattura
+                        consuma energia (rigenerazione solvente,
+                        compressione) -> piu' combustibile -> piu'
+                        emissioni lorde da trattare;
+      t_catturate     = emissioni_lorde * tasso_cattura%;
+      t_residue       = emissioni_lorde * (1 - tasso_cattura%) : pagano
+                        comunque l'ETS;
+      costo_ccs       = t_catturate * costo_ccs_eur_t (cattura +
+                        trasporto + stoccaggio, EUR/t catturata);
+      risparmio_ets   = (E - t_residue) * prezzo_co2;
+      netto_annuo     = risparmio_ets - costo_ccs;
+      break-even      = costo_ccs / (E - t_residue): prezzo CO2 al
+                        quale il CCS si ripaga da solo (None se la
+                        penalita' energetica annulla il beneficio).
+    La tabella di sensibilita' mostra il netto annuo al variare del
+    prezzo CO2 (0 .. max(2x prezzo inserito, 1.5x break-even)).
+
+    Differenza vs tab55 "Costo CO2" (costo ETS dell'impianto senza
+    mitigazione) e vs tab185 "CO2 implicita" (intensita' carbonica
+    implicita nei prezzi): questa e' l'economia di un investimento di
+    decarbonizzazione con break-even regolatorio.
+
+    Ritorna dict con: valido, errore, emissioni_annue_t,
+    tasso_cattura_pct, penalita_energetica_pct, costo_ccs_eur_t,
+    prezzo_co2, emissioni_lorde_t, t_catturate, t_residue,
+    costo_ccs_annuo, costo_ets_senza, costo_ets_con, risparmio_ets,
+    netto_annuo, prezzo_co2_break_even (None se n.d.),
+    costo_eur_mwh, df_sensibilita (pd.DataFrame), df_confronto
+    (pd.DataFrame), giudizio, verdetto.
+
+    NaN-safe: parametri non numerici o fuori dominio -> errore pulito;
+    deterministico (nessuna componente casuale).
+    """
+    def _err(msg):
+        return {"errore": msg, "valido": False}
+
+    def _num(x, minimo=None, massimo=None, intero=False):
+        if isinstance(x, bool):
+            return None
+        try:
+            v = float(x)
+        except (TypeError, ValueError):
+            return None
+        if not np.isfinite(v):
+            return None
+        if intero:
+            if v != int(v):
+                return None
+            v = int(v)
+        if minimo is not None and v < minimo:
+            return None
+        if massimo is not None and v > massimo:
+            return None
+        return v
+
+    E = _num(emissioni_annue_t, minimo=1.0)
+    c = _num(tasso_cattura_pct, minimo=0.01, massimo=100.0)
+    pe = _num(penalita_energetica_pct, minimo=0.0, massimo=200.0)
+    ca = _num(costo_ccs_eur_t, minimo=0.0)
+    p = _num(prezzo_co2, minimo=0.0)
+    pmw = _num(potenza_mw, minimo=0.01)
+    ore = _num(ore_annue, minimo=1.0, massimo=8760.0)
+    npt = _num(n_punti, minimo=3, intero=True)
+    if None in (E, c, pe, ca, p, pmw, ore, npt):
+        return _err("Parametri non validi: emissioni > 0, tasso di "
+                    "cattura in (0, 100], penalita' energetica in "
+                    "[0, 200], costo CCS / prezzo CO2 >= 0, potenza > 0, "
+                    "ore annue in (0, 8760], n_punti >= 3 intero.")
+
+    # --- bilancio di massa ---
+    lorde = E * (1.0 + pe / 100.0)
+    catt = lorde * c / 100.0
+    res = lorde * (1.0 - c / 100.0)
+
+    # --- economia annua ---
+    costo_ccs = catt * ca
+    ets_senza = E * p
+    ets_con = res * p
+    risparmio = ets_senza - ets_con
+    netto = risparmio - costo_ccs
+    denom_be = E - res
+    be = costo_ccs / denom_be if denom_be > 0 else None
+    mwh_annui = pmw * ore
+    costo_mwh = costo_ccs / mwh_annui
+
+    # --- giudizio ---
+    if netto >= 0.25 * ets_senza:
+        giudizio = "MOLTO CONVENIENTE"
+        verdetto = (f"Beneficio netto annuo {netto:,.0f} EUR (>= 25% del "
+                    f"costo ETS senza CCS, {ets_senza:,.0f} EUR): il CCS "
+                    f"si ripaga ampiamente al prezzo CO2 corrente "
+                    f"({p:,.0f} EUR/t).")
+    elif netto >= 0.0:
+        giudizio = "CONVENIENTE"
+        verdetto = (f"Beneficio netto annuo {netto:,.0f} EUR: il risparmio "
+                    f"ETS ({risparmio:,.0f} EUR) copre il costo del CCS "
+                    f"({costo_ccs:,.0f} EUR).")
+    elif netto >= -0.10 * ets_senza:
+        giudizio = "MARGINALE"
+        verdetto = (f"Beneficio netto annuo {netto:,.0f} EUR: perdita "
+                    f"contenuta (entro il 10% del costo ETS). Servirebbe "
+                    f"un prezzo CO2 di almeno "
+                    f"{be:,.0f} EUR/t per il break-even."
+                    if be is not None else
+                    f"Beneficio netto annuo {netto:,.0f} EUR: la "
+                    f"penalita' energetica annulla quasi tutto il "
+                    f"beneficio di cattura.")
+    else:
+        verdetto = (f"Beneficio netto annuo {netto:,.0f} EUR: il costo del "
+                    f"CCS ({costo_ccs:,.0f} EUR) supera di molto il "
+                    f"risparmio ETS ({risparmio:,.0f} EUR)."
+                    + (f" Break-even a {be:,.0f} EUR/t di CO2."
+                       if be is not None else ""))
+        giudizio = "NON CONVENIENTE"
+
+    # --- sensibilita' al prezzo CO2 ---
+    p_max = max(2.0 * p, (be * 1.5 if be is not None else 0.0), 1.0)
+    grid = np.linspace(0.0, p_max, npt)
+    df_sens = pd.DataFrame({
+        "Prezzo CO2 (EUR/t)": np.round(grid, 1),
+        "Risparmio ETS (EUR/anno)": np.round((E - res) * grid, 0),
+        "Netto annuo (EUR)": np.round((E - res) * grid - costo_ccs, 0),
+    })
+
+    # --- confronto scenari ---
+    df_conf = pd.DataFrame({
+        "Scenario": ["Senza CCS", "Con CCS"],
+        "Costo ETS (EUR/anno)": [round(ets_senza, 0), round(ets_con, 0)],
+        "Costo CCS (EUR/anno)": [0.0, round(costo_ccs, 0)],
+        "Totale (EUR/anno)": [round(ets_senza, 0),
+                              round(ets_con + costo_ccs, 0)],
+        "Emissioni nette (t/anno)": [round(E, 0), round(res, 0)],
+    })
+
+    return {
+        "valido": True, "errore": None,
+        "emissioni_annue_t": E, "tasso_cattura_pct": c,
+        "penalita_energetica_pct": pe, "costo_ccs_eur_t": ca,
+        "prezzo_co2": p,
+        "emissioni_lorde_t": lorde, "t_catturate": catt,
+        "t_residue": res,
+        "costo_ccs_annuo": costo_ccs, "costo_ets_senza": ets_senza,
+        "costo_ets_con": ets_con, "risparmio_ets": risparmio,
+        "netto_annuo": netto, "prezzo_co2_break_even": be,
+        "costo_eur_mwh": costo_mwh,
+        "df_sensibilita": df_sens, "df_confronto": df_conf,
+        "giudizio": giudizio, "verdetto": verdetto,
+    }
+
 def calcola_cogenerazione(prezzi, potenza_mw=1.0, rend_elettrico=0.38,
                           rend_termico=0.45, prezzo_gas=40.0, prezzo_co2=80.0,
                           fattore_emissione=0.202, valore_calore=55.0,
@@ -26637,7 +26797,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -43491,6 +43651,108 @@ elif workspace == _('ws8'):
                                mime="text/csv",
                                key="mi192_csv",
                                help="Una riga per mese: margine energia e ore di funzionamento.",
+                               )
+
+    with tab193:
+        titolo_ccs = edu("Cattura CO₂ (CCS)", "La CCS (Carbon Capture and Storage) cattura la CO₂ dai fumi di un impianto termoelettrico (post-combustione con solventi amminici), la comprime, la trasporta e la inietta in formazioni geologiche profonde. Costa energia (rigenerazione del solvente + compressione: la 'penalità energetica' aumenta le emissioni lorde da trattare) e un costo per tonnellata catturata. Conviene quando il prezzo della CO₂ (ETS) supera il costo di cattura per tonnellata evitata.")
+        st.markdown(f"<h1>💨 {titolo_ccs}</h1>", unsafe_allow_html=True)
+        st.caption("Lato produttore: a che prezzo della CO₂ conviene installare la cattura e lo stoccaggio su un impianto termoelettrico — risparmio ETS vs costo CCS, break-even del prezzo CO₂.")
+        c1a_ccs, c1b_ccs = st.columns(2)
+        with c1a_ccs:
+            e_ccs = st.number_input("Emissioni annue (tCO₂/anno)", min_value=1.0,
+                                    value=500000.0, step=10000.0,
+                                    key="ccs193_e",
+                                    help="Emissioni annue dell'impianto senza CCS (scope 1).")
+            c_ccs = st.number_input("Tasso di cattura (%)", min_value=0.1,
+                                    max_value=100.0, value=90.0, step=1.0,
+                                    key="ccs193_c",
+                                    help="Quota di CO₂ dei fumi effettivamente catturata (tipico 85-95% per post-combustione).")
+            pe_ccs = st.number_input("Penalità energetica (%)", min_value=0.0,
+                                     max_value=200.0, value=20.0, step=1.0,
+                                     key="ccs193_pe",
+                                     help="Energia extra per cattura e compressione: aumenta combustibile consumato ed emissioni lorde da trattare.")
+            ca_ccs = st.number_input("Costo CCS (EUR/t catturata)",
+                                     min_value=0.0, value=90.0, step=5.0,
+                                     key="ccs193_ca",
+                                     help="Costo all-in per tonnellata catturata: cattura + trasporto + stoccaggio (letteratura: 60-120 EUR/t).")
+        with c1b_ccs:
+            p_ccs = st.number_input("Prezzo CO₂ (EUR/t)", min_value=0.0,
+                                    value=85.0, step=5.0, key="ccs193_p",
+                                    help="Prezzo ETS atteso: ogni tonnellata catturata evita questo costo.")
+            pmw_ccs = st.number_input("Potenza impianto (MW)", min_value=0.1,
+                                      value=400.0, step=10.0, key="ccs193_pmw",
+                                      help="Serve solo per l'indicatore EUR/MWh (impatto sul costo di generazione).")
+            ore_ccs = st.number_input("Ore equivalenti (ore/anno)",
+                                      min_value=1.0, max_value=8760.0,
+                                      value=6000.0, step=100.0, key="ccs193_ore",
+                                      help="Ore equivalenti a pieno carico: produzione annua = potenza × ore.")
+
+        ris_ccs = calcola_ccs(
+            emissioni_annue_t=e_ccs, tasso_cattura_pct=c_ccs,
+            penalita_energetica_pct=pe_ccs, costo_ccs_eur_t=ca_ccs,
+            prezzo_co2=p_ccs, potenza_mw=pmw_ccs, ore_annue=ore_ccs)
+        if not ris_ccs["valido"]:
+            st.error(ris_ccs["errore"])
+        else:
+            k1_ccs, k2_ccs, k3_ccs, k4_ccs = st.columns(4)
+            with k1_ccs:
+                st.metric("Risparmio ETS (EUR/anno)",
+                          f"{ris_ccs['risparmio_ets']:,.0f}",
+                          help=f"Costo ETS evitato: {ris_ccs['t_catturate']:,.0f} t catturate nette × {p_ccs:,.0f} EUR/t.")
+            with k2_ccs:
+                st.metric("Costo CCS (EUR/anno)",
+                          f"{ris_ccs['costo_ccs_annuo']:,.0f}",
+                          help=f"{ris_ccs['t_catturate']:,.0f} t catturate × {ca_ccs:,.0f} EUR/t (emissioni lorde {ris_ccs['emissioni_lorde_t']:,.0f} t con penalità energetica).")
+            with k3_ccs:
+                st.metric("Beneficio netto (EUR/anno)",
+                          f"{ris_ccs['netto_annuo']:,.0f}",
+                          help="Risparmio ETS − costo CCS.")
+            with k4_ccs:
+                be_txt = (f"{ris_ccs['prezzo_co2_break_even']:,.0f} EUR/t"
+                          if ris_ccs["prezzo_co2_break_even"] is not None
+                          else "n.d.")
+                st.metric("Break-even prezzo CO₂", be_txt,
+                          help="Prezzo CO₂ al quale il CCS si ripaga da solo. Impatto sul costo di generazione: "
+                               f"{ris_ccs['costo_eur_mwh']:,.2f} EUR/MWh.")
+            if ris_ccs["giudizio"] == "MOLTO CONVENIENTE":
+                st.success(f"✅ {ris_ccs['giudizio']}: {ris_ccs['verdetto']}")
+            elif ris_ccs["giudizio"] == "CONVENIENTE":
+                st.success(f"✅ {ris_ccs['giudizio']}: {ris_ccs['verdetto']}")
+            elif ris_ccs["giudizio"] == "MARGINALE":
+                st.warning(f"⚠️ {ris_ccs['giudizio']}: {ris_ccs['verdetto']}")
+            else:
+                st.error(f"🛑 {ris_ccs['giudizio']}: {ris_ccs['verdetto']}")
+            st.caption("Modello: emissioni lorde = emissioni × (1 + penalità energetica); tonnellate residue pagano comunque l'ETS. Break-even = costo CCS / tonnellate nette evitate.")
+
+            fig_ccs = go.Figure()
+            df_sens_ccs = ris_ccs["df_sensibilita"]
+            fig_ccs.add_trace(go.Scatter(
+                x=df_sens_ccs["Prezzo CO2 (EUR/t)"],
+                y=df_sens_ccs["Netto annuo (EUR)"],
+                mode="lines+markers", name="Netto annuo"))
+            fig_ccs.add_hline(y=0, line_dash="dash", line_color="gray")
+            fig_ccs.add_vline(x=p_ccs, line_dash="dot", line_color="green",
+                              annotation_text="Prezzo inserito")
+            if ris_ccs["prezzo_co2_break_even"] is not None:
+                fig_ccs.add_vline(x=ris_ccs["prezzo_co2_break_even"],
+                                  line_dash="dot", line_color="red",
+                                  annotation_text="Break-even")
+            fig_ccs.update_layout(
+                title="Sensibilità del beneficio netto al prezzo della CO₂",
+                xaxis_title="Prezzo CO2 (EUR/t)",
+                yaxis_title="Netto annuo (EUR)")
+            st.plotly_chart(fig_ccs, use_container_width=True)
+
+            st.subheader("Confronto scenari (EUR/anno)")
+            st.dataframe(ris_ccs["df_confronto"], use_container_width=True)
+            csv_ccs = ris_ccs["df_sensibilita"].to_csv(index=False,
+                                                      sep=";").encode("utf-8")
+            st.download_button("Scarica CSV sensibilità",
+                               data=csv_ccs,
+                               file_name="ccs_sensibilita.csv",
+                               mime="text/csv",
+                               key="ccs193_csv",
+                               help="Una riga per prezzo CO2: risparmio ETS e beneficio netto annuo.",
                                )
 
 
