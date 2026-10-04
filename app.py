@@ -27950,6 +27950,477 @@ def calcola_debt_sizing(potenza_mw, ore_eq, prezzo_catturato, capex_eur_kw,
     }
 
 
+def calcola_competitivita_offerta(prezzo_mercato, prezzo_offerta,
+                                  consumo_mwh_anno, margine_target_pct):
+    """Competitivita' di un'offerta a prezzo fisso vs prezzo di mercato.
+
+    sconto_pct = (mercato - offerta) / mercato * 100
+    risparmio annuo = (mercato - offerta) * consumo
+    L'offerta e' competitiva se offerta <= mercato * (1 - margine_target/100).
+    df_scenari: mercato *(0.9, 0.95, 1, 1.05, 1.1) con risparmio annuo relativo.
+    Funzione pura: nessun accesso a Streamlit.
+    """
+    def _num(x):
+        try:
+            v = float(x)
+        except (TypeError, ValueError):
+            return None
+        return None if v != v else v
+
+    def _ko(msg):
+        return {"errore": msg, "valido": False}
+
+    mercato = _num(prezzo_mercato); offerta = _num(prezzo_offerta)
+    consumo = _num(consumo_mwh_anno); margine = _num(margine_target_pct)
+    if None in (mercato, offerta, consumo, margine):
+        return _ko("Tutti i parametri devono essere numerici.")
+    if mercato <= 0:
+        return _ko("Il prezzo di mercato deve essere > 0 EUR/MWh.")
+    if offerta <= 0:
+        return _ko("Il prezzo dell'offerta deve essere > 0 EUR/MWh.")
+    if consumo <= 0:
+        return _ko("Il consumo annuo deve essere > 0 MWh.")
+    if not 0.0 <= margine < 100.0:
+        return _ko("Il margine target deve essere tra 0 (incluso) e 100 (escluso) %.")
+
+    sconto_pct = (mercato - offerta) / mercato * 100.0
+    risparmio = (mercato - offerta) * consumo
+    competitiva = offerta <= mercato * (1.0 - margine / 100.0)
+
+    fattori = [0.9, 0.95, 1.0, 1.05, 1.1]
+    nomi = ["-10%", "-5%", "Base", "+5%", "+10%"]
+    df = pd.DataFrame({
+        "Scenario": nomi,
+        "Prezzo mercato (EUR/MWh)": [round(mercato * f, 2) for f in fattori],
+        "Risparmio annuo (EUR)": [round((mercato * f - offerta) * consumo, 0)
+                                  for f in fattori],
+    })
+    return {
+        "errore": None, "valido": True,
+        "prezzo_mercato": mercato, "prezzo_offerta": offerta,
+        "consumo_mwh_anno": consumo, "margine_target_pct": margine,
+        "sconto_pct": sconto_pct, "risparmio_annuo": risparmio,
+        "competitiva": competitiva, "df_scenari": df,
+    }
+
+
+def calcola_gradi_giorno(temp_medie_mensili, base_risc, base_raff, coeff_kwh_per_hdd):
+    """Gradi giorno mensili (HDD/CDD) e stima del fabbisogno termico.
+
+    HDD_mese = max(0, base_risc - T_mese) * giorni_mese
+    CDD_mese = max(0, T_mese - base_raff) * giorni_mese
+    stima_kwh_termici = hdd_annuo * coeff_kwh_per_hdd.
+    Funzione pura: nessun accesso a Streamlit.
+    """
+    _GIORNI = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    _MESI = ["Gen", "Feb", "Mar", "Apr", "Mag", "Giu",
+             "Lug", "Ago", "Set", "Ott", "Nov", "Dic"]
+
+    def _num(x):
+        try:
+            v = float(x)
+        except (TypeError, ValueError):
+            return None
+        return None if v != v else v
+
+    def _ko(msg):
+        return {"errore": msg, "valido": False}
+
+    temps = temp_medie_mensili
+    if not isinstance(temps, (list, tuple)) or len(temps) != 12:
+        return _ko("Servono esattamente 12 temperature medie mensili.")
+    t = [_num(v) for v in temps]
+    if any(v is None for v in t):
+        return _ko("Le temperature devono essere tutte numeriche (niente NaN).")
+    br = _num(base_risc)
+    bc = _num(base_raff)
+    k = _num(coeff_kwh_per_hdd)
+    if None in (br, bc, k):
+        return _ko("Base riscaldamento, base raffrescamento e coefficiente "
+                   "devono essere numerici.")
+    if k < 0:
+        return _ko("Il coefficiente kWh/HDD non puo' essere negativo.")
+
+    hdd_m = [max(0.0, br - tv) * g for tv, g in zip(t, _GIORNI)]
+    cdd_m = [max(0.0, tv - bc) * g for tv, g in zip(t, _GIORNI)]
+    hdd_annuo = float(sum(hdd_m))
+    cdd_annuo = float(sum(cdd_m))
+    df = pd.DataFrame({
+        "Mese": _MESI,
+        "HDD": [round(v, 2) for v in hdd_m],
+        "CDD": [round(v, 2) for v in cdd_m],
+    })
+    return {
+        "errore": None, "valido": True,
+        "hdd_mensili": hdd_m, "cdd_mensili": cdd_m,
+        "hdd_annuo": hdd_annuo, "cdd_annuo": cdd_annuo,
+        "stima_kwh_termici": hdd_annuo * k,
+        "base_risc": br, "base_raff": bc, "coeff_kwh_per_hdd": k,
+        "df_mensile": df,
+    }
+
+
+def calcola_confronto_fornitori(consumo_mwh, offerte):
+    """Confronta le offerte di fornitura energia su un consumo annuo dato.
+
+    costo_tot = quota_energia*consumo + quota_fissa + quota_potenza*kw.
+    Funzione pura: nessun accesso a Streamlit.
+    """
+    def _num(x):
+        try:
+            v = float(x)
+        except (TypeError, ValueError):
+            return None
+        return None if v != v else v
+
+    def _ko(msg):
+        return {"errore": msg, "valido": False, "df": None,
+                "migliore": None, "delta": {}}
+
+    c = _num(consumo_mwh)
+    if c is None or c <= 0:
+        return _ko("Il consumo annuo deve essere > 0 MWh.")
+    if not offerte or not isinstance(offerte, (list, tuple)):
+        return _ko("Nessuna offerta da confrontare: "
+                   "inserisci i parametri dei fornitori.")
+    righe = []
+    for off in offerte:
+        if not isinstance(off, dict):
+            return _ko("Ogni offerta deve essere un dizionario di parametri.")
+        nome = str(off.get("nome", "")).strip() or "Senza nome"
+        qe = _num(off.get("quota_energia"))
+        qf = _num(off.get("quota_fissa"))
+        qp = _num(off.get("quota_potenza"))
+        kw = _num(off.get("kw"))
+        if None in (qe, qf, qp, kw):
+            return _ko(f"Parametri non numerici per l'offerta '{nome}'.")
+        if qe < 0 or qf < 0 or qp < 0 or kw < 0:
+            return _ko(f"Parametri negativi non ammessi per l'offerta '{nome}'.")
+        quota_e = qe * c
+        quota_p = qp * kw
+        totale = quota_e + qf + quota_p
+        righe.append({
+            "Fornitore": nome,
+            "Quota energia €": round(quota_e, 2),
+            "Quota fissa €": round(qf, 2),
+            "Quota potenza €": round(quota_p, 2),
+            "Totale €": round(totale, 2),
+        })
+    df = pd.DataFrame(righe)
+    idx_min = df["Totale €"].idxmin()
+    migliore = df.loc[idx_min, "Fornitore"]
+    tot_min = float(df.loc[idx_min, "Totale €"])
+    delta = {r["Fornitore"]: round(r["Totale €"] - tot_min, 2)
+             for r in righe}
+    return {
+        "errore": None, "valido": True,
+        "df": df, "migliore": migliore, "delta": delta,
+    }
+
+
+def calcola_sconto_pronta_cassa(importo, sconto_pct, giorni_anticipo, wacc_pct):
+    """Confronto sconto per pagamento anticipato vs costo del capitale (WACC).
+
+    Uno sconto del fornitore per il pagamento anticipato equivale a
+    prendere a prestito: il tasso implicito annualizzato e'
+        (sconto / (1 - sconto)) * (365 / giorni_anticipo) * 100
+    con sconto in frazione. Lo sconto conviene se il tasso implicito
+    supera il WACC.
+    Funzione pura: nessun accesso a Streamlit.
+    """
+    def _num(x):
+        try:
+            v = float(x)
+        except (TypeError, ValueError):
+            return None
+        return None if v != v else v
+
+    def _ko(msg):
+        return {"errore": msg, "valido": False}
+
+    try:
+        imp = _num(importo); sc = _num(sconto_pct)
+        gg = _num(giorni_anticipo); w = _num(wacc_pct)
+        if None in (imp, sc, gg, w):
+            return _ko("Tutti i parametri devono essere numerici.")
+        if imp <= 0:
+            return _ko("L'importo deve essere > 0 EUR.")
+        if not 0.0 < sc < 100.0:
+            return _ko("Lo sconto deve essere tra 0 e 100 (esclusi) %.")
+        if gg <= 0:
+            return _ko("I giorni di anticipo devono essere > 0.")
+        if w < 0:
+            return _ko("Il WACC non puo' essere negativo.")
+
+        fraz = sc / 100.0
+        tasso_implicito = (fraz / (1.0 - fraz)) * (365.0 / gg) * 100.0
+        costo_sconto = imp * fraz
+        costo_wacc = imp * (w / 100.0) * (gg / 365.0)
+        risparmio = costo_sconto - costo_wacc
+        conviene = bool(tasso_implicito > w)
+
+        giorni_range = list(range(7, 91))
+        tassi = [(fraz / (1.0 - fraz)) * (365.0 / g) * 100.0
+                 for g in giorni_range]
+        df_sens = pd.DataFrame({
+            "Giorni anticipo": giorni_range,
+            "Tasso implicito (%/anno)": tassi})
+
+        return {"errore": None, "valido": True,
+                "importo": imp, "sconto_pct": sc,
+                "giorni_anticipo": int(round(gg)), "wacc_pct": w,
+                "tasso_implicito_pct": tasso_implicito,
+                "costo_sconto_eur": costo_sconto,
+                "costo_wacc_eur": costo_wacc,
+                "risparmio_vs_wacc_eur": risparmio,
+                "conviene": conviene,
+                "df_sensibilita": df_sens}
+    except Exception as e:  # pragma: no cover - guardia totale
+        return {"errore": "Errore interno: %s" % e, "valido": False}
+
+
+def calcola_scoring_ppa(offerte, pesi):
+    """Scoring multi-criterio di offerte PPA (funzione pura).
+
+    offerte: lista di dict {"nome": str, "prezzo": EUR/MWh,
+      "durata": anni, "profilo": % di match del profilo (0-100),
+      "floor": bool (prezzo minimo garantito)}.
+    pesi: dict {"prezzo": w1, "durata": w2, "profilo": w3, "floor": w4}
+      (somma > 0; vengono normalizzati internamente).
+
+    Normalizzazione min-max per criterio (scala 0-100): prezzo -> 100 al
+    MINIMO (prezzo minore = meglio), durata -> 100 al MASSIMO,
+    profilo -> valore diretto 0-100, floor -> 100 se True else 0.
+    Se max == min su un criterio, score 100 a tutti su quel criterio.
+    score_tot = somma(peso_norm * score_criterio).
+
+    NaN-safe: offerte vuote, pesi non validi, valori non numerici ->
+    {"errore": ...} senza eccezioni. Deterministica.
+    Ritorna dict con errore, df (Offerta, Prezzo, Durata, Profilo, Floor,
+    Score), df_criteri (score 0-100 per criterio, per il radar),
+    classifica (nomi ordinati per score desc) e pesi_norm.
+    """
+    def _num(x):
+        try:
+            v = float(x)
+        except (TypeError, ValueError):
+            return None
+        return None if v != v else v
+
+    def _ko(msg):
+        return {"errore": msg, "valido": False}
+
+    if not isinstance(offerte, (list, tuple)) or len(offerte) == 0:
+        return _ko("Servono una o piu' offerte PPA da confrontare.")
+    if not isinstance(pesi, dict):
+        return _ko("I pesi devono essere un dict "
+                   "{'prezzo', 'durata', 'profilo', 'floor'}.")
+
+    nomi, prezzi, durate, profili, floors = [], [], [], [], []
+    for i, off in enumerate(offerte):
+        if not isinstance(off, dict):
+            return _ko("L'offerta #%d non e' valida." % (i + 1))
+        nome = off.get("nome")
+        if not isinstance(nome, str) or not nome.strip():
+            return _ko("L'offerta #%d non ha un nome valido." % (i + 1))
+        nome = nome.strip()
+        p = _num(off.get("prezzo"))
+        d = _num(off.get("durata"))
+        pr = _num(off.get("profilo"))
+        if p is None or d is None or pr is None:
+            return _ko("L'offerta '%s' ha valori non numerici." % nome)
+        if p <= 0:
+            return _ko("Il prezzo dell'offerta '%s' deve essere > 0 "
+                       "EUR/MWh." % nome)
+        if d < 1:
+            return _ko("La durata dell'offerta '%s' deve essere >= 1 "
+                       "anno." % nome)
+        nomi.append(nome)
+        prezzi.append(p)
+        durate.append(d)
+        profili.append(min(100.0, max(0.0, pr)))
+        floors.append(bool(off.get("floor")))
+
+    chiavi = ("prezzo", "durata", "profilo", "floor")
+    w = []
+    for k in chiavi:
+        v = _num(pesi.get(k, 0.0))
+        if v is None or v < 0:
+            return _ko("Il peso '%s' deve essere un numero >= 0." % k)
+        w.append(v)
+    somma = sum(w)
+    if somma <= 0:
+        return _ko("La somma dei pesi deve essere > 0.")
+    pesi_norm = {k: w[j] / somma for j, k in enumerate(chiavi)}
+
+    def _mm_norm(vals, inverti=False):
+        vmin, vmax = min(vals), max(vals)
+        if vmax == vmin:
+            return [100.0] * len(vals)
+        if inverti:  # prezzo: 100 al minimo (minore = meglio)
+            return [100.0 * (vmax - v) / (vmax - vmin) for v in vals]
+        return [100.0 * (v - vmin) / (vmax - vmin) for v in vals]
+
+    s_prezzo = _mm_norm(prezzi, inverti=True)
+    s_durata = _mm_norm(durate, inverti=False)
+    s_profilo = list(profili)
+    s_floor = [100.0 if f else 0.0 for f in floors]
+
+    scores = []
+    for i in range(len(nomi)):
+        tot = (pesi_norm["prezzo"] * s_prezzo[i]
+               + pesi_norm["durata"] * s_durata[i]
+               + pesi_norm["profilo"] * s_profilo[i]
+               + pesi_norm["floor"] * s_floor[i])
+        scores.append(round(tot, 2))
+
+    # sorted stabile: a parita' di score vince l'ordine di input
+    ordine = sorted(range(len(nomi)), key=lambda i: -scores[i])
+    classifica = [nomi[i] for i in ordine]
+
+    df = pd.DataFrame({
+        "Offerta": nomi,
+        "Prezzo": [round(p, 2) for p in prezzi],
+        "Durata": [round(d, 1) for d in durate],
+        "Profilo": [round(pr, 1) for pr in profili],
+        "Floor": ["Si" if f else "No" for f in floors],
+        "Score": scores,
+    }).iloc[ordine].reset_index(drop=True)
+    df_criteri = pd.DataFrame({
+        "Offerta": nomi,
+        "Prezzo": [round(s, 1) for s in s_prezzo],
+        "Durata": [round(s, 1) for s in s_durata],
+        "Profilo": [round(s, 1) for s in s_profilo],
+        "Floor": [round(s, 1) for s in s_floor],
+    }).iloc[ordine].reset_index(drop=True)
+
+    return {"errore": None, "valido": True, "df": df,
+            "df_criteri": df_criteri, "classifica": classifica,
+            "pesi_norm": pesi_norm}
+
+
+def calcola_valore_tee(risparmio_mwh_anno, vettore, anni_vita_utile,
+                      prezzo_tee_eur, tasso_sconto_pct,
+                      costo_istruttoria_eur_anno, costo_intervento_eur):
+    """Valutazione dei Titoli di Efficienza Energetica (Certificati Bianchi)
+    generati da un intervento di risparmio energetico.
+
+    1 TEE = 1 tep (tonnellata equivalente di petrolio) di risparmio.
+    Fattori di conversione convenzionali: elettrico 5.346 MWh/tep,
+    gas 11.63 MWh/tep (1 tep = 11.63 MWh termici PCI).
+
+    TEE_annui = risparmio / fattore; ricavo_lordo = TEE_annui * prezzo_tee;
+    flusso_annuo_netto = ricavo_lordo - costo_istruttoria.
+    VAN sul periodo di vita utile al tasso di sconto con costo_intervento
+    all'anno 0; TIR per bisezione; payback semplice.
+    Funzione pura: nessun accesso a Streamlit.
+    """
+    _FATTORI = {"elettrico": 5.346, "gas": 11.63}
+
+    def _num(x):
+        try:
+            v = float(x)
+        except (TypeError, ValueError):
+            return None
+        return None if v != v else v
+
+    def _ko(msg):
+        return {"errore": msg, "valido": False}
+
+    risparmio = _num(risparmio_mwh_anno)
+    anni = _num(anni_vita_utile)
+    prezzo = _num(prezzo_tee_eur)
+    tasso = _num(tasso_sconto_pct)
+    istruttoria = _num(costo_istruttoria_eur_anno)
+    costo = _num(costo_intervento_eur)
+    if None in (risparmio, anni, prezzo, tasso, istruttoria, costo):
+        return _ko("Tutti i parametri numerici devono essere numeri.")
+    if risparmio <= 0:
+        return _ko("Il risparmio annuo deve essere > 0 MWh.")
+    if not (vettore in _FATTORI):
+        return _ko("Vettore non valido: 'elettrico' o 'gas'.")
+    if not (1 <= anni <= 20) or anni != int(anni):
+        return _ko("La vita utile deve essere un numero intero tra 1 e 20 anni.")
+    if prezzo <= 0:
+        return _ko("Il prezzo del TEE deve essere > 0 EUR.")
+    if tasso < 0:
+        return _ko("Il tasso di sconto non puo' essere negativo.")
+    if istruttoria < 0 or costo < 0:
+        return _ko("Costi di istruttoria e intervento non possono essere negativi.")
+    n = int(anni)
+    r = tasso / 100.0
+
+    fattore = _FATTORI[vettore]
+    tee_annui = risparmio / fattore
+    ricavo_lordo = tee_annui * prezzo
+    flusso_annuo = ricavo_lordo - istruttoria
+
+    def _van(t):
+        return sum(flusso_annuo / (1.0 + t) ** k for k in range(1, n + 1))
+
+    van = -costo + _van(r)
+
+    # TIR per bisezione, flussi: [-costo, flusso, ..., flusso]
+    tir_pct = None
+    if costo > 0 and flusso_annuo > 0 and -costo + _van(0.0) > 0 \
+            and -costo + _van(5.0) < 0:
+        lo, hi = 0.0, 5.0
+        for _ in range(200):
+            mid = (lo + hi) / 2.0
+            if -costo + _van(mid) > 0:
+                lo = mid
+            else:
+                hi = mid
+        tir_pct = lo * 100.0
+
+    # Payback semplice
+    if costo <= 0:
+        payback_anni = 0.0 if flusso_annuo > 0 else None
+    elif flusso_annuo <= 0:
+        payback_anni = None
+    else:
+        payback_anni = None
+        for k in range(1, n + 1):
+            if k * flusso_annuo >= costo:
+                payback_anni = float(k)
+                break
+
+    righe = []
+    cumulato = -costo
+    for k in range(n + 1):
+        if k == 0:
+            tee, lordo, istr, netto, att = 0.0, 0.0, 0.0, -costo, -costo
+        else:
+            tee, lordo, istr = tee_annui, ricavo_lordo, istruttoria
+            netto = flusso_annuo
+            att = flusso_annuo / (1.0 + r) ** k
+        cumulato += (att if k > 0 else 0.0)
+        righe.append({
+            "Anno": k,
+            "TEE generati": round(tee, 2),
+            "Ricavo lordo (€)": round(lordo, 0),
+            "Costo istruttoria (€)": round(istr, 0),
+            "Flusso netto (€)": round(netto, 0),
+            "Flusso attualizzato (€)": round(att, 0),
+            "Cumulato attualizzato (€)": round(cumulato, 0),
+        })
+    df = pd.DataFrame(righe, columns=["Anno", "TEE generati",
+                                      "Ricavo lordo (€)",
+                                      "Costo istruttoria (€)",
+                                      "Flusso netto (€)",
+                                      "Flusso attualizzato (€)",
+                                      "Cumulato attualizzato (€)"])
+    return {
+        "errore": None, "valido": True,
+        "vettore": vettore, "fattore_mwh_per_tee": fattore,
+        "tee_annui": tee_annui, "ricavo_lordo_annuo": ricavo_lordo,
+        "ricavo_netto_annuo": flusso_annuo, "van": van,
+        "tir_pct": tir_pct, "payback_anni": payback_anni,
+        "verdetto": "CONVENIENTE" if van > 0 else "NON CONVENIENTE",
+        "df": df,
+    }
+
+
 def calcola_opzione_differimento(V, K, T_anni, vol_pct, tasso_pct,
                                dy_pct=0.0, n_step=200):
     """Opzione REALE di differimento di un investimento energetico.
@@ -28780,7 +29251,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -47075,6 +47546,444 @@ elif workspace == _('ws8'):
                 key="deb205_csv_out",
                 help="Tabella annuale: energia, ricavi, OPEX, CFADS, debt service e DSCR.")
 
+
+    with tab206:
+        titolo_cmp = edu("Competitività offerta", "Un'offerta a prezzo fisso e' competitiva quando batte il prezzo di mercato con un margine di sicurezza: lo sconto percentuale rispetto al mercato e il risparmio annuo in euro dicono quanto conviene firmare.")
+        st.markdown(f"<h1>🎯 {titolo_cmp}</h1>", unsafe_allow_html=True)
+        st.caption("Sconto/premio vs prezzo di mercato, risparmio annuo e verdetto di competitivita' sul margine target.")
+        c1c, c2c = st.columns(2)
+        with c1c:
+            m_cmp = st.number_input("Prezzo di mercato (EUR/MWh)",
+                                    min_value=0.1, value=100.0, step=1.0,
+                                    key="cmp206_mercato",
+                                    help="Prezzo di riferimento del mercato (es. PUN/Swissix).")
+            o_cmp = st.number_input("Prezzo offerta (EUR/MWh)",
+                                    min_value=0.1, value=92.0, step=1.0,
+                                    key="cmp206_offerta",
+                                    help="Prezzo fisso proposto dal fornitore.")
+        with c2c:
+            e_cmp = st.number_input("Consumo annuo (MWh)",
+                                    min_value=1.0, value=1000.0, step=50.0,
+                                    key="cmp206_consumo",
+                                    help="Energia annua del cliente.")
+            g_cmp = st.slider("Margine target (%)", 0.0, 20.0,
+                              5.0, 0.5, key="cmp206_margine",
+                              help="Sconto minimo richiesto perche' l'offerta sia competitiva.")
+        ris_cmp = calcola_competitivita_offerta(m_cmp, o_cmp, e_cmp, g_cmp)
+        if ris_cmp["errore"]:
+            st.error(ris_cmp["errore"])
+        else:
+            soglia_cmp = ris_cmp["prezzo_mercato"] * (1.0 - ris_cmp["margine_target_pct"] / 100.0)
+            k1c, k2c, k3c = st.columns(3)
+            with k1c:
+                st.metric("Sconto / premio vs mercato",
+                          "%.1f %%" % ris_cmp["sconto_pct"],
+                          help="Positivo = sconto, negativo = premio sopra il mercato.")
+            with k2c:
+                st.metric("Risparmio annuo",
+                          "%.0f €" % ris_cmp["risparmio_annuo"],
+                          help="(Prezzo mercato - prezzo offerta) x consumo annuo.")
+            with k3c:
+                st.metric("Prezzo offerta",
+                          "%.2f €/MWh" % ris_cmp["prezzo_offerta"],
+                          help="Prezzo fisso proposto dal fornitore.")
+            if ris_cmp["competitiva"]:
+                st.success("🎯 OFFERTA COMPETITIVA — %.2f €/MWh sotto la soglia di %.2f €/MWh (mercato %.2f meno margine %.1f%%)."
+                           % (ris_cmp["prezzo_offerta"], soglia_cmp,
+                              ris_cmp["prezzo_mercato"], ris_cmp["margine_target_pct"]))
+            else:
+                st.error("🎯 OFFERTA NON COMPETITIVA — %.2f €/MWh sopra la soglia di %.2f €/MWh (mercato %.2f meno margine %.1f%%)."
+                         % (ris_cmp["prezzo_offerta"], soglia_cmp,
+                            ris_cmp["prezzo_mercato"], ris_cmp["margine_target_pct"]))
+            fig_cmp = go.Figure()
+            fig_cmp.add_trace(go.Bar(
+                x=["Mercato", "Offerta"],
+                y=[ris_cmp["prezzo_mercato"], ris_cmp["prezzo_offerta"]],
+                name="€/MWh", marker_color=["#f59e0b", "#22c55e"],
+                hovertemplate="%{x}: %{y:.2f} €/MWh<extra></extra>"))
+            fig_cmp.update_layout(title="Offerta vs prezzo di mercato",
+                                  yaxis_title="€/MWh",
+                                  template="plotly_dark", height=320)
+            st.plotly_chart(fig_cmp, use_container_width=True)
+            st.markdown("**Scenari: mercato ±10%**")
+            st.dataframe(ris_cmp["df_scenari"], use_container_width=True, hide_index=True)
+            st.download_button(
+                "Scarica CSV scenari mercato",
+                data=ris_cmp["df_scenari"].to_csv(index=False, sep=";").encode("utf-8"),
+                file_name="competitivita_offerta.csv", mime="text/csv",
+                key="cmp206_csv",
+                help="Tabella scenari di mercato ±10% con risparmio annuo relativo.")
+
+
+    with tab207:
+        titolo_gg = edu("Gradi giorno", "I gradi giorno riscaldamento (HDD) e raffrescamento (CDD) misurano il fabbisogno termico: HDD = max(0, base riscaldamento - temperatura media) per i giorni del mese, CDD = max(0, temperatura media - base raffrescamento). Moltiplicando gli HDD annui per un coefficiente kWh/HDD si stima il fabbisogno termico dell'immobile.")
+        st.markdown(f"<h1>🌡️ {titolo_gg}</h1>", unsafe_allow_html=True)
+        st.caption("Gradi giorno riscaldamento (HDD) e raffrescamento (CDD) da temperature medie mensili: stima il fabbisogno termico annuo.")
+        c1g, c2g, c3g = st.columns(3)
+        with c1g:
+            base_r = st.slider("Base riscaldamento (°C)",
+                               min_value=10.0, max_value=25.0, value=18.0, step=0.5,
+                               key="gg207_base_r",
+                               help="Temperatura di riferimento per gli HDD.")
+            base_c = st.slider("Base raffrescamento (°C)",
+                               min_value=18.0, max_value=30.0, value=24.0, step=0.5,
+                               key="gg207_base_c",
+                               help="Temperatura di riferimento per i CDD.")
+            coeff_gg = st.number_input("Coefficiente (kWh / HDD)",
+                                       min_value=0.0, value=2.5, step=0.1,
+                                       key="gg207_coeff",
+                                       help="kWh termici stimati per ogni grado giorno riscaldamento.")
+        _DEF_TICINO = [2.5, 4.0, 8.0, 11.5, 16.0, 20.0,
+                       22.5, 22.0, 18.0, 13.0, 7.0, 3.0]
+        _MESI_GG = ["Gen", "Feb", "Mar", "Apr", "Mag", "Giu",
+                    "Lug", "Ago", "Set", "Ott", "Nov", "Dic"]
+        temps_gg = []
+        for i, (mese, t0) in enumerate(zip(_MESI_GG, _DEF_TICINO)):
+            col = c2g if i % 2 == 0 else c3g
+            with col:
+                temps_gg.append(st.number_input(f"Temp. media {mese} (°C)",
+                                                min_value=-20.0, max_value=40.0,
+                                                value=float(t0), step=0.5,
+                                                key=f"gg207_t{i}"))
+        ris_gg = calcola_gradi_giorno(temps_gg, base_r, base_c, coeff_gg)
+        if ris_gg["errore"] or not ris_gg["valido"]:
+            st.error(ris_gg["errore"] or "Parametri non validi.")
+        else:
+            k1, k2, k3 = st.columns(3)
+            k1.metric("HDD annui", f"{ris_gg['hdd_annuo']:,.0f}".replace(",", "'"))
+            k2.metric("CDD annui", f"{ris_gg['cdd_annuo']:,.0f}".replace(",", "'"))
+            k3.metric("Stima fabbisogno termico",
+                      f"{ris_gg['stima_kwh_termici']:,.0f} kWh".replace(",", "'"))
+            fig_gg = go.Figure()
+            fig_gg.add_bar(x=ris_gg["df_mensile"]["Mese"], y=ris_gg["df_mensile"]["HDD"],
+                           name="HDD", marker_color="#ff7f0e")
+            fig_gg.add_bar(x=ris_gg["df_mensile"]["Mese"], y=ris_gg["df_mensile"]["CDD"],
+                           name="CDD", marker_color="#1f77b4")
+            fig_gg.update_layout(template="plotly_dark",
+                                 title="Gradi giorno mensili (HDD / CDD)",
+                                 barmode="group", xaxis_title="Mese",
+                                 yaxis_title="Gradi giorno")
+            st.plotly_chart(fig_gg, use_container_width=True)
+            st.dataframe(ris_gg["df_mensile"], use_container_width=True)
+            csv_gg = ris_gg["df_mensile"].to_csv(index=False, sep=";")
+            st.download_button("Scarica CSV", data=csv_gg,
+                               file_name="gradi_giorno.csv", mime="text/csv",
+                               key="gg207_csv")
+
+
+    with tab208:
+        titolo_frn = edu("Confronto fornitori", "Il costo annuo di un'offerta e' quota energia x consumo + quota fissa + quota potenza x kW impegnati. A parita' di consumo, la quota energia domina il totale, ma quota fissa e quota potenza possono ribaltare la classifica.")
+        st.markdown(f"<h1>📊 {titolo_frn}</h1>", unsafe_allow_html=True)
+        st.caption("Confronta le offerte dei fornitori sul tuo consumo annuo: totale = quota energia × consumo + quota fissa + quota potenza × kW.")
+        consumo_frn = st.number_input(
+            "Consumo annuo (MWh)", min_value=1.0, value=120.0, step=10.0,
+            key="frn208_consumo",
+            help="Energia elettrica consumata in un anno.")
+        _off_frn = []
+        _col_frn = st.columns(3)
+        _def_frn = [
+            ("a", "Fornitore A", 88.0, 300.0, 0.0, 0.0),
+            ("b", "Fornitore B", 84.5, 900.0, 12.0, 60.0),
+            ("c", "Fornitore C", 92.0, 0.0, 0.0, 0.0),
+        ]
+        for _w, (sigla, nome, dqe, dqf, dqp, dkw) in zip(_col_frn, _def_frn):
+            with _w:
+                with st.expander(nome, expanded=(sigla == "a")):
+                    qe_frn = st.number_input("Quota energia (€/MWh)",
+                                             min_value=0.0, value=dqe, step=1.0,
+                                             key="frn208_%s_qe" % sigla,
+                                             help="Prezzo della sola energia.")
+                    qf_frn = st.number_input("Quota fissa (€/anno)",
+                                             min_value=0.0, value=dqf, step=10.0,
+                                             key="frn208_%s_qf" % sigla,
+                                             help="Canone fisso annuo, indipendente dal consumo.")
+                    qp_frn = st.number_input("Quota potenza (€/kW/anno)",
+                                             min_value=0.0, value=dqp, step=1.0,
+                                             key="frn208_%s_qp" % sigla,
+                                             help="Costo annuo per kW di potenza impegnata.")
+                    kw_frn = st.number_input("Potenza impegnata (kW)",
+                                             min_value=0.0, value=dkw, step=5.0,
+                                             key="frn208_%s_kw" % sigla,
+                                             help="kW impegnati sul contatore.")
+            _off_frn.append({"nome": nome, "quota_energia": qe_frn,
+                             "quota_fissa": qf_frn,
+                             "quota_potenza": qp_frn, "kw": kw_frn})
+        ris_frn = calcola_confronto_fornitori(consumo_frn, _off_frn)
+        if ris_frn["errore"]:
+            st.error(ris_frn["errore"])
+        else:
+            df_frn = ris_frn["df"]
+            mig_frn = ris_frn["migliore"]
+            tot_mig_frn = float(df_frn.loc[
+                df_frn["Fornitore"] == mig_frn, "Totale €"].iloc[0])
+            tot_max_frn = float(df_frn["Totale €"].max())
+            risparmio_frn = tot_max_frn - tot_mig_frn
+            k1f, k2f, k3f = st.columns(3)
+            with k1f:
+                st.metric("Migliore offerta", mig_frn,
+                          help="Fornitore col costo totale annuo piu' basso.")
+            with k2f:
+                st.metric("Totale migliore", "%.0f €" % tot_mig_frn,
+                          help="Costo annuo dell'offerta migliore al consumo inserito.")
+            with k3f:
+                st.metric("Risparmio vs peggiore", "%.0f €" % risparmio_frn,
+                          help="Differenza tra l'offerta piu' cara e la migliore.")
+            fig_frn = go.Figure()
+            for _col_f, _lab_f, _colore_f in [
+                    ("Quota energia €", "Quota energia", "#38bdf8"),
+                    ("Quota fissa €", "Quota fissa", "#f59e0b"),
+                    ("Quota potenza €", "Quota potenza", "#22c55e")]:
+                fig_frn.add_trace(go.Bar(
+                    x=df_frn["Fornitore"], y=df_frn[_col_f], name=_lab_f,
+                    marker_color=_colore_f,
+                    hovertemplate="%{x}<br>" + _lab_f
+                    + ": %{y:,.0f} €<extra></extra>"))
+            fig_frn.update_layout(title="Componenti di costo per fornitore",
+                                  xaxis_title="", yaxis_title="€/anno",
+                                  barmode="stack", template="plotly_dark",
+                                  height=360)
+            st.plotly_chart(fig_frn, use_container_width=True)
+            st.markdown("**Dettaglio costi per fornitore**")
+            st.dataframe(df_frn, use_container_width=True, hide_index=True)
+            st.download_button(
+                "Scarica CSV confronto fornitori",
+                data=df_frn.to_csv(index=False, sep=";").encode("utf-8"),
+                file_name="confronto_fornitori.csv", mime="text/csv",
+                key="frn208_csv",
+                help="Tabella del confronto: componenti di costo e totale per fornitore.")
+
+
+    with tab209:
+        titolo_spc = edu("Sconto pronta cassa", "Se il fornitore ti sconta la fattura per pagarlo prima della scadenza, in realta' gli stai prendendo a prestito dei soldi: il tasso implicito annualizzato dice quanto ti costano quei soldi rispetto al tuo costo del capitale (WACC). Se il tasso implicito supera il WACC, conviene pagare in anticipo.")
+        st.markdown(f"<h1>💸 {titolo_spc}</h1>", unsafe_allow_html=True)
+        st.caption("Quanto ti costa davvero pagare in anticipo per avere lo sconto: tasso implicito annualizzato vs WACC.")
+        c1s, c2s = st.columns(2)
+        with c1s:
+            imp_spc = st.number_input("Importo fattura (€)",
+                                      min_value=1.0, value=50000.0,
+                                      step=1000.0, key="spc209_importo",
+                                      help="Valore della fattura su cui si applica lo sconto.")
+            sc_spc = st.slider("Sconto pronta cassa (%)", 0.5, 10.0,
+                               2.0, 0.1, key="spc209_sconto",
+                               help="Percentuale di sconto offerta per il pagamento anticipato.")
+        with c2s:
+            gg_spc = st.slider("Giorni di anticipo", 1, 90,
+                               30, 1, key="spc209_giorni",
+                               help="Giorni di anticipo rispetto alla scadenza naturale.")
+            w_spc = st.slider("WACC (%)", 0.0, 20.0,
+                              5.0, 0.25, key="spc209_wacc",
+                              help="Costo medio ponderato del capitale aziendale.")
+        ris_spc = calcola_sconto_pronta_cassa(imp_spc, sc_spc, gg_spc, w_spc)
+        if ris_spc["errore"]:
+            st.error(ris_spc["errore"])
+        else:
+            k1s, k2s, k3s = st.columns(3)
+            with k1s:
+                st.metric("Tasso implicito annuo",
+                          "%.2f %%" % ris_spc["tasso_implicito_pct"],
+                          help="Costo annualizzato dei soldi anticipati al fornitore.")
+            with k2s:
+                st.metric("Costo dello sconto",
+                          "%.2f €" % ris_spc["costo_sconto_eur"],
+                          help="Euro che lasci al fornitore: importo x sconto.")
+            with k3s:
+                st.metric("Risparmio vs WACC",
+                          "%+.2f €" % ris_spc["risparmio_vs_wacc_eur"],
+                          help="Costo dello sconto meno costo del capitale per gli stessi giorni: positivo = conviene anticipare.")
+            if ris_spc["conviene"]:
+                st.success("💸 CONVIENE — il tasso implicito (%.2f%%) supera il WACC (%.2f%%): pagare in anticipo costa meno del capitale."
+                           % (ris_spc["tasso_implicito_pct"], ris_spc["wacc_pct"]))
+            else:
+                st.warning("💸 NON CONVIENE — il tasso implicito (%.2f%%) e' sotto il WACC (%.2f%%): meglio pagare a scadenza e impiegare la liquidita' altrove."
+                           % (ris_spc["tasso_implicito_pct"], ris_spc["wacc_pct"]))
+            dfs = ris_spc["df_sensibilita"]
+            fig_spc = go.Figure()
+            fig_spc.add_trace(go.Scatter(
+                x=dfs["Giorni anticipo"], y=dfs["Tasso implicito (%/anno)"],
+                mode="lines", name="Tasso implicito",
+                line=dict(color="#38bdf8", width=2.5),
+                hovertemplate="%{x} gg<br>Tasso implicito: %{y:.2f} %%/anno<extra></extra>"))
+            fig_spc.add_hline(y=ris_spc["wacc_pct"], line_dash="dot",
+                              line_color="#f59e0b",
+                              annotation_text="WACC")
+            fig_spc.update_layout(title="Tasso implicito vs giorni di anticipo (sconto %.2f %%)" % ris_spc["sconto_pct"],
+                                  xaxis_title="Giorni di anticipo",
+                                  yaxis_title="Tasso implicito (%/anno)",
+                                  template="plotly_dark", height=320)
+            st.plotly_chart(fig_spc, use_container_width=True)
+            st.markdown("**Sensibilita': tasso implicito al variare dei giorni di anticipo**")
+            st.dataframe(dfs, use_container_width=True, hide_index=True)
+            st.download_button(
+                "Scarica CSV sensibilita' sconto pronta cassa",
+                data=dfs.to_csv(index=False, sep=";").encode("utf-8"),
+                file_name="sconto_pronta_cassa.csv", mime="text/csv",
+                key="spc209_csv",
+                help="Tabella giorni 7..90: tasso implicito annualizzato per lo sconto scelto.")
+
+
+    with tab210:
+        titolo_ppa210 = edu("Scoring offerte PPA", "Un PPA (Power Purchase Agreement) si confronta su piu' criteri insieme: prezzo dell'energia, durata del contratto, aderenza del profilo di produzione al tuo carico (match %) e presenza di un floor, cioe' un prezzo minimo garantito. Lo scoring normalizza ogni criterio su scala 0-100, applica i pesi che scegli e produce una classifica: vince l'offerta col punteggio totale piu' alto.")
+        st.markdown(f"<h1>🤝 {titolo_ppa210}</h1>", unsafe_allow_html=True)
+        st.caption("Confronta 3 offerte PPA con uno scoring pesato su prezzo, durata, match del profilo e floor garantito.")
+        st.markdown("**Pesi dei criteri**")
+        cw1, cw2, cw3, cw4 = st.columns(4)
+        with cw1:
+            w1_ppa = st.slider("Peso prezzo", 0, 100, 40, 5,
+                               key="ppa210_w1",
+                               help="Importanza del prezzo (EUR/MWh): vince l'offerta piu' economica.")
+        with cw2:
+            w2_ppa = st.slider("Peso durata", 0, 100, 25, 5,
+                               key="ppa210_w2",
+                               help="Importanza della durata del contratto (anni): vince la piu' lunga.")
+        with cw3:
+            w3_ppa = st.slider("Peso profilo", 0, 100, 20, 5,
+                               key="ppa210_w3",
+                               help="Importanza del match tra profilo di produzione e carico (%).")
+        with cw4:
+            w4_ppa = st.slider("Peso floor", 0, 100, 15, 5,
+                               key="ppa210_w4",
+                               help="Importanza del floor (prezzo minimo garantito).")
+        offerte210 = []
+        def_ppa = (("a", "Offerta A", 70.0, 10.0, 80.0, True),
+                   ("b", "Offerta B", 65.0, 7.0, 60.0, False),
+                   ("c", "Offerta C", 68.0, 12.0, 70.0, True))
+        for tag_ppa, nome_def, prz_def, dur_def, pro_def, fl_def in def_ppa:
+            with st.expander(f"✏️ {nome_def}", expanded=(tag_ppa == "a")):
+                c1p, c2p, c3p, c4p, c5p = st.columns(5)
+                with c1p:
+                    nome_ppa = st.text_input("Nome offerta", value=nome_def,
+                                             key="ppa210_%s_nome" % tag_ppa)
+                with c2p:
+                    prz_ppa = st.number_input("Prezzo (EUR/MWh)",
+                                              min_value=1.0, value=prz_def,
+                                              step=1.0,
+                                              key="ppa210_%s_prezzo" % tag_ppa,
+                                              help="Prezzo fisso dell'energia: minore = meglio.")
+                with c3p:
+                    dur_ppa = st.number_input("Durata (anni)",
+                                              min_value=1.0, value=dur_def,
+                                              step=1.0,
+                                              key="ppa210_%s_durata" % tag_ppa,
+                                              help="Durata del contratto: maggiore = meglio.")
+                with c4p:
+                    pro_ppa = st.number_input("Profilo (% match)",
+                                              min_value=0.0, max_value=100.0,
+                                              value=pro_def, step=5.0,
+                                              key="ppa210_%s_profilo" % tag_ppa,
+                                              help="Quanto la produzione segue il tuo carico (0-100%).")
+                with c5p:
+                    fl_ppa = st.checkbox("Floor garantito", value=fl_def,
+                                         key="ppa210_%s_floor" % tag_ppa,
+                                         help="Prezzo minimo garantito nel contratto.")
+                offerte210.append({"nome": nome_ppa, "prezzo": prz_ppa,
+                                   "durata": dur_ppa, "profilo": pro_ppa,
+                                   "floor": fl_ppa})
+        ris_ppa = calcola_scoring_ppa(
+            offerte210,
+            {"prezzo": w1_ppa, "durata": w2_ppa,
+             "profilo": w3_ppa, "floor": w4_ppa})
+        if ris_ppa["errore"]:
+            st.error(ris_ppa["errore"])
+        else:
+            vinc_ppa = ris_ppa["classifica"][0]
+            score_vinc = ris_ppa["df"].loc[
+                ris_ppa["df"]["Offerta"] == vinc_ppa, "Score"].iloc[0]
+            k1p, k2p = st.columns(2)
+            with k1p:
+                st.metric("🏆 Offerta vincitrice", vinc_ppa,
+                          help="Offerta col punteggio totale pesato piu' alto.")
+            with k2p:
+                st.metric("Score vincitore", "%.1f / 100" % score_vinc,
+                          help="Punteggio pesato: somma dei criteri 0-100 con i pesi scelti.")
+            cat_ppa = ["Prezzo", "Durata", "Profilo", "Floor"]
+            fig_ppa = go.Figure()
+            for _, riga_ppa in ris_ppa["df_criteri"].iterrows():
+                vals_ppa = ([riga_ppa[c] for c in cat_ppa]
+                            + [riga_ppa[cat_ppa[0]]])
+                fig_ppa.add_trace(go.Scatterpolar(
+                    r=vals_ppa, theta=cat_ppa + [cat_ppa[0]],
+                    mode="lines+markers", name=riga_ppa["Offerta"],
+                    hovertemplate="%{theta}: %{r:.1f}<extra></extra>"))
+            fig_ppa.update_layout(
+                title="Radar dei criteri (score 0-100)",
+                template="plotly_dark", height=420,
+                polar=dict(radialaxis=dict(visible=True, range=[0, 100])))
+            st.plotly_chart(fig_ppa, use_container_width=True)
+            st.markdown("**Classifica e punteggi**")
+            st.dataframe(ris_ppa["df"], use_container_width=True,
+                         hide_index=True)
+            st.download_button(
+                "Scarica CSV scoring PPA",
+                data=ris_ppa["df"].to_csv(index=False, sep=";").encode("utf-8"),
+                file_name="scoring_ppa.csv", mime="text/csv",
+                key="ppa210_csv",
+                help="Classifica delle offerte con score totale pesato.")
+    with tab211:
+        titolo_tee = edu("Certificati Bianchi (TEE)", "I Titoli di Efficienza Energetica remunerano ogni tonnellata equivalente di petrolio risparmiata: 1 TEE = 1 tep. Questa tab calcola TEE generati, ricavi, VAN, TIR e payback di un intervento di efficienza.")
+        st.markdown(f"<h1>🎖️ {titolo_tee}</h1>", unsafe_allow_html=True)
+        st.caption("Quanto valgono i Certificati Bianchi generati da un intervento di risparmio energetico (elettrico o gas).")
+        c1t, c2t, c3t = st.columns(3)
+        with c1t:
+            risparmio_tee = st.number_input("Risparmio annuo (MWh)", min_value=0.01,
+                                           value=1000.0, key="tee211_risparmio")
+            vettore_tee = st.radio("Vettore risparmiato", ["elettrico", "gas"],
+                                  key="tee211_vettore")
+        with c2t:
+            vita_tee = st.number_input("Vita utile riconosciuta (anni)",
+                                      min_value=1, max_value=20, value=5,
+                                      step=1, key="tee211_vita")
+            prezzo_tee = st.number_input("Prezzo TEE (€/TEE)", min_value=0.01,
+                                         value=300.0, key="tee211_prezzo")
+        with c3t:
+            istruttoria_tee = st.number_input("Costo istruttoria GME (€/anno)",
+                                             min_value=0.0, value=2000.0,
+                                             key="tee211_istr")
+            costo_tee = st.number_input("Costo intervento (€)", min_value=0.0,
+                                       value=150000.0, key="tee211_costo")
+        ris_tee = calcola_valore_tee(risparmio_tee, vettore_tee, vita_tee,
+                                    prezzo_tee, 6.0, istruttoria_tee, costo_tee)
+        if ris_tee["errore"]:
+            st.error(ris_tee["errore"])
+        else:
+            v_t = ris_tee["verdetto"]
+            if v_t == "CONVENIENTE":
+                st.success("🎖️ CONVENIENTE — VAN positivo: l'intervento ripaga se stesso coi Certificati Bianchi al prezzo ipotizzato.")
+            else:
+                st.error("🎖️ NON CONVENIENTE — VAN non positivo: alza il prezzo TEE, riduci i costi o aumenta il risparmio.")
+            k1t, k2t, k3t, k4t = st.columns(4)
+            with k1t:
+                st.metric("TEE generati/anno", "%.1f" % ris_tee["tee_annui"],
+                          help="Risparmio / fattore (5.346 elettrico, 11.63 gas).")
+            with k2t:
+                st.metric("VAN (6%)", "€ {:,.0f}".format(ris_tee["van"]).replace(",", "."),
+                          help="Valore attuale netto dei flussi netti meno il costo intervento.")
+            with k3t:
+                tir_txt = ("%.1f %%" % ris_tee["tir_pct"]) if ris_tee["tir_pct"] is not None else "n.d."
+                st.metric("TIR", tir_txt, help="Tasso interno di rendimento dei flussi.")
+            with k4t:
+                pb = ris_tee["payback_anni"]
+                pb_txt = ("%d anni" % pb) if pb is not None else "mai"
+                st.metric("Payback", pb_txt,
+                          help="Anni per recuperare il costo intervento con i ricavi netti.")
+            fig_tee = go.Figure()
+            df_tee = ris_tee["df"]
+            fig_tee.add_trace(go.Bar(x=df_tee["Anno"], y=df_tee["Flusso attualizzato (€)"],
+                                     name="Flusso attualizzato",
+                                     hovertemplate="Anno %{x}: € %{y:,.0f}<extra></extra>"))
+            fig_tee.add_trace(go.Scatter(x=df_tee["Anno"], y=df_tee["Cumulato attualizzato (€)"],
+                                         mode="lines+markers", name="Cumulato",
+                                         hovertemplate="Anno %{x}: € %{y:,.0f}<extra></extra>"))
+            fig_tee.update_layout(title="Flussi attualizzati per anno (tasso 6%)",
+                                  template="plotly_dark", height=420)
+            st.plotly_chart(fig_tee, use_container_width=True)
+            st.markdown("**Tabella annuale**")
+            st.dataframe(df_tee, use_container_width=True, hide_index=True)
+            st.download_button(
+                "Scarica CSV Certificati Bianchi",
+                data=df_tee.to_csv(index=False, sep=";").encode("utf-8"),
+                file_name="certificati_bianchi_tee.csv", mime="text/csv",
+                key="tee211_csv",
+                help="Flussi annui: TEE generati, ricavi, istruttoria, flussi netti e cumulato.")
 
 # Footer
 
