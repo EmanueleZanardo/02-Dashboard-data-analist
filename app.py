@@ -32121,6 +32121,90 @@ def q243_sintesi(profilo_orario, picco_intraore_pct=15.0, seed=243):
         "picchi_mensili_quartorari": [round(float(b.max()), 3) for b in np.array_split(q, 12)],
     }
 
+
+def a244_sintesi(consumo_annuo_kwh, quote_mensili, prezzo_kwh, fisso_annuo,
+                 n_acconti, var_consumo_pct=0.0, mese_ricalcolo=None):
+    """Simula bollette in acconto (su stima) vs costo reale e conguaglio.
+
+    Modello: il fornitore fattura `n_acconti` bollette uguali calcolate sul
+    costo annuo STIMATO (mesi 1..n_acconti); a fine anno il conguaglio salda
+    la differenza col costo REALE (stima +/- var_consumo_pct). Con
+    `mese_ricalcolo` (1..11) gli acconti successivi vengono ricalibrati sul
+    costo reale proiettato, come fanno i fornitori su richiesta del cliente.
+
+    Ritorna dict con serie mensili (12 valori) e KPI. Tutto deterministico.
+    """
+    import numpy as np
+    consumo_annuo_kwh = float(consumo_annuo_kwh)
+    if consumo_annuo_kwh <= 0:
+        raise ValueError("consumo_annuo_kwh deve essere > 0")
+    quote = [float(q) for q in quote_mensili]
+    if len(quote) != 12:
+        raise ValueError("quote_mensili deve avere 12 valori")
+    tot_q = float(sum(quote))
+    if tot_q <= 0:
+        raise ValueError("quote_mensili non puo' sommare a 0")
+    quote = [q / tot_q for q in quote]
+    prezzo_kwh = float(prezzo_kwh)
+    if prezzo_kwh < 0:
+        raise ValueError("prezzo_kwh non puo' essere negativo")
+    fisso_annuo = float(fisso_annuo)
+    if fisso_annuo < 0:
+        raise ValueError("fisso_annuo non puo' essere negativo")
+    n_acconti = int(n_acconti)
+    if not 1 <= n_acconti <= 11:
+        raise ValueError("n_acconti deve stare tra 1 e 11")
+    var = float(var_consumo_pct) / 100.0
+
+    kwh_stim = np.array(quote) * consumo_annuo_kwh
+    kwh_real = kwh_stim * (1.0 + var)
+    fisso_mese = fisso_annuo / 12.0
+    costo_stim = kwh_stim * prezzo_kwh + fisso_mese
+    costo_real = kwh_real * prezzo_kwh + fisso_mese
+    e_stim = float(costo_stim.sum())
+    e_real = float(costo_real.sum())
+
+    acconto_base = e_stim / n_acconti
+    versato = np.zeros(12)
+    versato[:n_acconti] = acconto_base
+    ricalcolato = False
+    if mese_ricalcolo is not None:
+        mr = int(mese_ricalcolo)
+        if 1 <= mr <= 11 and mr < n_acconti:
+            pagato_finora = float(versato[:mr].sum())
+            residui = n_acconti - mr
+            nuovo = (e_real - pagato_finora) / residui if residui > 0 else 0.0
+            versato[mr:n_acconti] = max(nuovo, 0.0)
+            ricalcolato = True
+
+    tot_versato = float(versato.sum())
+    conguaglio = e_real - tot_versato  # >0 = a debito (cliente deve), <0 = a credito
+    cum_costo = np.cumsum(costo_real)
+    cum_vers = np.cumsum(versato)
+    saldo = cum_costo - cum_vers  # scoperto progressivo (>0 = il cliente e' sotto di cassa)
+    i_max = int(np.argmax(saldo))
+    mesi = ["Gen", "Feb", "Mar", "Apr", "Mag", "Giu",
+            "Lug", "Ago", "Set", "Ott", "Nov", "Dic"]
+    return {
+        "mesi": mesi,
+        "kwh_stim_mese": [round(float(v), 1) for v in kwh_stim],
+        "kwh_real_mese": [round(float(v), 1) for v in kwh_real],
+        "costo_stim_mese": [round(float(v), 2) for v in costo_stim],
+        "costo_real_mese": [round(float(v), 2) for v in costo_real],
+        "versato_mese": [round(float(v), 2) for v in versato],
+        "saldo_progressivo": [round(float(v), 2) for v in saldo],
+        "costo_annuo_stimato": round(e_stim, 2),
+        "costo_annuo_reale": round(e_real, 2),
+        "totale_acconti": round(tot_versato, 2),
+        "conguaglio": round(conguaglio, 2),
+        "acconto_base": round(acconto_base, 2),
+        "acconto_ottimale": round(e_real / n_acconti, 2),
+        "max_scoperto": round(float(saldo[i_max]), 2),
+        "mese_max_scoperto": mesi[i_max],
+        "ricalcolato": ricalcolato,
+        "n_acconti": n_acconti,
+    }
+
 if workspace == _('ws1'):
     st.markdown(f"<h1>{_('ws1')}</h1>", unsafe_allow_html=True)
     banner_demo("simulatore strategico: margini, centrali e curve simulate")
@@ -32613,7 +32697,7 @@ elif workspace == _('ws7'):
 # ==========================================
 elif workspace == _('ws8'):
     st.markdown(f"<h1>{_('ws8')}</h1>", unsafe_allow_html=True)
-    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread, shaping curva, spread weekend, price capture, volatilità realizzata, confronto anno-su-anno, analisi prezzi negativi, spread intra-day, picchi di prezzo, profilo settimanale tipo, curva di durata, concentrazione del costo di fornitura, simulazione demand shifting, finestre di acquisto ottimali, stagionalità mensile, monitoraggio del budget energetico annuale, analisi di sensitività del costo al profilo di prelievo, Value-at-Risk Monte Carlo del costo di fornitura, classifica dei giorni di calendario più costosi per il profilo di prelievo, fasce tariffarie orarie ottimali derivate dal profilo di prezzo osservato, autocorrelazione del prezzo spot (persistenza e stagionalità), stress test deterministico del costo di fornitura sotto shock di prezzo, previsione naive-stagionale del prezzo del giorno successivo con backtest di accuratezza, decomposizione stagionale del prezzo (trend + pattern giornaliero/settimanale + residuo) con export CSV, margine di contribuzione per impianto con scomposizione mensile e analisi di concentrazione del margine, classificazione dei giorni in giorni tipo di prezzo (clustering deterministico dei profili giornalieri), confronto di sei strutture tariffarie sullo stesso profilo di prelievo (comparatore tariffe) con export CSV, caricamento e analisi del proprio profilo di carico reale da CSV (curva di durata, fattore di carico, costo a spot, correlazione col prezzo) con export CSV, calendario settimanale del costo giornaliero di fornitura (giorni piu' cari ed economici, costo medio per giorno della settimana, aggregazione mensile) con export CSV, test retrospettivo di efficacia della copertura esistente (regressione rolling), analisi della volatilita' intraday range-based con stimatore di Parkinson, classificazione dei giorni in regimi di prezzo (Basso/Medio/Alto) con matrice di transizione, report riepilogativo di periodo con export CSV consolidato.")
+    st.markdown("Analisi operativa del prezzo spot orario Swissix (CH): KPI, confronto con il periodo precedente, soglie di alert, profilo giornaliero, heatmap oraria, fasce F1/F2/F3, tabella dati, rischio & durata, arbitraggio batteria, base/peak mensile, simulatore costo fornitura, MtM hedging, spark spread, shaping curva, spread weekend, price capture, volatilità realizzata, confronto anno-su-anno, analisi prezzi negativi, spread intra-day, picchi di prezzo, profilo settimanale tipo, curva di durata, concentrazione del costo di fornitura, simulazione demand shifting, finestre di acquisto ottimali, stagionalità mensile, monitoraggio del budget energetico annuale, analisi di sensitività del costo al profilo di prelievo, Value-at-Risk Monte Carlo del costo di fornitura, classifica dei giorni di calendario più costosi per il profilo di prelievo, fasce tariffarie orarie ottimali derivate dal profilo di prezzo osservato, autocorrelazione del prezzo spot (persistenza e stagionalità), stress test deterministico del costo di fornitura sotto shock di prezzo, previsione naive-stagionale del prezzo del giorno successivo con backtest di accuratezza, decomposizione stagionale del prezzo (trend + pattern giornaliero/settimanale + residuo) con export CSV, margine di contribuzione per impianto con scomposizione mensile e analisi di concentrazione del margine, classificazione dei giorni in giorni tipo di prezzo (clustering deterministico dei profili giornalieri), confronto di sei strutture tariffarie sullo stesso profilo di prelievo (comparatore tariffe) con export CSV, caricamento e analisi del proprio profilo di carico reale da CSV (curva di durata, fattore di carico, costo a spot, correlazione col prezzo) con export CSV, calendario settimanale del costo giornaliero di fornitura (giorni piu' cari ed economici, costo medio per giorno della settimana, aggregazione mensile) con export CSV, test retrospettivo di efficacia della copertura esistente (regressione rolling), analisi della volatilita' intraday range-based con stimatore di Parkinson, classificazione dei giorni in regimi di prezzo (Basso/Medio/Alto) con matrice di transizione, report riepilogativo di periodo con export CSV consolidato, simulatore acconti/conguaglio con ricalibrazione acconti e analisi di sensitività allo scostamento dei consumi.")
 
     # ---------- Controlli: sorgente, periodo, impianti ----------
     st.subheader("⚙️ Sorgente dati & Timeframe")
@@ -32762,7 +32846,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -54837,6 +54921,105 @@ elif workspace == _('ws8'):
                 help="Picchi mensili orari vs quartorari.")
             st.caption("Modello indicativo: il profilo intra-ora e' sintetico (quarto di picco casuale per ora). "
                        "Per la potenza impegnata usare i quarti misurati reali; verificare le clausole del contratto di fornitura.")
+    with tab244:
+        titolo244 = edu("Acconto & conguaglio", "Le bollette in acconto sono calcolate sui consumi STIMATI dal fornitore; il conguaglio di fine anno salda la differenza con i consumi REALI. Se il cliente consuma piu' del previsto il conguaglio e' a debito (la 'stangata' di dicembre), se consuma meno e' a credito. Questa tab simula il flusso di cassa mensile, individua il mese di massimo scoperto e calcola l'acconto 'giusto' piu' l'eventuale ricalibrazione a meta' anno.")
+        st.markdown(f"<h1>🧾 {titolo244}</h1>", unsafe_allow_html=True)
+        st.caption("Acconti su stima vs costo reale: a quanto ammontera' il conguaglio e quando conviene ricalibrare gli acconti.")
+        banner_demo("stima consumi e costi sintetici (Mock)")
+        c1_244, c2_244, c3_244 = st.columns(3)
+        with c1_244:
+            cons244 = st.number_input("Consumo annuo stimato (kWh)", 1000.0, 1000000.0, 60000.0, 1000.0,
+                                      key="t244_cons")
+            prof244 = st.selectbox("Profilo stagionale dei consumi",
+                                   ["piatto", "estivo", "invernale", "doppia_punta"], index=2,
+                                   key="t244_prof",
+                                   help="Come si distribuisce il consumo stimato nei 12 mesi.")
+        with c2_244:
+            prz244 = st.number_input("Costo energia all-in (€/kWh)", 0.05, 0.80, 0.28, 0.01,
+                                     key="t244_prz", format="%.3f",
+                                     help="Prezzo 'tutto compreso' energia + oneri variabili + imposte per kWh.")
+            fis244 = st.number_input("Quota fissa annua (€)", 0.0, 20000.0, 600.0, 50.0,
+                                     key="t244_fis",
+                                     help="Potenza impegnata + quota fissa + oneri fissi annui, ripartiti in 12 mesi.")
+        with c3_244:
+            nacc244 = st.slider("Numero di acconti", 2, 11, 5, 1, key="t244_nacc",
+                                help="Bollette in acconto uguali sui mesi 1..N; il conguaglio arriva a fine anno.")
+            var244 = st.slider("Scostamento consumi reali vs stima (%)", -30.0, 30.0, 10.0, 1.0,
+                               key="t244_var",
+                               help="Positivo: il cliente consuma piu' del previsto -> conguaglio a debito.")
+        rical244 = st.checkbox("Ricalibra gli acconti in corso d'anno", value=False, key="t244_rical",
+                               help="Dal mese scelto gli acconti successivi vengono ricalcolati sul costo reale proiettato, come fanno i fornitori su richiesta del cliente.")
+        mese_rical244 = None
+        if rical244:
+            mese_rical244 = st.slider("Mese di ricalibrazione", 1, min(11, nacc244 - 1) if nacc244 > 1 else 1,
+                                      min(6, nacc244 - 1) if nacc244 > 1 else 1, 1, key="t244_mese_rical")
+        sin244 = None
+        try:
+            sin244 = a244_sintesi(cons244, profilo_mensile_demo(prof244), prz244, fis244, nacc244,
+                                  var_consumo_pct=var244, mese_ricalcolo=mese_rical244)
+        except ValueError as e244:
+            st.error(f"Dati non validi: {e244}")
+        if sin244 is not None:
+            cong244 = sin244["conguaglio"]
+            k1_244, k2_244, k3_244, k4_244 = st.columns(4)
+            k1_244.metric("Costo annuo stimato", f"€ {sin244['costo_annuo_stimato']:,.0f}")
+            k2_244.metric("Costo annuo reale", f"€ {sin244['costo_annuo_reale']:,.0f}",
+                          delta=f"€ {sin244['costo_annuo_reale'] - sin244['costo_annuo_stimato']:,.0f}")
+            k3_244.metric("Conguaglio",
+                          f"€ {abs(cong244):,.0f} {'a debito' if cong244 > 0.005 else ('a credito' if cong244 < -0.005 else 'a zero')}",
+                          delta=f"€ {cong244:,.0f}", delta_color="inverse")
+            k4_244.metric("Massimo scoperto", f"€ {sin244['max_scoperto']:,.0f}")
+            st.caption(f"Mese di massimo scoperto: **{sin244['mese_max_scoperto']}** — il cliente e' 'sotto' di "
+                       f"€ {sin244['max_scoperto']:,.0f} rispetto a quanto versato. "
+                       f"Acconto versato: € {sin244['acconto_base']:,.0f}/mese; "
+                       f"acconto 'giusto' (a stima esatta): € {sin244['acconto_ottimale']:,.0f}/mese.")
+            if sin244["ricalcolato"]:
+                st.success(f"Ricalibrazione attiva dal mese {mese_rical244}: gli acconti successivi sono stati "
+                           f"riparametrati sul costo reale proiettato — il conguaglio residuo si riduce "
+                           f"a € {cong244:,.0f}.")
+            mesi244 = sin244["mesi"]
+            cum_costo244 = list(__import__("numpy").cumsum(sin244["costo_real_mese"]))
+            cum_vers244 = list(__import__("numpy").cumsum(sin244["versato_mese"]))
+            fig_cum244 = go.Figure()
+            fig_cum244.add_trace(go.Scatter(x=mesi244, y=[round(float(v), 2) for v in cum_costo244],
+                                            mode="lines+markers", name="Costo cumulato reale",
+                                            line=dict(color="#EF4444")))
+            fig_cum244.add_trace(go.Scatter(x=mesi244, y=[round(float(v), 2) for v in cum_vers244],
+                                            mode="lines+markers", name="Versato cumulato (acconti)",
+                                            line=dict(color="#3B82F6")))
+            fig_cum244.update_layout(title="Costo reale vs acconti: il divario cumulato nel corso dell'anno",
+                                     xaxis_title="Mese", yaxis_title="€ cumulati")
+            st.plotly_chart(fig_cum244, use_container_width=True)
+            df_m244 = pd.DataFrame({"Mese": mesi244,
+                                    "kWh stimati": sin244["kwh_stim_mese"],
+                                    "kWh reali": sin244["kwh_real_mese"],
+                                    "Costo reale (€)": sin244["costo_real_mese"],
+                                    "Acconto (€)": sin244["versato_mese"],
+                                    "Saldo progressivo (€)": sin244["saldo_progressivo"]})
+            fig_bar244 = px.bar(df_m244, x="Mese", y=["Costo reale (€)", "Acconto (€)"], barmode="group",
+                                title="Mese per mese: costo reale vs acconto versato",
+                                color_discrete_sequence=["#EF4444", "#3B82F6"])
+            st.plotly_chart(fig_bar244, use_container_width=True)
+            st.subheader("Sensitivita' del conguaglio allo scostamento dei consumi")
+            righe_sens244 = []
+            for var_s244 in [-20, -10, -5, 0, 5, 10, 15, 20]:
+                s_s244 = a244_sintesi(cons244, profilo_mensile_demo(prof244), prz244, fis244,
+                                      nacc244, var_consumo_pct=float(var_s244))
+                righe_sens244.append({"Scostamento consumi (%)": var_s244,
+                                      "Costo annuo reale (€)": s_s244["costo_annuo_reale"],
+                                      "Conguaglio (€)": s_s244["conguaglio"]})
+            df_sens244 = pd.DataFrame(righe_sens244)
+            st.dataframe(df_sens244, use_container_width=True, hide_index=True)
+            st.dataframe(df_m244, use_container_width=True, hide_index=True)
+            st.download_button(
+                "Scarica CSV analisi",
+                data=df_m244.to_csv(index=False, sep=";").encode("utf-8"),
+                file_name="acconto_conguaglio.csv",
+                mime="text/csv", key="t244_csv",
+                help="Tabella mensile: kWh stimati/reali, costo reale, acconto versato, saldo progressivo.")
+            st.caption("Modello indicativo: acconti uguali sui mesi 1..N, conguaglio a dicembre. Nella realta' "
+                       "le tempistiche di fatturazione variano per fornitore e il conguaglio puo' essere "
+                       "rateizzato; verificare le condizioni contrattuali.")
 
 
 # Footer
