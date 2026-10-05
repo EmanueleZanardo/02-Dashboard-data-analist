@@ -28456,6 +28456,125 @@ def calcola_mef_orario(carico_picco_mw, cap_nucleare_mw=0.0, cap_idro_mw=0.0,
                     "fattore_eolico in [0,1] e stagione ('estate'/'inverno').")
 
 
+def calcola_budget_rischio(nomi, esposizioni_eur, volatilita_annua_pct,
+                           correlazione_media=0.3, confidenza=0.95,
+                           orizzonte_giorni=10):
+    """Budget di rischio di portafoglio: Component VaR (allocazione di Eulero).
+
+    Domanda operativa: "quale posizione mi sta facendo correre piu' rischio?"
+    Il VaR di portafoglio NON e' la somma dei VaR standalone (diversificazione);
+    il contributo marginale di ogni posizione al rischio totale si ottiene con
+    l'allocazione di Eulero: CVaR_i = w_i * dVaR/dw_i (i CVaR sommano
+    esattamente al VaR di portafoglio).
+
+    Parametri:
+      nomi, esposizioni_eur, volatilita_annua_pct: liste lunghe n>=2
+      correlazione_media: correlazione uniforme tra coppie di posizioni (-1..1)
+      confidenza: livello VaR (es. 0.95 / 0.99)
+      orizzonte_giorni: orizzonte VaR in giorni di mercato (252/anno)
+
+    KPI: VaR di portafoglio, VaR standalone sommati, benefit di
+    diversificazione, contributo % al rischio per posizione, target equal-risk
+    (1/n), numero effettivo di scommesse (ENB = 1/sum(c_i^2)), posizione
+    dominante e verdetto sulla concentrazione.
+    """
+    def _err(msg):
+        return {"valido": False, "errore": msg}
+
+    try:
+        nomi = [str(x).strip() or f"Posizione {i+1}"
+                for i, x in enumerate(nomi)]
+        E = [float(x) for x in esposizioni_eur]
+        S = [float(x) / 100.0 for x in volatilita_annua_pct]
+        rho = float(correlazione_media)
+        conf = float(confidenza)
+        T = float(orizzonte_giorni)
+        for nome, v in (("esposizioni", E), ("volatilita", S)):
+            if any(isinstance(x, bool) for x in v):
+                raise ValueError(nome)
+    except (TypeError, ValueError):
+        return _err("Input non validi: esposizioni e volatilita' devono essere numeri.")
+
+    n = len(nomi)
+    if n < 2 or not (len(E) == len(S) == n):
+        return _err("Servono almeno 2 posizioni con nome, esposizione e volatilita'.")
+    if any(e <= 0 for e in E):
+        return _err("Le esposizioni devono essere positive.")
+    if any(s <= 0 for s in S):
+        return _err("Le volatilita' devono essere positive.")
+    if not (-1.0 <= rho <= 1.0):
+        return _err("La correlazione media deve stare tra -1 e 1.")
+    if not (0.5 <= conf < 1.0):
+        return _err("La confidenza deve stare tra 0.50 e 0.99.")
+    if T <= 0:
+        return _err("L'orizzonte deve essere positivo.")
+    if len(set(nomi)) != n:
+        return _err("I nomi delle posizioni devono essere univoci.")
+
+    E = np.array(E)
+    S = np.array(S)
+    E_tot = E.sum()
+    w = E / E_tot
+    # matrice di covarianza con correlazione uniforme
+    C = np.full((n, n), rho)
+    np.fill_diagonal(C, 1.0)
+    cov = np.outer(S, S) * C
+    var_p = float(w @ cov @ w)
+    if var_p <= 0:
+        return _err("Varianza di portafoglio non positiva: ricontrolla input.")
+    vol_p = math.sqrt(var_p)
+    z = float(norm.ppf(conf))
+    scala = z * math.sqrt(T / 252.0)
+    var_portafoglio = scala * vol_p * E_tot
+    # Component VaR di Eulero: CVaR_i = E_tot * scala * w_i * (cov w)_i / vol_p
+    marg = (cov @ w) / vol_p
+    cvar = E_tot * scala * w * marg
+    var_standalone = scala * S * E
+    benefit_div = float(var_standalone.sum() - var_portafoglio)
+    contrib_pct = cvar / var_portafoglio  # somma = 1
+    enb = float(1.0 / np.sum(contrib_pct ** 2))
+    target = 1.0 / n
+    i_dom = int(np.argmax(contrib_pct))
+
+    if contrib_pct[i_dom] >= 0.50:
+        verdetto = (f"CONCENTRAZIONE: {nomi[i_dom]} spiega da sola il "
+                    f"{contrib_pct[i_dom]*100:.0f}% del rischio di portafoglio "
+                    f"(soglia 50%). Valuta se ridurre l'esposizione o coprirla.")
+    elif enb < n / 2:
+        verdetto = (f"Rischio sbilanciato: il numero effettivo di scommesse "
+                    f"({enb:.1f}) e' meno della meta' delle posizioni ({n}). "
+                    f"Il portafoglio si comporta come poche posizioni concentrate.")
+    else:
+        verdetto = (f"Rischio ben distribuito: nessuna posizione supera il "
+                    f"{contrib_pct[i_dom]*100:.0f}% del rischio e il numero "
+                    f"effettivo di scommesse ({enb:.1f} su {n}) e' alto.")
+
+    df = pd.DataFrame({
+        "Posizione": nomi,
+        "Esposizione (eur)": np.round(E, 0),
+        "Volatilita' annua (%)": np.round(S * 100.0, 1),
+        "VaR standalone (eur)": np.round(var_standalone, 0),
+        "Component VaR (eur)": np.round(cvar, 0),
+        "Contributo al rischio (%)": np.round(contrib_pct * 100.0, 1),
+        "Target equal-risk (%)": round(target * 100.0, 1),
+    }).sort_values("Contributo al rischio (%)", ascending=False).reset_index(drop=True)
+
+    return {
+        "valido": True, "errore": None,
+        "var_portafoglio_eur": var_portafoglio,
+        "var_standalone_somma_eur": float(var_standalone.sum()),
+        "benefit_diversificazione_eur": benefit_div,
+        "volatilita_portafoglio_annua_pct": vol_p * 100.0,
+        "numero_effettivo_scommesse": enb,
+        "posizione_dominante": nomi[i_dom],
+        "contributo_dominante_pct": float(contrib_pct[i_dom] * 100.0),
+        "verdetto": verdetto,
+        "df": df,
+        "confidenza": conf, "orizzonte_giorni": T,
+        "correlazione_media": rho,
+    }
+
+
 def calcola_valore_forecast(quantita_mwh, n_giorni=30, prezzo_medio_eur_mwh=95.0,
                             vol_giornaliera_eur_mwh=6.0, sigma_forecast=3.0,
                             n_sim=20000, seed=7):
@@ -31776,7 +31895,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -52299,6 +52418,95 @@ elif workspace == _('ws8'):
                 file_name="valore_forecast_curva_sigma.csv",
                 mime="text/csv", key="ai229_csv",
                 help="Sigma del forecast e corrispondente valore atteso in eur/MWh.")
+
+    with tab230:
+        titolo_rb = edu("Budget di rischio", "Il VaR di portafoglio NON e' la somma dei VaR delle singole posizioni: la DIVERSIFICAZIONE lo riduce. Il COMPONENT VaR (allocazione di Eulero) dice quanta parte del rischio totale viene davvero da ciascuna posizione: e' la derivata del VaR rispetto al peso, e la somma dei Component VaR e' esattamente il VaR di portafoglio. Il NUMERO EFFETTIVO DI SCOMMESSE (1/somma dei quadrati dei contributi) dice da quante posizioni indipendenti e' fatto davvero il tuo rischio.")
+        st.markdown(f"<h1>\U0001F9EE {titolo_rb}</h1>", unsafe_allow_html=True)
+        st.caption("Quale posizione ti fa correre piu' rischio? Component VaR per allocazione di Eulero, benefit di diversificazione e numero effettivo di scommesse.")
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            n230 = st.slider("Numero di posizioni", min_value=2, max_value=8,
+                             value=4, step=1, key="rb230_n",
+                             help="Posizioni del portafoglio (forward, opzioni, PPA, batteria, ...).")
+        with c2:
+            rho230 = st.slider("Correlazione media", min_value=-0.20, max_value=1.0,
+                               value=0.30, step=0.05, key="rb230_rho",
+                               help="Correlazione uniforme tra coppie di posizioni: 0.3 e' un default prudente per asset energetici.")
+        with c3:
+            conf230 = st.selectbox("Confidenza VaR", [0.95, 0.99], index=0,
+                                   key="rb230_conf", format_func=lambda x: f"{x:.0%}")
+        with c4:
+            t230 = st.number_input("Orizzonte (giorni)", min_value=1, max_value=252,
+                                   value=10, step=1, key="rb230_t",
+                                   help="Giorni di mercato: il VaR scala con radice(T/252).")
+        _nomi230, _esp230, _vol230 = [], [], []
+        _def_nomi = ["Forward Q1", "Opzione call", "PPA eolico", "Batteria",
+                     "GO", "Spark spread", "Stoccaggio gas", "Tolling"]
+        _def_esp = [1_000_000.0, 500_000.0, 2_000_000.0, 300_000.0,
+                    200_000.0, 400_000.0, 600_000.0, 800_000.0]
+        _def_vol = [30.0, 45.0, 20.0, 35.0, 25.0, 40.0, 30.0, 30.0]
+        for _i230 in range(int(n230)):
+            a1, a2, a3 = st.columns([2, 2, 2])
+            with a1:
+                _nomi230.append(st.text_input(f"Nome posizione {_i230+1}",
+                                              value=_def_nomi[_i230],
+                                              key=f"rb230_nome_{_i230}"))
+            with a2:
+                _esp230.append(st.number_input(f"Esposizione {_i230+1} (eur)",
+                                               min_value=0.0, value=_def_esp[_i230],
+                                               step=50_000.0, key=f"rb230_esp_{_i230}"))
+            with a3:
+                _vol230.append(st.number_input(f"Volatilita' {_i230+1} (% annua)",
+                                                min_value=0.1, value=_def_vol[_i230],
+                                                step=1.0, key=f"rb230_vol_{_i230}"))
+        ris230 = calcola_budget_rischio(_nomi230, _esp230, _vol230,
+                                        correlazione_media=rho230,
+                                        confidenza=conf230,
+                                        orizzonte_giorni=int(t230))
+        if not ris230["valido"]:
+            st.error(ris230["errore"])
+        else:
+            k1, k2, k3, k4, k5 = st.columns(5)
+            k1.metric(f"VaR {conf230:.0%} / {int(t230)}g",
+                      f"{ris230['var_portafoglio_eur']:,.0f} eur",
+                      help="Perdita massima attesa all'orizzonte col livello di confidenza scelto.")
+            k2.metric("VaR standalone sommati",
+                      f"{ris230['var_standalone_somma_eur']:,.0f} eur",
+                      help="Somma dei VaR delle singole posizioni: ignora la diversificazione.")
+            k3.metric("Benefit diversificazione",
+                      f"{ris230['benefit_diversificazione_eur']:,.0f} eur",
+                      help="Quanto la diversificazione toglie al rischio: standalone - portafoglio.")
+            k4.metric("N. effettivo scommesse",
+                      f"{ris230['numero_effettivo_scommesse']:.2f}",
+                      help=f"1/somma(contributi^2): il portafoglio si comporta come {ris230['numero_effettivo_scommesse']:.1f} posizioni indipendenti su {int(n230)}.")
+            k5.metric("Posizione dominante",
+                      ris230["posizione_dominante"],
+                      f"{ris230['contributo_dominante_pct']:.1f}% del rischio")
+            if ris230["contributo_dominante_pct"] >= 50:
+                st.warning(ris230["verdetto"])
+            elif ris230["numero_effettivo_scommesse"] < int(n230) / 2:
+                st.info(ris230["verdetto"])
+            else:
+                st.success(ris230["verdetto"])
+            _df230 = ris230["df"]
+            fig230 = go.Figure()
+            fig230.add_trace(go.Bar(x=_df230["Posizione"],
+                                    y=_df230["Contributo al rischio (%)"],
+                                    name="Contributo al rischio"))
+            fig230.add_hline(y=100.0 / int(n230), line_dash="dash",
+                             annotation_text="target equal-risk")
+            fig230.update_layout(title="Contributo al rischio per posizione (Component VaR)",
+                                 xaxis_title="Posizione", yaxis_title="% del VaR di portafoglio",
+                                 height=360, margin=dict(l=40, r=20, t=50, b=40))
+            st.plotly_chart(fig230, use_container_width=True, key="rb230_chart")
+            st.dataframe(_df230, use_container_width=True, hide_index=True)
+            st.download_button(
+                "Scarica CSV budget di rischio",
+                data=_df230.to_csv(index=False, sep=";").encode("utf-8"),
+                file_name="budget_di_rischio.csv",
+                mime="text/csv", key="rb230_csv",
+                help="Posizione, esposizione, volatilita', VaR standalone, Component VaR e contributo al rischio.")
+            st.caption("Modello indicativo: correlazione uniforme tra tutte le coppie (semplificazione dichiarata), VaR parametrico normale, scaling temporale con radice quadrata. Per un desk reale usa la matrice di correlazione stimata sui rendimenti storici.")
 
 # Footer
 
