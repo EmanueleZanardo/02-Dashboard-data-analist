@@ -32031,7 +32031,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab234, tab239, tab235, tab233 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🧮 Concentrazione temporale (HHI)", "🎯 Score di timing", "📊 Probabilità sforamento budget", "🔍 Qualità dati", "🔁 Correlazione carico-prezzo", "💧 Waterfall del costo"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab234, tab239, tab235, tab233, tab240= st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🧮 Concentrazione temporale (HHI)", "🎯 Score di timing", "📊 Probabilità sforamento budget", "🔍 Qualità dati", "🔁 Correlazione carico-prezzo", "💧 Waterfall del costo", "📋 Checklist gara fornitura"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -53669,6 +53669,273 @@ def load_price_corr(load_kw, prezzo_eur_mwh, top_n=4):
             mime="text/csv", key="t233_csv",
             help="Componenti, valori in eur e cumulata progressiva della waterfall.")
         st.caption("Modello indicativo: la cascata somma le componenti nell'ordine di bolletta (energia → perdite → oneri → accise → IVA). L'IVA si applica sulla base imponibile che include le accise. I preset sono esempi, non tariffe reali.")
+
+
+
+def checklist_score(items):
+    """Score ponderato di una offerta.
+    items: list di (voce, peso_pct, score) con score in [0, 5].
+    Ritorna dict(totale_ponderato, dettaglio, somma_pesi, pesi_validi).
+    """
+    dettaglio = []
+    somma_pesi = 0.0
+    accumulo = 0.0
+    for voce, peso, score in items:
+        try:
+            p = float(peso)
+            s = float(score)
+        except (TypeError, ValueError):
+            p, s = 0.0, 0.0
+        s = max(0.0, min(5.0, s))
+        p = max(0.0, p)
+        somma_pesi += p
+        accumulo += p * s
+        dettaglio.append({"Voce": voce, "Peso (%)": round(p, 1),
+                          "Punteggio": round(s, 1),
+                          "Ponderato": round(p * s, 2)})
+    totale = accumulo / somma_pesi if somma_pesi > 0 else 0.0
+    return {"totale_ponderato": round(totale, 3),
+            "dettaglio": dettaglio,
+            "somma_pesi": round(somma_pesi, 1),
+            "pesi_validi": 0 < somma_pesi <= 100}
+
+
+def rank_offers(offerte):
+    """Classifica fino a 3 offerte. offerte: list di (nome, items).
+    Ritorna lista di dict ordinata per score decrescente."""
+    righe = []
+    for nome, items in offerte:
+        ris = checklist_score(items)
+        righe.append({"offerta": nome,
+                      "score": ris["totale_ponderato"],
+                      "dettaglio": ris["dettaglio"],
+                      "somma_pesi": ris["somma_pesi"]})
+    righe.sort(key=lambda r: r["score"], reverse=True)
+    for i, r in enumerate(righe, start=1):
+        r["posizione"] = i
+    return righe
+
+
+
+    with tab240:
+        titolo_cg = edu("Checklist gara fornitura", "Le gare di fornitura energia NON si vincono solo sul prezzo: una checklist punteggiata pesa ogni voce (prezzo energia, oneri, durata, flessibilita', penali, servizio, solidita' del fornitore) con un peso % e assegna un punteggio 0-5. Lo SCORE TOTALE PONDERATO e' la media dei punteggi pesata sui pesi: vince l'offerta con lo score piu' alto, non necessariamente quella col prezzo piu' basso.")
+        st.markdown(f"<h1>📋 {titolo_cg}</h1>", unsafe_allow_html=True)
+        st.caption("Checklist punteggiata per gare di fornitura energia: voci con peso % e punteggio 0-5, score totale ponderato per offerta e confronto fino a 3 offerte.")
+        voci240 = [
+            "Prezzo energia (eur/MWh)",
+            "Oneri e corrispettivi di rete",
+            "Durata e condizioni di rinnovo",
+            "Flessibilita' di prelievo",
+            "Penali per superamento/sbilanciamenti",
+            "Servizio clienti e reportistica",
+            "Solidita' del fornitore",
+            "Sostenibilita' e garanzie d'origine",
+        ]
+        _offerte240 = ["Offerta A", "Offerta B", "Offerta C"]
+        with st.expander("Pesi delle voci (%)", expanded=True):
+            _cols_peso = st.columns(4)
+            with _cols_peso[0]:
+                _wpeso0 = st.number_input(
+                    "Peso: Prezzo energia (eur/MWh)", min_value=0.0, max_value=100.0,
+                    value=30.0, step=1.0, key="t240_w_0",
+                    help="Peso percentuale della voce nella valutazione.")
+            with _cols_peso[1]:
+                _wpeso1 = st.number_input(
+                    "Peso: Oneri e corrispettivi di rete", min_value=0.0, max_value=100.0,
+                    value=15.0, step=1.0, key="t240_w_1",
+                    help="Peso percentuale della voce nella valutazione.")
+            with _cols_peso[2]:
+                _wpeso2 = st.number_input(
+                    "Peso: Durata e condizioni di rinnovo", min_value=0.0, max_value=100.0,
+                    value=10.0, step=1.0, key="t240_w_2",
+                    help="Peso percentuale della voce nella valutazione.")
+            with _cols_peso[3]:
+                _wpeso3 = st.number_input(
+                    "Peso: Flessibilita' di prelievo", min_value=0.0, max_value=100.0,
+                    value=12.0, step=1.0, key="t240_w_3",
+                    help="Peso percentuale della voce nella valutazione.")
+            with _cols_peso[0]:
+                _wpeso4 = st.number_input(
+                    "Peso: Penali per superamento/sbilanciamenti", min_value=0.0, max_value=100.0,
+                    value=10.0, step=1.0, key="t240_w_4",
+                    help="Peso percentuale della voce nella valutazione.")
+            with _cols_peso[1]:
+                _wpeso5 = st.number_input(
+                    "Peso: Servizio clienti e reportistica", min_value=0.0, max_value=100.0,
+                    value=8.0, step=1.0, key="t240_w_5",
+                    help="Peso percentuale della voce nella valutazione.")
+            with _cols_peso[2]:
+                _wpeso6 = st.number_input(
+                    "Peso: Solidita' del fornitore", min_value=0.0, max_value=100.0,
+                    value=10.0, step=1.0, key="t240_w_6",
+                    help="Peso percentuale della voce nella valutazione.")
+            with _cols_peso[3]:
+                _wpeso7 = st.number_input(
+                    "Peso: Sostenibilita' e garanzie d'origine", min_value=0.0, max_value=100.0,
+                    value=5.0, step=1.0, key="t240_w_7",
+                    help="Peso percentuale della voce nella valutazione.")
+            pesi_in240 = [_wpeso0, _wpeso1, _wpeso2, _wpeso3, _wpeso4, _wpeso5, _wpeso6, _wpeso7]
+            _somma240 = sum(pesi_in240)
+            if not (0 < _somma240 <= 100):
+                st.warning(f"La somma dei pesi deve essere > 0 e <= 100 (attuale: {_somma240:.1f}).")
+            else:
+                st.info(f"Somma pesi: {_somma240:.1f}%")
+        _tabs_o240 = st.tabs(_offerte240)
+        with _tabs_o240[0]:
+            st.caption("Punteggi per Offerta A (0 = pessimo, 5 = ottimo).")
+            _punti0 = []
+            _punti0.append(st.slider(
+                "Prezzo energia (eur/MWh)", min_value=0, max_value=5, value=3, step=1,
+                key="t240_s_0_0",
+                help="Punteggio 0 (pessimo) - 5 (ottimo)."))
+            _punti0.append(st.slider(
+                "Oneri e corrispettivi di rete", min_value=0, max_value=5, value=3, step=1,
+                key="t240_s_0_1",
+                help="Punteggio 0 (pessimo) - 5 (ottimo)."))
+            _punti0.append(st.slider(
+                "Durata e condizioni di rinnovo", min_value=0, max_value=5, value=3, step=1,
+                key="t240_s_0_2",
+                help="Punteggio 0 (pessimo) - 5 (ottimo)."))
+            _punti0.append(st.slider(
+                "Flessibilita' di prelievo", min_value=0, max_value=5, value=3, step=1,
+                key="t240_s_0_3",
+                help="Punteggio 0 (pessimo) - 5 (ottimo)."))
+            _punti0.append(st.slider(
+                "Penali per superamento/sbilanciamenti", min_value=0, max_value=5, value=3, step=1,
+                key="t240_s_0_4",
+                help="Punteggio 0 (pessimo) - 5 (ottimo)."))
+            _punti0.append(st.slider(
+                "Servizio clienti e reportistica", min_value=0, max_value=5, value=3, step=1,
+                key="t240_s_0_5",
+                help="Punteggio 0 (pessimo) - 5 (ottimo)."))
+            _punti0.append(st.slider(
+                "Solidita' del fornitore", min_value=0, max_value=5, value=3, step=1,
+                key="t240_s_0_6",
+                help="Punteggio 0 (pessimo) - 5 (ottimo)."))
+            _punti0.append(st.slider(
+                "Sostenibilita' e garanzie d'origine", min_value=0, max_value=5, value=3, step=1,
+                key="t240_s_0_7",
+                help="Punteggio 0 (pessimo) - 5 (ottimo)."))
+        with _tabs_o240[1]:
+            st.caption("Punteggi per Offerta B (0 = pessimo, 5 = ottimo).")
+            _punti1 = []
+            _punti1.append(st.slider(
+                "Prezzo energia (eur/MWh)", min_value=0, max_value=5, value=3, step=1,
+                key="t240_s_1_0",
+                help="Punteggio 0 (pessimo) - 5 (ottimo)."))
+            _punti1.append(st.slider(
+                "Oneri e corrispettivi di rete", min_value=0, max_value=5, value=3, step=1,
+                key="t240_s_1_1",
+                help="Punteggio 0 (pessimo) - 5 (ottimo)."))
+            _punti1.append(st.slider(
+                "Durata e condizioni di rinnovo", min_value=0, max_value=5, value=3, step=1,
+                key="t240_s_1_2",
+                help="Punteggio 0 (pessimo) - 5 (ottimo)."))
+            _punti1.append(st.slider(
+                "Flessibilita' di prelievo", min_value=0, max_value=5, value=3, step=1,
+                key="t240_s_1_3",
+                help="Punteggio 0 (pessimo) - 5 (ottimo)."))
+            _punti1.append(st.slider(
+                "Penali per superamento/sbilanciamenti", min_value=0, max_value=5, value=3, step=1,
+                key="t240_s_1_4",
+                help="Punteggio 0 (pessimo) - 5 (ottimo)."))
+            _punti1.append(st.slider(
+                "Servizio clienti e reportistica", min_value=0, max_value=5, value=3, step=1,
+                key="t240_s_1_5",
+                help="Punteggio 0 (pessimo) - 5 (ottimo)."))
+            _punti1.append(st.slider(
+                "Solidita' del fornitore", min_value=0, max_value=5, value=3, step=1,
+                key="t240_s_1_6",
+                help="Punteggio 0 (pessimo) - 5 (ottimo)."))
+            _punti1.append(st.slider(
+                "Sostenibilita' e garanzie d'origine", min_value=0, max_value=5, value=3, step=1,
+                key="t240_s_1_7",
+                help="Punteggio 0 (pessimo) - 5 (ottimo)."))
+        with _tabs_o240[2]:
+            st.caption("Punteggi per Offerta C (0 = pessimo, 5 = ottimo).")
+            _punti2 = []
+            _punti2.append(st.slider(
+                "Prezzo energia (eur/MWh)", min_value=0, max_value=5, value=3, step=1,
+                key="t240_s_2_0",
+                help="Punteggio 0 (pessimo) - 5 (ottimo)."))
+            _punti2.append(st.slider(
+                "Oneri e corrispettivi di rete", min_value=0, max_value=5, value=3, step=1,
+                key="t240_s_2_1",
+                help="Punteggio 0 (pessimo) - 5 (ottimo)."))
+            _punti2.append(st.slider(
+                "Durata e condizioni di rinnovo", min_value=0, max_value=5, value=3, step=1,
+                key="t240_s_2_2",
+                help="Punteggio 0 (pessimo) - 5 (ottimo)."))
+            _punti2.append(st.slider(
+                "Flessibilita' di prelievo", min_value=0, max_value=5, value=3, step=1,
+                key="t240_s_2_3",
+                help="Punteggio 0 (pessimo) - 5 (ottimo)."))
+            _punti2.append(st.slider(
+                "Penali per superamento/sbilanciamenti", min_value=0, max_value=5, value=3, step=1,
+                key="t240_s_2_4",
+                help="Punteggio 0 (pessimo) - 5 (ottimo)."))
+            _punti2.append(st.slider(
+                "Servizio clienti e reportistica", min_value=0, max_value=5, value=3, step=1,
+                key="t240_s_2_5",
+                help="Punteggio 0 (pessimo) - 5 (ottimo)."))
+            _punti2.append(st.slider(
+                "Solidita' del fornitore", min_value=0, max_value=5, value=3, step=1,
+                key="t240_s_2_6",
+                help="Punteggio 0 (pessimo) - 5 (ottimo)."))
+            _punti2.append(st.slider(
+                "Sostenibilita' e garanzie d'origine", min_value=0, max_value=5, value=3, step=1,
+                key="t240_s_2_7",
+                help="Punteggio 0 (pessimo) - 5 (ottimo)."))
+        _punteggi240 = {"Offerta A": _punti0, "Offerta B": _punti1, "Offerta C": _punti2}
+        _offerte_data240 = [(_n, list(zip(voci240, pesi_in240, _punteggi240[_n])))
+                            for _n in _offerte240]
+        _classifica240 = rank_offers(_offerte_data240)
+        _k1, _k2, _k3 = st.columns(3)
+        _metric_cols = (_k1, _k2, _k3)
+        for _i240, _r240 in enumerate(_classifica240):
+            _metric_cols[_i240].metric(
+                f"Score {_r240['offerta']}",
+                f"{_r240['score']:.2f} / 5.00",
+                delta=f"#{_r240['posizione']} in classifica",
+                help="Score totale ponderato su scala 0-5: somma(peso x punteggio)/somma(pesi).")
+        _vincente240 = _classifica240[0]
+        if _vincente240["score"] > 0:
+            st.success(f"L'offerta {_vincente240['offerta']} vince con score {_vincente240['score']:.2f}/5.00.")
+        st.subheader("Grafico radar di confronto")
+        import matplotlib.pyplot as plt
+        _fig240 = plt.figure(figsize=(7, 5.5))
+        _ax240 = plt.subplot(111, polar=True)
+        _angoli240 = [n / float(len(voci240)) * 2 * 3.14159265358979
+                      for n in range(len(voci240))]
+        _angoli240 += _angoli240[:1]
+        _colori240 = ["#1f77b4", "#ff7f0e", "#2ca02c"]
+        for _k240, _nome240 in enumerate(_offerte240):
+            _vals240 = [float(_x) for _x in _punteggi240[_nome240]] + [float(_punteggi240[_nome240][0])]
+            _ax240.plot(_angoli240, _vals240, "o-", linewidth=2,
+                        label=f"{_nome240} ({_classifica240[_k240]['score']:.2f})",
+                        color=_colori240[_k240])
+            _ax240.fill(_angoli240, _vals240, alpha=0.08, color=_colori240[_k240])
+        _ax240.set_xticks(_angoli240[:-1])
+        _ax240.set_xticklabels([_v[:22] for _v in voci240], fontsize=7)
+        _ax240.set_ylim(0, 5)
+        _ax240.set_title("Radar punteggi 0-5 per voce", fontsize=11)
+        _ax240.legend(loc="upper right", bbox_to_anchor=(1.25, 1.05), fontsize=8)
+        st.pyplot(_fig240, use_container_width=True)
+        st.subheader("Dettaglio voci ponderate")
+        _righe240 = []
+        for _n, _items240 in _offerte_data240:
+            _res240 = checklist_score(_items240)
+            for _d240 in _res240["dettaglio"]:
+                _righe240.append({"Offerta": _n, **_d240})
+        _df240 = pd.DataFrame(_righe240)
+        st.dataframe(_df240, use_container_width=True, hide_index=True)
+        st.download_button(
+            "Scarica CSV dettaglio checklist",
+            data=_df240.to_csv(index=False, sep=";").encode("utf-8"),
+            file_name="checklist_gara_fornitura.csv",
+            mime="text/csv", key="t240_csv",
+            help="Offerta, voce, peso %, punteggio 0-5 e contributo ponderato.")
+        st.caption("Modello indicativo: punteggi inseriti a mano e pesi a discrezione del valutatore; il punteggio deve essere coerente tra le offerte per essere confrontabile. Adatta voci e pesi alla specifica di gara.")
 
 # Footer
 
