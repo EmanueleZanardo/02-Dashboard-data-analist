@@ -31254,6 +31254,109 @@ def calcola_opzione_differimento(V, K, T_anni, vol_pct, tasso_pct,
 
 # WORKSPACE 1: SIMULATORE STRATEGICO
 # =========================================="
+
+# ---------- W231: funzioni pure qualita dati (nessuno streamlit qui dentro) ----------
+
+def dq231_genera_serie(n_ore, prezzo_base, rumore_std, n_outlier, amp_outlier,
+                       n_gap, max_gap_ore, seed):
+    # Serie sintetica oraria di prezzi. Ritorna (df[timestamp, prezzo], outlier_iniettati_ts).
+    rng = np.random.default_rng(seed)
+    ore = np.arange(n_ore)
+    profilo = 12.0 * np.sin(2.0 * np.pi * ore / 24.0) + 6.0 * np.sin(2.0 * np.pi * ore / 168.0)
+    prezzi = prezzo_base + profilo + rng.normal(0.0, rumore_std, n_ore)
+    ts = pd.date_range("2026-01-01", periods=n_ore, freq="h")
+    n_out = int(min(n_outlier, n_ore))
+    pos = rng.choice(n_ore, size=n_out, replace=False) if n_out > 0 else np.array([], dtype=int)
+    segni = np.where(rng.random(len(pos)) < 0.5, -1.0, 1.0)
+    prezzi[pos] = prezzi[pos] + segni * amp_outlier * rng.uniform(1.0, 2.0, len(pos))
+    inj_ts = [ts[p] for p in sorted(pos.tolist())]
+    df = pd.DataFrame({"timestamp": ts, "prezzo": prezzi})
+    da_togliere = set()
+    for _ in range(int(n_gap)):
+        lunghezza = int(rng.integers(1, int(max_gap_ore) + 1))
+        inizio = int(rng.integers(0, max(n_ore - lunghezza, 1)))
+        da_togliere.update(range(inizio, min(inizio + lunghezza, n_ore)))
+    df = df.drop(index=sorted(da_togliere)).reset_index(drop=True)
+    return df, inj_ts
+
+
+def dq231_detect_gaps(df):
+    # Ritorna lista di dict {'inizio','fine','ore_mancanti'} per i buchi nella griglia oraria.
+    if df is None or df.empty:
+        return []
+    ts = pd.to_datetime(df["timestamp"]).sort_values().reset_index(drop=True)
+    atteso = pd.date_range(ts.min(), ts.max(), freq="h")
+    mancanti = atteso.difference(ts)
+    gap = []
+    for t in mancanti:
+        if gap and t == gap[-1]["fine"] + pd.Timedelta(hours=1):
+            gap[-1]["fine"] = t
+            gap[-1]["ore_mancanti"] += 1
+        else:
+            gap.append({"inizio": t, "fine": t, "ore_mancanti": 1})
+    return gap
+
+
+def dq231_detect_outliers_iqr(df, k=1.5):
+    # Outlier con metodo IQR. Ritorna dict con mask, soglie e statistiche.
+    if df is None or df.empty:
+        return {"mask": np.zeros(0, dtype=bool), "q1": float("nan"),
+                "q3": float("nan"), "iqr": float("nan"),
+                "soglia_bassa": float("nan"), "soglia_alta": float("nan"),
+                "n_outlier": 0}
+    v = df["prezzo"].to_numpy(dtype=float)
+    q1 = float(np.quantile(v, 0.25))
+    q3 = float(np.quantile(v, 0.75))
+    iqr = q3 - q1
+    lo = q1 - k * iqr
+    hi = q3 + k * iqr
+    mask = (v < lo) | (v > hi)
+    return {"mask": mask, "q1": q1, "q3": q3, "iqr": float(iqr),
+            "soglia_bassa": float(lo), "soglia_alta": float(hi),
+            "n_outlier": int(mask.sum())}
+
+
+def dq231_detect_spikes(df, soglia_pct=50.0):
+    # Spike: variazione % in valore assoluto rispetto all'ora precedente oltre soglia.
+    if df is None or df.empty:
+        return {"mask": np.zeros(0, dtype=bool),
+                "variazioni_pct": np.zeros(0), "n_spike": 0}
+    v = df["prezzo"].to_numpy(dtype=float)
+    if len(v) < 2:
+        return {"mask": np.zeros(len(v), dtype=bool),
+                "variazioni_pct": np.full(len(v), np.nan), "n_spike": 0}
+    prev = v[:-1]
+    cur = v[1:]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        var = np.abs((cur - prev) / np.where(prev != 0, prev, np.nan)) * 100.0
+    var = np.concatenate([[np.nan], var])
+    mask = np.zeros(len(v), dtype=bool)
+    mask[1:] = var[1:] > soglia_pct
+    return {"mask": mask, "variazioni_pct": var, "n_spike": int(mask.sum())}
+
+
+def dq231_quality_summary(df, gaps, out_res, spike_res):
+    # KPI riepilogativi. Ritorna dict.
+    ore_mancanti = int(sum(g["ore_mancanti"] for g in gaps))
+    ore_effettive = int(len(df)) if df is not None else 0
+    ore_attese = ore_effettive + ore_mancanti
+    gap_max = int(max([g["ore_mancanti"] for g in gaps], default=0))
+    mask_unione = out_res["mask"] | spike_res["mask"]
+    n_anomale = int(mask_unione.sum())
+    return {
+        "ore_attese": ore_attese,
+        "ore_effettive": ore_effettive,
+        "ore_mancanti": ore_mancanti,
+        "pct_ore_mancanti": (100.0 * ore_mancanti / ore_attese) if ore_attese else 0.0,
+        "n_gap": len(gaps),
+        "gap_piu_lungo_ore": gap_max,
+        "n_outlier": int(out_res["n_outlier"]),
+        "n_spike": int(spike_res["n_spike"]),
+        "n_ore_anomale": n_anomale,
+        "pct_ore_anomale": (100.0 * n_anomale / ore_effettive) if ore_effettive else 0.0,
+    }
+
+# ---------- fine W231 ----------
 if workspace == _('ws1'):
     st.markdown(f"<h1>{_('ws1')}</h1>", unsafe_allow_html=True)
     banner_demo("simulatore strategico: margini, centrali e curve simulate")
@@ -31895,7 +31998,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab232, tab234, tab239 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🧮 Concentrazione temporale (HHI)", "🎯 Score di timing", "📊 Probabilità sforamento budget"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab234, tab239 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🧮 Concentrazione temporale (HHI)", "🎯 Score di timing", "📊 Probabilità sforamento budget", "🔍 Qualità dati"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -53015,6 +53118,160 @@ def w239_csv_simulazioni(sims):
                                      file_name="w239_simulazioni_costo_annuo.csv",
                                      mime="text/csv", key="t239_csv",
                                      help="Una riga per simulazione: costo annuo in eur.")
+
+    with tab231:
+        titolo_qd231 = edu("Qualit\u00e0 dati (gap & outlier)", "La QUALITA' DEI DATI della serie oraria decide se i KPI degli altri tab sono affidabili: le ORE MANCANTI (gap) falsano medie e curve di durata, gli OUTLIER (metodo IQR: fuori da [Q1-k*IQR, Q3+k*IQR]) segnalano valori estremi rispetto alla distribuzione, gli SPIKE (variazione % ora-su-ora oltre soglia) catturano i salti improvvisi di prezzo. Questo tab genera una serie sintetica con parametri regolabili (rumore, outlier e gap iniettati) oppure accetta un tuo CSV con colonne 'timestamp' e 'prezzo', e misura: % ore mancanti, numero outlier, gap piu' lungo, % ore anomale.")
+        st.markdown(f"<h1>\U0001F50D {titolo_qd231}</h1>", unsafe_allow_html=True)
+        st.caption("Rilevazione ore mancanti (gap), outlier con metodo IQR e spike di prezzo: KPI, grafico con anomalie evidenziate, export CSV delle anomalie.")
+
+        try:
+            import matplotlib as _mpl231
+            try:
+                _mpl231.use("Agg")
+            except Exception:
+                pass
+            import matplotlib.pyplot as _plt231
+            _mpl231_ok = True
+        except Exception:
+            _plt231 = None
+            _mpl231_ok = False
+
+        c231a, c231b, c231c = st.columns(3)
+        with c231a:
+            mod231 = st.radio("Origine dati", ["Serie sintetica", "Carica CSV"],
+                              key="t231_modalita", horizontal=True,
+                              help="Genera una serie oraria sintetica con anomalie iniettate, oppure carica il tuo CSV.")
+        with c231b:
+            k231 = st.slider("Fattore IQR (k)", min_value=0.5, max_value=3.0,
+                             value=1.5, step=0.1, key="t231_iqr_k",
+                             help="Ampiezza delle bande IQR: outlier se fuori da [Q1-k*IQR, Q3+k*IQR].")
+        with c231c:
+            soglia231 = st.slider("Soglia spike (% ora-su-ora)", min_value=10.0,
+                                   max_value=200.0, value=50.0, step=5.0,
+                                   key="t231_spike_soglia",
+                                   help="Spike se |variazione % rispetto all'ora precedente| supera la soglia.")
+
+        df231 = None
+        inj231 = []
+        if mod231 == "Serie sintetica":
+            p1, p2, p3, p4 = st.columns(4)
+            with p1:
+                n_ore231 = st.slider("Ore simulate", min_value=168, max_value=8760,
+                                      value=720, step=24, key="t231_ore")
+            with p2:
+                base231 = st.slider("Prezzo base (\u20ac/MWh)", min_value=20.0,
+                                     max_value=200.0, value=90.0, step=5.0, key="t231_base")
+            with p3:
+                rum231 = st.slider("Rumore \u03c3 (\u20ac/MWh)", min_value=0.0,
+                                    max_value=30.0, value=8.0, step=0.5, key="t231_rumore")
+            with p4:
+                seed231 = st.number_input("Seed", min_value=0, max_value=99999,
+                                           value=42, step=1, key="t231_seed")
+            q1, q2, q3, q4 = st.columns(4)
+            with q1:
+                n_out231 = st.slider("Outlier iniettati", min_value=0, max_value=50,
+                                      value=8, step=1, key="t231_outliers")
+            with q2:
+                amp231 = st.slider("Ampiezza outlier (\u20ac/MWh)", min_value=10.0,
+                                    max_value=200.0, value=60.0, step=5.0, key="t231_ampiezza")
+            with q3:
+                n_gap231 = st.slider("Gap iniettati", min_value=0, max_value=10,
+                                      value=3, step=1, key="t231_gap_n")
+            with q4:
+                max_gap231 = st.slider("Lunghezza max gap (ore)", min_value=1,
+                                        max_value=72, value=12, step=1, key="t231_gap_max")
+            df231, inj231 = dq231_genera_serie(int(n_ore231), float(base231),
+                                               float(rum231), int(n_out231),
+                                               float(amp231), int(n_gap231),
+                                               int(max_gap231), int(seed231))
+        else:
+            up231 = st.file_uploader("CSV con colonne 'timestamp' e 'prezzo'",
+                                      type=["csv"], key="t231_upload",
+                                      help="Prima colonna data/ora, seconda colonna prezzo (\u20ac/MWh).")
+            if up231 is not None:
+                try:
+                    _tmp231 = pd.read_csv(up231)
+                    _cols231 = {str(c).lower().strip(): c for c in _tmp231.columns}
+                    _tcol231 = _cols231.get("timestamp") or _cols231.get("datetime") or _cols231.get("data") or _tmp231.columns[0]
+                    _pcol231 = _cols231.get("prezzo") or _cols231.get("price") or _tmp231.columns[1]
+                    df231 = pd.DataFrame({
+                        "timestamp": pd.to_datetime(_tmp231[_tcol231]),
+                        "prezzo": pd.to_numeric(_tmp231[_pcol231], errors="coerce"),
+                    }).dropna().sort_values("timestamp").reset_index(drop=True)
+                except Exception as _e231:
+                    st.error(f"CSV non leggibile: {_e231}")
+            if df231 is None:
+                st.info("Carica un CSV per iniziare l'analisi.")
+
+        if df231 is not None and not df231.empty:
+            gaps231 = dq231_detect_gaps(df231)
+            out231 = dq231_detect_outliers_iqr(df231, k=float(k231))
+            spk231 = dq231_detect_spikes(df231, soglia_pct=float(soglia231))
+            sum231 = dq231_quality_summary(df231, gaps231, out231, spk231)
+
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("% ore mancanti", f"{sum231['pct_ore_mancanti']:.2f} %",
+                      help="Ore mancanti rispetto alla griglia oraria attesa.")
+            m2.metric("Outlier IQR", f"{sum231['n_outlier']}",
+                      help=f"Valori fuori da [{out231['soglia_bassa']:.1f}, {out231['soglia_alta']:.1f}] \u20ac/MWh (k={float(k231):.1f}).")
+            m3.metric("Gap pi\u00f9 lungo", f"{sum231['gap_piu_lungo_ore']} ore",
+                      help="Buco consecutivo piu' lungo nella serie.")
+            m4.metric("% ore anomale", f"{sum231['pct_ore_anomale']:.2f} %",
+                      help="Ore con outlier IQR o spike (unione, senza doppi conteggi).")
+            if inj231:
+                _trovati231 = sum(1 for t in inj231 if t in set(df231["timestamp"][out231["mask"]].tolist()))
+                st.caption(f"Outlier iniettati ritrovati dal metodo IQR: {_trovati231}/{len(inj231)} (recall serie sintetica).")
+
+            if _mpl231_ok:
+                fig231, ax231 = _plt231.subplots(figsize=(10, 4))
+                ax231.plot(df231["timestamp"], df231["prezzo"], lw=0.8, label="Prezzo (\u20ac/MWh)")
+                _mo231 = out231["mask"]
+                _ms231 = spk231["mask"]
+                if _mo231.any():
+                    ax231.scatter(df231["timestamp"][_mo231], df231["prezzo"][_mo231],
+                                  c="red", s=18, zorder=3, label=f"Outlier IQR ({out231['n_outlier']})")
+                if _ms231.any():
+                    ax231.scatter(df231["timestamp"][_ms231], df231["prezzo"][_ms231],
+                                  c="orange", marker="^", s=30, zorder=4, label=f"Spike ({spk231['n_spike']})")
+                for _g231 in gaps231:
+                    ax231.axvspan(_g231["inizio"], _g231["fine"] + pd.Timedelta(hours=1),
+                                  color="red", alpha=0.12)
+                ax231.set_xlabel("Data/ora")
+                ax231.set_ylabel("\u20ac/MWh")
+                ax231.legend(loc="best", fontsize=8)
+                fig231.tight_layout()
+                st.pyplot(fig231, use_container_width=True)
+                _plt231.close(fig231)
+            else:
+                st.warning("matplotlib non disponibile: grafico non disegnato.")
+
+            _righe231 = []
+            for _i231 in df231.index[out231["mask"]]:
+                _righe231.append({"timestamp": df231.loc[_i231, "timestamp"],
+                                   "prezzo_eur_mwh": round(float(df231.loc[_i231, "prezzo"]), 2),
+                                   "tipo": "outlier IQR", "variazione_pct": ""})
+            for _j231 in range(len(df231)):
+                if spk231["mask"][_j231]:
+                    _righe231.append({"timestamp": df231["timestamp"].iloc[_j231],
+                                       "prezzo_eur_mwh": round(float(df231["prezzo"].iloc[_j231]), 2),
+                                       "tipo": "spike",
+                                       "variazione_pct": round(float(spk231["variazioni_pct"][_j231]), 1)})
+            anom231 = pd.DataFrame(_righe231).sort_values("timestamp").reset_index(drop=True) if _righe231 else pd.DataFrame(columns=["timestamp", "prezzo_eur_mwh", "tipo", "variazione_pct"])
+
+            st.subheader(f"Anomalie rilevate ({len(anom231)})")
+            if st.checkbox("Mostra tabella gap rilevati", value=bool(gaps231), key="t231_mostra_gap"):
+                if gaps231:
+                    st.dataframe(pd.DataFrame(gaps231), use_container_width=True, hide_index=True)
+                else:
+                    st.caption("Nessun gap: serie completa sulla griglia oraria.")
+            if st.checkbox("Mostra tabella anomalie", value=True, key="t231_mostra_tabella"):
+                st.dataframe(anom231, use_container_width=True, hide_index=True)
+            st.download_button("\u2b07\ufe0f Scarica anomalie (CSV)",
+                               anom231.to_csv(index=False).encode("utf-8"),
+                               file_name="anomalie_qualita_dati.csv",
+                               mime="text/csv", key="t231_csv",
+                               help="Tabella delle anomalie rilevate (outlier IQR + spike).")
+            st.caption(f"Soglie applicate: IQR k={float(k231):.1f} -> [{out231['soglia_bassa']:.1f}, {out231['soglia_alta']:.1f}] \u20ac/MWh; spike oltre {float(soglia231):.0f}% ora-su-ora. Serie: {sum231['ore_effettive']} ore effettive su {sum231['ore_attese']} attese.")
 
 # Footer
 
