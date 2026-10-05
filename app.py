@@ -31895,7 +31895,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab232, tab234 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🧮 Concentrazione temporale (HHI)", "🎯 Score di timing"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab232, tab234, tab239 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🧮 Concentrazione temporale (HHI)", "🎯 Score di timing", "📊 Probabilità sforamento budget"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -52868,6 +52868,153 @@ def genera_costi_orari_sintetici(n_ore, costo_base_eur, extra_picco_eur,
                 mime="text/csv", key="t234_csv",
                 help="Ora, prezzo orario, profilo di carico, peso percentuale e costo orario.")
             st.caption("Metodologia: prezzi e profilo sono sintetici (curva a doppio picco + rumore con seed). Profilo ottimo = tutto il carico concentrato nell'ora piu' economica. Dati indicativi a scopo didattico.")
+
+def w239_simulate_annual_cost(monthly_costs, n_sim=10000, vol=0.10, seed=42):
+    """Monte Carlo del costo energetico annuo (EUR).
+
+    Per ogni simulazione campiona 12 mesi (bootstrap con reinserimento dai costi
+    mensili storici) e applica uno shock moltiplicativo N(0, vol^2) a ciascun mese.
+    Ritorna un array di n_sim costi annui simulati.
+    """
+    rng = np.random.default_rng(seed)
+    mc = np.asarray(list(monthly_costs), dtype=float)
+    mc = mc[np.isfinite(mc)]
+    if mc.size == 0:
+        raise ValueError("Costi mensili non validi.")
+    draws = rng.choice(mc, size=(int(n_sim), 12), replace=True)
+    noise = 1.0 + float(vol) * rng.standard_normal(size=(int(n_sim), 12))
+    return np.maximum(draws * noise, 0.0).sum(axis=1)
+
+
+def w239_breach_prob(sims, budget):
+    """P(costo annuo simulato > budget)."""
+    s = np.asarray(list(sims), dtype=float)
+    if s.size == 0:
+        raise ValueError("Nessuna simulazione.")
+    return float(np.mean(s > float(budget)))
+
+
+def w239_expected_cost(sims):
+    """Costo annuo atteso (media delle simulazioni)."""
+    s = np.asarray(list(sims), dtype=float)
+    return float(np.mean(s))
+
+
+def w239_safety_budget(sims, conf=0.95):
+    """Budget di sicurezza: quantile `conf` della distribuzione del costo annuo."""
+    s = np.asarray(list(sims), dtype=float)
+    return float(np.quantile(s, float(conf)))
+
+
+def w239_var_cost(sims, conf=0.95):
+    """VaR del costo: stesso quantile del safety budget (perdita massima attesa col livello di confidenza)."""
+    return w239_safety_budget(sims, conf=conf)
+
+
+def w239_csv_simulazioni(sims):
+    """Restituisce il CSV delle simulazioni come stringa."""
+    import io as _io
+    import csv as _csv
+    buf = _io.StringIO()
+    w = _csv.writer(buf, lineterminator="\n")
+    w.writerow(["simulazione", "costo_annuo_eur"])
+    for i, v in enumerate(np.asarray(list(sims), dtype=float), start=1):
+        w.writerow([i, f"{v:.2f}"])
+    return buf.getvalue()
+
+
+    with tab239:
+        titolo_psb = edu("Probabilità sforamento budget", "Il BUDGET annuo e' un tetto secco, ma il costo energetico e' una variabile aleatoria: P(SFORAMENTO) = frazione delle simulazioni in cui il costo annuo supera il budget. Il COSTO ATTESO e' la media della distribuzione simulata, il VaR 95% e' la soglia che il costo supera solo nel 5% dei casi, il BUDGET DI SICUREZZA e' il budget che dovresti fissare per essere coperto al 95%: se il tuo budget e' sotto il VaR 95%, lo sforamento non e' sfortuna ma aritmetica.")
+        st.markdown(f"<h1>\U0001F4CA {titolo_psb}</h1>", unsafe_allow_html=True)
+        st.caption("Monte Carlo sul costo annuo: bootstrap dai costi mensili storici + shock di volatilita'. Quante simulazioni superano il budget?")
+        mesi239 = ["Gen", "Feb", "Mar", "Apr", "Mag", "Giu", "Lug", "Ago", "Set", "Ott", "Nov", "Dic"]
+        _def_m239 = [12000.0, 11000.0, 10500.0, 9000.0, 8000.0, 8500.0,
+                     9500.0, 9000.0, 8500.0, 9500.0, 10500.0, 11500.0]
+        i1, i2, i3, i4, i5 = st.columns(5)
+        with i1:
+            budget239 = st.number_input("Budget annuo (eur)", min_value=0.0,
+                                        value=120000.0, step=5000.0,
+                                        key="t239_budget",
+                                        help="Tetto di spesa annua da non sforare.")
+        with i2:
+            nsim239 = st.number_input("N. simulazioni", min_value=1000, max_value=200000,
+                                     value=20000, step=1000, key="t239_nsim",
+                                     help="Piu' simulazioni = stima piu' stabile (20.000 e' un buon default).")
+        with i3:
+            vol239 = st.slider("Volatilita' mensile (%)", min_value=0.0, max_value=60.0,
+                               value=10.0, step=1.0, key="t239_vol",
+                               help="Incertezza sui singoli mesi: shock moltiplicativo N(0, vol^2).")
+        with i4:
+            seed239 = st.number_input("Seed (riproducibilita')", min_value=0, max_value=999999,
+                                      value=42, step=1, key="t239_seed")
+        with i5:
+            conf239 = st.selectbox("Confidenza", [0.90, 0.95, 0.99], index=1,
+                                   key="t239_conf",
+                                   format_func=lambda x: f"{x:.0%}",
+                                   help="Livello di confidenza per VaR e budget di sicurezza.")
+        st.markdown("**Costi mensili storici (eur/mese)**")
+        if st.button("Carica preset sintetici", key="t239_preset",
+                     help="Riempi i 12 mesi con un profilo stagionale sintetico."):
+            for _k239, _v239 in enumerate(_def_m239):
+                st.session_state[f"t239_m_{_k239}"] = float(_v239)
+        cols239 = st.columns(4)
+        costi239 = []
+        for _k239 in range(12):
+            with cols239[_k239 % 4]:
+                costi239.append(st.number_input(mesi239[_k239], min_value=0.0,
+                                                value=float(_def_m239[_k239]),
+                                                step=500.0, key=f"t239_m_{_k239}"))
+        esegui239 = st.button("Esegui simulazione", type="primary", key="t239_calcola")
+        if esegui239 or "t239_sims" in st.session_state:
+            if esegui239:
+                try:
+                    sims239 = w239_simulate_annual_cost(costi239, n_sim=int(nsim239),
+                                                       vol=vol239 / 100.0, seed=int(seed239))
+                    st.session_state["t239_sims"] = sims239
+                except ValueError as _e239:
+                    st.error(str(_e239))
+                    st.session_state.pop("t239_sims", None)
+                    sims239 = None
+            else:
+                sims239 = st.session_state["t239_sims"]
+            if sims239 is not None:
+                p239 = w239_breach_prob(sims239, budget239)
+                att239 = w239_expected_cost(sims239)
+                var239 = w239_var_cost(sims239, conf239)
+                safe239 = w239_safety_budget(sims239, conf239)
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("P(sforamento)", f"{p239:.1%}",
+                          help="Frazione delle simulazioni col costo annuo sopra il budget.")
+                m2.metric("Costo atteso", f"{att239:,.0f} eur",
+                          help="Media delle simulazioni Monte Carlo.")
+                m3.metric(f"VaR {conf239:.0%} del costo", f"{var239:,.0f} eur",
+                          help=f"Soglia superata solo nel {(1-conf239):.0%} delle simulazioni.")
+                m4.metric(f"Budget di sicurezza ({conf239:.0%})", f"{safe239:,.0f} eur",
+                          help=f"Budget che copre il costo nel {conf239:.0%} dei casi.")
+                if p239 >= 0.5:
+                    st.warning(f"P(sforamento) = {p239:.1%}: il budget e' troppo stretto, piu' della meta' degli scenari lo supera.")
+                elif p239 <= 0.05:
+                    st.success(f"P(sforamento) = {p239:.1%}: budget prudente, margine di sicurezza adeguato.")
+                else:
+                    st.info(f"P(sforamento) = {p239:.1%}: rischio moderato, valuta un cuscinetto fino a {safe239:,.0f} eur.")
+                if st.checkbox("Mostra istogramma distribuzione", value=True, key="t239_mostra_hist"):
+                    fig239 = go.Figure()
+                    fig239.add_trace(go.Histogram(x=np.asarray(sims239), nbinsx=60,
+                                                  name="Simulazioni",
+                                                  marker_color="#2e86de", opacity=0.75))
+                    fig239.add_vline(x=float(budget239), line_dash="dash", line_color="#e74c3c",
+                                     annotation_text=f"Budget ({float(budget239):,.0f} eur)")
+                    fig239.add_vline(x=var239, line_dash="dot", line_color="#f39c12",
+                                     annotation_text=f"VaR {conf239:.0%} ({var239:,.0f} eur)")
+                    fig239.update_layout(title="Distribuzione simulata del costo annuo",
+                                         xaxis_title="Costo annuo (eur)", yaxis_title="Frequenza",
+                                         height=380)
+                    st.plotly_chart(fig239, use_container_width=True, key="t239_chart")
+                st.download_button("Scarica CSV simulazioni",
+                                     data=w239_csv_simulazioni(sims239),
+                                     file_name="w239_simulazioni_costo_annuo.csv",
+                                     mime="text/csv", key="t239_csv",
+                                     help="Una riga per simulazione: costo annuo in eur.")
 
 # Footer
 
