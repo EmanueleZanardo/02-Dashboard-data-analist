@@ -31998,7 +31998,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab234, tab239 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🧮 Concentrazione temporale (HHI)", "🎯 Score di timing", "📊 Probabilità sforamento budget", "🔍 Qualità dati"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab234, tab239, tab235 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🧮 Concentrazione temporale (HHI)", "🎯 Score di timing", "📊 Probabilità sforamento budget", "🔍 Qualità dati", "🔁 Correlazione carico-prezzo"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -53272,6 +53272,246 @@ def w239_csv_simulazioni(sims):
                                mime="text/csv", key="t231_csv",
                                help="Tabella delle anomalie rilevate (outlier IQR + spike).")
             st.caption(f"Soglie applicate: IQR k={float(k231):.1f} -> [{out231['soglia_bassa']:.1f}, {out231['soglia_alta']:.1f}] \u20ac/MWh; spike oltre {float(soglia231):.0f}% ora-su-ora. Serie: {sum231['ore_effettive']} ore effettive su {sum231['ore_attese']} attese.")
+
+# ===========================================================================
+# W235 (05/10/2026) - tab235 "Correlazione carico-prezzo"
+# Funzioni pure: nessuna chiamata streamlit, solo numpy. Testate via appfuncs.
+# ===========================================================================
+
+def profilo_carico_sintetico_t235(ore=24, base_kw=50.0, picco_kw=150.0,
+                                  ora_picco=12.0, larghezza_picco=3.0,
+                                  rumore_pct=0.0, seed=235):
+    """Profilo di carico sintetico (kW): base + picco gaussiano + rumore."""
+    n = int(ore)
+    t = np.arange(n, dtype=float)
+    w = max(float(larghezza_picco), 0.5)
+    profilo = float(base_kw) + (float(picco_kw) - float(base_kw)) * np.exp(
+        -0.5 * ((t - float(ora_picco)) / w) ** 2)
+    if float(rumore_pct) > 0.0:
+        rng = np.random.default_rng(int(seed))
+        profilo = profilo * (1.0 + rng.normal(0.0, float(rumore_pct) / 100.0, size=n))
+    return np.maximum(profilo, 0.0)
+
+
+def profilo_prezzo_sintetico_t235(ore=24, base_eur_mwh=80.0, picco_eur_mwh=250.0,
+                                   ora_picco=18.0, larghezza_picco=2.0,
+                                   rumore_pct=0.0, seed=236):
+    """Profilo di prezzo sintetico (eur/MWh): base + picco serale + rumore."""
+    n = int(ore)
+    t = np.arange(n, dtype=float)
+    w = max(float(larghezza_picco), 0.5)
+    profilo = float(base_eur_mwh) + (float(picco_eur_mwh) - float(base_eur_mwh)) * np.exp(
+        -0.5 * ((t - float(ora_picco)) / w) ** 2
+    )
+    if float(rumore_pct) > 0.0:
+        rng = np.random.default_rng(int(seed))
+        profilo = profilo * (1.0 + rng.normal(0.0, float(rumore_pct) / 100.0, size=n))
+    return np.maximum(profilo, 0.5)
+
+
+def load_price_corr(load_kw, prezzo_eur_mwh, top_n=4):
+    """Correlazione tra profilo di carico (kW orari) e prezzo orario (eur/MWh).
+
+    Ritorna un dict con:
+      r_pearson, r_spearman: correlazione lineare / di rango [-1, 1]
+      costo_effettivo_eur: somma(carico_kWh * prezzo) sul periodo
+      costo_scorrelato_eur: stesso consumo totale ma profilo piatto
+        (nessuna concomitanza carico-prezzo)
+      extra_costo_vs_scorrelato_eur: differenza (positivo = paghi di piu'
+        perche' consumi nelle ore care)
+      ore_top_concomitanti: ore tra le top_n di carico E le top_n di prezzo
+    """
+    try:
+        load = np.asarray(load_kw, dtype=float).ravel()
+        prezzo = np.asarray(prezzo_eur_mwh, dtype=float).ravel()
+    except (ValueError, TypeError):
+        return {"valido": False, "errore": "Input non numerici."}
+    if load.size != prezzo.size:
+        return {"valido": False, "errore": "Carico e prezzo devono avere la stessa lunghezza."}
+    n = int(load.size)
+    if n < 3:
+        return {"valido": False, "errore": "Servono almeno 3 osservazioni orarie."}
+    if bool(np.isnan(load).any()) or bool(np.isnan(prezzo).any()):
+        return {"valido": False, "errore": "Valori mancanti (NaN) nelle serie."}
+    # Pearson e ranghi medi calcolati a mano (funzione autocontenuta: niente scipy)
+    def _pearson(x, y):
+        xc = x - x.mean()
+        yc = y - y.mean()
+        den = float(np.sqrt(float((xc ** 2).sum()) * float((yc ** 2).sum())))
+        if den <= 0.0:
+            return 0.0
+        return max(-1.0, min(1.0, float((xc * yc).sum() / den)))
+
+    def _ranghi(a):
+        order = np.argsort(a, kind="mergesort")
+        ranks = np.empty(int(a.size), dtype=float)
+        i, nn = 0, int(a.size)
+        while i < nn:
+            j = i
+            while j + 1 < nn and a[order[j + 1]] == a[order[i]]:
+                j += 1
+            ranks[order[i:j + 1]] = (i + j) / 2.0 + 1.0
+            i = j + 1
+        return ranks
+
+    r_p = _pearson(load, prezzo)
+    r_s = _pearson(_ranghi(load), _ranghi(prezzo))
+    costo_effettivo = float(np.sum(load * prezzo) / 1000.0)
+    costo_scorrelato = float(load.mean() * prezzo.sum() / 1000.0)
+    extra = costo_effettivo - costo_scorrelato
+    k = max(1, min(int(top_n), n))
+    idx_l = set(np.argsort(load)[-k:].tolist())
+    idx_p = set(np.argsort(prezzo)[-k:].tolist())
+    concomitanti = len(idx_l & idx_p)
+    if r_p >= 0.5:
+        verdetto = ("Profilo SFORTUNATO: il carico e' concentrato nelle ore piu' care. "
+                    "Spostare consumi fuori picco riduce il costo.")
+    elif r_p <= -0.5:
+        verdetto = ("Profilo FORTUNATO: il carico e' concentrato nelle ore piu' economiche. "
+                    "Il profilo lavora a favore del prezzo.")
+    else:
+        verdetto = ("Profilo NEUTRO: nessuna correlazione forte tra carico e prezzo "
+                    "(|r di Pearson| < 0,5).")
+    return {
+        "valido": True,
+        "errore": "",
+        "n": n,
+        "r_pearson": r_p,
+        "r_spearman": r_s,
+        "costo_effettivo_eur": costo_effettivo,
+        "costo_scorrelato_eur": costo_scorrelato,
+        "extra_costo_vs_scorrelato_eur": extra,
+        "ore_top_concomitanti": concomitanti,
+        "top_n": k,
+        "verdetto": verdetto,
+    }
+
+
+    with tab235:
+        titolo235 = edu("Correlazione carico-prezzo",
+                        "Se il tuo profilo consuma di piu' proprio quando il prezzo e' alto, paghi un EXTRA rispetto a un profilo piatto con gli stessi kWh totali. L'r di Pearson misura la correlazione LINEARE carico-prezzo, l'r di Spearman quella di RANGO (robusta ai picchi estremi). Le 'ore top concomitanti' sono le ore che stanno sia tra le piu' cariche di consumo sia tra le piu' care di prezzo: quelle sono le ore da spostare per prime.")
+        st.markdown(f"<h1>\U0001F501 {titolo235}</h1>", unsafe_allow_html=True)
+        st.caption("Il profilo consuma di piu' proprio nelle ore piu' care? Correlazione carico-prezzo, extra-costo rispetto a un profilo scorrelato e ore critiche da spostare.")
+        mode235 = st.radio("Sorgente dati", ["Profili sintetici", "Serie manuali (incolla)"],
+                           horizontal=True, key="t235_mode",
+                           help="Profili sintetici: carico e prezzo generati con picchi regolabili. Serie manuali: incolla le tue righe 'carico_kW,prezzo_eurMWh', una per ora.")
+        if mode235 == "Profili sintetici":
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                base_l235 = st.slider("Carico base (kW)", 0.0, 200.0, 50.0, 5.0, key="t235_base_load")
+                picco_l235 = st.slider("Picco carico (kW)", 0.0, 500.0, 150.0, 10.0, key="t235_peak_load")
+            with c2:
+                ora_l235 = st.slider("Ora picco carico", 0.0, 23.0, 12.0, 1.0, key="t235_load_hour")
+                larg_l235 = st.slider("Larghezza picco carico (h)", 0.5, 8.0, 3.0, 0.5, key="t235_load_width")
+            with c3:
+                base_p235 = st.slider("Prezzo base (eur/MWh)", 0.0, 200.0, 80.0, 5.0, key="t235_base_price")
+                picco_p235 = st.slider("Picco prezzo (eur/MWh)", 0.0, 600.0, 250.0, 10.0, key="t235_peak_price")
+            with c4:
+                ora_p235 = st.slider("Ora picco prezzo", 0.0, 23.0, 18.0, 1.0, key="t235_price_hour")
+                larg_p235 = st.slider("Larghezza picco prezzo (h)", 0.5, 8.0, 2.0, 0.5, key="t235_price_width")
+            rumore235 = st.slider("Rumore sulle serie (%)", 0.0, 30.0, 5.0, 1.0, key="t235_noise",
+                                  help="Variabilita' casuale ora per ora, per rendere il profilo piu' realistico.")
+            load235 = profilo_carico_sintetico_t235(ore=24, base_kw=base_l235, picco_kw=picco_l235,
+                                                    ora_picco=ora_l235, larghezza_picco=larg_l235,
+                                                    rumore_pct=rumore235, seed=235)
+            price235 = profilo_prezzo_sintetico_t235(ore=24, base_eur_mwh=base_p235, picco_eur_mwh=picco_p235,
+                                                     ora_picco=ora_p235, larghezza_picco=larg_p235,
+                                                     rumore_pct=rumore235, seed=236)
+        else:
+            txt235 = st.text_area("Serie orarie (una riga per ora: carico_kW,prezzo_eurMWh)",
+                                  value="50,80\n55,85\n150,250\n140,240\n60,90",
+                                  height=150, key="t235_series",
+                                  help="Carico in kW e prezzo in eur/MWh separati da virgola o punto e virgola, una riga per ora.")
+            _load235, _price235 = [], []
+            for _r235 in txt235.strip().splitlines():
+                _r235 = _r235.strip().replace(";", ",")
+                if not _r235:
+                    continue
+                _p235 = _r235.split(",")
+                if len(_p235) >= 2:
+                    try:
+                        _load235.append(float(_p235[0].strip()))
+                        _price235.append(float(_p235[1].strip()))
+                    except ValueError:
+                        pass
+            load235 = np.array(_load235)
+            price235 = np.array(_price235)
+        topn235 = st.slider("Ore top considerate", 1, 8, 4, 1, key="t235_topn",
+                            help="Quante ore di massimo carico / massimo prezzo confrontare per le concomitanze.")
+        ris235 = load_price_corr(load235, price235, top_n=int(topn235))
+        if not ris235["valido"]:
+            st.error(ris235["errore"])
+        else:
+            k1, k2, k3, k4 = st.columns(4)
+            k1.metric("r di Pearson", f"{ris235['r_pearson']:+.3f}",
+                      help="Correlazione lineare carico-prezzo: +1 = consumi nelle ore care, -1 = consumi nelle ore economiche.")
+            k2.metric("r di Spearman", f"{ris235['r_spearman']:+.3f}",
+                      help="Correlazione di rango: robusta ai picchi estremi, coglie relazioni monotone non lineari.")
+            k3.metric("Extra-costo vs scorrelato", f"{ris235['extra_costo_vs_scorrelato_eur']:+,.2f} eur",
+                      help="Quanto paghi in piu' (o in meno) rispetto a un profilo piatto con gli stessi kWh totali.")
+            k4.metric("Ore top concomitanti", f"{ris235['ore_top_concomitanti']} / {ris235['top_n']}",
+                      help="Ore che sono sia tra le piu' cariche di consumo sia tra le piu' care di prezzo: le prime da spostare.")
+            if ris235["r_pearson"] >= 0.5:
+                st.warning(ris235["verdetto"])
+            elif ris235["r_pearson"] <= -0.5:
+                st.success(ris235["verdetto"])
+            else:
+                st.info(ris235["verdetto"])
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+            n235 = ris235["n"]
+            fig235, ax235 = plt.subplots(figsize=(7.5, 4.2))
+            ax235.scatter(load235, price235, alpha=0.7, s=48)
+            if float(np.std(load235)) > 1e-9:
+                _b235, _a235 = np.polyfit(load235, price235, 1)
+                _xs235 = np.array([float(load235.min()), float(load235.max())])
+                ax235.plot(_xs235, _a235 + _b235 * _xs235, color="red", linestyle="--",
+                           label=f"regressione (pendenza {_b235:+.2f})")
+                ax235.legend()
+            for _i235 in range(n235):
+                ax235.annotate(f"{_i235:02d}", (load235[_i235], price235[_i235]),
+                               fontsize=7, alpha=0.6, xytext=(3, 3),
+                               textcoords="offset points")
+            ax235.set_xlabel("Carico (kW)")
+            ax235.set_ylabel("Prezzo (eur/MWh)")
+            ax235.set_title("Scatter carico vs prezzo con retta di regressione (etichetta = ora)")
+            fig235.tight_layout()
+            st.pyplot(fig235)
+            plt.close(fig235)
+            if st.checkbox("Mostra heatmap oraria normalizzata", value=True, key="t235_heatmap",
+                           help="Carico, prezzo e costo orario normalizzati 0-1: le colonne rosse sono le ore critiche."):
+                _lm235 = float(load235.max()) if float(load235.max()) > 0 else 1.0
+                _pm235 = float(price235.max()) if float(price235.max()) > 0 else 1.0
+                _c235 = load235 * price235
+                _cm235 = float(_c235.max()) if float(_c235.max()) > 0 else 1.0
+                _mat235 = np.vstack([load235 / _lm235, price235 / _pm235, _c235 / _cm235])
+                fig_h235, ax_h235 = plt.subplots(figsize=(10, 2.8))
+                _im235 = ax_h235.imshow(_mat235, aspect="auto", cmap="YlOrRd", vmin=0, vmax=1)
+                ax_h235.set_yticks([0, 1, 2])
+                ax_h235.set_yticklabels(["Carico (norm.)", "Prezzo (norm.)", "Costo orario (norm.)"])
+                ax_h235.set_xticks(range(n235))
+                ax_h235.set_xticklabels([f"{h % 24:02d}" for h in range(n235)], fontsize=8)
+                ax_h235.set_xlabel("Ora")
+                ax_h235.set_title("Heatmap oraria: dove carico e prezzo si sommano")
+                fig_h235.colorbar(_im235, ax=ax_h235, label="0-1")
+                fig_h235.tight_layout()
+                st.pyplot(fig_h235)
+                plt.close(fig_h235)
+            df235 = pd.DataFrame({
+                "ora": np.arange(n235),
+                "carico_kw": np.round(load235, 2),
+                "prezzo_eur_mwh": np.round(price235, 2),
+                "costo_orario_eur": np.round(load235 * price235 / 1000.0, 2),
+            })
+            st.dataframe(df235, use_container_width=True, hide_index=True)
+            st.download_button(
+                "Scarica CSV correlazione carico-prezzo",
+                data=df235.to_csv(index=False, sep=";").encode("utf-8"),
+                file_name="correlazione_carico_prezzo.csv",
+                mime="text/csv", key="t235_csv",
+                help="Ora, carico in kW, prezzo in eur/MWh e costo orario in eur.")
+            st.caption("Serie sintetiche a scopo didattico: per decisioni reali usa il tuo profilo di carico misurato e i prezzi orari della tua zona. L'extra-costo confronta col profilo piatto a parita' di energia totale.")
 
 # Footer
 
