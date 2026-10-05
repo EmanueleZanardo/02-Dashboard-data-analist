@@ -204,15 +204,15 @@ class TestRegistry:
                                 "lower", lambda: "")() == "tabs"):
                 titoli = [t.value for t in node.value.args[0].elts]
         assert titoli is not None
-        assert len(titoli) == 221
-        assert titoli[-1] == "⚡ Oneri di dispacciamento"
-        m = re.search(r"((?:tab\d+, )+tab221) = st\.tabs\(\[", src)
+        assert len(titoli) == 222
+        assert titoli[-1] == "💶 Oneri generali"
+        m = re.search(r"((?:tab\d+, )+tab222) = st.tabs\(\[", src)
         assert m is not None
         vars_tab = [v.strip() for v in m.group(1).split(",")]
-        assert len(vars_tab) == 221
+        assert len(vars_tab) == 222
         assert "tab214" in vars_tab
         withs = re.findall(r"^\s*with (tab\d+):", src, re.M)
-        assert len(withs) == len(vars_tab) == 221
+        assert len(withs) == len(vars_tab) == 222
         assert "tab215" in withs
         # key widget univoche della tab215
         keys = re.findall(r'key="(rob215_[^"]+)"', src)
