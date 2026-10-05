@@ -95,7 +95,15 @@
 
 # STATUS.md — 02-Dashboard-data-analist (Singularity Quant ETRM)
 
-**Ultimo aggiornamento: 04/10/2026 ~02:00 CEST**
+**Ultimo aggiornamento: 05/10/2026 ~02:00 CEST**
+
+## 05/10/2026 ~02:00 CEST — aggiornamento documentale giornaliero
+- **04/10 QA orario tutto il giorno:** tab190 (00:40) → tab217 (22:40) pushate via Contents API, suite pytest sempre verde (fino a 1154 passed / 0 failed). Nota: dopo mezzanotte "QA 05/10 00:40 — fix registry test 218→219" (`c7a45f9`, 01:28 CEST).
+- **04/10 09:20–09:37 — dashboard andata in sleep** (segnalazione con screenshot di Emanuele). Root cause: Streamlit Cloud usa Python 3.14 di default; pillow==10.4.0 non ha wheel e non compila → boot bloccato in "in the oven". Fix reale: impostato Python 3.12 dalle impostazioni dell'app su share.streamlit.io; app tornata su in ~1 min. `runtime.txt` pushato (60bb565) poi rimosso (b28700a) perché ignorato da Streamlit Cloud.
+- Cron `streamlit-keepalive-6h` aggiornato: rileva le nuove stringhe di sleep e sveglia via browser (il curl da solo non basta — falso negativo del controllo precedente).
+- **04/10 11:57–12:01 — APP_PASSWORD reimpostata via Streamlit Secrets** su richiesta di Emanuele (valore non registrato); app riavviata.
+- Blocco invariato: vecchia chiave ENTSO-E nella storia git ancora da ruotare (serve sua azione).
+
 
 ## 04/10/2026 ~02:00 CEST — aggiornamento documentale giornaliero
 - **03/10 00:17 — creato e abilitato job `streamlit-keepalive-6h`** su ordine di Emanuele ("non deve più accadere" lo sleep). Ping ogni 6h a `czpox8o8x6arnxw96txnvt.streamlit.app`: HTTP 303, nessun "waking up" tutto il giorno.
