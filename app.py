@@ -32585,6 +32585,150 @@ def d248_confronto_sconto(importo_euro, costo_ritardo_totale_euro,
     }
 
 
+def cnx249_quota_potenza(kw, tariffa_eur_kw):
+    """Quota potenza del contributo di allacciamento: kW impegnati x tariffa.
+
+    Ritorna potenza, tariffa applicata e importo arrotondato.
+    Tutto deterministico.
+    """
+    kw = float(kw)
+    tar = float(tariffa_eur_kw)
+    if kw <= 0:
+        raise ValueError("potenza impegnata non positiva")
+    if tar < 0:
+        raise ValueError("tariffa potenza negativa")
+    return {
+        "kw": round(kw, 2),
+        "tariffa_eur_kw": round(tar, 2),
+        "importo": round(kw * tar, 2),
+    }
+
+
+def cnx249_quota_distanza(metri, franchigia_m, tariffa_eur_m):
+    """Quota distanza del contributo di allacciamento: tariffa x metri oltre la
+    franchigia (se la rete esistente e' entro la franchigia la quota e' zero).
+
+    Ritorna metri, franchigia, metri fatturabili e importo arrotondato.
+    Tutto deterministico.
+    """
+    m = float(metri)
+    fr = float(franchigia_m)
+    tar = float(tariffa_eur_m)
+    if m < 0 or fr < 0:
+        raise ValueError("metri o franchigia negativi")
+    if tar < 0:
+        raise ValueError("tariffa distanza negativa")
+    m_fatt = max(0.0, m - fr)
+    return {
+        "metri": round(m, 1),
+        "franchigia_m": round(fr, 1),
+        "metri_fatturabili": round(m_fatt, 1),
+        "tariffa_eur_m": round(tar, 2),
+        "importo": round(m_fatt * tar, 2),
+    }
+
+
+def cnx249_preventivo(kw, metri, franchigia_m, tariffa_eur_kw, tariffa_eur_m,
+                      onere_amministrativo_eur=50.0, iva_pct=10.0):
+    """Preventivo di allacciamento completo: quota potenza + quota distanza +
+    onere amministrativo, con IVA sul totale.
+
+    Ritorna il dettaglio per voce, imponibile, IVA, totale e costo per kW.
+    Tutto deterministico.
+    """
+    qp = cnx249_quota_potenza(kw, tariffa_eur_kw)
+    qd = cnx249_quota_distanza(metri, franchigia_m, tariffa_eur_m)
+    onere = float(onere_amministrativo_eur)
+    iva = float(iva_pct)
+    if onere < 0:
+        raise ValueError("onere amministrativo negativo")
+    if iva < 0 or iva > 100:
+        raise ValueError("aliquota IVA non valida")
+    imponibile = round(qp["importo"] + qd["importo"] + onere, 2)
+    iva_eur = round(imponibile * iva / 100.0, 2)
+    totale = round(imponibile + iva_eur, 2)
+    return {
+        "quota_potenza": qp["importo"],
+        "quota_distanza": qd["importo"],
+        "metri_fatturabili": qd["metri_fatturabili"],
+        "onere_amministrativo": round(onere, 2),
+        "imponibile": imponibile,
+        "iva_pct": round(iva, 2),
+        "iva": iva_eur,
+        "totale": totale,
+        "costo_per_kw": round(totale / qp["kw"], 2),
+    }
+
+
+def cnx249_confronto_bt_mt(kw, metri, params_bt, params_mt,
+                           costo_cabina_mt_eur=0.0):
+    """Confronto contributo di allacciamento BT vs MT (cabina MT/BT a carico
+    del cliente nella MT: costo extra da sommare al preventivo MT).
+
+    params_bt/params_mt sono dict con franchigia_m, tariffa_eur_kw,
+    tariffa_eur_m, onere_amministrativo_eur, iva_pct.
+    Ritorna preventivi BT e MT, investimento MT (con cabina), differenza e
+    livello piu' economico. Tutto deterministico.
+    """
+    for p, nome in ((params_bt, "BT"), (params_mt, "MT")):
+        if not isinstance(p, dict):
+            raise ValueError(f"parametri {nome} non validi")
+        for k in ("franchigia_m", "tariffa_eur_kw", "tariffa_eur_m",
+                  "onere_amministrativo_eur", "iva_pct"):
+            if k not in p:
+                raise ValueError(f"parametri {nome}: manca {k}")
+    cab = float(costo_cabina_mt_eur)
+    if cab < 0:
+        raise ValueError("costo cabina negativo")
+    prev_bt = cnx249_preventivo(kw, metri, params_bt["franchigia_m"],
+                                params_bt["tariffa_eur_kw"],
+                                params_bt["tariffa_eur_m"],
+                                params_bt["onere_amministrativo_eur"],
+                                params_bt["iva_pct"])
+    prev_mt = cnx249_preventivo(kw, metri, params_mt["franchigia_m"],
+                                params_mt["tariffa_eur_kw"],
+                                params_mt["tariffa_eur_m"],
+                                params_mt["onere_amministrativo_eur"],
+                                params_mt["iva_pct"])
+    invest_mt = round(prev_mt["totale"] + cab, 2)
+    diff = round(invest_mt - prev_bt["totale"], 2)
+    return {
+        "preventivo_bt": prev_bt,
+        "preventivo_mt": prev_mt,
+        "cabina_mt": round(cab, 2),
+        "investimento_mt": invest_mt,
+        "differenza": diff,
+        "conveniente": "BT" if diff > 0 else "MT",
+    }
+
+
+def cnx249_sensibilita(kw_list, metri_list, franchigia_m, tariffa_eur_kw,
+                       tariffa_eur_m, onere_amministrativo_eur=50.0,
+                       iva_pct=10.0):
+    """Matrice del totale del preventivo (IVA inclusa) al variare di potenza
+    e distanza dalla rete: righe di dict {kw, metri, totale}.
+
+    Tutto deterministico.
+    """
+    kws = [float(x) for x in kw_list]
+    ms = [float(x) for x in metri_list]
+    if len(kws) < 2 or len(ms) < 2:
+        raise ValueError("servono almeno 2 potenze e 2 distanze")
+    if any(x <= 0 for x in kws):
+        raise ValueError("potenze non positive")
+    if any(x < 0 for x in ms):
+        raise ValueError("distanze negative")
+    righe = []
+    for kw in kws:
+        for m in ms:
+            tot = cnx249_preventivo(kw, m, franchigia_m, tariffa_eur_kw,
+                                    tariffa_eur_m, onere_amministrativo_eur,
+                                    iva_pct)["totale"]
+            righe.append({"kw": round(kw, 2), "metri": round(m, 1),
+                          "totale": tot})
+    return righe
+
+
 
 if workspace == _('ws1'):
     st.markdown(f"<h1>{_('ws1')}</h1>", unsafe_allow_html=True)
@@ -33227,7 +33371,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -55745,6 +55889,87 @@ elif workspace == _('ws8'):
             st.caption("Modello indicativo: D.Lgs. 231/2002 (tasso moratorio BCE + 8 pp, rimborso forfettario "
                        "spese di recupero minimo 40 \u20ac) per i rapporti tra imprese; tasso legale ex art. 1284 c.c. "
                        "per gli altri casi. Saggio BCE e tasso legale vanno aggiornati ai valori ufficiali del periodo.")
+
+    with tab249:
+        titolo249 = edu("Preventivo allacciamento", "Nuova connessione alla rete: il distributore addebita un contributo di allacciamento composto da quota potenza (euro per kW impegnato), quota distanza (euro per metro di rete oltre una franchigia) e onere amministrativo. Il tab stima il contributo, lo confronta tra bassa e media tensione e mostra la sensibilita' a potenza e distanza.")
+        st.markdown(f"<h1>\U0001F50C {titolo249}</h1>", unsafe_allow_html=True)
+        st.caption("Nuova connessione: quota potenza + quota distanza oltre franchigia + onere amministrativo, con IVA.")
+        banner_demo("preventivo sintetico (Mock): tariffe di default indicative e modificabili — per il valore ufficiale usare sempre il preventivo del distributore")
+        tensione249 = st.selectbox("Livello di tensione", ["BT (bassa tensione)", "MT (media tensione)"], key="t249_tensione",
+                                    help="La MT ha quota potenza/distanza diverse e richiede la cabina MT/BT a carico del cliente.")
+        default_bt = {"franchigia_m": 200.0, "tariffa_eur_kw": 70.0, "tariffa_eur_m": 10.0,
+                      "onere_amministrativo_eur": 50.0, "iva_pct": 10.0}
+        default_mt = {"franchigia_m": 300.0, "tariffa_eur_kw": 55.0, "tariffa_eur_m": 15.0,
+                      "onere_amministrativo_eur": 150.0, "iva_pct": 10.0}
+        c1_249, c2_249, c3_249 = st.columns(3)
+        kw249 = c1_249.number_input("Potenza impegnata (kW)", min_value=0.1, max_value=100000.0, value=15.0, step=1.0, key="t249_kw",
+                                    help="Potenza contrattualmente impegnata della nuova fornitura.")
+        metri249 = c2_249.number_input("Distanza dalla rete esistente (m)", min_value=0.0, max_value=50000.0, value=300.0, step=10.0, key="t249_metri",
+                                        help="Distanza tra il punto di consegna e la rete esistente del distributore.")
+        fr249 = c3_249.number_input("Franchigia (m)", min_value=0.0, max_value=50000.0, value=200.0, step=10.0, key="t249_franchigia",
+                                    help="Metri di rete coperti dalla quota potenza, non fatturati a parte.")
+        with st.expander("Tariffe e parametri (editabili)"):
+            e1_249, e2_249, e3_249, e4_249 = st.columns(4)
+            tk249 = e1_249.number_input("Tariffa potenza (\u20ac/kW)", min_value=0.0, value=70.0, step=1.0, key="t249_tar_kw")
+            tm249 = e2_249.number_input("Tariffa distanza (\u20ac/m)", min_value=0.0, value=10.0, step=0.5, key="t249_tar_m")
+            on249 = e3_249.number_input("Onere amministrativo (\u20ac)", min_value=0.0, value=50.0, step=5.0, key="t249_onere")
+            iv249 = e4_249.slider("IVA (%)", 0.0, 22.0, 10.0, 0.5, key="t249_iva")
+        prev249 = cnx249_preventivo(kw249, metri249, fr249, tk249, tm249, on249, iv249)
+        k1_249, k2_249, k3_249, k4_249, k5_249 = st.columns(5)
+        render_kpi("Quota potenza (\u20ac)", f"{prev249['quota_potenza']:,.2f}", k1_249)
+        render_kpi("Quota distanza (\u20ac)", f"{prev249['quota_distanza']:,.2f}", k2_249)
+        render_kpi("Imponibile (\u20ac)", f"{prev249['imponibile']:,.2f}", k3_249)
+        render_kpi("Totale IVA inclusa (\u20ac)", f"{prev249['totale']:,.2f}", k4_249)
+        render_kpi("Costo per kW (\u20ac/kW)", f"{prev249['costo_per_kw']:,.2f}", k5_249)
+        st.caption(f"Metri fatturati oltre la franchigia: **{prev249['metri_fatturabili']:,.0f} m** — Livello: **{tensione249}**")
+        righe249 = [{"Voce": "Quota potenza", "Importo (\u20ac)": prev249["quota_potenza"]},
+                    {"Voce": "Quota distanza", "Importo (\u20ac)": prev249["quota_distanza"]},
+                    {"Voce": "Onere amministrativo", "Importo (\u20ac)": prev249["onere_amministrativo"]},
+                    {"Voce": "IVA", "Importo (\u20ac)": prev249["iva"]}]
+        df249 = pd.DataFrame(righe249)
+        fig249 = px.bar(df249, x="Voce", y="Importo (\u20ac)",
+                        title="Composizione del contributo di allacciamento (\u20ac)",
+                        color="Voce", text_auto=".2f")
+        st.plotly_chart(fig249, use_container_width=True)
+        with st.expander("Confronto BT vs MT"):
+            st.caption("La media tensione richiede la cabina MT/BT (fornitura e posa a carico del cliente): sommarla al preventivo MT per il confronto corretto.")
+            cab249 = st.slider("Costo cabina MT/BT (\u20ac)", 0.0, 100000.0, 15000.0, 500.0, key="t249_cabina",
+                               help="Cabina di trasformazione MT/BT a carico del cliente (indicativo).")
+            bt249 = {"franchigia_m": fr249, "tariffa_eur_kw": tk249, "tariffa_eur_m": tm249,
+                     "onere_amministrativo_eur": on249, "iva_pct": iv249}
+            conf249 = cnx249_confronto_bt_mt(kw249, metri249, bt249, default_mt, cab249)
+            msg249 = (f"\U0001F4A1 Conviene la **BT**: preventivo {conf249['preventivo_bt']['totale']:,.2f} \u20ac vs investimento MT {conf249['investimento_mt']:,.2f} \u20ac (differenza {conf249['differenza']:,.2f} \u20ac)."
+                      if conf249["conveniente"] == "BT" else
+                      f"\U0001F4A1 Conviene la **MT**: investimento MT {conf249['investimento_mt']:,.2f} \u20ac vs preventivo BT {conf249['preventivo_bt']['totale']:,.2f} \u20ac (risparmio {abs(conf249['differenza']):,.2f} \u20ac).")
+            st.info(msg249)
+            dfc249 = pd.DataFrame([
+                {"Scenario": "Preventivo BT", "Euro": conf249["preventivo_bt"]["totale"]},
+                {"Scenario": "Preventivo MT", "Euro": conf249["preventivo_mt"]["totale"]},
+                {"Scenario": "Cabina MT/BT", "Euro": conf249["cabina_mt"]},
+            ])
+            figc249 = px.bar(dfc249, x="Scenario", y="Euro", text_auto=".2f",
+                             title="BT vs MT: investimento iniziale (\u20ac)", color="Scenario")
+            st.plotly_chart(figc249, use_container_width=True)
+        with st.expander("Sensibilita': totale al variare di potenza e distanza"):
+            kw_grid249 = [5.0, 10.0, 15.0, 30.0, 50.0]
+            m_grid249 = [100.0, 200.0, 300.0, 500.0, 1000.0]
+            z249 = [[cnx249_preventivo(kw, m, fr249, tk249, tm249, on249, iv249)["totale"]
+                     for m in m_grid249] for kw in kw_grid249]
+            fig_s249 = px.imshow(z249, x=[f"{m:,.0f} m" for m in m_grid249],
+                                 y=[f"{kw:,.0f} kW" for kw in kw_grid249],
+                                 labels=dict(x="Distanza dalla rete", y="Potenza impegnata", color="Totale \u20ac"),
+                                 title="Preventivo totale IVA inclusa (\u20ac) al variare di potenza e distanza",
+                                 text_auto=".0f", color_continuous_scale="Greens")
+            st.plotly_chart(fig_s249, use_container_width=True)
+            dfz249 = pd.DataFrame([{"Potenza (kW)": r["kw"], "Distanza (m)": r["metri"], "Totale (\u20ac)": r["totale"]}
+                                   for r in cnx249_sensibilita(kw_grid249, m_grid249, fr249, tk249, tm249, on249, iv249)])
+            st.download_button(
+                "Scarica CSV analisi",
+                data=dfz249.to_csv(index=False, sep=";").encode("utf-8"),
+                file_name="preventivo_allacciamento.csv",
+                mime="text/csv", key="t249_csv",
+                help="Griglia di sensibilita' del preventivo: potenza x distanza con franchigia e tariffe impostate.")
+            st.caption("Modello semplificato: quota potenza per kW impegnato + quota distanza per i metri oltre la franchigia + onere amministrativo, IVA sul totale. Tariffe di default INDICATIVE e modificabili: il valore ufficiale e' nel preventivo del distributore (struttura ARERA TIQE).")
 
 # Footer
 
