@@ -32031,7 +32031,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab234, tab239, tab235, tab233, tab240, tab238 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🧮 Concentrazione temporale (HHI)", "🎯 Score di timing", "📊 Probabilità sforamento budget", "🔍 Qualità dati (gap & outlier)", "🔁 Correlazione carico-prezzo", "💧 Waterfall del costo", "📋 Checklist gara fornitura", "🌙 Baseload notturno"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -52644,93 +52644,160 @@ elif workspace == _('ws8'):
                 help="Posizione, esposizione, volatilita', VaR standalone, Component VaR e contributo al rischio.")
             st.caption("Modello indicativo: correlazione uniforme tra tutte le coppie (semplificazione dichiarata), VaR parametrico normale, scaling temporale con radice quadrata. Per un desk reale usa la matrice di correlazione stimata sui rendimenti storici.")
 
-def hhi_index(cost_by_hour):
-    """Indice HHI sulle quote di costo orarie: somma(quote^2), in [1/N, 1].
 
-    1/N = costo perfettamente distribuito sulle N ore; 1 = tutto il costo
-    in una sola ora. Piu' e' alto, piu' la spesa e' concentrata in poche ore.
-    """
-    c = np.asarray(list(cost_by_hour), dtype=float)
-    c = c[np.isfinite(c) & (c > 0)]
-    if c.size == 0:
-        return float("nan")
-    tot = c.sum()
-    if tot <= 0:
-        return float("nan")
-    q = c / tot
-    return float((q ** 2).sum())
+    with tab231:
+        titolo_qd231 = edu("Qualit\u00e0 dati (gap & outlier)", "La QUALITA' DEI DATI della serie oraria decide se i KPI degli altri tab sono affidabili: le ORE MANCANTI (gap) falsano medie e curve di durata, gli OUTLIER (metodo IQR: fuori da [Q1-k*IQR, Q3+k*IQR]) segnalano valori estremi rispetto alla distribuzione, gli SPIKE (variazione % ora-su-ora oltre soglia) catturano i salti improvvisi di prezzo. Questo tab genera una serie sintetica con parametri regolabili (rumore, outlier e gap iniettati) oppure accetta un tuo CSV con colonne 'timestamp' e 'prezzo', e misura: % ore mancanti, numero outlier, gap piu' lungo, % ore anomale.")
+        st.markdown(f"<h1>\U0001F50D {titolo_qd231}</h1>", unsafe_allow_html=True)
+        st.caption("Rilevazione ore mancanti (gap), outlier con metodo IQR e spike di prezzo: KPI, grafico con anomalie evidenziate, export CSV delle anomalie.")
 
+        try:
+            import matplotlib as _mpl231
+            try:
+                _mpl231.use("Agg")
+            except Exception:
+                pass
+            import matplotlib.pyplot as _plt231
+            _mpl231_ok = True
+        except Exception:
+            _plt231 = None
+            _mpl231_ok = False
 
-def effective_hours(cost_by_hour):
-    """Numero effettivo di ore: 1 / somma(quote^2).
+        c231a, c231b, c231c = st.columns(3)
+        with c231a:
+            mod231 = st.radio("Origine dati", ["Serie sintetica", "Carica CSV"],
+                              key="t231_modalita", horizontal=True,
+                              help="Genera una serie oraria sintetica con anomalie iniettate, oppure carica il tuo CSV.")
+        with c231b:
+            k231 = st.slider("Fattore IQR (k)", min_value=0.5, max_value=3.0,
+                             value=1.5, step=0.1, key="t231_iqr_k",
+                             help="Ampiezza delle bande IQR: outlier se fuori da [Q1-k*IQR, Q3+k*IQR].")
+        with c231c:
+            soglia231 = st.slider("Soglia spike (% ora-su-ora)", min_value=10.0,
+                                   max_value=200.0, value=50.0, step=5.0,
+                                   key="t231_spike_soglia",
+                                   help="Spike se |variazione % rispetto all'ora precedente| supera la soglia.")
 
-    Se la spesa fosse uniforme su E ore, l'HHI sarebbe 1/E: E e' quindi il
-    numero di ore "equivalenti" in cui si concentra davvero il costo.
-    """
-    h = hhi_index(cost_by_hour)
-    if not np.isfinite(h) or h <= 0:
-        return float("nan")
-    return float(1.0 / h)
+        df231 = None
+        inj231 = []
+        if mod231 == "Serie sintetica":
+            p1, p2, p3, p4 = st.columns(4)
+            with p1:
+                n_ore231 = st.slider("Ore simulate", min_value=168, max_value=8760,
+                                      value=720, step=24, key="t231_ore")
+            with p2:
+                base231 = st.slider("Prezzo base (\u20ac/MWh)", min_value=20.0,
+                                     max_value=200.0, value=90.0, step=5.0, key="t231_base")
+            with p3:
+                rum231 = st.slider("Rumore \u03c3 (\u20ac/MWh)", min_value=0.0,
+                                    max_value=30.0, value=8.0, step=0.5, key="t231_rumore")
+            with p4:
+                seed231 = st.number_input("Seed", min_value=0, max_value=99999,
+                                           value=42, step=1, key="t231_seed")
+            q1, q2, q3, q4 = st.columns(4)
+            with q1:
+                n_out231 = st.slider("Outlier iniettati", min_value=0, max_value=50,
+                                      value=8, step=1, key="t231_outliers")
+            with q2:
+                amp231 = st.slider("Ampiezza outlier (\u20ac/MWh)", min_value=10.0,
+                                    max_value=200.0, value=60.0, step=5.0, key="t231_ampiezza")
+            with q3:
+                n_gap231 = st.slider("Gap iniettati", min_value=0, max_value=10,
+                                      value=3, step=1, key="t231_gap_n")
+            with q4:
+                max_gap231 = st.slider("Lunghezza max gap (ore)", min_value=1,
+                                        max_value=72, value=12, step=1, key="t231_gap_max")
+            df231, inj231 = dq231_genera_serie(int(n_ore231), float(base231),
+                                               float(rum231), int(n_out231),
+                                               float(amp231), int(n_gap231),
+                                               int(max_gap231), int(seed231))
+        else:
+            up231 = st.file_uploader("CSV con colonne 'timestamp' e 'prezzo'",
+                                      type=["csv"], key="t231_upload",
+                                      help="Prima colonna data/ora, seconda colonna prezzo (\u20ac/MWh).")
+            if up231 is not None:
+                try:
+                    _tmp231 = pd.read_csv(up231)
+                    _cols231 = {str(c).lower().strip(): c for c in _tmp231.columns}
+                    _tcol231 = _cols231.get("timestamp") or _cols231.get("datetime") or _cols231.get("data") or _tmp231.columns[0]
+                    _pcol231 = _cols231.get("prezzo") or _cols231.get("price") or _tmp231.columns[1]
+                    df231 = pd.DataFrame({
+                        "timestamp": pd.to_datetime(_tmp231[_tcol231]),
+                        "prezzo": pd.to_numeric(_tmp231[_pcol231], errors="coerce"),
+                    }).dropna().sort_values("timestamp").reset_index(drop=True)
+                except Exception as _e231:
+                    st.error(f"CSV non leggibile: {_e231}")
+            if df231 is None:
+                st.info("Carica un CSV per iniziare l'analisi.")
 
+        if df231 is not None and not df231.empty:
+            gaps231 = dq231_detect_gaps(df231)
+            out231 = dq231_detect_outliers_iqr(df231, k=float(k231))
+            spk231 = dq231_detect_spikes(df231, soglia_pct=float(soglia231))
+            sum231 = dq231_quality_summary(df231, gaps231, out231, spk231)
 
-def top_hours_share(cost_by_hour, k):
-    """Quota del costo totale concentrata nelle k ore piu' care (0..1)."""
-    c = np.asarray(list(cost_by_hour), dtype=float)
-    c = c[np.isfinite(c) & (c > 0)]
-    if c.size == 0:
-        return float("nan")
-    k = int(k)
-    if k <= 0:
-        return float("nan")
-    k = min(k, c.size)
-    return float(np.sort(c)[-k:].sum() / c.sum())
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("% ore mancanti", f"{sum231['pct_ore_mancanti']:.2f} %",
+                      help="Ore mancanti rispetto alla griglia oraria attesa.")
+            m2.metric("Outlier IQR", f"{sum231['n_outlier']}",
+                      help=f"Valori fuori da [{out231['soglia_bassa']:.1f}, {out231['soglia_alta']:.1f}] \u20ac/MWh (k={float(k231):.1f}).")
+            m3.metric("Gap pi\u00f9 lungo", f"{sum231['gap_piu_lungo_ore']} ore",
+                      help="Buco consecutivo piu' lungo nella serie.")
+            m4.metric("% ore anomale", f"{sum231['pct_ore_anomale']:.2f} %",
+                      help="Ore con outlier IQR o spike (unione, senza doppi conteggi).")
+            if inj231:
+                _trovati231 = sum(1 for t in inj231 if t in set(df231["timestamp"][out231["mask"]].tolist()))
+                st.caption(f"Outlier iniettati ritrovati dal metodo IQR: {_trovati231}/{len(inj231)} (recall serie sintetica).")
 
+            if _mpl231_ok:
+                fig231, ax231 = _plt231.subplots(figsize=(10, 4))
+                ax231.plot(df231["timestamp"], df231["prezzo"], lw=0.8, label="Prezzo (\u20ac/MWh)")
+                _mo231 = out231["mask"]
+                _ms231 = spk231["mask"]
+                if _mo231.any():
+                    ax231.scatter(df231["timestamp"][_mo231], df231["prezzo"][_mo231],
+                                  c="red", s=18, zorder=3, label=f"Outlier IQR ({out231['n_outlier']})")
+                if _ms231.any():
+                    ax231.scatter(df231["timestamp"][_ms231], df231["prezzo"][_ms231],
+                                  c="orange", marker="^", s=30, zorder=4, label=f"Spike ({spk231['n_spike']})")
+                for _g231 in gaps231:
+                    ax231.axvspan(_g231["inizio"], _g231["fine"] + pd.Timedelta(hours=1),
+                                  color="red", alpha=0.12)
+                ax231.set_xlabel("Data/ora")
+                ax231.set_ylabel("\u20ac/MWh")
+                ax231.legend(loc="best", fontsize=8)
+                fig231.tight_layout()
+                st.pyplot(fig231, use_container_width=True)
+                _plt231.close(fig231)
+            else:
+                st.warning("matplotlib non disponibile: grafico non disegnato.")
 
-def ore_per_copertura(cost_by_hour, soglia_pct=80.0):
-    """Quante ore (le piu' care) servono per coprire soglia_pct% del costo."""
-    df = cumulative_curve(cost_by_hour)
-    if df.empty:
-        return float("nan")
-    hit = df[df["costo_cumulato_pct"] >= float(soglia_pct)]
-    if hit.empty:
-        return float(len(df))
-    return float(hit["ora_rank"].iloc[0])
+            _righe231 = []
+            for _i231 in df231.index[out231["mask"]]:
+                _righe231.append({"timestamp": df231.loc[_i231, "timestamp"],
+                                   "prezzo_eur_mwh": round(float(df231.loc[_i231, "prezzo"]), 2),
+                                   "tipo": "outlier IQR", "variazione_pct": ""})
+            for _j231 in range(len(df231)):
+                if spk231["mask"][_j231]:
+                    _righe231.append({"timestamp": df231["timestamp"].iloc[_j231],
+                                       "prezzo_eur_mwh": round(float(df231["prezzo"].iloc[_j231]), 2),
+                                       "tipo": "spike",
+                                       "variazione_pct": round(float(spk231["variazioni_pct"][_j231]), 1)})
+            anom231 = pd.DataFrame(_righe231).sort_values("timestamp").reset_index(drop=True) if _righe231 else pd.DataFrame(columns=["timestamp", "prezzo_eur_mwh", "tipo", "variazione_pct"])
 
-
-def cumulative_curve(cost_by_hour):
-    """Curva cumulata del costo: ore ordinate per costo decrescente.
-
-    Ritorna DataFrame con colonne ora_rank, costo_eur, quota_costo,
-    costo_cumulato_pct.
-    """
-    c = np.asarray(list(cost_by_hour), dtype=float)
-    c = c[np.isfinite(c) & (c > 0)]
-    df = pd.DataFrame({"ora_rank": np.arange(1, c.size + 1),
-                       "costo_eur": np.sort(c)[::-1]})
-    if df.empty:
-        df["quota_costo"] = pd.Series(dtype=float)
-        df["costo_cumulato_pct"] = pd.Series(dtype=float)
-        return df
-    tot = float(df["costo_eur"].sum())
-    df["quota_costo"] = df["costo_eur"] / tot if tot > 0 else 0.0
-    df["costo_cumulato_pct"] = df["quota_costo"].cumsum() * 100.0
-    return df
-
-
-def genera_costi_orari_sintetici(n_ore, costo_base_eur, extra_picco_eur,
-                                 n_ore_picco, seed=7):
-    """Serie sintetica di costi orari: base gaussiana + picchi di prezzo."""
-    rng = np.random.default_rng(int(seed))
-    n_ore = max(int(n_ore), 24)
-    base = max(float(costo_base_eur), 0.0)
-    costi = rng.normal(loc=base, scale=max(base * 0.15, 1e-9), size=n_ore)
-    costi = np.clip(costi, max(base * 0.2, 1e-9), None)
-    n_pk = min(max(int(n_ore_picco), 0), n_ore)
-    if n_pk > 0 and float(extra_picco_eur) > 0:
-        idx = rng.choice(n_ore, size=n_pk, replace=False)
-        costi[idx] += rng.uniform(float(extra_picco_eur) * 0.5,
-                                  float(extra_picco_eur) * 1.5, size=n_pk)
-    return costi
+            st.subheader(f"Anomalie rilevate ({len(anom231)})")
+            if st.checkbox("Mostra tabella gap rilevati", value=bool(gaps231), key="t231_mostra_gap"):
+                if gaps231:
+                    st.dataframe(pd.DataFrame(gaps231), use_container_width=True, hide_index=True)
+                else:
+                    st.caption("Nessun gap: serie completa sulla griglia oraria.")
+            if st.checkbox("Mostra tabella anomalie", value=True, key="t231_mostra_tabella"):
+                st.dataframe(anom231, use_container_width=True, hide_index=True)
+            st.download_button("\u2b07\ufe0f Scarica anomalie (CSV)",
+                               anom231.to_csv(index=False).encode("utf-8"),
+                               file_name="anomalie_qualita_dati.csv",
+                               mime="text/csv", key="t231_csv",
+                               help="Tabella delle anomalie rilevate (outlier IQR + spike).")
+            st.caption(f"Soglie applicate: IQR k={float(k231):.1f} -> [{out231['soglia_bassa']:.1f}, {out231['soglia_alta']:.1f}] \u20ac/MWh; spike oltre {float(soglia231):.0f}% ora-su-ora. Serie: {sum231['ore_effettive']} ore effettive su {sum231['ore_attese']} attese.")
 
 
     with tab232:
@@ -52826,6 +52893,131 @@ def genera_costi_orari_sintetici(n_ore, costo_base_eur, extra_picco_eur,
             mime="text/csv", key="t232_csv",
             help="Rank ora, costo orario, quota di costo e percentuale cumulata (separatore ';').")
         st.caption("Modello indicativo su serie sintetica: HHI = somma(quote orarie^2); numero effettivo ore = 1/HHI. Con dati reali, alimenta le funzioni con i tuoi costi orari misurati.")
+
+
+    with tab233:
+        titolo_wf = edu("Waterfall del costo", "La bolletta non e' solo energia: tra perdite di rete, oneri di sistema, accise e IVA il prezzo finale puo' quasi raddoppiare. La waterfall mostra, componente dopo componente, come si costruisce il totale: ogni barra parte da dove finisce la precedente, fino al totale a destra.")
+        st.markdown(f"<h1>💧 {titolo_wf}</h1>", unsafe_allow_html=True)
+        st.caption("Scomponi il costo totale dell'energia in cascata: inserisci i valori delle componenti o usa un preset, e vedi come energia, perdite di rete, oneri di sistema, accise e IVA si sommano fino al totale.")
+        banner_demo("waterfall del costo: preset e valori inseriti manualmente (Mock)")
+        _PRESETS233 = {
+            "Domestico 2.700 kWh/anno": {"t233_kwh": 2700.0, "t233_energia": 540.0, "t233_perdite": 35.0, "t233_oneri": 120.0, "t233_accise": 61.29, "t233_iva": 75.63},
+            "PMI 50 MWh/anno": {"t233_kwh": 50000.0, "t233_energia": 6500.0, "t233_perdite": 320.0, "t233_oneri": 1100.0, "t233_accise": 625.0, "t233_iva": 1879.9},
+            "Industriale 1 GWh/anno": {"t233_kwh": 1000000.0, "t233_energia": 95000.0, "t233_perdite": 4200.0, "t233_oneri": 18000.0, "t233_accise": 12500.0, "t233_iva": 28534.0},
+        }
+        _p1, _p2, _p3 = st.columns([3, 2, 2])
+        with _p1:
+            _preset233 = st.selectbox("Preset di partenza", list(_PRESETS233.keys()), index=0, key="t233_preset",
+                                      help="Valori di esempio: dopo averli applicati puoi modificarli a mano.")
+        with _p2:
+            st.write("")
+            st.write("")
+            if st.button("Applica preset", key="t233_applica",
+                         help="Copia i valori del preset nei campi qui sotto."):
+                for _k233, _v233 in _PRESETS233[_preset233].items():
+                    st.session_state[_k233] = _v233
+        with _p3:
+            kwh233 = st.number_input("Consumo annuo (kWh)", min_value=0.0, value=2700.0,
+                                     step=100.0, key="t233_kwh",
+                                     help="Serve solo per calcolare il costo medio per kWh sul totale.")
+        _d0 = _PRESETS233["Domestico 2.700 kWh/anno"]
+        _c1, _c2, _c3, _c4, _c5 = st.columns(5)
+        with _c1:
+            energia233 = st.number_input("Energia (€/anno)", min_value=0.0, value=_d0["t233_energia"],
+                                         step=10.0, key="t233_energia",
+                                         help="Materia energia: prezzo per consumo.")
+        with _c2:
+            perdite233 = st.number_input("Perdite di rete (€/anno)", min_value=0.0, value=_d0["t233_perdite"],
+                                         step=5.0, key="t233_perdite",
+                                         help="Quota perdite di rete applicata in bolletta.")
+        with _c3:
+            oneri233 = st.number_input("Oneri di sistema (€/anno)", min_value=0.0, value=_d0["t233_oneri"],
+                                       step=10.0, key="t233_oneri",
+                                       help="Oneri generali di sistema (es. ASOS/ARIM).")
+        with _c4:
+            accise233 = st.number_input("Accise (€/anno)", min_value=0.0, value=_d0["t233_accise"],
+                                        step=5.0, key="t233_accise",
+                                        help="Accisa sull'energia elettrica: concorre anche alla base imponibile IVA.")
+        with _c5:
+            iva233 = st.number_input("IVA (€/anno)", min_value=0.0, value=_d0["t233_iva"],
+                                     step=5.0, key="t233_iva",
+                                     help="IVA sulla base imponibile (energia + perdite + oneri + accise).")
+        _comp233 = {"Energia": energia233, "Perdite di rete": perdite233,
+                    "Oneri di sistema": oneri233, "Accise": accise233, "IVA": iva233}
+        _dfw233 = build_waterfall(_comp233)
+        _tot233 = waterfall_total(_comp233)
+        _q233 = waterfall_quote_pct(_comp233)
+        _k1, _k2, _k3, _k4, _k5, _k6 = st.columns(6)
+        _labs233 = ["Energia", "Perdite di rete", "Oneri di sistema", "Accise", "IVA"]
+        _klist233 = [_k1, _k2, _k3, _k4, _k5]
+        for _i233, _lab233 in enumerate(_labs233):
+            _qv233 = float(_q233.loc[_q233["componente"] == _lab233, "quota_pct"].iloc[0])
+            _klist233[_i233].metric(_lab233, f"{_comp233[_lab233]:,.2f} €",
+                                    f"{_qv233:.1f}% del totale")
+        _k6.metric("TOTALE", f"{_tot233:,.2f} €",
+                   f"{_tot233 / kwh233:.4f} €/kWh" if kwh233 > 0 else "kWh = 0")
+        _fisco233 = oneri233 + accise233 + iva233
+        if _tot233 > 0 and _fisco233 / _tot233 >= 0.5:
+            st.warning(f"Carico fiscale e parafiscale (oneri + accise + IVA): {_fisco233:,.2f} €, pari al {_fisco233 / _tot233:.0%} del totale — piu' della meta' della bolletta non e' energia.")
+        elif _tot233 > 0:
+            st.info(f"Carico fiscale e parafiscale (oneri + accise + IVA): {_fisco233:,.2f} €, pari al {_fisco233 / _tot233:.0%} del totale.")
+        _o1, _o2 = st.columns(2)
+        with _o1:
+            _show_det233 = st.checkbox("Mostra tabella di dettaglio", value=True,
+                                       key="t233_mostra_dettaglio")
+        with _o2:
+            _show_q233 = st.checkbox("Mostra quote percentuali", value=False,
+                                     key="t233_mostra_quote")
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+            _mpl233 = True
+        except Exception:
+            _mpl233 = False
+        _nomi233 = list(_dfw233["componente"]) + ["TOTALE"]
+        _vals233 = list(_dfw233["valore_eur"]) + [_tot233]
+        if _mpl233:
+            _prev233 = [0.0] + list(_dfw233["cumulata_eur"].iloc[:-1])
+            _bots233 = _prev233 + [0.0]
+            _cols233 = ["#38bdf8" if _v >= 0 else "#f87171" for _v in _vals233[:-1]] + ["#fbbf24"]
+            _fig233, _ax233 = plt.subplots(figsize=(10, 4.6))
+            _bars233 = _ax233.bar(_nomi233, _vals233, bottom=_bots233, color=_cols233,
+                                  edgecolor="white", linewidth=0.8, width=0.6)
+            for _j233 in range(len(_dfw233)):
+                _yy233 = float(_dfw233["cumulata_eur"].iloc[_j233])
+                _ax233.plot([_j233 - 0.3, _j233 + 0.7], [_yy233, _yy233],
+                            color="#94a3b8", linestyle="--", linewidth=1)
+            _ax233.bar_label(_bars233, fmt="%.0f €", padding=3, fontsize=8)
+            _ax233.set_title("Waterfall del costo energetico (€/anno)", fontsize=12)
+            _ax233.set_ylabel("€")
+            _ax233.grid(axis="y", linestyle=":", alpha=0.5)
+            _ax233.set_axisbelow(True)
+            plt.setp(_ax233.get_xticklabels(), rotation=15, ha="right")
+            _fig233.tight_layout()
+            st.pyplot(_fig233, use_container_width=True, key="t233_chart_mpl")
+            plt.close(_fig233)
+        else:
+            _figp233 = go.Figure(go.Waterfall(
+                x=_nomi233, y=_vals233,
+                measure=["relative"] * len(_dfw233) + ["total"],
+                name="Costo"))
+            _figp233.update_layout(title="Waterfall del costo energetico (€/anno)",
+                                   yaxis_title="€", height=420,
+                                   margin=dict(l=40, r=20, t=50, b=40))
+            st.plotly_chart(_figp233, use_container_width=True, key="t233_chart_plotly")
+        if _show_det233:
+            st.dataframe(_dfw233, use_container_width=True, hide_index=True)
+        if _show_q233:
+            st.dataframe(_q233, use_container_width=True, hide_index=True)
+        st.download_button(
+            "Scarica CSV waterfall",
+            data=_dfw233.to_csv(index=False, sep=";").encode("utf-8"),
+            file_name="waterfall_costo.csv",
+            mime="text/csv", key="t233_csv",
+            help="Componenti, valori in eur e cumulata progressiva della waterfall.")
+        st.caption("Modello indicativo: la cascata somma le componenti nell'ordine di bolletta (energia → perdite → oneri → accise → IVA). L'IVA si applica sulla base imponibile che include le accise. I preset sono esempi, non tariffe reali.")
+
 
     with tab234:
         def t234_timing_score(prices, weights):
@@ -53005,420 +53197,6 @@ def genera_costi_orari_sintetici(n_ore, costo_base_eur, extra_picco_eur,
                 help="Ora, prezzo orario, profilo di carico, peso percentuale e costo orario.")
             st.caption("Metodologia: prezzi e profilo sono sintetici (curva a doppio picco + rumore con seed). Profilo ottimo = tutto il carico concentrato nell'ora piu' economica. Dati indicativi a scopo didattico.")
 
-def w239_simulate_annual_cost(monthly_costs, n_sim=10000, vol=0.10, seed=42):
-    """Monte Carlo del costo energetico annuo (EUR).
-
-    Per ogni simulazione campiona 12 mesi (bootstrap con reinserimento dai costi
-    mensili storici) e applica uno shock moltiplicativo N(0, vol^2) a ciascun mese.
-    Ritorna un array di n_sim costi annui simulati.
-    """
-    rng = np.random.default_rng(seed)
-    mc = np.asarray(list(monthly_costs), dtype=float)
-    mc = mc[np.isfinite(mc)]
-    if mc.size == 0:
-        raise ValueError("Costi mensili non validi.")
-    draws = rng.choice(mc, size=(int(n_sim), 12), replace=True)
-    noise = 1.0 + float(vol) * rng.standard_normal(size=(int(n_sim), 12))
-    return np.maximum(draws * noise, 0.0).sum(axis=1)
-
-
-def w239_breach_prob(sims, budget):
-    """P(costo annuo simulato > budget)."""
-    s = np.asarray(list(sims), dtype=float)
-    if s.size == 0:
-        raise ValueError("Nessuna simulazione.")
-    return float(np.mean(s > float(budget)))
-
-
-def w239_expected_cost(sims):
-    """Costo annuo atteso (media delle simulazioni)."""
-    s = np.asarray(list(sims), dtype=float)
-    return float(np.mean(s))
-
-
-def w239_safety_budget(sims, conf=0.95):
-    """Budget di sicurezza: quantile `conf` della distribuzione del costo annuo."""
-    s = np.asarray(list(sims), dtype=float)
-    return float(np.quantile(s, float(conf)))
-
-
-def w239_var_cost(sims, conf=0.95):
-    """VaR del costo: stesso quantile del safety budget (perdita massima attesa col livello di confidenza)."""
-    return w239_safety_budget(sims, conf=conf)
-
-
-def w239_csv_simulazioni(sims):
-    """Restituisce il CSV delle simulazioni come stringa."""
-    import io as _io
-    import csv as _csv
-    buf = _io.StringIO()
-    w = _csv.writer(buf, lineterminator="\n")
-    w.writerow(["simulazione", "costo_annuo_eur"])
-    for i, v in enumerate(np.asarray(list(sims), dtype=float), start=1):
-        w.writerow([i, f"{v:.2f}"])
-    return buf.getvalue()
-
-
-    with tab239:
-        titolo_psb = edu("Probabilità sforamento budget", "Il BUDGET annuo e' un tetto secco, ma il costo energetico e' una variabile aleatoria: P(SFORAMENTO) = frazione delle simulazioni in cui il costo annuo supera il budget. Il COSTO ATTESO e' la media della distribuzione simulata, il VaR 95% e' la soglia che il costo supera solo nel 5% dei casi, il BUDGET DI SICUREZZA e' il budget che dovresti fissare per essere coperto al 95%: se il tuo budget e' sotto il VaR 95%, lo sforamento non e' sfortuna ma aritmetica.")
-        st.markdown(f"<h1>\U0001F4CA {titolo_psb}</h1>", unsafe_allow_html=True)
-        st.caption("Monte Carlo sul costo annuo: bootstrap dai costi mensili storici + shock di volatilita'. Quante simulazioni superano il budget?")
-        mesi239 = ["Gen", "Feb", "Mar", "Apr", "Mag", "Giu", "Lug", "Ago", "Set", "Ott", "Nov", "Dic"]
-        _def_m239 = [12000.0, 11000.0, 10500.0, 9000.0, 8000.0, 8500.0,
-                     9500.0, 9000.0, 8500.0, 9500.0, 10500.0, 11500.0]
-        i1, i2, i3, i4, i5 = st.columns(5)
-        with i1:
-            budget239 = st.number_input("Budget annuo (eur)", min_value=0.0,
-                                        value=120000.0, step=5000.0,
-                                        key="t239_budget",
-                                        help="Tetto di spesa annua da non sforare.")
-        with i2:
-            nsim239 = st.number_input("N. simulazioni", min_value=1000, max_value=200000,
-                                     value=20000, step=1000, key="t239_nsim",
-                                     help="Piu' simulazioni = stima piu' stabile (20.000 e' un buon default).")
-        with i3:
-            vol239 = st.slider("Volatilita' mensile (%)", min_value=0.0, max_value=60.0,
-                               value=10.0, step=1.0, key="t239_vol",
-                               help="Incertezza sui singoli mesi: shock moltiplicativo N(0, vol^2).")
-        with i4:
-            seed239 = st.number_input("Seed (riproducibilita')", min_value=0, max_value=999999,
-                                      value=42, step=1, key="t239_seed")
-        with i5:
-            conf239 = st.selectbox("Confidenza", [0.90, 0.95, 0.99], index=1,
-                                   key="t239_conf",
-                                   format_func=lambda x: f"{x:.0%}",
-                                   help="Livello di confidenza per VaR e budget di sicurezza.")
-        st.markdown("**Costi mensili storici (eur/mese)**")
-        if st.button("Carica preset sintetici", key="t239_preset",
-                     help="Riempi i 12 mesi con un profilo stagionale sintetico."):
-            for _k239, _v239 in enumerate(_def_m239):
-                st.session_state[f"t239_m_{_k239}"] = float(_v239)
-        cols239 = st.columns(4)
-        costi239 = []
-        for _k239 in range(12):
-            with cols239[_k239 % 4]:
-                costi239.append(st.number_input(mesi239[_k239], min_value=0.0,
-                                                value=float(_def_m239[_k239]),
-                                                step=500.0, key=f"t239_m_{_k239}"))
-        esegui239 = st.button("Esegui simulazione", type="primary", key="t239_calcola")
-        if esegui239 or "t239_sims" in st.session_state:
-            if esegui239:
-                try:
-                    sims239 = w239_simulate_annual_cost(costi239, n_sim=int(nsim239),
-                                                       vol=vol239 / 100.0, seed=int(seed239))
-                    st.session_state["t239_sims"] = sims239
-                except ValueError as _e239:
-                    st.error(str(_e239))
-                    st.session_state.pop("t239_sims", None)
-                    sims239 = None
-            else:
-                sims239 = st.session_state["t239_sims"]
-            if sims239 is not None:
-                p239 = w239_breach_prob(sims239, budget239)
-                att239 = w239_expected_cost(sims239)
-                var239 = w239_var_cost(sims239, conf239)
-                safe239 = w239_safety_budget(sims239, conf239)
-                m1, m2, m3, m4 = st.columns(4)
-                m1.metric("P(sforamento)", f"{p239:.1%}",
-                          help="Frazione delle simulazioni col costo annuo sopra il budget.")
-                m2.metric("Costo atteso", f"{att239:,.0f} eur",
-                          help="Media delle simulazioni Monte Carlo.")
-                m3.metric(f"VaR {conf239:.0%} del costo", f"{var239:,.0f} eur",
-                          help=f"Soglia superata solo nel {(1-conf239):.0%} delle simulazioni.")
-                m4.metric(f"Budget di sicurezza ({conf239:.0%})", f"{safe239:,.0f} eur",
-                          help=f"Budget che copre il costo nel {conf239:.0%} dei casi.")
-                if p239 >= 0.5:
-                    st.warning(f"P(sforamento) = {p239:.1%}: il budget e' troppo stretto, piu' della meta' degli scenari lo supera.")
-                elif p239 <= 0.05:
-                    st.success(f"P(sforamento) = {p239:.1%}: budget prudente, margine di sicurezza adeguato.")
-                else:
-                    st.info(f"P(sforamento) = {p239:.1%}: rischio moderato, valuta un cuscinetto fino a {safe239:,.0f} eur.")
-                if st.checkbox("Mostra istogramma distribuzione", value=True, key="t239_mostra_hist"):
-                    fig239 = go.Figure()
-                    fig239.add_trace(go.Histogram(x=np.asarray(sims239), nbinsx=60,
-                                                  name="Simulazioni",
-                                                  marker_color="#2e86de", opacity=0.75))
-                    fig239.add_vline(x=float(budget239), line_dash="dash", line_color="#e74c3c",
-                                     annotation_text=f"Budget ({float(budget239):,.0f} eur)")
-                    fig239.add_vline(x=var239, line_dash="dot", line_color="#f39c12",
-                                     annotation_text=f"VaR {conf239:.0%} ({var239:,.0f} eur)")
-                    fig239.update_layout(title="Distribuzione simulata del costo annuo",
-                                         xaxis_title="Costo annuo (eur)", yaxis_title="Frequenza",
-                                         height=380)
-                    st.plotly_chart(fig239, use_container_width=True, key="t239_chart")
-                st.download_button("Scarica CSV simulazioni",
-                                     data=w239_csv_simulazioni(sims239),
-                                     file_name="w239_simulazioni_costo_annuo.csv",
-                                     mime="text/csv", key="t239_csv",
-                                     help="Una riga per simulazione: costo annuo in eur.")
-
-    with tab231:
-        titolo_qd231 = edu("Qualit\u00e0 dati (gap & outlier)", "La QUALITA' DEI DATI della serie oraria decide se i KPI degli altri tab sono affidabili: le ORE MANCANTI (gap) falsano medie e curve di durata, gli OUTLIER (metodo IQR: fuori da [Q1-k*IQR, Q3+k*IQR]) segnalano valori estremi rispetto alla distribuzione, gli SPIKE (variazione % ora-su-ora oltre soglia) catturano i salti improvvisi di prezzo. Questo tab genera una serie sintetica con parametri regolabili (rumore, outlier e gap iniettati) oppure accetta un tuo CSV con colonne 'timestamp' e 'prezzo', e misura: % ore mancanti, numero outlier, gap piu' lungo, % ore anomale.")
-        st.markdown(f"<h1>\U0001F50D {titolo_qd231}</h1>", unsafe_allow_html=True)
-        st.caption("Rilevazione ore mancanti (gap), outlier con metodo IQR e spike di prezzo: KPI, grafico con anomalie evidenziate, export CSV delle anomalie.")
-
-        try:
-            import matplotlib as _mpl231
-            try:
-                _mpl231.use("Agg")
-            except Exception:
-                pass
-            import matplotlib.pyplot as _plt231
-            _mpl231_ok = True
-        except Exception:
-            _plt231 = None
-            _mpl231_ok = False
-
-        c231a, c231b, c231c = st.columns(3)
-        with c231a:
-            mod231 = st.radio("Origine dati", ["Serie sintetica", "Carica CSV"],
-                              key="t231_modalita", horizontal=True,
-                              help="Genera una serie oraria sintetica con anomalie iniettate, oppure carica il tuo CSV.")
-        with c231b:
-            k231 = st.slider("Fattore IQR (k)", min_value=0.5, max_value=3.0,
-                             value=1.5, step=0.1, key="t231_iqr_k",
-                             help="Ampiezza delle bande IQR: outlier se fuori da [Q1-k*IQR, Q3+k*IQR].")
-        with c231c:
-            soglia231 = st.slider("Soglia spike (% ora-su-ora)", min_value=10.0,
-                                   max_value=200.0, value=50.0, step=5.0,
-                                   key="t231_spike_soglia",
-                                   help="Spike se |variazione % rispetto all'ora precedente| supera la soglia.")
-
-        df231 = None
-        inj231 = []
-        if mod231 == "Serie sintetica":
-            p1, p2, p3, p4 = st.columns(4)
-            with p1:
-                n_ore231 = st.slider("Ore simulate", min_value=168, max_value=8760,
-                                      value=720, step=24, key="t231_ore")
-            with p2:
-                base231 = st.slider("Prezzo base (\u20ac/MWh)", min_value=20.0,
-                                     max_value=200.0, value=90.0, step=5.0, key="t231_base")
-            with p3:
-                rum231 = st.slider("Rumore \u03c3 (\u20ac/MWh)", min_value=0.0,
-                                    max_value=30.0, value=8.0, step=0.5, key="t231_rumore")
-            with p4:
-                seed231 = st.number_input("Seed", min_value=0, max_value=99999,
-                                           value=42, step=1, key="t231_seed")
-            q1, q2, q3, q4 = st.columns(4)
-            with q1:
-                n_out231 = st.slider("Outlier iniettati", min_value=0, max_value=50,
-                                      value=8, step=1, key="t231_outliers")
-            with q2:
-                amp231 = st.slider("Ampiezza outlier (\u20ac/MWh)", min_value=10.0,
-                                    max_value=200.0, value=60.0, step=5.0, key="t231_ampiezza")
-            with q3:
-                n_gap231 = st.slider("Gap iniettati", min_value=0, max_value=10,
-                                      value=3, step=1, key="t231_gap_n")
-            with q4:
-                max_gap231 = st.slider("Lunghezza max gap (ore)", min_value=1,
-                                        max_value=72, value=12, step=1, key="t231_gap_max")
-            df231, inj231 = dq231_genera_serie(int(n_ore231), float(base231),
-                                               float(rum231), int(n_out231),
-                                               float(amp231), int(n_gap231),
-                                               int(max_gap231), int(seed231))
-        else:
-            up231 = st.file_uploader("CSV con colonne 'timestamp' e 'prezzo'",
-                                      type=["csv"], key="t231_upload",
-                                      help="Prima colonna data/ora, seconda colonna prezzo (\u20ac/MWh).")
-            if up231 is not None:
-                try:
-                    _tmp231 = pd.read_csv(up231)
-                    _cols231 = {str(c).lower().strip(): c for c in _tmp231.columns}
-                    _tcol231 = _cols231.get("timestamp") or _cols231.get("datetime") or _cols231.get("data") or _tmp231.columns[0]
-                    _pcol231 = _cols231.get("prezzo") or _cols231.get("price") or _tmp231.columns[1]
-                    df231 = pd.DataFrame({
-                        "timestamp": pd.to_datetime(_tmp231[_tcol231]),
-                        "prezzo": pd.to_numeric(_tmp231[_pcol231], errors="coerce"),
-                    }).dropna().sort_values("timestamp").reset_index(drop=True)
-                except Exception as _e231:
-                    st.error(f"CSV non leggibile: {_e231}")
-            if df231 is None:
-                st.info("Carica un CSV per iniziare l'analisi.")
-
-        if df231 is not None and not df231.empty:
-            gaps231 = dq231_detect_gaps(df231)
-            out231 = dq231_detect_outliers_iqr(df231, k=float(k231))
-            spk231 = dq231_detect_spikes(df231, soglia_pct=float(soglia231))
-            sum231 = dq231_quality_summary(df231, gaps231, out231, spk231)
-
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("% ore mancanti", f"{sum231['pct_ore_mancanti']:.2f} %",
-                      help="Ore mancanti rispetto alla griglia oraria attesa.")
-            m2.metric("Outlier IQR", f"{sum231['n_outlier']}",
-                      help=f"Valori fuori da [{out231['soglia_bassa']:.1f}, {out231['soglia_alta']:.1f}] \u20ac/MWh (k={float(k231):.1f}).")
-            m3.metric("Gap pi\u00f9 lungo", f"{sum231['gap_piu_lungo_ore']} ore",
-                      help="Buco consecutivo piu' lungo nella serie.")
-            m4.metric("% ore anomale", f"{sum231['pct_ore_anomale']:.2f} %",
-                      help="Ore con outlier IQR o spike (unione, senza doppi conteggi).")
-            if inj231:
-                _trovati231 = sum(1 for t in inj231 if t in set(df231["timestamp"][out231["mask"]].tolist()))
-                st.caption(f"Outlier iniettati ritrovati dal metodo IQR: {_trovati231}/{len(inj231)} (recall serie sintetica).")
-
-            if _mpl231_ok:
-                fig231, ax231 = _plt231.subplots(figsize=(10, 4))
-                ax231.plot(df231["timestamp"], df231["prezzo"], lw=0.8, label="Prezzo (\u20ac/MWh)")
-                _mo231 = out231["mask"]
-                _ms231 = spk231["mask"]
-                if _mo231.any():
-                    ax231.scatter(df231["timestamp"][_mo231], df231["prezzo"][_mo231],
-                                  c="red", s=18, zorder=3, label=f"Outlier IQR ({out231['n_outlier']})")
-                if _ms231.any():
-                    ax231.scatter(df231["timestamp"][_ms231], df231["prezzo"][_ms231],
-                                  c="orange", marker="^", s=30, zorder=4, label=f"Spike ({spk231['n_spike']})")
-                for _g231 in gaps231:
-                    ax231.axvspan(_g231["inizio"], _g231["fine"] + pd.Timedelta(hours=1),
-                                  color="red", alpha=0.12)
-                ax231.set_xlabel("Data/ora")
-                ax231.set_ylabel("\u20ac/MWh")
-                ax231.legend(loc="best", fontsize=8)
-                fig231.tight_layout()
-                st.pyplot(fig231, use_container_width=True)
-                _plt231.close(fig231)
-            else:
-                st.warning("matplotlib non disponibile: grafico non disegnato.")
-
-            _righe231 = []
-            for _i231 in df231.index[out231["mask"]]:
-                _righe231.append({"timestamp": df231.loc[_i231, "timestamp"],
-                                   "prezzo_eur_mwh": round(float(df231.loc[_i231, "prezzo"]), 2),
-                                   "tipo": "outlier IQR", "variazione_pct": ""})
-            for _j231 in range(len(df231)):
-                if spk231["mask"][_j231]:
-                    _righe231.append({"timestamp": df231["timestamp"].iloc[_j231],
-                                       "prezzo_eur_mwh": round(float(df231["prezzo"].iloc[_j231]), 2),
-                                       "tipo": "spike",
-                                       "variazione_pct": round(float(spk231["variazioni_pct"][_j231]), 1)})
-            anom231 = pd.DataFrame(_righe231).sort_values("timestamp").reset_index(drop=True) if _righe231 else pd.DataFrame(columns=["timestamp", "prezzo_eur_mwh", "tipo", "variazione_pct"])
-
-            st.subheader(f"Anomalie rilevate ({len(anom231)})")
-            if st.checkbox("Mostra tabella gap rilevati", value=bool(gaps231), key="t231_mostra_gap"):
-                if gaps231:
-                    st.dataframe(pd.DataFrame(gaps231), use_container_width=True, hide_index=True)
-                else:
-                    st.caption("Nessun gap: serie completa sulla griglia oraria.")
-            if st.checkbox("Mostra tabella anomalie", value=True, key="t231_mostra_tabella"):
-                st.dataframe(anom231, use_container_width=True, hide_index=True)
-            st.download_button("\u2b07\ufe0f Scarica anomalie (CSV)",
-                               anom231.to_csv(index=False).encode("utf-8"),
-                               file_name="anomalie_qualita_dati.csv",
-                               mime="text/csv", key="t231_csv",
-                               help="Tabella delle anomalie rilevate (outlier IQR + spike).")
-            st.caption(f"Soglie applicate: IQR k={float(k231):.1f} -> [{out231['soglia_bassa']:.1f}, {out231['soglia_alta']:.1f}] \u20ac/MWh; spike oltre {float(soglia231):.0f}% ora-su-ora. Serie: {sum231['ore_effettive']} ore effettive su {sum231['ore_attese']} attese.")
-
-# ===========================================================================
-# W235 (05/10/2026) - tab235 "Correlazione carico-prezzo"
-# Funzioni pure: nessuna chiamata streamlit, solo numpy. Testate via appfuncs.
-# ===========================================================================
-
-def profilo_carico_sintetico_t235(ore=24, base_kw=50.0, picco_kw=150.0,
-                                  ora_picco=12.0, larghezza_picco=3.0,
-                                  rumore_pct=0.0, seed=235):
-    """Profilo di carico sintetico (kW): base + picco gaussiano + rumore."""
-    n = int(ore)
-    t = np.arange(n, dtype=float)
-    w = max(float(larghezza_picco), 0.5)
-    profilo = float(base_kw) + (float(picco_kw) - float(base_kw)) * np.exp(
-        -0.5 * ((t - float(ora_picco)) / w) ** 2)
-    if float(rumore_pct) > 0.0:
-        rng = np.random.default_rng(int(seed))
-        profilo = profilo * (1.0 + rng.normal(0.0, float(rumore_pct) / 100.0, size=n))
-    return np.maximum(profilo, 0.0)
-
-
-def profilo_prezzo_sintetico_t235(ore=24, base_eur_mwh=80.0, picco_eur_mwh=250.0,
-                                   ora_picco=18.0, larghezza_picco=2.0,
-                                   rumore_pct=0.0, seed=236):
-    """Profilo di prezzo sintetico (eur/MWh): base + picco serale + rumore."""
-    n = int(ore)
-    t = np.arange(n, dtype=float)
-    w = max(float(larghezza_picco), 0.5)
-    profilo = float(base_eur_mwh) + (float(picco_eur_mwh) - float(base_eur_mwh)) * np.exp(
-        -0.5 * ((t - float(ora_picco)) / w) ** 2
-    )
-    if float(rumore_pct) > 0.0:
-        rng = np.random.default_rng(int(seed))
-        profilo = profilo * (1.0 + rng.normal(0.0, float(rumore_pct) / 100.0, size=n))
-    return np.maximum(profilo, 0.5)
-
-
-def load_price_corr(load_kw, prezzo_eur_mwh, top_n=4):
-    """Correlazione tra profilo di carico (kW orari) e prezzo orario (eur/MWh).
-
-    Ritorna un dict con:
-      r_pearson, r_spearman: correlazione lineare / di rango [-1, 1]
-      costo_effettivo_eur: somma(carico_kWh * prezzo) sul periodo
-      costo_scorrelato_eur: stesso consumo totale ma profilo piatto
-        (nessuna concomitanza carico-prezzo)
-      extra_costo_vs_scorrelato_eur: differenza (positivo = paghi di piu'
-        perche' consumi nelle ore care)
-      ore_top_concomitanti: ore tra le top_n di carico E le top_n di prezzo
-    """
-    try:
-        load = np.asarray(load_kw, dtype=float).ravel()
-        prezzo = np.asarray(prezzo_eur_mwh, dtype=float).ravel()
-    except (ValueError, TypeError):
-        return {"valido": False, "errore": "Input non numerici."}
-    if load.size != prezzo.size:
-        return {"valido": False, "errore": "Carico e prezzo devono avere la stessa lunghezza."}
-    n = int(load.size)
-    if n < 3:
-        return {"valido": False, "errore": "Servono almeno 3 osservazioni orarie."}
-    if bool(np.isnan(load).any()) or bool(np.isnan(prezzo).any()):
-        return {"valido": False, "errore": "Valori mancanti (NaN) nelle serie."}
-    # Pearson e ranghi medi calcolati a mano (funzione autocontenuta: niente scipy)
-    def _pearson(x, y):
-        xc = x - x.mean()
-        yc = y - y.mean()
-        den = float(np.sqrt(float((xc ** 2).sum()) * float((yc ** 2).sum())))
-        if den <= 0.0:
-            return 0.0
-        return max(-1.0, min(1.0, float((xc * yc).sum() / den)))
-
-    def _ranghi(a):
-        order = np.argsort(a, kind="mergesort")
-        ranks = np.empty(int(a.size), dtype=float)
-        i, nn = 0, int(a.size)
-        while i < nn:
-            j = i
-            while j + 1 < nn and a[order[j + 1]] == a[order[i]]:
-                j += 1
-            ranks[order[i:j + 1]] = (i + j) / 2.0 + 1.0
-            i = j + 1
-        return ranks
-
-    r_p = _pearson(load, prezzo)
-    r_s = _pearson(_ranghi(load), _ranghi(prezzo))
-    costo_effettivo = float(np.sum(load * prezzo) / 1000.0)
-    costo_scorrelato = float(load.mean() * prezzo.sum() / 1000.0)
-    extra = costo_effettivo - costo_scorrelato
-    k = max(1, min(int(top_n), n))
-    idx_l = set(np.argsort(load)[-k:].tolist())
-    idx_p = set(np.argsort(prezzo)[-k:].tolist())
-    concomitanti = len(idx_l & idx_p)
-    if r_p >= 0.5:
-        verdetto = ("Profilo SFORTUNATO: il carico e' concentrato nelle ore piu' care. "
-                    "Spostare consumi fuori picco riduce il costo.")
-    elif r_p <= -0.5:
-        verdetto = ("Profilo FORTUNATO: il carico e' concentrato nelle ore piu' economiche. "
-                    "Il profilo lavora a favore del prezzo.")
-    else:
-        verdetto = ("Profilo NEUTRO: nessuna correlazione forte tra carico e prezzo "
-                    "(|r di Pearson| < 0,5).")
-    return {
-        "valido": True,
-        "errore": "",
-        "n": n,
-        "r_pearson": r_p,
-        "r_spearman": r_s,
-        "costo_effettivo_eur": costo_effettivo,
-        "costo_scorrelato_eur": costo_scorrelato,
-        "extra_costo_vs_scorrelato_eur": extra,
-        "ore_top_concomitanti": concomitanti,
-        "top_n": k,
-        "verdetto": verdetto,
-    }
-
 
     with tab235:
         titolo235 = edu("Correlazione carico-prezzo",
@@ -53547,174 +53325,309 @@ def load_price_corr(load_kw, prezzo_eur_mwh, top_n=4):
             st.caption("Serie sintetiche a scopo didattico: per decisioni reali usa il tuo profilo di carico misurato e i prezzi orari della tua zona. L'extra-costo confronta col profilo piatto a parita' di energia totale.")
 
 
-    with tab233:
-        titolo_wf = edu("Waterfall del costo", "La bolletta non e' solo energia: tra perdite di rete, oneri di sistema, accise e IVA il prezzo finale puo' quasi raddoppiare. La waterfall mostra, componente dopo componente, come si costruisce il totale: ogni barra parte da dove finisce la precedente, fino al totale a destra.")
-        st.markdown(f"<h1>💧 {titolo_wf}</h1>", unsafe_allow_html=True)
-        st.caption("Scomponi il costo totale dell'energia in cascata: inserisci i valori delle componenti o usa un preset, e vedi come energia, perdite di rete, oneri di sistema, accise e IVA si sommano fino al totale.")
-        banner_demo("waterfall del costo: preset e valori inseriti manualmente (Mock)")
-        _PRESETS233 = {
-            "Domestico 2.700 kWh/anno": {"t233_kwh": 2700.0, "t233_energia": 540.0, "t233_perdite": 35.0, "t233_oneri": 120.0, "t233_accise": 61.29, "t233_iva": 75.63},
-            "PMI 50 MWh/anno": {"t233_kwh": 50000.0, "t233_energia": 6500.0, "t233_perdite": 320.0, "t233_oneri": 1100.0, "t233_accise": 625.0, "t233_iva": 1879.9},
-            "Industriale 1 GWh/anno": {"t233_kwh": 1000000.0, "t233_energia": 95000.0, "t233_perdite": 4200.0, "t233_oneri": 18000.0, "t233_accise": 12500.0, "t233_iva": 28534.0},
-        }
-        _p1, _p2, _p3 = st.columns([3, 2, 2])
-        with _p1:
-            _preset233 = st.selectbox("Preset di partenza", list(_PRESETS233.keys()), index=0, key="t233_preset",
-                                      help="Valori di esempio: dopo averli applicati puoi modificarli a mano.")
-        with _p2:
-            st.write("")
-            st.write("")
-            if st.button("Applica preset", key="t233_applica",
-                         help="Copia i valori del preset nei campi qui sotto."):
-                for _k233, _v233 in _PRESETS233[_preset233].items():
-                    st.session_state[_k233] = _v233
-        with _p3:
-            kwh233 = st.number_input("Consumo annuo (kWh)", min_value=0.0, value=2700.0,
-                                     step=100.0, key="t233_kwh",
-                                     help="Serve solo per calcolare il costo medio per kWh sul totale.")
-        _d0 = _PRESETS233["Domestico 2.700 kWh/anno"]
-        _c1, _c2, _c3, _c4, _c5 = st.columns(5)
-        with _c1:
-            energia233 = st.number_input("Energia (€/anno)", min_value=0.0, value=_d0["t233_energia"],
-                                         step=10.0, key="t233_energia",
-                                         help="Materia energia: prezzo per consumo.")
-        with _c2:
-            perdite233 = st.number_input("Perdite di rete (€/anno)", min_value=0.0, value=_d0["t233_perdite"],
-                                         step=5.0, key="t233_perdite",
-                                         help="Quota perdite di rete applicata in bolletta.")
-        with _c3:
-            oneri233 = st.number_input("Oneri di sistema (€/anno)", min_value=0.0, value=_d0["t233_oneri"],
-                                       step=10.0, key="t233_oneri",
-                                       help="Oneri generali di sistema (es. ASOS/ARIM).")
-        with _c4:
-            accise233 = st.number_input("Accise (€/anno)", min_value=0.0, value=_d0["t233_accise"],
-                                        step=5.0, key="t233_accise",
-                                        help="Accisa sull'energia elettrica: concorre anche alla base imponibile IVA.")
-        with _c5:
-            iva233 = st.number_input("IVA (€/anno)", min_value=0.0, value=_d0["t233_iva"],
-                                     step=5.0, key="t233_iva",
-                                     help="IVA sulla base imponibile (energia + perdite + oneri + accise).")
-        _comp233 = {"Energia": energia233, "Perdite di rete": perdite233,
-                    "Oneri di sistema": oneri233, "Accise": accise233, "IVA": iva233}
-        _dfw233 = build_waterfall(_comp233)
-        _tot233 = waterfall_total(_comp233)
-        _q233 = waterfall_quote_pct(_comp233)
-        _k1, _k2, _k3, _k4, _k5, _k6 = st.columns(6)
-        _labs233 = ["Energia", "Perdite di rete", "Oneri di sistema", "Accise", "IVA"]
-        _klist233 = [_k1, _k2, _k3, _k4, _k5]
-        for _i233, _lab233 in enumerate(_labs233):
-            _qv233 = float(_q233.loc[_q233["componente"] == _lab233, "quota_pct"].iloc[0])
-            _klist233[_i233].metric(_lab233, f"{_comp233[_lab233]:,.2f} €",
-                                    f"{_qv233:.1f}% del totale")
-        _k6.metric("TOTALE", f"{_tot233:,.2f} €",
-                   f"{_tot233 / kwh233:.4f} €/kWh" if kwh233 > 0 else "kWh = 0")
-        _fisco233 = oneri233 + accise233 + iva233
-        if _tot233 > 0 and _fisco233 / _tot233 >= 0.5:
-            st.warning(f"Carico fiscale e parafiscale (oneri + accise + IVA): {_fisco233:,.2f} €, pari al {_fisco233 / _tot233:.0%} del totale — piu' della meta' della bolletta non e' energia.")
-        elif _tot233 > 0:
-            st.info(f"Carico fiscale e parafiscale (oneri + accise + IVA): {_fisco233:,.2f} €, pari al {_fisco233 / _tot233:.0%} del totale.")
-        _o1, _o2 = st.columns(2)
-        with _o1:
-            _show_det233 = st.checkbox("Mostra tabella di dettaglio", value=True,
-                                       key="t233_mostra_dettaglio")
-        with _o2:
-            _show_q233 = st.checkbox("Mostra quote percentuali", value=False,
-                                     key="t233_mostra_quote")
-        try:
-            import matplotlib
-            matplotlib.use("Agg")
-            import matplotlib.pyplot as plt
-            _mpl233 = True
-        except Exception:
-            _mpl233 = False
-        _nomi233 = list(_dfw233["componente"]) + ["TOTALE"]
-        _vals233 = list(_dfw233["valore_eur"]) + [_tot233]
-        if _mpl233:
-            _prev233 = [0.0] + list(_dfw233["cumulata_eur"].iloc[:-1])
-            _bots233 = _prev233 + [0.0]
-            _cols233 = ["#38bdf8" if _v >= 0 else "#f87171" for _v in _vals233[:-1]] + ["#fbbf24"]
-            _fig233, _ax233 = plt.subplots(figsize=(10, 4.6))
-            _bars233 = _ax233.bar(_nomi233, _vals233, bottom=_bots233, color=_cols233,
-                                  edgecolor="white", linewidth=0.8, width=0.6)
-            for _j233 in range(len(_dfw233)):
-                _yy233 = float(_dfw233["cumulata_eur"].iloc[_j233])
-                _ax233.plot([_j233 - 0.3, _j233 + 0.7], [_yy233, _yy233],
-                            color="#94a3b8", linestyle="--", linewidth=1)
-            _ax233.bar_label(_bars233, fmt="%.0f €", padding=3, fontsize=8)
-            _ax233.set_title("Waterfall del costo energetico (€/anno)", fontsize=12)
-            _ax233.set_ylabel("€")
-            _ax233.grid(axis="y", linestyle=":", alpha=0.5)
-            _ax233.set_axisbelow(True)
-            plt.setp(_ax233.get_xticklabels(), rotation=15, ha="right")
-            _fig233.tight_layout()
-            st.pyplot(_fig233, use_container_width=True, key="t233_chart_mpl")
-            plt.close(_fig233)
-        else:
-            _figp233 = go.Figure(go.Waterfall(
-                x=_nomi233, y=_vals233,
-                measure=["relative"] * len(_dfw233) + ["total"],
-                name="Costo"))
-            _figp233.update_layout(title="Waterfall del costo energetico (€/anno)",
-                                   yaxis_title="€", height=420,
-                                   margin=dict(l=40, r=20, t=50, b=40))
-            st.plotly_chart(_figp233, use_container_width=True, key="t233_chart_plotly")
-        if _show_det233:
-            st.dataframe(_dfw233, use_container_width=True, hide_index=True)
-        if _show_q233:
-            st.dataframe(_q233, use_container_width=True, hide_index=True)
-        st.download_button(
-            "Scarica CSV waterfall",
-            data=_dfw233.to_csv(index=False, sep=";").encode("utf-8"),
-            file_name="waterfall_costo.csv",
-            mime="text/csv", key="t233_csv",
-            help="Componenti, valori in eur e cumulata progressiva della waterfall.")
-        st.caption("Modello indicativo: la cascata somma le componenti nell'ordine di bolletta (energia → perdite → oneri → accise → IVA). L'IVA si applica sulla base imponibile che include le accise. I preset sono esempi, non tariffe reali.")
+    with tab236:
+        titolo_cr = edu("Curva di carico residua", "Il CARICO RESIDUO e' cio' che resta da prelevare dalla rete dopo l'autoconsumo fotovoltaico: carico meno produzione FV, ora per ora. La CURVA DI DURATA ordina le 8760 ore dell'anno dalla piu' deficitaria alla piu' eccedentaria: la parte sotto lo zero e' il surplus immesso in rete. Piu' l'area di surplus e' grande, piu' conviene spostare consumi nelle ore di sole o aggiungere accumulo.")
+        st.markdown(f"<h1>📊 {titolo_cr}</h1>", unsafe_allow_html=True)
+        st.caption("Carico netto dopo FV: curva di durata, ore di surplus, autoconsumo e picco residuo.")
+        base236 = st.slider("Baseload (kW)", min_value=0.0, max_value=50.0, value=8.0, step=0.5, key="t236_base")
+        pm236 = st.slider("Picco mattina (kW)", min_value=0.0, max_value=50.0, value=12.0, step=0.5, key="t236_pm")
+        opm236 = st.slider("Ora picco mattina", min_value=5, max_value=11, value=8, step=1, key="t236_opm")
+        ps236 = st.slider("Picco sera (kW)", min_value=0.0, max_value=50.0, value=18.0, step=0.5, key="t236_ps")
+        ops236 = st.slider("Ora picco sera", min_value=17, max_value=22, value=19, step=1, key="t236_ops")
+        kwp236 = st.slider("Potenza FV (kWp)", min_value=0.0, max_value=100.0, value=30.0, step=1.0, key="t236_kwp")
+        opfv236 = st.slider("Ora picco FV", min_value=11, max_value=15, value=13, step=1, key="t236_opfv")
+        nuv236 = st.slider("Fattore nuvolosita' (0=sereno)", min_value=0.0, max_value=0.8, value=0.15, step=0.05, key="t236_nuv")
+        seed236 = st.number_input("Seed rumore", min_value=0, max_value=9999, value=7, step=1, key="t236_seed")
+        giorni236 = st.slider("Giorni simulati", min_value=30, max_value=365, value=365, step=5, key="t236_giorni")
+        tab236_show = st.checkbox("Mostra tabella oraria (giorno tipo)", value=False, key="t236_show")
+        import numpy as _np236
+        _rng236 = _np236.random.default_rng(int(seed236))
+        _prof236 = clc236_profilo_giornaliero(base236, pm236, int(opm236), ps236, int(ops236))
+        _fv236 = clc236_fv_giornaliero(kwp236, int(opfv236), float(nuv236))
+        _carico236, _fvfull236 = [], []
+        for _g in range(int(giorni236)):
+            _rumore_c = _rng236.normal(0, 0.03, 24)
+            _rumore_f = _rng236.normal(0, 0.05, 24)
+            for _h in range(24):
+                _carico236.append(max(0.0, _prof236[_h] * (1 + _rumore_c[_h])))
+                _fvfull236.append(max(0.0, _fv236[_h] * (1 + _rumore_f[_h])))
+        _kpi236 = clc236_kpi_anno(_carico236, _fvfull236)
+        _res236 = clc236_carico_residuo(_carico236, _fvfull236)
+        _dur236 = clc236_duration_curve(_res236)
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Ore di surplus / anno", f"{_kpi236['ore_surplus']:,}".replace(",", "."), key="t236_m1")
+        c1.metric("Energia surplus (kWh/anno)", f"{_kpi236['energia_surplus_kwh']:,.0f}".replace(",", "."), key="t236_m2")
+        c2.metric("Autoconsumo FV", f"{_kpi236['autoconsumo_pct']:.1f} %", key="t236_m3")
+        c2.metric("Energia residua da rete (kWh/anno)", f"{_kpi236['energia_residua_kwh']:,.0f}".replace(",", "."), key="t236_m4")
+        c3.metric("Picco residuo (kW)", f"{_kpi236['picco_residuo_kw']:.1f}", key="t236_m5")
+        c3.metric("Picco lordo (kW)", f"{_kpi236['picco_lordo_kw']:.1f}", key="t236_m6")
+        import matplotlib.pyplot as _plt236
+        _fig236, _ax236 = _plt236.subplots(figsize=(9, 4))
+        _x236 = _np236.arange(len(_dur236))
+        _ax236.plot(_x236, _dur236, color="#1f77b4", lw=1.2, label="Carico residuo")
+        _ax236.fill_between(_x236, _dur236, 0, where=(_dur236 < 0), color="#2ca02c", alpha=0.35, label="Surplus (immissione)")
+        _ax236.fill_between(_x236, _dur236, 0, where=(_dur236 >= 0), color="#d62728", alpha=0.25, label="Prelievo da rete")
+        _ax236.axhline(0, color="black", lw=0.8)
+        _ax236.set_xlabel("Ore ordinate (durata)")
+        _ax236.set_ylabel("kW residui")
+        _ax236.set_title("Curva di durata del carico residuo")
+        _ax236.legend()
+        _fig236.tight_layout()
+        st.pyplot(_fig236, key="t236_fig")
+        if tab236_show:
+            import pandas as _pd236
+            _df236 = _pd236.DataFrame({"ora": range(24), "carico_kw": [round(x, 2) for x in _prof236], "fv_kw": [round(x, 2) for x in _fv236]})
+            st.dataframe(_df236, key="t236_df")
+        import pandas as _pd236b
+        _csv236 = _pd236b.DataFrame({"rank_ora": _np236.arange(1, len(_dur236) + 1), "kw_residui": _np236.round(_dur236, 3)}).to_csv(index=False, sep=";")
+        st.download_button("Scarica CSV curva di durata", data=_csv236.encode("utf-8"), file_name="curva_carico_residuo.csv", mime="text/csv", key="t236_csv",
+                           help="Rank ora e kW residui ordinati in senso decrescente.")
+        st.caption("Modello indicativo su profili sintetici: il surplus cresce con i kWp e cala se i consumi si concentrano nelle ore di sole.")
+
+    with tab237:
+        titolo_fi = edu("Flessibilita' implicita", "La FLESSIBILITA' IMPLICITA e' il risparmio che ottieni spostando i consumi dalle ore care a quelle economiche, senza cambiare quanto consumi in totale. Il modello prende una quota delle ore piu' care (default 10%) e calcola quanto risparmieresti spostandone una parte nelle ore piu' economiche: e' il valore economico della flessibilita' che hai gia' in casa, prima di comprare batterie o automazione.")
+        st.markdown(f"<h1>⚡ {titolo_fi}</h1>", unsafe_allow_html=True)
+        st.caption("Quanto vale spostare i consumi dalle ore care a quelle economiche, a parita' di energia totale.")
+        base237 = st.slider("Baseload (kW)", min_value=0.0, max_value=50.0, value=6.0, step=0.5, key="t237_base")
+        picco237 = st.slider("Picco di carico (kW)", min_value=0.0, max_value=50.0, value=15.0, step=0.5, key="t237_picco")
+        orap237 = st.slider("Ora picco carico", min_value=6, max_value=22, value=19, step=1, key="t237_orap")
+        pbase237 = st.slider("Prezzo base (eur/MWh)", min_value=20.0, max_value=150.0, value=70.0, step=1.0, key="t237_pbase")
+        pamp237 = st.slider("Ampiezza picco prezzo (eur/MWh)", min_value=0.0, max_value=150.0, value=60.0, step=1.0, key="t237_pamp")
+        orapp237 = st.slider("Ora picco prezzo", min_value=6, max_value=22, value=18, step=1, key="t237_orapp")
+        quota237 = st.slider("Quota ore care da attaccare (%)", min_value=5, max_value=30, value=10, step=1, key="t237_quota")
+        shift237 = st.slider("Quota spostabile del carico (%)", min_value=10, max_value=90, value=50, step=5, key="t237_shift")
+        seed237 = st.number_input("Seed", min_value=0, max_value=9999, value=3, step=1, key="t237_seed")
+        giorni237 = st.slider("Giorni simulati", min_value=30, max_value=365, value=365, step=5, key="t237_giorni")
+        tab237_show = st.checkbox("Mostra tabella ore top/bottom (giorno tipo)", value=False, key="t237_show")
+        _load237, _price237 = [], []
+        for _g in range(int(giorni237)):
+            _load237 += flx237_profilo_sintetico(base237, picco237, int(orap237), seed=int(seed237) + _g)
+            _price237 += flx237_prezzo_sintetico(pbase237, pamp237, int(orapp237), seed=int(seed237) + 1000 + _g)
+        _res237 = flx237_shifting_saving(_load237, _price237, pct_shift=float(shift237) / 100.0, quota_top=float(quota237) / 100.0)
+        _top237, _bot237 = flx237_top_bottom(_load237[:24], _price237[:24], quota_top=float(quota237) / 100.0)
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Risparmio annuo stimato", f"{_res237['risparmio_eur']:,.0f} €".replace(",", "."), key="t237_m1")
+        c1.metric("In % del costo base", f"{_res237['risparmio_pct']:.1f} %", key="t237_m2")
+        c2.metric("Energia spostabile (kWh/anno)", f"{_res237['energia_spostabile_kwh']:,.0f}".replace(",", "."), key="t237_m3")
+        c2.metric("Costo base annuo", f"{_res237['costo_base_eur']:,.0f} €".replace(",", "."), key="t237_m4")
+        c3.metric("Prezzo medio ore care", f"{_res237['prezzo_medio_top']:.0f} €/MWh", key="t237_m5")
+        c3.metric("Prezzo medio ore economiche", f"{_res237['prezzo_medio_bottom']:.0f} €/MWh", key="t237_m6")
+        import numpy as _np237
+        import matplotlib.pyplot as _plt237
+        _fig237, (_a1, _a2) = _plt237.subplots(2, 1, figsize=(9, 6), sharex=True)
+        _h237 = _np237.arange(24)
+        _a1.bar(_h237, _np237.array(_load237[:24]), color="#1f77b4", alpha=0.8)
+        _a1.bar(_top237, _np237.array(_load237[:24])[_top237], color="#d62728", alpha=0.9, label="Ore care (da spostare)")
+        _a1.set_ylabel("kW")
+        _a1.set_title("Carico giorno tipo: ore care evidenziate")
+        _a1.legend()
+        _a2.step(_h237, _price237[:24], where="mid", color="#ff7f0e", lw=1.5)
+        _a2.set_xlabel("Ora")
+        _a2.set_ylabel("€/MWh")
+        _a2.set_title("Prezzo giorno tipo")
+        _fig237.tight_layout()
+        st.pyplot(_fig237, key="t237_fig")
+        if tab237_show:
+            import pandas as _pd237
+            _df237 = _pd237.DataFrame({"ora": range(24), "carico_kw": _load237[:24], "prezzo_eur_mwh": _price237[:24],
+                                       "fascia": ["cara" if i in _top237 else ("economica" if i in _bot237 else "media") for i in range(24)]})
+            st.dataframe(_df237, key="t237_df")
+        import io as _io237, csv as _csv237
+        _buf237 = _io237.StringIO()
+        _w237 = _csv237.writer(_buf237, delimiter=";")
+        _w237.writerow(["giorno", "ora", "carico_kw", "prezzo_eur_mwh"])
+        for _i, (_l, _p) in enumerate(zip(_load237, _price237)):
+            _w237.writerow([_i // 24, _i % 24, f"{_l:.3f}", f"{_p:.2f}"])
+        st.download_button("Scarica CSV serie orarie", data=_buf237.getvalue().encode("utf-8"), file_name="flessibilita_implicita.csv", mime="text/csv", key="t237_csv",
+                           help="Giorno, ora, carico in kW, prezzo in eur/MWh.")
+        st.caption("Modello indicativo: lo shifting e' istantaneo e senza perdite; nella realta' vincoli di processo e comfort riducono la quota spostabile.")
+
+    with tab238:
+        titolo_bn = edu("Baseload notturno", "Il BASELOAD NOTTURNO e' il carico minimo che resta acceso tra le 22 e le 6: luci di sicurezza, server, stand-by, frigoriferi. Il CARICO FANTASMA (ghost load) e' il minimo mai spento: ogni kW fantasma costa 8.760 kWh all'anno. La QUOTA NOTTURNA e' la frazione di energia consumata di notte sul totale giornaliero; il RAPPORTO NOTTE/GIORNO confronta i prezzi medi delle due fasce.")
+        st.markdown(f"<h1>🌙 {titolo_bn}</h1>", unsafe_allow_html=True)
+        st.caption("Quota di consumi tra le 22 e le 6, costo della quota notturna, rapporto prezzo notte/giorno e stima del carico fantasma mai spento.")
+        banner_demo("baseload notturno: profilo di carico e prezzi sintetici")
+        st.subheader("Profilo sintetico del carico")
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            base238 = st.slider("Baseload diurno/notturno (kW)", min_value=0.0, max_value=50.0,
+                                value=8.0, step=0.5, key="t238_base_kw",
+                                help="Carico sempre acceso: stand-by, server, sicurezza.")
+        with c2:
+            picco238 = st.slider("Picco diurno (kW)", min_value=0.0, max_value=200.0,
+                                 value=60.0, step=1.0, key="t238_picco_kw",
+                                 help="Ampiezza della gaussiana diurna sopra il baseload.")
+        with c3:
+            orapicco238 = st.slider("Ora del picco", min_value=8, max_value=20,
+                                    value=12, step=1, key="t238_ora_picco",
+                                    help="Ora del massimo diurno (centro della gaussiana).")
+        with c4:
+            serale238 = st.slider("Coda serale (frazione del picco)", min_value=0.0, max_value=1.0,
+                                  value=0.35, step=0.05, key="t238_fattore_serale",
+                                  help="Attivita' serale attorno alle 20: frazione del picco diurno.")
+        d1, d2, d3, d4 = st.columns(4)
+        with d1:
+            pg238 = st.number_input("Prezzo giorno (eur/MWh)", min_value=0.0, max_value=1000.0,
+                                    value=110.0, step=1.0, key="t238_prezzo_giorno",
+                                    help="Prezzo medio applicato alle ore fuori dalla fascia notturna.")
+        with d2:
+            pn238 = st.number_input("Prezzo notte (eur/MWh)", min_value=0.0, max_value=1000.0,
+                                    value=78.0, step=1.0, key="t238_prezzo_notte",
+                                    help="Prezzo medio applicato alla fascia notturna.")
+        with d3:
+            ini238 = st.selectbox("Inizio fascia notturna", [20, 21, 22, 23], index=2,
+                                  key="t238_inizio_notte",
+                                  help="Prima ora della fascia notturna (inclusa).")
+        with d4:
+            fin238 = st.selectbox("Fine fascia notturna", [5, 6, 7], index=1,
+                                  key="t238_fine_notte",
+                                  help="Ultima ora della fascia notturna (inclusa).")
+        ore_notte238 = list(range(int(ini238), 24)) + list(range(0, int(fin238) + 1))
+        prof238 = profilo_sintetico238(float(base238), float(picco238), float(orapicco238), float(serale238))
+        prezzi238 = [float(pn238) if h in set(ore_notte238) else float(pg238) for h in range(24)]
+        ris238 = night_share238(prof238, prezzi238, ore_notte238)
+        ghost238 = ghost_load238(prof238, ore_notte238)
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("% consumi notturni", f"{ris238['quota']:.1%}",
+                  help="Energia consumata in fascia notturna sul totale giornaliero.")
+        k2.metric("Costo notturno", f"{ris238['costo_notte']:,.2f} eur",
+                  help="Spesa giornaliera attribuita alle ore notturne.")
+        k3.metric("Rapporto prezzo notte/giorno", f"{ris238['rapporto']:.2f}",
+                  help="Prezzo medio notturno diviso prezzo medio diurno: <1 = notte piu' economica.")
+        k4.metric("Baseload minimo (fantasma)", f"{ghost238:.1f} kW",
+                  help="Minimo notturno mai spento: ogni kW fantasma = 8.760 kWh/anno.")
+        j1, j2, j3 = st.columns(3)
+        j1.metric("Energia notturna", f"{ris238['energia_notte_kwh']:,.0f} kWh/giorno")
+        j2.metric("Costo diurno", f"{ris238['costo_giorno']:,.2f} eur/giorno")
+        j3.metric("Costo annuo fantasma", f"{ghost238 * 8760.0 * ((ris238['prezzo_medio_notte'] + ris238['prezzo_medio_giorno']) / 2.0) / 1000.0:,.0f} eur",
+                  help="Stima: carico fantasma x 8.760 h x prezzo medio annuo.")
+        import matplotlib.pyplot as plt
+        fig238, ax238 = plt.subplots(figsize=(10, 4))
+        ax238.plot(range(24), prof238, marker="o", linewidth=2, label="Carico (kW)")
+        ax238.axvspan(int(ini238) - 0.5, 23.5, color="#1a237e", alpha=0.12, label="Fascia notturna")
+        ax238.axvspan(-0.5, int(fin238) + 0.5, color="#1a237e", alpha=0.12)
+        mostra_ghost238 = st.checkbox("Mostra linea carico fantasma", value=True, key="t238_mostra_fantasma")
+        if mostra_ghost238:
+            ax238.axhline(ghost238, color="red", linestyle="--", linewidth=1.5,
+                          label=f"Carico fantasma {ghost238:.1f} kW")
+        ax238.set_xlim(-0.5, 23.5)
+        ax238.set_xticks(range(24))
+        ax238.set_xlabel("Ora")
+        ax238.set_ylabel("kW")
+        ax238.set_title("Profilo giornaliero 24h con fascia notturna evidenziata")
+        ax238.grid(alpha=0.3)
+        ax238.legend()
+        st.pyplot(fig238)
+        if st.checkbox("Mostra tabella oraria", value=False, key="t238_tabella"):
+            df238 = pd.DataFrame({
+                "Ora": list(range(24)),
+                "Carico_kW": prof238,
+                "Fascia": ["notte" if h in set(ore_notte238) else "giorno" for h in range(24)],
+                "Prezzo_eur_MWh": prezzi238,
+                "Costo_eur": [round(prof238[h] * prezzi238[h] / 1000.0, 4) for h in range(24)],
+            })
+            st.dataframe(df238, use_container_width=True, hide_index=True)
+            st.download_button(
+                "Scarica CSV profilo notturno",
+                data=df238.to_csv(index=False, sep=";").encode("utf-8"),
+                file_name="baseload_notturno.csv",
+                mime="text/csv", key="t238_csv",
+                help="Ora, carico, fascia, prezzo e costo orario del profilo sintetico.")
+        st.caption("Modello indicativo su profilo sintetico: la quota notturna dipende da baseload e coda serale; il carico fantasma e' il minimo della fascia notturna. Per dati reali sostituire il profilo sintetico con la serie misurata.")
 
 
-
-def checklist_score(items):
-    """Score ponderato di una offerta.
-    items: list di (voce, peso_pct, score) con score in [0, 5].
-    Ritorna dict(totale_ponderato, dettaglio, somma_pesi, pesi_validi).
-    """
-    dettaglio = []
-    somma_pesi = 0.0
-    accumulo = 0.0
-    for voce, peso, score in items:
-        try:
-            p = float(peso)
-            s = float(score)
-        except (TypeError, ValueError):
-            p, s = 0.0, 0.0
-        s = max(0.0, min(5.0, s))
-        p = max(0.0, p)
-        somma_pesi += p
-        accumulo += p * s
-        dettaglio.append({"Voce": voce, "Peso (%)": round(p, 1),
-                          "Punteggio": round(s, 1),
-                          "Ponderato": round(p * s, 2)})
-    totale = accumulo / somma_pesi if somma_pesi > 0 else 0.0
-    return {"totale_ponderato": round(totale, 3),
-            "dettaglio": dettaglio,
-            "somma_pesi": round(somma_pesi, 1),
-            "pesi_validi": 0 < somma_pesi <= 100}
-
-
-def rank_offers(offerte):
-    """Classifica fino a 3 offerte. offerte: list di (nome, items).
-    Ritorna lista di dict ordinata per score decrescente."""
-    righe = []
-    for nome, items in offerte:
-        ris = checklist_score(items)
-        righe.append({"offerta": nome,
-                      "score": ris["totale_ponderato"],
-                      "dettaglio": ris["dettaglio"],
-                      "somma_pesi": ris["somma_pesi"]})
-    righe.sort(key=lambda r: r["score"], reverse=True)
-    for i, r in enumerate(righe, start=1):
-        r["posizione"] = i
-    return righe
-
+    with tab239:
+        titolo_psb = edu("Probabilità sforamento budget", "Il BUDGET annuo e' un tetto secco, ma il costo energetico e' una variabile aleatoria: P(SFORAMENTO) = frazione delle simulazioni in cui il costo annuo supera il budget. Il COSTO ATTESO e' la media della distribuzione simulata, il VaR 95% e' la soglia che il costo supera solo nel 5% dei casi, il BUDGET DI SICUREZZA e' il budget che dovresti fissare per essere coperto al 95%: se il tuo budget e' sotto il VaR 95%, lo sforamento non e' sfortuna ma aritmetica.")
+        st.markdown(f"<h1>\U0001F4CA {titolo_psb}</h1>", unsafe_allow_html=True)
+        st.caption("Monte Carlo sul costo annuo: bootstrap dai costi mensili storici + shock di volatilita'. Quante simulazioni superano il budget?")
+        mesi239 = ["Gen", "Feb", "Mar", "Apr", "Mag", "Giu", "Lug", "Ago", "Set", "Ott", "Nov", "Dic"]
+        _def_m239 = [12000.0, 11000.0, 10500.0, 9000.0, 8000.0, 8500.0,
+                     9500.0, 9000.0, 8500.0, 9500.0, 10500.0, 11500.0]
+        i1, i2, i3, i4, i5 = st.columns(5)
+        with i1:
+            budget239 = st.number_input("Budget annuo (eur)", min_value=0.0,
+                                        value=120000.0, step=5000.0,
+                                        key="t239_budget",
+                                        help="Tetto di spesa annua da non sforare.")
+        with i2:
+            nsim239 = st.number_input("N. simulazioni", min_value=1000, max_value=200000,
+                                     value=20000, step=1000, key="t239_nsim",
+                                     help="Piu' simulazioni = stima piu' stabile (20.000 e' un buon default).")
+        with i3:
+            vol239 = st.slider("Volatilita' mensile (%)", min_value=0.0, max_value=60.0,
+                               value=10.0, step=1.0, key="t239_vol",
+                               help="Incertezza sui singoli mesi: shock moltiplicativo N(0, vol^2).")
+        with i4:
+            seed239 = st.number_input("Seed (riproducibilita')", min_value=0, max_value=999999,
+                                      value=42, step=1, key="t239_seed")
+        with i5:
+            conf239 = st.selectbox("Confidenza", [0.90, 0.95, 0.99], index=1,
+                                   key="t239_conf",
+                                   format_func=lambda x: f"{x:.0%}",
+                                   help="Livello di confidenza per VaR e budget di sicurezza.")
+        st.markdown("**Costi mensili storici (eur/mese)**")
+        if st.button("Carica preset sintetici", key="t239_preset",
+                     help="Riempi i 12 mesi con un profilo stagionale sintetico."):
+            for _k239, _v239 in enumerate(_def_m239):
+                st.session_state[f"t239_m_{_k239}"] = float(_v239)
+        cols239 = st.columns(4)
+        costi239 = []
+        for _k239 in range(12):
+            with cols239[_k239 % 4]:
+                costi239.append(st.number_input(mesi239[_k239], min_value=0.0,
+                                                value=float(_def_m239[_k239]),
+                                                step=500.0, key=f"t239_m_{_k239}"))
+        esegui239 = st.button("Esegui simulazione", type="primary", key="t239_calcola")
+        if esegui239 or "t239_sims" in st.session_state:
+            if esegui239:
+                try:
+                    sims239 = w239_simulate_annual_cost(costi239, n_sim=int(nsim239),
+                                                       vol=vol239 / 100.0, seed=int(seed239))
+                    st.session_state["t239_sims"] = sims239
+                except ValueError as _e239:
+                    st.error(str(_e239))
+                    st.session_state.pop("t239_sims", None)
+                    sims239 = None
+            else:
+                sims239 = st.session_state["t239_sims"]
+            if sims239 is not None:
+                p239 = w239_breach_prob(sims239, budget239)
+                att239 = w239_expected_cost(sims239)
+                var239 = w239_var_cost(sims239, conf239)
+                safe239 = w239_safety_budget(sims239, conf239)
+                m1, m2, m3, m4 = st.columns(4)
+                m1.metric("P(sforamento)", f"{p239:.1%}",
+                          help="Frazione delle simulazioni col costo annuo sopra il budget.")
+                m2.metric("Costo atteso", f"{att239:,.0f} eur",
+                          help="Media delle simulazioni Monte Carlo.")
+                m3.metric(f"VaR {conf239:.0%} del costo", f"{var239:,.0f} eur",
+                          help=f"Soglia superata solo nel {(1-conf239):.0%} delle simulazioni.")
+                m4.metric(f"Budget di sicurezza ({conf239:.0%})", f"{safe239:,.0f} eur",
+                          help=f"Budget che copre il costo nel {conf239:.0%} dei casi.")
+                if p239 >= 0.5:
+                    st.warning(f"P(sforamento) = {p239:.1%}: il budget e' troppo stretto, piu' della meta' degli scenari lo supera.")
+                elif p239 <= 0.05:
+                    st.success(f"P(sforamento) = {p239:.1%}: budget prudente, margine di sicurezza adeguato.")
+                else:
+                    st.info(f"P(sforamento) = {p239:.1%}: rischio moderato, valuta un cuscinetto fino a {safe239:,.0f} eur.")
+                if st.checkbox("Mostra istogramma distribuzione", value=True, key="t239_mostra_hist"):
+                    fig239 = go.Figure()
+                    fig239.add_trace(go.Histogram(x=np.asarray(sims239), nbinsx=60,
+                                                  name="Simulazioni",
+                                                  marker_color="#2e86de", opacity=0.75))
+                    fig239.add_vline(x=float(budget239), line_dash="dash", line_color="#e74c3c",
+                                     annotation_text=f"Budget ({float(budget239):,.0f} eur)")
+                    fig239.add_vline(x=var239, line_dash="dot", line_color="#f39c12",
+                                     annotation_text=f"VaR {conf239:.0%} ({var239:,.0f} eur)")
+                    fig239.update_layout(title="Distribuzione simulata del costo annuo",
+                                         xaxis_title="Costo annuo (eur)", yaxis_title="Frequenza",
+                                         height=380)
+                    st.plotly_chart(fig239, use_container_width=True, key="t239_chart")
+                st.download_button("Scarica CSV simulazioni",
+                                     data=w239_csv_simulazioni(sims239),
+                                     file_name="w239_simulazioni_costo_annuo.csv",
+                                     mime="text/csv", key="t239_csv",
+                                     help="Una riga per simulazione: costo annuo in eur.")
 
 
     with tab240:
@@ -53937,6 +53850,306 @@ def rank_offers(offerte):
             help="Offerta, voce, peso %, punteggio 0-5 e contributo ponderato.")
         st.caption("Modello indicativo: punteggi inseriti a mano e pesi a discrezione del valutatore; il punteggio deve essere coerente tra le offerte per essere confrontabile. Adatta voci e pesi alla specifica di gara.")
 
+def hhi_index(cost_by_hour):
+    """Indice HHI sulle quote di costo orarie: somma(quote^2), in [1/N, 1].
+
+    1/N = costo perfettamente distribuito sulle N ore; 1 = tutto il costo
+    in una sola ora. Piu' e' alto, piu' la spesa e' concentrata in poche ore.
+    """
+    c = np.asarray(list(cost_by_hour), dtype=float)
+    c = c[np.isfinite(c) & (c > 0)]
+    if c.size == 0:
+        return float("nan")
+    tot = c.sum()
+    if tot <= 0:
+        return float("nan")
+    q = c / tot
+    return float((q ** 2).sum())
+
+
+def effective_hours(cost_by_hour):
+    """Numero effettivo di ore: 1 / somma(quote^2).
+
+    Se la spesa fosse uniforme su E ore, l'HHI sarebbe 1/E: E e' quindi il
+    numero di ore "equivalenti" in cui si concentra davvero il costo.
+    """
+    h = hhi_index(cost_by_hour)
+    if not np.isfinite(h) or h <= 0:
+        return float("nan")
+    return float(1.0 / h)
+
+
+def top_hours_share(cost_by_hour, k):
+    """Quota del costo totale concentrata nelle k ore piu' care (0..1)."""
+    c = np.asarray(list(cost_by_hour), dtype=float)
+    c = c[np.isfinite(c) & (c > 0)]
+    if c.size == 0:
+        return float("nan")
+    k = int(k)
+    if k <= 0:
+        return float("nan")
+    k = min(k, c.size)
+    return float(np.sort(c)[-k:].sum() / c.sum())
+
+
+def ore_per_copertura(cost_by_hour, soglia_pct=80.0):
+    """Quante ore (le piu' care) servono per coprire soglia_pct% del costo."""
+    df = cumulative_curve(cost_by_hour)
+    if df.empty:
+        return float("nan")
+    hit = df[df["costo_cumulato_pct"] >= float(soglia_pct)]
+    if hit.empty:
+        return float(len(df))
+    return float(hit["ora_rank"].iloc[0])
+
+
+def cumulative_curve(cost_by_hour):
+    """Curva cumulata del costo: ore ordinate per costo decrescente.
+
+    Ritorna DataFrame con colonne ora_rank, costo_eur, quota_costo,
+    costo_cumulato_pct.
+    """
+    c = np.asarray(list(cost_by_hour), dtype=float)
+    c = c[np.isfinite(c) & (c > 0)]
+    df = pd.DataFrame({"ora_rank": np.arange(1, c.size + 1),
+                       "costo_eur": np.sort(c)[::-1]})
+    if df.empty:
+        df["quota_costo"] = pd.Series(dtype=float)
+        df["costo_cumulato_pct"] = pd.Series(dtype=float)
+        return df
+    tot = float(df["costo_eur"].sum())
+    df["quota_costo"] = df["costo_eur"] / tot if tot > 0 else 0.0
+    df["costo_cumulato_pct"] = df["quota_costo"].cumsum() * 100.0
+    return df
+
+
+def genera_costi_orari_sintetici(n_ore, costo_base_eur, extra_picco_eur,
+                                 n_ore_picco, seed=7):
+    """Serie sintetica di costi orari: base gaussiana + picchi di prezzo."""
+    rng = np.random.default_rng(int(seed))
+    n_ore = max(int(n_ore), 24)
+    base = max(float(costo_base_eur), 0.0)
+    costi = rng.normal(loc=base, scale=max(base * 0.15, 1e-9), size=n_ore)
+    costi = np.clip(costi, max(base * 0.2, 1e-9), None)
+    n_pk = min(max(int(n_ore_picco), 0), n_ore)
+    if n_pk > 0 and float(extra_picco_eur) > 0:
+        idx = rng.choice(n_ore, size=n_pk, replace=False)
+        costi[idx] += rng.uniform(float(extra_picco_eur) * 0.5,
+                                  float(extra_picco_eur) * 1.5, size=n_pk)
+    return costi
+
+
+def w239_simulate_annual_cost(monthly_costs, n_sim=10000, vol=0.10, seed=42):
+    """Monte Carlo del costo energetico annuo (EUR).
+
+    Per ogni simulazione campiona 12 mesi (bootstrap con reinserimento dai costi
+    mensili storici) e applica uno shock moltiplicativo N(0, vol^2) a ciascun mese.
+    Ritorna un array di n_sim costi annui simulati.
+    """
+    rng = np.random.default_rng(seed)
+    mc = np.asarray(list(monthly_costs), dtype=float)
+    mc = mc[np.isfinite(mc)]
+    if mc.size == 0:
+        raise ValueError("Costi mensili non validi.")
+    draws = rng.choice(mc, size=(int(n_sim), 12), replace=True)
+    noise = 1.0 + float(vol) * rng.standard_normal(size=(int(n_sim), 12))
+    return np.maximum(draws * noise, 0.0).sum(axis=1)
+
+
+def w239_breach_prob(sims, budget):
+    """P(costo annuo simulato > budget)."""
+    s = np.asarray(list(sims), dtype=float)
+    if s.size == 0:
+        raise ValueError("Nessuna simulazione.")
+    return float(np.mean(s > float(budget)))
+
+
+def w239_expected_cost(sims):
+    """Costo annuo atteso (media delle simulazioni)."""
+    s = np.asarray(list(sims), dtype=float)
+    return float(np.mean(s))
+
+
+def w239_safety_budget(sims, conf=0.95):
+    """Budget di sicurezza: quantile `conf` della distribuzione del costo annuo."""
+    s = np.asarray(list(sims), dtype=float)
+    return float(np.quantile(s, float(conf)))
+
+
+def w239_var_cost(sims, conf=0.95):
+    """VaR del costo: stesso quantile del safety budget (perdita massima attesa col livello di confidenza)."""
+    return w239_safety_budget(sims, conf=conf)
+
+
+def w239_csv_simulazioni(sims):
+    """Restituisce il CSV delle simulazioni come stringa."""
+    import io as _io
+    import csv as _csv
+    buf = _io.StringIO()
+    w = _csv.writer(buf, lineterminator="\n")
+    w.writerow(["simulazione", "costo_annuo_eur"])
+    for i, v in enumerate(np.asarray(list(sims), dtype=float), start=1):
+        w.writerow([i, f"{v:.2f}"])
+    return buf.getvalue()
+
+
+# ===========================================================================
+# W235 (05/10/2026) - tab235 "Correlazione carico-prezzo"
+# Funzioni pure: nessuna chiamata streamlit, solo numpy. Testate via appfuncs.
+# ===========================================================================
+
+def profilo_carico_sintetico_t235(ore=24, base_kw=50.0, picco_kw=150.0,
+                                  ora_picco=12.0, larghezza_picco=3.0,
+                                  rumore_pct=0.0, seed=235):
+    """Profilo di carico sintetico (kW): base + picco gaussiano + rumore."""
+    n = int(ore)
+    t = np.arange(n, dtype=float)
+    w = max(float(larghezza_picco), 0.5)
+    profilo = float(base_kw) + (float(picco_kw) - float(base_kw)) * np.exp(
+        -0.5 * ((t - float(ora_picco)) / w) ** 2)
+    if float(rumore_pct) > 0.0:
+        rng = np.random.default_rng(int(seed))
+        profilo = profilo * (1.0 + rng.normal(0.0, float(rumore_pct) / 100.0, size=n))
+    return np.maximum(profilo, 0.0)
+
+
+def profilo_prezzo_sintetico_t235(ore=24, base_eur_mwh=80.0, picco_eur_mwh=250.0,
+                                   ora_picco=18.0, larghezza_picco=2.0,
+                                   rumore_pct=0.0, seed=236):
+    """Profilo di prezzo sintetico (eur/MWh): base + picco serale + rumore."""
+    n = int(ore)
+    t = np.arange(n, dtype=float)
+    w = max(float(larghezza_picco), 0.5)
+    profilo = float(base_eur_mwh) + (float(picco_eur_mwh) - float(base_eur_mwh)) * np.exp(
+        -0.5 * ((t - float(ora_picco)) / w) ** 2
+    )
+    if float(rumore_pct) > 0.0:
+        rng = np.random.default_rng(int(seed))
+        profilo = profilo * (1.0 + rng.normal(0.0, float(rumore_pct) / 100.0, size=n))
+    return np.maximum(profilo, 0.5)
+
+
+def load_price_corr(load_kw, prezzo_eur_mwh, top_n=4):
+    """Correlazione tra profilo di carico (kW orari) e prezzo orario (eur/MWh).
+
+    Ritorna un dict con:
+      r_pearson, r_spearman: correlazione lineare / di rango [-1, 1]
+      costo_effettivo_eur: somma(carico_kWh * prezzo) sul periodo
+      costo_scorrelato_eur: stesso consumo totale ma profilo piatto
+        (nessuna concomitanza carico-prezzo)
+      extra_costo_vs_scorrelato_eur: differenza (positivo = paghi di piu'
+        perche' consumi nelle ore care)
+      ore_top_concomitanti: ore tra le top_n di carico E le top_n di prezzo
+    """
+    try:
+        load = np.asarray(load_kw, dtype=float).ravel()
+        prezzo = np.asarray(prezzo_eur_mwh, dtype=float).ravel()
+    except (ValueError, TypeError):
+        return {"valido": False, "errore": "Input non numerici."}
+    if load.size != prezzo.size:
+        return {"valido": False, "errore": "Carico e prezzo devono avere la stessa lunghezza."}
+    n = int(load.size)
+    if n < 3:
+        return {"valido": False, "errore": "Servono almeno 3 osservazioni orarie."}
+    if bool(np.isnan(load).any()) or bool(np.isnan(prezzo).any()):
+        return {"valido": False, "errore": "Valori mancanti (NaN) nelle serie."}
+    # Pearson e ranghi medi calcolati a mano (funzione autocontenuta: niente scipy)
+    def _pearson(x, y):
+        xc = x - x.mean()
+        yc = y - y.mean()
+        den = float(np.sqrt(float((xc ** 2).sum()) * float((yc ** 2).sum())))
+        if den <= 0.0:
+            return 0.0
+        return max(-1.0, min(1.0, float((xc * yc).sum() / den)))
+
+    def _ranghi(a):
+        order = np.argsort(a, kind="mergesort")
+        ranks = np.empty(int(a.size), dtype=float)
+        i, nn = 0, int(a.size)
+        while i < nn:
+            j = i
+            while j + 1 < nn and a[order[j + 1]] == a[order[i]]:
+                j += 1
+            ranks[order[i:j + 1]] = (i + j) / 2.0 + 1.0
+            i = j + 1
+        return ranks
+
+    r_p = _pearson(load, prezzo)
+    r_s = _pearson(_ranghi(load), _ranghi(prezzo))
+    costo_effettivo = float(np.sum(load * prezzo) / 1000.0)
+    costo_scorrelato = float(load.mean() * prezzo.sum() / 1000.0)
+    extra = costo_effettivo - costo_scorrelato
+    k = max(1, min(int(top_n), n))
+    idx_l = set(np.argsort(load)[-k:].tolist())
+    idx_p = set(np.argsort(prezzo)[-k:].tolist())
+    concomitanti = len(idx_l & idx_p)
+    if r_p >= 0.5:
+        verdetto = ("Profilo SFORTUNATO: il carico e' concentrato nelle ore piu' care. "
+                    "Spostare consumi fuori picco riduce il costo.")
+    elif r_p <= -0.5:
+        verdetto = ("Profilo FORTUNATO: il carico e' concentrato nelle ore piu' economiche. "
+                    "Il profilo lavora a favore del prezzo.")
+    else:
+        verdetto = ("Profilo NEUTRO: nessuna correlazione forte tra carico e prezzo "
+                    "(|r di Pearson| < 0,5).")
+    return {
+        "valido": True,
+        "errore": "",
+        "n": n,
+        "r_pearson": r_p,
+        "r_spearman": r_s,
+        "costo_effettivo_eur": costo_effettivo,
+        "costo_scorrelato_eur": costo_scorrelato,
+        "extra_costo_vs_scorrelato_eur": extra,
+        "ore_top_concomitanti": concomitanti,
+        "top_n": k,
+        "verdetto": verdetto,
+    }
+
+
+def checklist_score(items):
+    """Score ponderato di una offerta.
+    items: list di (voce, peso_pct, score) con score in [0, 5].
+    Ritorna dict(totale_ponderato, dettaglio, somma_pesi, pesi_validi).
+    """
+    dettaglio = []
+    somma_pesi = 0.0
+    accumulo = 0.0
+    for voce, peso, score in items:
+        try:
+            p = float(peso)
+            s = float(score)
+        except (TypeError, ValueError):
+            p, s = 0.0, 0.0
+        s = max(0.0, min(5.0, s))
+        p = max(0.0, p)
+        somma_pesi += p
+        accumulo += p * s
+        dettaglio.append({"Voce": voce, "Peso (%)": round(p, 1),
+                          "Punteggio": round(s, 1),
+                          "Ponderato": round(p * s, 2)})
+    totale = accumulo / somma_pesi if somma_pesi > 0 else 0.0
+    return {"totale_ponderato": round(totale, 3),
+            "dettaglio": dettaglio,
+            "somma_pesi": round(somma_pesi, 1),
+            "pesi_validi": 0 < somma_pesi <= 100}
+
+
+def rank_offers(offerte):
+    """Classifica fino a 3 offerte. offerte: list di (nome, items).
+    Ritorna lista di dict ordinata per score decrescente."""
+    righe = []
+    for nome, items in offerte:
+        ris = checklist_score(items)
+        righe.append({"offerta": nome,
+                      "score": ris["totale_ponderato"],
+                      "dettaglio": ris["dettaglio"],
+                      "somma_pesi": ris["somma_pesi"]})
+    righe.sort(key=lambda r: r["score"], reverse=True)
+    for i, r in enumerate(righe, start=1):
+        r["posizione"] = i
+    return righe
+
 
 
 def night_share238(load_kw, price_eur_mwh, ore_notte=None):
@@ -53995,98 +54208,114 @@ def profilo_sintetico238(base_kw, picco_kw, ora_picco, fattore_serale):
         prof.append(round(base_kw + gauss + sera, 3))
     return prof
 
-    with tab238:
-        titolo_bn = edu("Baseload notturno", "Il BASELOAD NOTTURNO e' il carico minimo che resta acceso tra le 22 e le 6: luci di sicurezza, server, stand-by, frigoriferi. Il CARICO FANTASMA (ghost load) e' il minimo mai spento: ogni kW fantasma costa 8.760 kWh all'anno. La QUOTA NOTTURNA e' la frazione di energia consumata di notte sul totale giornaliero; il RAPPORTO NOTTE/GIORNO confronta i prezzi medi delle due fasce.")
-        st.markdown(f"<h1>🌙 {titolo_bn}</h1>", unsafe_allow_html=True)
-        st.caption("Quota di consumi tra le 22 e le 6, costo della quota notturna, rapporto prezzo notte/giorno e stima del carico fantasma mai spento.")
-        banner_demo("baseload notturno: profilo di carico e prezzi sintetici")
-        st.subheader("Profilo sintetico del carico")
-        c1, c2, c3, c4 = st.columns(4)
-        with c1:
-            base238 = st.slider("Baseload diurno/notturno (kW)", min_value=0.0, max_value=50.0,
-                                value=8.0, step=0.5, key="t238_base_kw",
-                                help="Carico sempre acceso: stand-by, server, sicurezza.")
-        with c2:
-            picco238 = st.slider("Picco diurno (kW)", min_value=0.0, max_value=200.0,
-                                 value=60.0, step=1.0, key="t238_picco_kw",
-                                 help="Ampiezza della gaussiana diurna sopra il baseload.")
-        with c3:
-            orapicco238 = st.slider("Ora del picco", min_value=8, max_value=20,
-                                    value=12, step=1, key="t238_ora_picco",
-                                    help="Ora del massimo diurno (centro della gaussiana).")
-        with c4:
-            serale238 = st.slider("Coda serale (frazione del picco)", min_value=0.0, max_value=1.0,
-                                  value=0.35, step=0.05, key="t238_fattore_serale",
-                                  help="Attivita' serale attorno alle 20: frazione del picco diurno.")
-        d1, d2, d3, d4 = st.columns(4)
-        with d1:
-            pg238 = st.number_input("Prezzo giorno (eur/MWh)", min_value=0.0, max_value=1000.0,
-                                    value=110.0, step=1.0, key="t238_prezzo_giorno",
-                                    help="Prezzo medio applicato alle ore fuori dalla fascia notturna.")
-        with d2:
-            pn238 = st.number_input("Prezzo notte (eur/MWh)", min_value=0.0, max_value=1000.0,
-                                    value=78.0, step=1.0, key="t238_prezzo_notte",
-                                    help="Prezzo medio applicato alla fascia notturna.")
-        with d3:
-            ini238 = st.selectbox("Inizio fascia notturna", [20, 21, 22, 23], index=2,
-                                  key="t238_inizio_notte",
-                                  help="Prima ora della fascia notturna (inclusa).")
-        with d4:
-            fin238 = st.selectbox("Fine fascia notturna", [5, 6, 7], index=1,
-                                  key="t238_fine_notte",
-                                  help="Ultima ora della fascia notturna (inclusa).")
-        ore_notte238 = list(range(int(ini238), 24)) + list(range(0, int(fin238) + 1))
-        prof238 = profilo_sintetico238(float(base238), float(picco238), float(orapicco238), float(serale238))
-        prezzi238 = [float(pn238) if h in set(ore_notte238) else float(pg238) for h in range(24)]
-        ris238 = night_share238(prof238, prezzi238, ore_notte238)
-        ghost238 = ghost_load238(prof238, ore_notte238)
-        k1, k2, k3, k4 = st.columns(4)
-        k1.metric("% consumi notturni", f"{ris238['quota']:.1%}",
-                  help="Energia consumata in fascia notturna sul totale giornaliero.")
-        k2.metric("Costo notturno", f"{ris238['costo_notte']:,.2f} eur",
-                  help="Spesa giornaliera attribuita alle ore notturne.")
-        k3.metric("Rapporto prezzo notte/giorno", f"{ris238['rapporto']:.2f}",
-                  help="Prezzo medio notturno diviso prezzo medio diurno: <1 = notte piu' economica.")
-        k4.metric("Baseload minimo (fantasma)", f"{ghost238:.1f} kW",
-                  help="Minimo notturno mai spento: ogni kW fantasma = 8.760 kWh/anno.")
-        j1, j2, j3 = st.columns(3)
-        j1.metric("Energia notturna", f"{ris238['energia_notte_kwh']:,.0f} kWh/giorno")
-        j2.metric("Costo diurno", f"{ris238['costo_giorno']:,.2f} eur/giorno")
-        j3.metric("Costo annuo fantasma", f"{ghost238 * 8760.0 * ((ris238['prezzo_medio_notte'] + ris238['prezzo_medio_giorno']) / 2.0) / 1000.0:,.0f} eur",
-                  help="Stima: carico fantasma x 8.760 h x prezzo medio annuo.")
-        import matplotlib.pyplot as plt
-        fig238, ax238 = plt.subplots(figsize=(10, 4))
-        ax238.plot(range(24), prof238, marker="o", linewidth=2, label="Carico (kW)")
-        ax238.axvspan(int(ini238) - 0.5, 23.5, color="#1a237e", alpha=0.12, label="Fascia notturna")
-        ax238.axvspan(-0.5, int(fin238) + 0.5, color="#1a237e", alpha=0.12)
-        mostra_ghost238 = st.checkbox("Mostra linea carico fantasma", value=True, key="t238_mostra_fantasma")
-        if mostra_ghost238:
-            ax238.axhline(ghost238, color="red", linestyle="--", linewidth=1.5,
-                          label=f"Carico fantasma {ghost238:.1f} kW")
-        ax238.set_xlim(-0.5, 23.5)
-        ax238.set_xticks(range(24))
-        ax238.set_xlabel("Ora")
-        ax238.set_ylabel("kW")
-        ax238.set_title("Profilo giornaliero 24h con fascia notturna evidenziata")
-        ax238.grid(alpha=0.3)
-        ax238.legend()
-        st.pyplot(fig238)
-        if st.checkbox("Mostra tabella oraria", value=False, key="t238_tabella"):
-            df238 = pd.DataFrame({
-                "Ora": list(range(24)),
-                "Carico_kW": prof238,
-                "Fascia": ["notte" if h in set(ore_notte238) else "giorno" for h in range(24)],
-                "Prezzo_eur_MWh": prezzi238,
-                "Costo_eur": [round(prof238[h] * prezzi238[h] / 1000.0, 4) for h in range(24)],
-            })
-            st.dataframe(df238, use_container_width=True, hide_index=True)
-            st.download_button(
-                "Scarica CSV profilo notturno",
-                data=df238.to_csv(index=False, sep=";").encode("utf-8"),
-                file_name="baseload_notturno.csv",
-                mime="text/csv", key="t238_csv",
-                help="Ora, carico, fascia, prezzo e costo orario del profilo sintetico.")
-        st.caption("Modello indicativo su profilo sintetico: la quota notturna dipende da baseload e coda serale; il carico fantasma e' il minimo della fascia notturna. Per dati reali sostituire il profilo sintetico con la serie misurata.")
+
+def clc236_carico_residuo(carico_kw, fv_kw):
+    """Carico residuo orario = carico - FV (kW). Valori negativi = surplus immesso."""
+    import numpy as np
+    carico = np.asarray(list(carico_kw), dtype=float)
+    fv = np.asarray(list(fv_kw), dtype=float)
+    if fv.shape != carico.shape:
+        raise ValueError("carico e fv devono avere la stessa lunghezza")
+    return carico - fv
+
+
+def clc236_duration_curve(serie):
+    """Curva di durata: valori ordinati in senso decrescente."""
+    import numpy as np
+    s = np.asarray(list(serie), dtype=float)
+    return np.sort(s)[::-1]
+
+
+def clc236_kpi_anno(carico_kw, fv_kw):
+    """KPI annuali su una serie oraria (tipicamente 8760 ore)."""
+    import numpy as np
+    residuo = clc236_carico_residuo(carico_kw, fv_kw)
+    ore_surplus = int((residuo < 0).sum())
+    energia_surplus = float(-residuo[residuo < 0].sum())
+    energia_residua = float(residuo[residuo > 0].sum())
+    fv_tot = float(np.asarray(list(fv_kw), dtype=float).sum())
+    autoconsumo = float(1.0 - energia_surplus / fv_tot) if fv_tot > 0 else 1.0
+    return {
+        "ore_surplus": ore_surplus,
+        "energia_surplus_kwh": round(energia_surplus, 1),
+        "energia_residua_kwh": round(energia_residua, 1),
+        "picco_residuo_kw": round(float(residuo.max()), 2),
+        "picco_lordo_kw": round(float(np.asarray(list(carico_kw), dtype=float).max()), 2),
+        "autoconsumo_pct": round(autoconsumo * 100.0, 1),
+    }
+
+
+def clc236_profilo_giornaliero(base_kw, picco_matt_kw, ora_picco_matt, picco_sera_kw, ora_picco_sera):
+    """Profilo giornaliero sintetico 24h: baseload + due gaussiane (mattina/sera)."""
+    import numpy as np
+    h = np.arange(24)
+    prof = (base_kw
+            + picco_matt_kw * np.exp(-((h - ora_picco_matt) ** 2) / 8.0)
+            + picco_sera_kw * np.exp(-((h - ora_picco_sera) ** 2) / 8.0))
+    return [round(float(x), 3) for x in prof]
+
+
+def clc236_fv_giornaliero(kwp, ora_picco_fv, fattore_nuvola):
+    """Produzione FV giornaliera sintetica 24h: campana diurna attenuata dalle nuvole."""
+    import numpy as np
+    h = np.arange(24)
+    fv = kwp * np.exp(-((h - ora_picco_fv) ** 2) / 18.0) * (1.0 - fattore_nuvola)
+    return [round(float(max(x, 0.0)), 3) for x in fv]
+
+
+def flx237_top_bottom(load_kw, price_eur_mwh, quota_top=0.10):
+    """Indici delle ore piu' care (top quota) e piu' economiche (bottom quota)."""
+    import numpy as np
+    price = np.asarray(list(price_eur_mwh), dtype=float)
+    n = price.size
+    k = max(1, int(round(n * quota_top)))
+    idx_top = np.argsort(price)[-k:]
+    idx_bottom = np.argsort(price)[:k]
+    return idx_top.tolist(), idx_bottom.tolist()
+
+
+def flx237_shifting_saving(load_kw, price_eur_mwh, pct_shift=0.5, quota_top=0.10):
+    """Risparmio spostando pct_shift del carico dalle ore top alle ore bottom."""
+    import numpy as np
+    load = np.asarray(list(load_kw), dtype=float)
+    price = np.asarray(list(price_eur_mwh), dtype=float)
+    if load.shape != price.shape:
+        raise ValueError("carico e prezzo devono avere la stessa lunghezza")
+    idx_top, idx_bottom = flx237_top_bottom(load, price, quota_top)
+    e_top = float(load[idx_top].sum())
+    spostabile = e_top * pct_shift
+    p_top = float(price[idx_top].mean())
+    p_bottom = float(price[idx_bottom].mean())
+    risparmio = spostabile * (p_top - p_bottom) / 1000.0
+    costo_base = float((load * price).sum() / 1000.0)
+    return {
+        "energia_spostabile_kwh": round(spostabile, 1),
+        "risparmio_eur": round(risparmio, 2),
+        "risparmio_pct": round(100.0 * risparmio / costo_base, 2) if costo_base else 0.0,
+        "prezzo_medio_top": round(p_top, 2),
+        "prezzo_medio_bottom": round(p_bottom, 2),
+        "costo_base_eur": round(costo_base, 2),
+    }
+
+
+def flx237_profilo_sintetico(base_kw, picco_kw, ora_picco, seed=0):
+    """Profilo di carico giornaliero sintetico 24h con rumore (seed per ripetibilita')."""
+    import numpy as np
+    rng = np.random.default_rng(seed)
+    h = np.arange(24)
+    prof = base_kw + picco_kw * np.exp(-((h - ora_picco) ** 2) / 8.0)
+    prof = prof * (1 + rng.normal(0, 0.05, 24))
+    return [round(float(max(x, 0.0)), 3) for x in prof]
+
+
+def flx237_prezzo_sintetico(base_eur, ampiezza_eur, ora_picco, seed=0):
+    """Prezzo orario sintetico 24h: picco serale + rumore (seed per ripetibilita')."""
+    import numpy as np
+    rng = np.random.default_rng(seed)
+    h = np.arange(24)
+    prezzo = base_eur + ampiezza_eur * np.exp(-((h - ora_picco) ** 2) / 12.0)
+    prezzo = prezzo * (1 + rng.normal(0, 0.08, 24))
+    return [round(float(max(x, 1.0)), 2) for x in prezzo]
 
 # Footer
 
