@@ -31895,7 +31895,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab232 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🧮 Concentrazione temporale (HHI)"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -52507,6 +52507,189 @@ elif workspace == _('ws8'):
                 mime="text/csv", key="rb230_csv",
                 help="Posizione, esposizione, volatilita', VaR standalone, Component VaR e contributo al rischio.")
             st.caption("Modello indicativo: correlazione uniforme tra tutte le coppie (semplificazione dichiarata), VaR parametrico normale, scaling temporale con radice quadrata. Per un desk reale usa la matrice di correlazione stimata sui rendimenti storici.")
+
+def hhi_index(cost_by_hour):
+    """Indice HHI sulle quote di costo orarie: somma(quote^2), in [1/N, 1].
+
+    1/N = costo perfettamente distribuito sulle N ore; 1 = tutto il costo
+    in una sola ora. Piu' e' alto, piu' la spesa e' concentrata in poche ore.
+    """
+    c = np.asarray(list(cost_by_hour), dtype=float)
+    c = c[np.isfinite(c) & (c > 0)]
+    if c.size == 0:
+        return float("nan")
+    tot = c.sum()
+    if tot <= 0:
+        return float("nan")
+    q = c / tot
+    return float((q ** 2).sum())
+
+
+def effective_hours(cost_by_hour):
+    """Numero effettivo di ore: 1 / somma(quote^2).
+
+    Se la spesa fosse uniforme su E ore, l'HHI sarebbe 1/E: E e' quindi il
+    numero di ore "equivalenti" in cui si concentra davvero il costo.
+    """
+    h = hhi_index(cost_by_hour)
+    if not np.isfinite(h) or h <= 0:
+        return float("nan")
+    return float(1.0 / h)
+
+
+def top_hours_share(cost_by_hour, k):
+    """Quota del costo totale concentrata nelle k ore piu' care (0..1)."""
+    c = np.asarray(list(cost_by_hour), dtype=float)
+    c = c[np.isfinite(c) & (c > 0)]
+    if c.size == 0:
+        return float("nan")
+    k = int(k)
+    if k <= 0:
+        return float("nan")
+    k = min(k, c.size)
+    return float(np.sort(c)[-k:].sum() / c.sum())
+
+
+def ore_per_copertura(cost_by_hour, soglia_pct=80.0):
+    """Quante ore (le piu' care) servono per coprire soglia_pct% del costo."""
+    df = cumulative_curve(cost_by_hour)
+    if df.empty:
+        return float("nan")
+    hit = df[df["costo_cumulato_pct"] >= float(soglia_pct)]
+    if hit.empty:
+        return float(len(df))
+    return float(hit["ora_rank"].iloc[0])
+
+
+def cumulative_curve(cost_by_hour):
+    """Curva cumulata del costo: ore ordinate per costo decrescente.
+
+    Ritorna DataFrame con colonne ora_rank, costo_eur, quota_costo,
+    costo_cumulato_pct.
+    """
+    c = np.asarray(list(cost_by_hour), dtype=float)
+    c = c[np.isfinite(c) & (c > 0)]
+    df = pd.DataFrame({"ora_rank": np.arange(1, c.size + 1),
+                       "costo_eur": np.sort(c)[::-1]})
+    if df.empty:
+        df["quota_costo"] = pd.Series(dtype=float)
+        df["costo_cumulato_pct"] = pd.Series(dtype=float)
+        return df
+    tot = float(df["costo_eur"].sum())
+    df["quota_costo"] = df["costo_eur"] / tot if tot > 0 else 0.0
+    df["costo_cumulato_pct"] = df["quota_costo"].cumsum() * 100.0
+    return df
+
+
+def genera_costi_orari_sintetici(n_ore, costo_base_eur, extra_picco_eur,
+                                 n_ore_picco, seed=7):
+    """Serie sintetica di costi orari: base gaussiana + picchi di prezzo."""
+    rng = np.random.default_rng(int(seed))
+    n_ore = max(int(n_ore), 24)
+    base = max(float(costo_base_eur), 0.0)
+    costi = rng.normal(loc=base, scale=max(base * 0.15, 1e-9), size=n_ore)
+    costi = np.clip(costi, max(base * 0.2, 1e-9), None)
+    n_pk = min(max(int(n_ore_picco), 0), n_ore)
+    if n_pk > 0 and float(extra_picco_eur) > 0:
+        idx = rng.choice(n_ore, size=n_pk, replace=False)
+        costi[idx] += rng.uniform(float(extra_picco_eur) * 0.5,
+                                  float(extra_picco_eur) * 1.5, size=n_pk)
+    return costi
+
+
+    with tab232:
+        titolo_hhi = edu("Concentrazione temporale (HHI)", "L'indice HHI (Herfindahl-Hirschman) misura quanto la SPESA energetica e' concentrata in poche ore: e' la somma dei quadrati delle quote di costo orarie. Vale 1/N se il costo e' perfettamente distribuito sulle N ore, 1 se tutto il costo cade in una sola ora. Il NUMERO EFFETTIVO DI ORE (1/HHI) dice in quante ore 'equivalenti' si concentra davvero la spesa: se spendi 100k eur in 8760 ore ma il numero effettivo e' 900, il grosso del costo sta in quelle 900 ore care.")
+        st.markdown(f"<h1>\U0001F9EE {titolo_hhi}</h1>", unsafe_allow_html=True)
+        st.caption("In quante poche ore si concentra la tua spesa energetica? HHI sulle quote di costo orarie, numero effettivo di ore, quota del costo nei top-k ore piu' care e curva cumulata.")
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            n232 = st.slider("Ore analizzate", min_value=168, max_value=8760,
+                             value=8760, step=168, key="t232_n_ore",
+                             help="168 = una settimana, 8760 = un anno intero di ore.")
+        with c2:
+            base232 = st.slider("Costo base orario (eur)", min_value=10.0, max_value=300.0,
+                                value=80.0, step=5.0, key="t232_base",
+                                help="Costo orario medio nelle ore 'normali' (profilo piatto).")
+        with c3:
+            picco232 = st.slider("Extra picco orario (eur)", min_value=0.0, max_value=800.0,
+                                 value=250.0, step=10.0, key="t232_picco",
+                                 help="Sovrapprezzo medio aggiunto alle ore di picco.")
+        with c4:
+            npk232 = st.slider("Ore di picco", min_value=0, max_value=1000,
+                               value=120, step=10, key="t232_ore_picco",
+                               help="Quante ore ricevono il sovrapprezzo di picco.")
+        c5, c6, c7, c8 = st.columns(4)
+        with c5:
+            seed232 = st.number_input("Seed serie sintetica", min_value=0, max_value=9999,
+                                      value=7, step=1, key="t232_seed",
+                                      help="Fissa il seed per rendere la serie riproducibile.")
+        with c6:
+            k1_232 = st.slider("Top-k (primo)", min_value=1, max_value=500,
+                               value=10, step=1, key="t232_k1",
+                               help="Prime k ore piu' care per la prima quota di concentrazione.")
+        with c7:
+            k2_232 = st.slider("Top-k (secondo)", min_value=1, max_value=1000,
+                               value=50, step=5, key="t232_k2",
+                               help="Prime k ore piu' care per la seconda quota di concentrazione.")
+        with c8:
+            soglia232 = st.selectbox("Soglia HHI di allerta", [0.10, 0.15, 0.25], index=1,
+                                     key="t232_soglia_hhi", format_func=lambda x: f"{x:.2f}",
+                                     help="Benchmark stile antitrust: 0.15 concentrazione moderata, 0.25 alta.")
+        costi232 = genera_costi_orari_sintetici(int(n232), float(base232),
+                                                float(picco232), int(npk232),
+                                                seed=int(seed232))
+        hhi232 = hhi_index(costi232)
+        eff232 = effective_hours(costi232)
+        top1_232 = top_hours_share(costi232, int(k1_232))
+        top2_232 = top_hours_share(costi232, int(k2_232))
+        ore80_232 = ore_per_copertura(costi232, 80.0)
+        tot232 = float(np.sum(costi232))
+        kpi1, kpi2, kpi3, kpi4, kpi5 = st.columns(5)
+        kpi1.metric("HHI del costo", f"{hhi232:.4f}",
+                    help="Somma dei quadrati delle quote orarie: 1/N = distribuito, 1 = tutto in un'ora.")
+        kpi2.metric("N. effettivo di ore", f"{eff232:,.0f}",
+                    help="1/HHI: il costo si comporta come se fosse concentrato in queste ore.")
+        kpi3.metric(f"Quota top-{int(k1_232)} ore", f"{top1_232:.1%}",
+                    help="Percentuale del costo totale nelle k ore piu' care.")
+        kpi4.metric(f"Quota top-{int(k2_232)} ore", f"{top2_232:.1%}",
+                    help="Percentuale del costo totale nelle k ore piu' care.")
+        kpi5.metric("Ore per l'80% del costo", f"{ore80_232:,.0f}",
+                    help="Quante ore (le piu' care) bastano a coprire l'80% della spesa.")
+        if hhi232 >= float(soglia232):
+            st.warning(f"HHI {hhi232:.4f} sopra la soglia {float(soglia232):.2f}: la spesa e' concentrata — le ore di picco ({int(npk232)} su {int(n232)}) guidano il costo. Spostare carico fuori picco o fissare il prezzo di quelle ore riduce molto la bolletta.")
+        elif hhi232 >= float(soglia232) / 2:
+            st.info(f"HHI {hhi232:.4f}: concentrazione moderata — il {top1_232:.0%} del costo sta nelle {int(k1_232)} ore piu' care.")
+        else:
+            st.success(f"HHI {hhi232:.4f}: costo ben distribuito sulle ore — il profilo e' piatto.")
+        st.caption(f"Costo totale periodo: {tot232:,.0f} eur su {int(n232)} ore (media {tot232 / max(int(n232), 1):,.1f} eur/ora).")
+        df232 = cumulative_curve(costi232)
+        import matplotlib.pyplot as plt
+        fig232, ax232 = plt.subplots(figsize=(9, 4.2))
+        ax232.plot(df232["ora_rank"], df232["costo_cumulato_pct"], linewidth=2)
+        ax232.axhline(80, linestyle="--", linewidth=1)
+        ax232.axvline(float(ore80_232), linestyle="--", linewidth=1)
+        ax232.set_xlabel("Ore (ordinate dalla piu' cara)")
+        ax232.set_ylabel("% cumulata del costo")
+        ax232.set_title("Curva cumulata del costo (ore piu' care per prime)")
+        ax232.set_xlim(1, max(int(n232), 2))
+        ax232.set_ylim(0, 100)
+        ax232.grid(True, alpha=0.3)
+        fig232.tight_layout()
+        st.pyplot(fig232, use_container_width=True)
+        plt.close(fig232)
+        mostra232 = st.checkbox("Mostra tabella curva cumulata", value=False, key="t232_mostra_tabella",
+                                help="Prime righe della curva: rank, costo orario, quota e cumulata.")
+        if mostra232:
+            nrighe232 = st.number_input("Righe da mostrare", min_value=5, max_value=500,
+                                        value=20, step=5, key="t232_n_righe")
+            st.dataframe(df232.head(int(nrighe232)), use_container_width=True, hide_index=True)
+        st.download_button(
+            "Scarica CSV curva cumulata",
+            data=df232.to_csv(index=False, sep=";").encode("utf-8"),
+            file_name="curva_cumulata_costo_hhi.csv",
+            mime="text/csv", key="t232_csv",
+            help="Rank ora, costo orario, quota di costo e percentuale cumulata (separatore ';').")
+        st.caption("Modello indicativo su serie sintetica: HHI = somma(quote orarie^2); numero effettivo ore = 1/HHI. Con dati reali, alimenta le funzioni con i tuoi costi orari misurati.")
 
 # Footer
 
