@@ -32342,6 +32342,87 @@ def r245_sintesi(capitale, tan_annuo_pct, n_rate, costi_fissi=0.0,
     }
 
 
+def d246_deposito(costo_annuo_euro, mesi, sconto_sdd_pct):
+    """Deposito cauzionale: lordo e netto in euro.
+
+    Il deposito lordo vale (costo_annuo / 12) * mesi; quello netto applica la
+    riduzione concessa con addebito diretto SEPA (sconto_sdd_pct).
+    costo_annuo_euro: spesa annua stimata (> 0); mesi: mensilita' richieste
+    (0..6); sconto_sdd_pct: riduzione per addebito diretto SEPA (0..100).
+    Ritorna la tupla (deposito_lordo, deposito_netto). Tutto deterministico.
+    """
+    costo = float(costo_annuo_euro)
+    m = int(mesi)
+    s = float(sconto_sdd_pct)
+    if costo <= 0:
+        raise ValueError("costo_annuo_euro deve essere > 0")
+    if not 0 <= m <= 6:
+        raise ValueError("mesi deve stare tra 0 e 6")
+    if not 0.0 <= s <= 100.0:
+        raise ValueError("sconto_sdd_pct deve stare tra 0 e 100")
+    lordo = costo / 12.0 * m
+    netto = lordo * (1.0 - s / 100.0)
+    return lordo, netto
+
+
+def d246_costo_opportunita(deposito_euro, tan_annuo_pct, anni=1.0):
+    """Costo opportunita' del capitale immobilizzato nel deposito.
+
+    deposito_euro: importo del deposito (>= 0); tan_annuo_pct: TAN nominale
+    annuo del capitale (>= 0); anni: orizzonte (default 1 anno).
+    Ritorna il costo in euro.
+    """
+    d = float(deposito_euro)
+    t = float(tan_annuo_pct)
+    y = float(anni)
+    if d < 0:
+        raise ValueError("deposito_euro non puo' essere negativo")
+    if t < 0:
+        raise ValueError("tan_annuo_pct non puo' essere negativo")
+    if y <= 0:
+        raise ValueError("anni deve essere > 0")
+    return d * t / 100.0 * y
+
+
+def d246_costo_fideiussione(deposito_euro, commissione_annua_pct):
+    """Costo annuo della fideiussione bancaria posta a garanzia del deposito.
+
+    deposito_euro: importo garantito (>= 0); commissione_annua_pct: commissione
+    annua della banca in percentuale (>= 0). Ritorna il costo in euro.
+    """
+    d = float(deposito_euro)
+    c = float(commissione_annua_pct)
+    if d < 0:
+        raise ValueError("deposito_euro non puo' essere negativo")
+    if c < 0:
+        raise ValueError("commissione_annua_pct non puo' essere negativa")
+    return d * c / 100.0
+
+
+def d246_sintesi(costo_annuo_euro, mesi, sconto_sdd_pct, tan_annuo_pct,
+                 commissione_fideiussione_pct):
+    """Sintesi completa del deposito cauzionale.
+
+    Ritorna un dict con deposito lordo/netto, costo opportunita' annuo, costo
+    fideiussione annuo, costo totale annuo e incidenza percentuale sul costo
+    annuo stimato. Tutto deterministico.
+    """
+    lordo, netto = d246_deposito(costo_annuo_euro, mesi, sconto_sdd_pct)
+    opp = d246_costo_opportunita(netto, tan_annuo_pct)
+    fid = d246_costo_fideiussione(netto, commissione_fideiussione_pct)
+    costo = float(costo_annuo_euro)
+    return {
+        "deposito_lordo": round(lordo, 2),
+        "deposito_netto": round(netto, 2),
+        "costo_opportunita_annuo": round(opp, 2),
+        "costo_fideiussione_annuo": round(fid, 2),
+        "costo_totale_annuo": round(opp + fid, 2),
+        "incidenza_pct": round((opp + fid) / costo * 100.0, 3),
+        "mesi": int(mesi),
+        "sconto_sdd_pct": round(float(sconto_sdd_pct), 1),
+    }
+
+
 if workspace == _('ws1'):
     st.markdown(f"<h1>{_('ws1')}</h1>", unsafe_allow_html=True)
     banner_demo("simulatore strategico: margini, centrali e curve simulate")
@@ -32983,7 +33064,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -55244,6 +55325,78 @@ elif workspace == _('ws8'):
                        "TAEG calcolato sui flussi effettivi. Le condizioni reali dipendono dal fornitore; "
                        "verificare il contratto e il documento 'Informazioni europee di base sul credito ai consumatori'.")
 
+
+    with tab246:
+        titolo246 = edu("Deposito cauzionale", "Molti fornitori di energia chiedono un deposito cauzionale come garanzia: di solito da 1 a 3 mensilita' del costo annuo stimato. L'addebito diretto SEPA (SDD) spesso lo riduce o lo azzera. Il deposito ha comunque un costo: il capitale immobilizzato (costo opportunita') ed eventualmente la commissione di una fideiussione bancaria.")
+        st.markdown(f"<h1>🛡️ {titolo246}</h1>", unsafe_allow_html=True)
+        st.caption("Deposito cauzionale: importo stimato, costo del capitale immobilizzato e effetto dell'addebito diretto SEPA.")
+        banner_demo("parametri di contratto sintetici (Mock)")
+        c1_246, c2_246, c3_246 = st.columns(3)
+        with c1_246:
+            costo246 = st.number_input("Costo annuo stimato (€)", 100.0, 2000000.0, 12000.0, 100.0,
+                                       key="t246_costo",
+                                       help="Spesa annua stimata da cui il fornitore calcola il deposito.")
+            mesi246 = st.slider("Mensilita' di deposito richieste", 0, 6, 2, 1, key="t246_mesi",
+                                help="Mensilita' del costo annuo richieste come garanzia (0 = nessun deposito).")
+        with c2_246:
+            sdd246 = st.slider("Riduzione con addebito diretto SEPA (%)", 0.0, 100.0, 50.0, 5.0,
+                              key="t246_sdd",
+                              help="Molti fornitori riducono o azzerano il deposito con addebito diretto.")
+            tan246 = st.slider("Costo del capitale TAN annuo (%)", 0.0, 12.0, 4.0, 0.25, key="t246_tan",
+                               help="Tasso per il costo opportunita' del capitale immobilizzato nel deposito.")
+        with c3_246:
+            fid246 = st.slider("Commissione fideiussione annua (%)", 0.0, 5.0, 1.0, 0.1, key="t246_fid",
+                               help="Commissione annua della banca per la fideiussione a garanzia del deposito.")
+        sin246 = None
+        try:
+            sin246 = d246_sintesi(costo246, mesi246, sdd246, tan246, fid246)
+        except ValueError as e:
+            st.error(f"⚠️ {e}")
+        if sin246:
+            k1_246, k2_246, k3_246, k4_246 = st.columns(4)
+            k1_246.metric("Deposito netto (€)", f"{sin246['deposito_netto']:,.2f}",
+                          delta=f"lordo {sin246['deposito_lordo']:,.2f} €",
+                          help="Deposito dopo la riduzione per addebito diretto SEPA.")
+            k2_246.metric("Costo opportunita' annuo (€)", f"{sin246['costo_opportunita_annuo']:,.2f}",
+                          help="Capitale immobilizzato valorizzato al TAN annuo.")
+            k3_246.metric("Costo fideiussione annuo (€)", f"{sin246['costo_fideiussione_annuo']:,.2f}",
+                          help="Commissione annua della fideiussione bancaria.")
+            k4_246.metric("Incidenza sul costo annuo (%)", f"{sin246['incidenza_pct']:.3f} %",
+                          help="Costo totale annuo del deposito / costo annuo stimato.")
+            st.subheader("Confronto scenari: senza SDD vs con SDD")
+            righe_sc246 = []
+            for sdd_sc246 in [0.0, 50.0, 100.0]:
+                sc246 = d246_sintesi(costo246, mesi246, sdd_sc246, tan246, fid246)
+                righe_sc246.append({"Scenario": f"SDD -{sdd_sc246:.0f}%",
+                                    "Deposito netto (€)": sc246["deposito_netto"],
+                                    "Costo opportunita' (€/anno)": sc246["costo_opportunita_annuo"],
+                                    "Costo fideiussione (€/anno)": sc246["costo_fideiussione_annuo"],
+                                    "Costo totale (€/anno)": sc246["costo_totale_annuo"]})
+            df_sc246 = pd.DataFrame(righe_sc246)
+            st.dataframe(df_sc246, use_container_width=True, hide_index=True)
+            fig_sc246 = px.bar(df_sc246, x="Scenario", y="Costo totale (€/anno)",
+                               title="Costo annuo del deposito per scenario SDD",
+                               color_discrete_sequence=["#8B5CF6"])
+            st.plotly_chart(fig_sc246, use_container_width=True)
+            st.subheader("Sensitivita' del deposito netto: mesi × riduzione SDD")
+            mesi_grid246 = list(range(0, 7))
+            sdd_grid246 = [0.0, 25.0, 50.0, 75.0, 100.0]
+            z246 = [[d246_deposito(costo246, m, s)[1] for m in mesi_grid246] for s in sdd_grid246]
+            fig_s246 = px.imshow(z246, x=[str(m) for m in mesi_grid246],
+                                 y=[f"{s:.0f}%" for s in sdd_grid246],
+                                 labels=dict(x="Mensilita' richieste", y="Riduzione SDD", color="Deposito netto €"),
+                                 title="Deposito netto (€) al variare di mensilita' e riduzione SDD",
+                                 text_auto=".0f", color_continuous_scale="YlOrRd")
+            st.plotly_chart(fig_s246, use_container_width=True)
+            st.download_button(
+                "Scarica CSV analisi",
+                data=df_sc246.to_csv(index=False, sep=";").encode("utf-8"),
+                file_name="deposito_cauzionale.csv",
+                mime="text/csv", key="t246_csv",
+                help="Confronto scenari SDD: deposito netto, costi annui e costo totale.")
+            st.caption("Modello indicativo: il deposito si calcola sul costo annuo stimato e si restituisce a fine "
+                       "contratto; condizioni, mensilita' richieste e sconti SDD variano per fornitore. "
+                       "Verificare le condizioni contrattuali.")
 
 # Footer
 
