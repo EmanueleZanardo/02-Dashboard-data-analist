@@ -31195,7 +31195,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -51110,6 +51110,120 @@ elif workspace == _('ws8'):
                 mime="text/csv", key="tm223_csv",
                 help="Dettaglio mensile di trasmissione, distribuzione e misura.")
             st.caption("Stima indicativa: i corrispettivi ARERA cambiano ogni anno; aggiorna i default con i valori della delibera vigente o della tua bolletta.")
+
+    with tab224:
+        titolo_ce = edu("Cessione eccedenze", "Quando un impianto (fotovoltaico, cogenerazione...) produce piu' di quanto il sito consuma, l'energia in eccesso immessa in rete viene valorizzata dal GSE con il RITIRO DEDICATO (delibera ARERA ARG/elt 280/07): di norma al PREZZO ZONALE ORARIO di mercato, oppure — per gli impianti che ne hanno diritto — ai PREZZI MINIMI GARANTITI pubblicati ogni anno dal GSE. Questa tab confronta i due regimi mese per mese sul tuo profilo di eccedenza, stima il ricavo annuo e mostra quanto varrebbe invece autoconsumare una quota maggiore dell'eccedenza (valorizzata al prezzo retail che eviteresti in bolletta).")
+        st.markdown(f"<h1>\U0001f4a1 {titolo_ce}</h1>", unsafe_allow_html=True)
+        st.caption("Quanto rende l'energia immessa in rete? Ritiro dedicato a prezzo zonale vs prezzi minimi garantiti GSE, con valorizzazione alternativa in autoconsumo.")
+        st.info("I prezzi minimi garantiti cambiano ogni anno con le pubblicazioni GSE: il default qui sotto e' INDICATIVO, inserisci il valore dell'anno di competenza. Il prezzo zonale medio e' una tua stima (es. media annua della tua zona).")
+        _profili_ce = {
+            "Piatto (1/12 al mese)": "piatto",
+            "Estivo (FV tipico, picco mag-ago)": "estivo",
+            "Invernale (cogen/eolico)": "invernale",
+            "Doppia punta (est + inv)": "doppia_punta",
+        }
+        c1, c2 = st.columns(2)
+        with c1:
+            ecc224 = st.number_input("Energia eccedentaria annua immessa (MWh)",
+                                     min_value=0.0, value=120.0, step=10.0,
+                                     key="ce224_eccedenza")
+            prof224 = st.selectbox("Profilo mensile dell'eccedenza",
+                                   list(_profili_ce.keys()), index=1,
+                                   key="ce224_profilo",
+                                   help="Come si distribuisce l'eccedenza nei 12 mesi.")
+        with c2:
+            pz224 = st.number_input("Prezzo zonale orario medio annuo (€/MWh)",
+                                    min_value=0.0, value=110.0, step=5.0,
+                                    key="ce224_zonale")
+            pmg224 = st.number_input("Prezzo minimo garantito GSE (€/MWh)",
+                                     min_value=0.0, value=55.0, step=1.0,
+                                     key="ce224_pmg")
+        retail224 = st.number_input("Prezzo retail evitato con l'autoconsumo (€/MWh)",
+                                    min_value=0.0, value=250.0, step=5.0,
+                                    key="ce224_retail",
+                                    help="Quanto pagheresti in bolletta l'energia che invece autoconsumi: serve per la valorizzazione alternativa.")
+        # --- logica (pura, testata standalone in hidden_files/tab224_cessione_eccedenze.py)
+        _mesi224 = ["Gen", "Feb", "Mar", "Apr", "Mag", "Giu",
+                    "Lug", "Ago", "Set", "Ott", "Nov", "Dic"]
+        _pesi224 = {
+            "piatto": [1.0 / 12.0] * 12,
+            "estivo": [0.045, 0.055, 0.075, 0.095, 0.115, 0.130,
+                       0.135, 0.125, 0.100, 0.065, 0.035, 0.025],
+            "invernale": [0.130, 0.120, 0.100, 0.080, 0.060, 0.045,
+                          0.040, 0.045, 0.060, 0.080, 0.110, 0.130],
+            "doppia_punta": [0.100, 0.090, 0.080, 0.070, 0.080, 0.100,
+                             0.115, 0.110, 0.080, 0.060, 0.055, 0.060],
+        }[_profili_ce[prof224]]
+        _idx224 = [1.10, 1.08, 1.04, 0.99, 0.94, 0.91,
+                   0.91, 0.93, 0.97, 1.03, 1.08, 1.10]
+        ecc_m224 = [ecc224 * p for p in _pesi224]
+        pz_m224 = [pz224 * i for i in _idx224]
+        rz_m224 = [e * p for e, p in zip(ecc_m224, pz_m224)]
+        rp_m224 = [e * pmg224 for e in ecc_m224]
+        rz_tot224 = sum(rz_m224)
+        rp_tot224 = sum(rp_m224)
+        pz_pond224 = rz_tot224 / ecc224 if ecc224 > 0 else 0.0
+        delta224 = rz_tot224 - rp_tot224
+        if delta224 >= 0:
+            verdict224 = (f"Con questi input conviene il **prezzo zonale**: "
+                          f"+€ {delta224:,.0f}/anno rispetto ai prezzi minimi garantiti.")
+        else:
+            verdict224 = (f"Con questi input convengono i **prezzi minimi garantiti**: "
+                          f"+€ {-delta224:,.0f}/anno rispetto al prezzo zonale.")
+        st.success(verdict224)
+        k1, k2, k3, k4 = st.columns(4)
+        k1.metric("Ricavo annuo — prezzo zonale", f"€ {rz_tot224:,.0f}")
+        k2.metric("Ricavo annuo — PMG GSE", f"€ {rp_tot224:,.0f}")
+        k3.metric("Zonale medio ponderato", f"€ {pz_pond224:,.1f}/MWh")
+        k4.metric("Delta zonale − PMG", f"€ {delta224:+,.0f}")
+        df_m224 = pd.DataFrame({
+            "Mese": _mesi224,
+            "Eccedenza (MWh)": [round(e, 1) for e in ecc_m224],
+            "Prezzo zonale (€/MWh)": [round(p, 1) for p in pz_m224],
+            "Ricavo zonale (€)": [round(r, 0) for r in rz_m224],
+            "Ricavo PMG (€)": [round(r, 0) for r in rp_m224],
+        })
+        fig224 = go.Figure()
+        fig224.add_trace(go.Bar(x=df_m224["Mese"], y=df_m224["Ricavo zonale (€)"],
+                               name="Prezzo zonale"))
+        fig224.add_trace(go.Bar(x=df_m224["Mese"], y=df_m224["Ricavo PMG (€)"],
+                               name="PMG GSE"))
+        fig224.update_layout(title="Ricavo mensile per regime",
+                             barmode="group",
+                             xaxis_title="Mese", yaxis_title="€",
+                             height=360, margin=dict(l=40, r=20, t=50, b=40))
+        st.plotly_chart(fig224, use_container_width=True, key="ce224_bar")
+        st.subheader("Dettaglio mensile")
+        st.dataframe(df_m224, use_container_width=True, hide_index=True)
+        st.subheader("Sensibilita' al prezzo zonale")
+        df_s224 = pd.DataFrame({
+            "Scenario prezzo zonale": [f"{d:+d}%" for d in (-30, -20, -10, 0, 10, 20, 30)],
+            "Prezzo medio (€/MWh)": [round(pz224 * (1 + d / 100.0), 1) for d in (-30, -20, -10, 0, 10, 20, 30)],
+            "Ricavo annuo zonale (€)": [round(rz_tot224 * (1 + d / 100.0), 0) for d in (-30, -20, -10, 0, 10, 20, 30)],
+            "Delta vs PMG (€)": [round(rz_tot224 * (1 + d / 100.0) - rp_tot224, 0) for d in (-30, -20, -10, 0, 10, 20, 30)],
+        })
+        st.dataframe(df_s224, use_container_width=True, hide_index=True)
+        st.subheader("Valorizzazione alternativa: autoconsumo incrementale")
+        st.caption("Se sposti una quota dell'eccedenza in autoconsumo, quella quota vale il prezzo retail evitato invece del prezzo di cessione: il grafico mostra il ricavo combinato al variare della quota.")
+        _cess224 = max(pz_pond224, pmg224)
+        _alt224 = [(q, q * ecc224 * retail224 + (1.0 - q) * ecc224 * _cess224)
+                   for q in [i / 20.0 for i in range(21)]]
+        fig224b = go.Figure()
+        fig224b.add_trace(go.Scatter(x=[q * 100.0 for q, _ in _alt224],
+                                    y=[r for _, r in _alt224],
+                                    mode="lines+markers", name="Ricavo combinato"))
+        fig224b.update_layout(title="Ricavo combinato vs quota autoconsumata",
+                              xaxis_title="Quota eccedenza in autoconsumo (%)",
+                              yaxis_title="€/anno",
+                              height=340, margin=dict(l=40, r=20, t=50, b=40))
+        st.plotly_chart(fig224b, use_container_width=True, key="ce224_alt")
+        st.download_button(
+            "Scarica CSV cessione eccedenze",
+            data=df_m224.to_csv(index=False, sep=";").encode("utf-8"),
+            file_name="cessione_eccedenze_mensile.csv",
+            mime="text/csv", key="ce224_csv",
+            help="Dettaglio mensile di eccedenza, prezzo zonale e ricavi per regime.")
+        st.caption("Stima indicativa: i prezzi minimi garantiti sono pubblicati annualmente dal GSE e il prezzo zonale varia ogni ora; aggiorna i default con i valori dell'anno di competenza.")
 
 # Footer
 
