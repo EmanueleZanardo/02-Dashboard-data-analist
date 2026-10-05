@@ -27767,6 +27767,200 @@ def calcola_cbam(quantita_annua, fattore_emissione_tco2, prezzo_ets_eur_t,
             "df_traiettoria": df_tr}
 
 
+def profilo_mensile_demo(tipo="piatto"):
+    """Quote mensili (12 valori con somma 1.0) per ripartire l'energia annua.
+
+    Tipi disponibili: "piatto" (1/12 al mese), "estivo" (picco lug-ago,
+    climatizzazione), "invernale" (picco gen-feb, riscaldamento elettrico),
+    "doppia_punta" (picchi estate e inverno). Tipo sconosciuto -> "piatto".
+    Ritorna sempre 12 float la cui somma e' 1.0. Deterministico.
+    """
+    base = {
+        "piatto": [1.0] * 12,
+        "estivo": [0.90, 0.85, 0.90, 0.95, 1.05, 1.25, 1.45, 1.45,
+                   1.15, 1.00, 0.90, 0.90],
+        "invernale": [1.45, 1.35, 1.15, 0.95, 0.85, 0.80, 0.80, 0.85,
+                      0.90, 1.00, 1.20, 1.40],
+        "doppia_punta": [1.30, 1.20, 1.05, 0.95, 0.95, 1.10, 1.25, 1.25,
+                         1.05, 0.95, 1.05, 1.25],
+    }
+    pesi = base.get(tipo, base["piatto"])
+    tot = float(sum(pesi))
+    return [p / tot for p in pesi]
+
+
+def calcola_oneri_dispacciamento(energia_mwh_annua, uplift_eur_mwh,
+                                 quota_fissa_eur_pod_anno,
+                                 quota_potenza_eur_kw_anno, potenza_kw,
+                                 n_pod=1, quote_mensili=None,
+                                 uplift_scenari=None):
+    """Stima degli oneri di dispacciamento per un prelievo in Italia.
+
+    Domanda operativa: "quanto pesano in bolletta gli oneri di
+    dispacciamento (Terna/ARERA) oltre la materia energia?" Voci:
+      - UPLIFT: corrispettivo a copertura dei costi di approvvigionamento
+        delle risorse nel mercato per il servizio di dispacciamento (MSD),
+        addebitato in euro/MWh sull'energia prelevata (valore mensile
+        pubblicato da Terna, variabile);
+      - quota FISSA: euro/POD/anno (componente fissa del corrispettivo di
+        dispacciamento per la BT);
+      - quota POTENZA: euro/kW/anno sulla potenza impegnata.
+
+    Formule:
+      uplift = energia x uplift_eur_mwh
+      fissa  = n_pod x quota_fissa_eur_pod_anno
+      potenza = potenza_kw x quota_potenza_eur_kw_anno
+      totale = uplift + fissa + potenza
+      equivalente (€/MWh) = totale / energia
+
+    Il mensile riparte l'uplift per quote_mensili (12 quote, default
+    piatto) e fissa/potenza in dodicesimi. La sensitivita' ricalcola il
+    totale al variare dell'uplift (default: -50%/-25%/base/+25%/+50%).
+
+    NaN-safe: parametri non numerici, negativi (energia <= 0), n_pod non
+    intero >= 1, quote non 12/normalizzabili, scenari non validi -> errore
+    pulito. Deterministico.
+
+    Ritorna dict con 'errore', 'valido', 'verdetto', 'costo_uplift',
+    'costo_quota_fissa', 'costo_quota_potenza', 'costo_totale_annuo',
+    'equivalente_eur_mwh', 'quote_pct' (dict voce -> %), 'df_mensile'
+    (Mese, Energia (MWh), Uplift (€), Quota fissa (€), Quota potenza (€),
+    Totale (€)), 'df_sensitivita' (Scenario, Uplift (€/MWh),
+    Totale annuo (€), Equivalente (€/MWh)).
+    """
+    mesi = ["Gen", "Feb", "Mar", "Apr", "Mag", "Giu",
+            "Lug", "Ago", "Set", "Ott", "Nov", "Dic"]
+    col_m = ["Mese", "Energia (MWh)", "Uplift (\u20ac)",
+             "Quota fissa (\u20ac)", "Quota potenza (\u20ac)", "Totale (\u20ac)"]
+    col_s = ["Scenario", "Uplift (\u20ac/MWh)", "Totale annuo (\u20ac)",
+             "Equivalente (\u20ac/MWh)"]
+    vuoto = {"errore": None, "valido": False, "verdetto": None,
+             "costo_uplift": 0.0, "costo_quota_fissa": 0.0,
+             "costo_quota_potenza": 0.0, "costo_totale_annuo": 0.0,
+             "equivalente_eur_mwh": 0.0,
+             "quote_pct": {"uplift": 0.0, "quota_fissa": 0.0,
+                           "quota_potenza": 0.0},
+             "df_mensile": pd.DataFrame(columns=col_m),
+             "df_sensitivita": pd.DataFrame(columns=col_s)}
+
+    def _err(msg):
+        out = dict(vuoto)
+        out["df_mensile"] = pd.DataFrame(columns=col_m)
+        out["df_sensitivita"] = pd.DataFrame(columns=col_s)
+        out["errore"] = msg
+        return out
+
+    def _num(x, nome):
+        if isinstance(x, bool):
+            raise ValueError(nome)
+        v = float(x)
+        if not np.isfinite(v):
+            raise ValueError(nome)
+        return v
+
+    try:
+        en = _num(energia_mwh_annua, "energia")
+        up = _num(uplift_eur_mwh, "uplift")
+        qf = _num(quota_fissa_eur_pod_anno, "quota_fissa")
+        qp = _num(quota_potenza_eur_kw_anno, "quota_potenza")
+        pk = _num(potenza_kw, "potenza")
+        if isinstance(n_pod, bool):
+            raise ValueError("n_pod")
+        npod = int(n_pod)
+        if npod != n_pod:
+            raise ValueError("n_pod")
+        quote = None
+        if quote_mensili is not None:
+            quote = [_num(q, "quota") for q in quote_mensili]
+            if len(quote) != 12:
+                raise ValueError("quote_len")
+            if any(q < 0 for q in quote) or sum(quote) <= 0:
+                raise ValueError("quote_sum")
+        scenari = None
+        if uplift_scenari is not None:
+            scenari = [_num(s, "scenario") for s in uplift_scenari]
+            if not scenari or any(s < 0 for s in scenari):
+                raise ValueError("scenari")
+    except (TypeError, ValueError):
+        return _err("Parametri non validi: numeri finiti >= 0; energia > 0; "
+                    "n_pod intero >= 1; 12 quote mensili >= 0 con somma > 0.")
+    if en <= 0:
+        return _err("Parametri non validi: energia annua > 0.")
+    if up < 0:
+        return _err("Parametri non validi: uplift >= 0.")
+    if qf < 0:
+        return _err("Parametri non validi: quota fissa >= 0.")
+    if qp < 0:
+        return _err("Parametri non validi: quota potenza >= 0.")
+    if pk < 0:
+        return _err("Parametri non validi: potenza >= 0.")
+    if npod < 1:
+        return _err("Parametri non validi: n_pod >= 1.")
+
+    c_uplift = en * up
+    c_fissa = npod * qf
+    c_potenza = pk * qp
+    totale = c_uplift + c_fissa + c_potenza
+    eq = totale / en
+    if totale > 0:
+        qpct = {"uplift": c_uplift / totale * 100.0,
+                "quota_fissa": c_fissa / totale * 100.0,
+                "quota_potenza": c_potenza / totale * 100.0}
+    else:
+        qpct = {"uplift": 0.0, "quota_fissa": 0.0, "quota_potenza": 0.0}
+
+    if quote is None:
+        quote = [1.0 / 12.0] * 12
+    else:
+        s = sum(quote)
+        quote = [q / s for q in quote]
+    righe_m = []
+    for i in range(12):
+        en_m = en * quote[i]
+        up_m = en_m * up
+        qf_m = c_fissa / 12.0
+        qp_m = c_potenza / 12.0
+        righe_m.append({"Mese": mesi[i],
+                        "Energia (MWh)": round(en_m, 2),
+                        "Uplift (\u20ac)": round(up_m, 2),
+                        "Quota fissa (\u20ac)": round(qf_m, 2),
+                        "Quota potenza (\u20ac)": round(qp_m, 2),
+                        "Totale (\u20ac)": round(up_m + qf_m + qp_m, 2)})
+    df_m = pd.DataFrame(righe_m, columns=col_m)
+
+    if scenari is None:
+        fattori = [0.50, 0.75, 1.00, 1.25, 1.50]
+        etichette = ["Uplift -50%", "Uplift -25%", "Uplift base",
+                     "Uplift +25%", "Uplift +50%"]
+        scenari = [up * f for f in fattori]
+    else:
+        etichette = ["Scenario %d (%.2f \u20ac/MWh)" % (i + 1, s)
+                     for i, s in enumerate(scenari)]
+    righe_s = []
+    for lab, up_s in zip(etichette, scenari):
+        tot_s = en * up_s + c_fissa + c_potenza
+        righe_s.append({"Scenario": lab,
+                        "Uplift (\u20ac/MWh)": round(up_s, 2),
+                        "Totale annuo (\u20ac)": round(tot_s, 2),
+                        "Equivalente (\u20ac/MWh)": round(tot_s / en, 3)})
+    df_s = pd.DataFrame(righe_s, columns=col_s)
+
+    if eq < 2.5:
+        verdetto = "\U0001F7E2 ONERI TRASCURABILI (<2,50 \u20ac/MWh)"
+    elif eq < 5.0:
+        verdetto = "\U0001F7E1 ONERI MODERATI (<5,00 \u20ac/MWh)"
+    elif eq < 8.0:
+        verdetto = "\U0001F7E0 ONERI RILEVANTI (<8,00 \u20ac/MWh)"
+    else:
+        verdetto = "\U0001F534 ONERI SIGNIFICATIVI (>=8,00 \u20ac/MWh)"
+
+    return {"errore": None, "valido": True, "verdetto": verdetto,
+            "costo_uplift": c_uplift, "costo_quota_fissa": c_fissa,
+            "costo_quota_potenza": c_potenza, "costo_totale_annuo": totale,
+            "equivalente_eur_mwh": eq, "quote_pct": qpct,
+            "df_mensile": df_m, "df_sensitivita": df_s}
+
+
 def calcola_radar_scadenze(df_contratti, prezzo_mercato_eur_mwh,
                            data_rif=None, orizzonte_mesi=6):
     """Radar scadenze contratti di fornitura.
@@ -30631,7 +30825,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -50204,6 +50398,103 @@ elif workspace == _('ws8'):
                 help="Costo CBAM stimato anno per anno con il phase-in.")
             st.caption("Stima indicativa: i fattori di emissione di default vanno verificati sul regolamento CBAM o sostituiti con i dati reali dell'impianto esportatore. "
                        "Soglia 50 t/anno per lo status di dichiarante autorizzato.")
+
+    with tab221:
+        titolo_od = edu("Oneri di dispacciamento", "Oltre la materia energia, la bolletta italiana addebita gli oneri di dispacciamento: il corrispettivo UPLIFT di Terna (a copertura dei costi di approvvigionamento delle risorse nel mercato per il servizio di dispacciamento, in euro/MWh sull'energia prelevata, pubblicato mensilmente) piu' le componenti fissa (euro/POD/anno) e di potenza (euro/kW/anno) del corrispettivo di dispacciamento. Questa tab stima il costo annuo, l'equivalente in euro/MWh, la ripartizione mensile e la sensibilita' all'uplift: utile per quantificare una voce che su prelievi medio-grandi vale diversi euro/MWh e per negoziare con il fornitore sapendo cosa e' passante e cosa no.")
+        st.markdown(f"<h1>⚡ {titolo_od}</h1>", unsafe_allow_html=True)
+        st.caption("Quanto pesano gli oneri di dispacciamento in bolletta? Stima annua di uplift + quota fissa + quota potenza, con mensile e sensibilita'.")
+        st.info("L'uplift e' pubblicato mensilmente da Terna e varia (anni recenti: ~2-5 €/MWh); quota fissa e quota potenza seguono le delibere ARERA per la BT. "
+                "I default qui sotto sono INDICATIVI: inserisci i valori della tua bolletta o della delibera vigente per una stima precisa.")
+        _profili_od = {
+            "Piatto (1/12 al mese)": "piatto",
+            "Estivo (picco lug-ago)": "estivo",
+            "Invernale (picco gen-feb)": "invernale",
+            "Doppia punta (est + inv)": "doppia_punta",
+        }
+        c1, c2 = st.columns(2)
+        with c1:
+            en221 = st.number_input("Energia annua prelevata (MWh)",
+                                    min_value=0.0, value=1000.0, step=50.0,
+                                    key="od221_energia")
+            up221 = st.number_input("Uplift Terna (€/MWh)",
+                                    min_value=0.0, value=3.50, step=0.10,
+                                    key="od221_uplift",
+                                    help="Corrispettivo mensile pubblicato da Terna sull'energia prelevata.")
+            pr221 = st.selectbox("Profilo mensile dell'energia",
+                                 list(_profili_od.keys()), key="od221_profilo",
+                                 help="Serve a ripartire l'uplift mese per mese.")
+        with c2:
+            qf221 = st.number_input("Quota fissa (€/POD/anno)",
+                                    min_value=0.0, value=21.00, step=1.0,
+                                    key="od221_qfissa",
+                                    help="Componente fissa del corrispettivo di dispacciamento (BT).")
+            qp221 = st.number_input("Quota potenza (€/kW/anno)",
+                                    min_value=0.0, value=21.00, step=1.0,
+                                    key="od221_qpot",
+                                    help="Componente di potenza del corrispettivo di dispacciamento (BT).")
+            pk221 = st.number_input("Potenza impegnata (kW)",
+                                    min_value=0.0, value=200.0, step=10.0,
+                                    key="od221_potenza")
+            np221 = st.number_input("Numero POD", min_value=1, value=1,
+                                    step=1, key="od221_npod")
+        ris221 = calcola_oneri_dispacciamento(
+            float(en221), float(up221), float(qf221), float(qp221),
+            float(pk221), n_pod=int(np221),
+            quote_mensili=profilo_mensile_demo(_profili_od[pr221]))
+        if ris221["errore"]:
+            st.error(ris221["errore"])
+        else:
+            st.subheader(ris221["verdetto"])
+            k1, k2, k3, k4 = st.columns(4)
+            with k1:
+                st.metric("Uplift", "€ %,.0f" % ris221["costo_uplift"])
+            with k2:
+                st.metric("Quota fissa", "€ %,.0f" % ris221["costo_quota_fissa"])
+            with k3:
+                st.metric("Quota potenza", "€ %,.0f" % ris221["costo_quota_potenza"])
+            with k4:
+                st.metric("Totale annuo", "€ %,.0f" % ris221["costo_totale_annuo"])
+            st.caption("Equivalente: %.3f €/MWh sull'energia prelevata "
+                       "(uplift %.1f%% · fissa %.1f%% · potenza %.1f%%)." % (
+                           ris221["equivalente_eur_mwh"],
+                           ris221["quote_pct"]["uplift"],
+                           ris221["quote_pct"]["quota_fissa"],
+                           ris221["quote_pct"]["quota_potenza"]))
+            import plotly.graph_objects as go
+            fig_od1 = go.Figure(data=[go.Pie(
+                labels=["Uplift", "Quota fissa", "Quota potenza"],
+                values=[ris221["costo_uplift"], ris221["costo_quota_fissa"],
+                        ris221["costo_quota_potenza"]],
+                marker=dict(colors=["#f59e0b", "#3b82f6", "#10b981"]))])
+            fig_od1.update_layout(title="Ripartizione oneri di dispacciamento",
+                                  height=360,
+                                  margin=dict(l=20, r=20, t=50, b=20))
+            st.plotly_chart(fig_od1, use_container_width=True, key="od221_pie")
+            df_m221 = ris221["df_mensile"]
+            fig_od2 = go.Figure()
+            for col, colore in [("Uplift (€)", "#f59e0b"),
+                                ("Quota fissa (€)", "#3b82f6"),
+                                ("Quota potenza (€)", "#10b981")]:
+                fig_od2.add_trace(go.Bar(x=df_m221["Mese"], y=df_m221[col],
+                                         name=col, marker=dict(color=colore)))
+            fig_od2.update_layout(title="Oneri di dispacciamento per mese",
+                                  barmode="stack", xaxis_title="Mese",
+                                  yaxis_title="€", height=360,
+                                  margin=dict(l=40, r=20, t=50, b=40))
+            st.plotly_chart(fig_od2, use_container_width=True, key="od221_bar")
+            st.subheader("Dettaglio mensile")
+            st.dataframe(df_m221, use_container_width=True, hide_index=True)
+            st.subheader("Sensibilita' all'uplift")
+            df_s221 = ris221["df_sensitivita"]
+            st.dataframe(df_s221, use_container_width=True, hide_index=True)
+            st.download_button(
+                "Scarica CSV oneri dispacciamento",
+                data=df_m221.to_csv(index=False, sep=";").encode("utf-8"),
+                file_name="oneri_dispacciamento_mensile.csv", mime="text/csv",
+                key="od221_csv",
+                help="Dettaglio mensile degli oneri di dispacciamento.")
+            st.caption("Stima indicativa: l'uplift varia ogni mese (pubblicazioni Terna) e le componenti fissa/potenza seguono le delibere ARERA: aggiorna i default con i valori vigenti. "
+                       "La quota potenza qui e' calcolata sulla potenza impegnata inserita.")
 
 # Footer
 
