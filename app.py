@@ -27998,6 +27998,208 @@ def calcola_componenti_trasporto_misura(energia_mwh_annua, potenza_kw, n_pod=1,
                     "(numeri >= 0).")
 
 
+def calcola_accise_iva(energia_kwh_annua, tipo_utenza="non_domestica",
+                       costo_energia_eur=0.0, altri_oneri_eur=0.0,
+                       accise=None, aliquota_iva=None,
+                       energia_scenari=None):
+    """Accisa sull'energia elettrica + IVA per una fornitura italiana.
+
+    Domanda operativa: "della mia bolletta, quanto e' imposta (accisa +
+    IVA) e quanto dipende dallo scaglione in cui cado?" L'accisa si
+    applica sui kWh prelevati con scaglioni MENSILI (il calcolo viene
+    fatto mese per mese, come fa il venditore in fattura):
+
+    Domestici:
+      - residente: esenzione sui primi `dom_esenzione_kwh_mese`
+        (default 150) kWh/mese, oltre `dom_aliquota` (default 0,0227
+        euro/kWh) su tutto il resto;
+      - non residente: `dom_aliquota` su tutti i kWh.
+    Non domestici (usi diversi da domestici/illuminazione pubblica):
+      - fino a `nd_soglia_kwh_mese` (default 1.200.000) kWh/mese:
+        `nd_aliquota_1` (default 0,0125 euro/kWh);
+      - oltre: `nd_aliquota_2` (default 0,0075 euro/kWh).
+    Illuminazione pubblica: esente (accisa 0).
+
+    L'IVA si applica sulla base imponibile che INCLUDE l'accisa:
+      base = costo_energia + altri_oneri + accisa
+    aliquota default: 10% domestici, 22% altri (sovrascrivibile con
+    `aliquota_iva`).
+
+    accise: dict opzionale con le 5 chiavi ("dom_esenzione_kwh_mese",
+    "dom_aliquota", "nd_soglia_kwh_mese", "nd_aliquota_1",
+    "nd_aliquota_2"); se None, o per le chiavi mancanti, si usano i
+    default INDICATIVI sopra (modificabili in UI).
+
+    Formule:
+      accisa_annua   = somma mensile (vedi sopra)
+      base_iva       = costo_energia_eur + altri_oneri_eur + accisa_annua
+      iva            = base_iva x aliquota_iva / 100
+      totale_fattura = base_iva + iva
+      totale_imposte = accisa_annua + iva
+      quota_fiscale% = totale_imposte / totale_fattura x 100
+      equivalente    = totale_imposte / (energia_kwh / 1000)
+
+    Il mensile riparte l'energia annua in dodicesimi. La sensibilita'
+    ricalcola accisa/IVA/imposte al variare dell'energia annua
+    (default: -30%/-15%/base/+15%/+30%).
+
+    NaN-safe: energia <= 0, tipo_utenza non valido, costi < 0, accise
+    non-dict/negative/non numeriche, aliquota_iva fuori 0..100,
+    scenari non validi -> errore pulito. Deterministico.
+
+    Ritorna dict con 'errore', 'valido', 'verdetto', 'accisa_annua',
+    'iva_eur', 'base_imponibile_eur', 'totale_fattura_eur',
+    'totale_imposte', 'equivalente_eur_mwh', 'quota_fiscale_pct',
+    'aliquota_iva_usata', 'df_mensile', 'df_sensitivita'.
+    """
+    mesi = ["Gen", "Feb", "Mar", "Apr", "Mag", "Giu",
+            "Lug", "Ago", "Set", "Ott", "Nov", "Dic"]
+    tipi = ["domestica_residente", "domestica_non_residente",
+            "non_domestica", "illuminazione_pubblica"]
+    chiavi = ["dom_esenzione_kwh_mese", "dom_aliquota",
+              "nd_soglia_kwh_mese", "nd_aliquota_1", "nd_aliquota_2"]
+    default = {"dom_esenzione_kwh_mese": 150.0, "dom_aliquota": 0.0227,
+               "nd_soglia_kwh_mese": 1200000.0, "nd_aliquota_1": 0.0125,
+               "nd_aliquota_2": 0.0075}
+    col_m = ["Mese", "Energia (kWh)", "Accisa (€)", "Quota oltre soglia (kWh)",
+             "Base IVA cumulata (€)"]
+    col_s = ["Scenario", "Energia (kWh/anno)", "Accisa (€)",
+             "IVA (€)", "Totale imposte (€)"]
+    vuoto = {"errore": None, "valido": False, "verdetto": None,
+             "accisa_annua": 0.0, "iva_eur": 0.0,
+             "base_imponibile_eur": 0.0, "totale_fattura_eur": 0.0,
+             "totale_imposte": 0.0, "equivalente_eur_mwh": 0.0,
+             "quota_fiscale_pct": 0.0, "aliquota_iva_usata": 0.0,
+             "df_mensile": pd.DataFrame(columns=col_m),
+             "df_sensitivita": pd.DataFrame(columns=col_s)}
+
+    def _err(msg):
+        out = dict(vuoto)
+        out["df_mensile"] = pd.DataFrame(columns=col_m)
+        out["df_sensitivita"] = pd.DataFrame(columns=col_s)
+        out["errore"] = msg
+        return out
+
+    def _num(x, nome):
+        if isinstance(x, bool):
+            raise ValueError(nome)
+        v = float(x)
+        if not np.isfinite(v):
+            raise ValueError(nome)
+        return v
+
+    def _accisa_mese(e_m, tipo, acc):
+        if tipo == "illuminazione_pubblica":
+            return 0.0, 0.0
+        if tipo == "domestica_residente":
+            oltre = max(0.0, e_m - acc["dom_esenzione_kwh_mese"])
+            return oltre * acc["dom_aliquota"], oltre
+        if tipo == "domestica_non_residente":
+            return e_m * acc["dom_aliquota"], e_m
+        # non_domestica: doppio scaglione mensile
+        sotto = min(e_m, acc["nd_soglia_kwh_mese"])
+        sopra = max(0.0, e_m - acc["nd_soglia_kwh_mese"])
+        return (sotto * acc["nd_aliquota_1"]
+                + sopra * acc["nd_aliquota_2"]), sopra
+
+    try:
+        en = _num(energia_kwh_annua, "energia")
+        ce = _num(costo_energia_eur, "costo_energia")
+        ao = _num(altri_oneri_eur, "altri_oneri")
+        if en <= 0:
+            raise ValueError("energia")
+        if ce < 0 or ao < 0:
+            raise ValueError("costi")
+        tipo = str(tipo_utenza).strip().lower()
+        if tipo not in tipi:
+            raise ValueError("tipo_utenza")
+        acc = dict(default)
+        if accise is not None:
+            if not isinstance(accise, dict):
+                raise ValueError("accise")
+            for k in chiavi:
+                if k in accise:
+                    v = _num(accise[k], k)
+                    if v < 0:
+                        raise ValueError(k)
+                    acc[k] = v
+        if aliquota_iva is None:
+            aliq = 10.0 if tipo.startswith("domestica") else 22.0
+        else:
+            aliq = _num(aliquota_iva, "aliquota_iva")
+            if aliq < 0 or aliq > 100:
+                raise ValueError("aliquota_iva")
+
+        # --- mensile (energia in dodicesimi, scaglioni applicati al mese)
+        e_mese = en / 12.0
+        righe_m, accisa_annua, oltre_tot = [], 0.0, 0.0
+        for m in mesi:
+            a_m, oltre_m = _accisa_mese(e_mese, tipo, acc)
+            accisa_annua += a_m
+            oltre_tot += oltre_m
+            righe_m.append({"Mese": m,
+                            "Energia (kWh)": round(e_mese, 1),
+                            "Accisa (€)": round(a_m, 2),
+                            "Quota oltre soglia (kWh)": round(oltre_m, 1),
+                            "Base IVA cumulata (€)":
+                                round((ce + ao) / 12.0 + a_m, 2)})
+        df_m = pd.DataFrame(righe_m)
+
+        base = ce + ao + accisa_annua
+        iva = base * aliq / 100.0
+        tot_fatt = base + iva
+        tot_imp = accisa_annua + iva
+        quota_fisc = (tot_imp / tot_fatt * 100.0) if tot_fatt > 0 else 0.0
+        equiv = tot_imp / (en / 1000.0)
+
+        if quota_fisc < 10.0:
+            verdetto = (f"Peso fiscale LEGGERO: imposte al "
+                        f"{quota_fisc:.1f}% della fattura "
+                        f"({equiv:.2f} €/MWh).")
+        elif quota_fisc < 20.0:
+            verdetto = (f"Peso fiscale MEDIO: imposte al "
+                        f"{quota_fisc:.1f}% della fattura "
+                        f"({equiv:.2f} €/MWh).")
+        else:
+            verdetto = (f"Peso fiscale PESANTE: imposte al "
+                        f"{quota_fisc:.1f}% della fattura "
+                        f"({equiv:.2f} €/MWh) — verifica scaglione "
+                        f"ed esenzioni.")
+
+        # --- sensibilita' all'energia annua
+        if energia_scenari is None:
+            energia_scenari = [-30.0, -15.0, 0.0, 15.0, 30.0]
+        scen = []
+        for s in energia_scenari:
+            sv = _num(s, "scenari")
+            e_s = en * (1.0 + sv / 100.0)
+            if e_s <= 0:
+                raise ValueError("scenari")
+            e_ms = e_s / 12.0
+            a_s = sum(_accisa_mese(e_ms, tipo, acc)[0] for _ in mesi)
+            b_s = ce + ao + a_s
+            i_s = b_s * aliq / 100.0
+            scen.append({"Scenario": (f"{sv:+.0f}%" if sv != 0 else "base"),
+                         "Energia (kWh/anno)": round(e_s, 0),
+                         "Accisa (€)": round(a_s, 2),
+                         "IVA (€)": round(i_s, 2),
+                         "Totale imposte (€)": round(a_s + i_s, 2)})
+        df_s = pd.DataFrame(scen)
+
+        return {"errore": None, "valido": True, "verdetto": verdetto,
+                "accisa_annua": accisa_annua, "iva_eur": iva,
+                "base_imponibile_eur": base, "totale_fattura_eur": tot_fatt,
+                "totale_imposte": tot_imp, "equivalente_eur_mwh": equiv,
+                "quota_fiscale_pct": quota_fisc,
+                "aliquota_iva_usata": aliq,
+                "df_mensile": df_m, "df_sensitivita": df_s}
+    except (ValueError, TypeError):
+        return _err("Input non validi: controlla energia (>0), tipo_utenza "
+                    "(domestica_residente / domestica_non_residente / "
+                    "non_domestica / illuminazione_pubblica), costi (>=0), "
+                    "le 5 aliquote/esenzioni (numeri >= 0) e l'aliquota IVA "
+                    "(0..100).")
+
 def calcola_oneri_generali(energia_mwh_annua, quota_fissa_eur_pod_anno,
                              quota_potenza_eur_kw_anno,
                              quota_energia_eur_mwh, potenza_kw,
@@ -31195,7 +31397,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -51357,6 +51559,108 @@ elif workspace == _('ws8'):
             mime="text/csv", key="ssp225_csv",
             help="Dettaglio mensile di immessa, prelevata, energia scambiata e contributo in conto scambio.")
         st.caption("Stima indicativa: il conguaglio ufficiale e' annuale (con acconti semestrali) e il CUsf cambia ogni anno con le pubblicazioni GSE/ARERA; il prezzo zonale varia ogni ora. Aggiorna i default con i valori dell'anno di competenza.")
+
+    with tab226:
+        titolo_ai = edu("Accise e IVA", "Sull'energia elettrica si pagano due imposte: l'ACCISA (sui kWh prelevati, con scaglioni mensili diversi per utenze domestiche e non domestiche) e l'IVA (10% per i domestici, 22% per gli altri, calcolata sulla base imponibile che INCLUDE l'accisa). Questa tab stima il peso fiscale della tua bolletta e mostra in che scaglione cadi.")
+        st.markdown(f"<h1>🧾 {titolo_ai}</h1>", unsafe_allow_html=True)
+        st.caption("Quanto della tua bolletta e' imposta? Accisa per scaglioni mensili + IVA sulla base imponibile (accisa inclusa), con sensibilita' ai consumi.")
+        st.warning("Default INDICATIVI: gli scaglioni e le aliquote cambiano con le leggi di bilancio — aggiornali con i valori dell'anno di competenza prima di usare i numeri per decisioni.")
+        _tipi226 = {"Domestica residente": "domestica_residente",
+                    "Domestica non residente": "domestica_non_residente",
+                    "Non domestica": "non_domestica",
+                    "Illuminazione pubblica (esente)": "illuminazione_pubblica"}
+        c1, c2 = st.columns(2)
+        with c1:
+            tipo226 = st.selectbox("Tipo utenza", list(_tipi226.keys()),
+                                   index=2, key="ai226_tipo")
+            en226 = st.number_input("Energia annua (kWh)",
+                                    min_value=1.0, value=12000.0, step=100.0,
+                                    key="ai226_energia")
+        with c2:
+            ce226 = st.number_input("Costo materia energia (€/anno)",
+                                    min_value=0.0, value=2400.0, step=50.0,
+                                    key="ai226_costo_energia",
+                                    help="Materia energia + dispacciamento: fa parte della base imponibile IVA.")
+            ao226 = st.number_input("Altri oneri in bolletta (€/anno)",
+                                    min_value=0.0, value=600.0, step=50.0,
+                                    key="ai226_altri_oneri",
+                                    help="Trasporto, misura, oneri generali: anche questi entrano nella base IVA.")
+        with st.expander("Aliquote ed esenzioni (default indicativi)"):
+            e1, e2 = st.columns(2)
+            with e1:
+                dom_ese226 = st.number_input("Esenzione domestici residenti (kWh/mese)",
+                                             min_value=0.0, value=150.0, step=10.0,
+                                             key="ai226_dom_ese")
+                dom_ali226 = st.number_input("Accisa domestici (€/kWh)",
+                                             min_value=0.0, value=0.0227, step=0.001,
+                                             format="%.4f", key="ai226_dom_ali")
+                iva226 = st.number_input("Aliquota IVA (%)",
+                                         min_value=0.0, max_value=100.0, value=22.0,
+                                         step=1.0, key="ai226_iva")
+            with e2:
+                nd_sog226 = st.number_input("Soglia non domestici (kWh/mese)",
+                                            min_value=0.0, value=1200000.0, step=10000.0,
+                                            key="ai226_nd_sog")
+                nd_ali1_226 = st.number_input("Accisa non dom. sotto soglia (€/kWh)",
+                                              min_value=0.0, value=0.0125, step=0.001,
+                                              format="%.4f", key="ai226_nd_ali1")
+                nd_ali2_226 = st.number_input("Accisa non dom. oltre soglia (€/kWh)",
+                                              min_value=0.0, value=0.0075, step=0.001,
+                                              format="%.4f", key="ai226_nd_ali2")
+        _acc226 = {"dom_esenzione_kwh_mese": dom_ese226,
+                   "dom_aliquota": dom_ali226,
+                   "nd_soglia_kwh_mese": nd_sog226,
+                   "nd_aliquota_1": nd_ali1_226,
+                   "nd_aliquota_2": nd_ali2_226}
+        ris226 = calcola_accise_iva(en226, _tipi226[tipo226],
+                                    costo_energia_eur=ce226,
+                                    altri_oneri_eur=ao226,
+                                    accise=_acc226, aliquota_iva=iva226)
+        if ris226["errore"]:
+            st.error(ris226["errore"])
+        else:
+            st.success(ris226["verdetto"])
+            k1, k2, k3, k4, k5 = st.columns(5)
+            k1.metric("Accisa annua", f"€ {ris226['accisa_annua']:,.0f}")
+            k2.metric(f"IVA {ris226['aliquota_iva_usata']:.0f}%", f"€ {ris226['iva_eur']:,.0f}")
+            k3.metric("Totale imposte", f"€ {ris226['totale_imposte']:,.0f}")
+            k4.metric("Peso fiscale", f"{ris226['quota_fiscale_pct']:.1f}%")
+            k5.metric("Equivalente", f"{ris226['equivalente_eur_mwh']:.2f} €/MWh")
+            _dfm226 = ris226["df_mensile"].copy()
+            _dfm226["IVA mensile (€)"] = (_dfm226["Base IVA cumulata (€)"]
+                                          * ris226["aliquota_iva_usata"] / 100.0).round(2)
+            fig226 = go.Figure()
+            fig226.add_trace(go.Bar(x=_dfm226["Mese"], y=_dfm226["Accisa (€)"],
+                                    name="Accisa"))
+            fig226.add_trace(go.Bar(x=_dfm226["Mese"], y=_dfm226["IVA mensile (€)"],
+                                    name="IVA"))
+            fig226.update_layout(title="Imposte mensili (accisa per scaglione + IVA)",
+                                 barmode="stack",
+                                 xaxis_title="Mese", yaxis_title="€",
+                                 height=360, margin=dict(l=40, r=20, t=50, b=40))
+            st.plotly_chart(fig226, use_container_width=True, key="ai226_bar")
+            st.subheader("Sensibilita' ai consumi")
+            st.caption("L'accisa ha scaglioni a scalini (soprattutto oltre la soglia mensile per i non domestici): il totale imposte non cresce in modo lineare con i consumi.")
+            _dfs226 = ris226["df_sensitivita"]
+            fig226b = go.Figure()
+            fig226b.add_trace(go.Scatter(x=_dfs226["Scenario"], y=_dfs226["Accisa (€)"],
+                                         mode="lines+markers", name="Accisa"))
+            fig226b.add_trace(go.Scatter(x=_dfs226["Scenario"], y=_dfs226["Totale imposte (€)"],
+                                         mode="lines+markers", name="Totale imposte"))
+            fig226b.update_layout(title="Imposte vs consumi annui",
+                                  xaxis_title="Scenario", yaxis_title="€/anno",
+                                  height=340, margin=dict(l=40, r=20, t=50, b=40))
+            st.plotly_chart(fig226b, use_container_width=True, key="ai226_sens")
+            st.dataframe(_dfm226[["Mese", "Energia (kWh)", "Accisa (€)",
+                                  "Quota oltre soglia (kWh)", "IVA mensile (€)"]],
+                         use_container_width=True, hide_index=True)
+            st.download_button(
+                "Scarica CSV accise e IVA",
+                data=_dfm226.to_csv(index=False, sep=";").encode("utf-8"),
+                file_name="accise_iva_mensile.csv",
+                mime="text/csv", key="ai226_csv",
+                help="Dettaglio mensile di energia, accisa per scaglione e IVA.")
+            st.caption("Stima indicativa: l'accisa si liquida sui consumi effettivi mensili di fatturazione e l'IVA segue le regole del DPR 633/1972; per i casi particolari (usi esenti, agevolazioni) verifica con il venditore.")
 
 # Footer
 
