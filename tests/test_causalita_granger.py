@@ -260,7 +260,8 @@ class TestRegistry:
                     and isinstance(node.value, __import__("ast").Call)):
                 func = node.value.func
                 if (isinstance(func, __import__("ast").Attribute)
-                        and func.attr == "tabs"):
+                        and func.attr == "tabs"
+                        and node.value.args and hasattr(node.value.args[0], "elts")):
                     nomi = [t.id for t in node.targets[0].elts]
                     titoli = [e.value for e in node.value.args[0].elts]
         assert "tab173" in nomi
