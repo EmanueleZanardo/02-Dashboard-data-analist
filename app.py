@@ -31390,6 +31390,737 @@ def waterfall_quote_pct(componenti):
     return pd.DataFrame({"componente": nomi, "quota_pct": quote})
 
 
+def calcola_mappa_prezzo_carico(prezzi, carichi, n_prezzo=4, n_carico=4, min_ore=24):
+    """Mappa del costo per bucket di prezzo x bucket di carico (heatmap).
+
+    Ogni ora e' classificata per fascia di PREZZO (eur/MWh, righe) e fascia di
+    CARICO (kW, colonne); la cella riporta gli euro spesi (costo = p*carico/1000)
+    e il numero di ore. I bucket sono costruiti sui quantili della serie, con
+    fusione automatica dei bin vuoti (duplicates drop) quando una serie e' piatta.
+
+    Ritorna un dict con:
+      ok, valido, errore
+      mat_costo: DataFrame (righe = bucket prezzo, colonne = bucket carico) in EUR
+      mat_ore: DataFrame con il conteggio delle ore per cella
+      kpi: ore_totali, costo_totale_eur, quota_dominante_pct, quota_top3_pct
+      top_celle: DataFrame delle celle ordinato per costo_eur decrescente
+        (colonne: bucket_prezzo, bucket_carico, ore, costo_eur, quota_pct)
+    """
+    try:
+        p = np.asarray(prezzi, dtype=float).ravel()
+        c = np.asarray(carichi, dtype=float).ravel()
+    except (ValueError, TypeError):
+        return {"ok": False, "valido": False,
+                "errore": "Input non numerici: prezzi e carichi devono essere numeri."}
+    if p.size != c.size:
+        return {"ok": False, "valido": False,
+                "errore": f"Serie con lunghezze diverse: prezzi={int(p.size)}, carichi={int(c.size)}."}
+    try:
+        n_prezzo = int(n_prezzo)
+        n_carico = int(n_carico)
+        min_ore = int(min_ore)
+    except (ValueError, TypeError):
+        return {"ok": False, "valido": False, "errore": "Parametri n_prezzo/n_carico/min_ore non interi."}
+    if isinstance(n_prezzo, bool) or isinstance(n_carico, bool) or isinstance(min_ore, bool):
+        return {"ok": False, "valido": False, "errore": "Parametri n_prezzo/n_carico/min_ore non interi."}
+    if n_prezzo < 2 or n_carico < 2:
+        return {"ok": False, "valido": False,
+                "errore": "Servono almeno 2 bucket per il prezzo e 2 per il carico."}
+    if min_ore < 1:
+        return {"ok": False, "valido": False, "errore": "min_ore deve essere >= 1."}
+    mask = ~np.isnan(p) & ~np.isnan(c)
+    p, c = p[mask], c[mask]
+    n = int(p.size)
+    if n < min_ore:
+        return {"ok": False, "valido": False,
+                "errore": f"Servono almeno {min_ore} ore valide (trovate {n})."}
+    costo = p * c / 1000.0
+
+    def _edges(x, k):
+        qs = np.quantile(x, np.linspace(0.0, 1.0, k + 1))
+        edges = np.unique(qs)
+        if edges.size < 2:
+            lo = float(x.min())
+            hi = float(x.max())
+            edges = np.array([lo, hi]) if hi > lo else np.array([lo, lo + 1.0])
+        return edges
+
+    e_p = _edges(p, n_prezzo)
+    e_c = _edges(c, n_carico)
+    nb_p, nb_c = int(e_p.size - 1), int(e_c.size - 1)
+    idx_p = np.clip(np.digitize(p, e_p[1:-1], right=False), 0, nb_p - 1)
+    idx_c = np.clip(np.digitize(c, e_c[1:-1], right=False), 0, nb_c - 1)
+    lab_p = [f"{e_p[i]:.1f}\u2013{e_p[i + 1]:.1f} \u20ac/MWh" for i in range(nb_p)]
+    lab_c = [f"{e_c[i]:.0f}\u2013{e_c[i + 1]:.0f} kW" for i in range(nb_c)]
+    mat_costo = pd.DataFrame(np.zeros((nb_p, nb_c)), index=lab_p, columns=lab_c)
+    mat_ore = pd.DataFrame(np.zeros((nb_p, nb_c), dtype=int), index=lab_p, columns=lab_c)
+    for i in range(n):
+        mat_costo.iat[int(idx_p[i]), int(idx_c[i])] += float(costo[i])
+        mat_ore.iat[int(idx_p[i]), int(idx_c[i])] += 1
+    totale = float(costo.sum())
+    celle = []
+    for i in range(nb_p):
+        for j in range(nb_c):
+            co = float(mat_costo.iat[i, j])
+            ore = int(mat_ore.iat[i, j])
+            q = round(co / totale * 100.0, 2) if totale > 0 else 0.0
+            celle.append({"bucket_prezzo": lab_p[i], "bucket_carico": lab_c[j],
+                          "ore": ore, "costo_eur": round(co, 2), "quota_pct": q})
+    top_celle = pd.DataFrame(celle).sort_values("costo_eur", ascending=False).reset_index(drop=True)
+    quote = [r["quota_pct"] for r in celle]
+    quota_top3 = round(float(sum(sorted(quote, reverse=True)[:3])), 2)
+    kpi = {
+        "ore_totali": n,
+        "costo_totale_eur": round(totale, 2),
+        "quota_dominante_pct": float(max(quote)) if quote else 0.0,
+        "quota_top3_pct": quota_top3,
+    }
+    return {"ok": True, "valido": True, "errore": None,
+            "mat_costo": mat_costo, "mat_ore": mat_ore,
+            "kpi": kpi, "top_celle": top_celle}
+
+
+def hhi_index(cost_by_hour):
+    """Indice HHI sulle quote di costo orarie: somma(quote^2), in [1/N, 1].
+
+    1/N = costo perfettamente distribuito sulle N ore; 1 = tutto il costo
+    in una sola ora. Piu' e' alto, piu' la spesa e' concentrata in poche ore.
+    """
+    c = np.asarray(list(cost_by_hour), dtype=float)
+    c = c[np.isfinite(c) & (c > 0)]
+    if c.size == 0:
+        return float("nan")
+    tot = c.sum()
+    if tot <= 0:
+        return float("nan")
+    q = c / tot
+    return float((q ** 2).sum())
+
+
+def effective_hours(cost_by_hour):
+    """Numero effettivo di ore: 1 / somma(quote^2).
+
+    Se la spesa fosse uniforme su E ore, l'HHI sarebbe 1/E: E e' quindi il
+    numero di ore "equivalenti" in cui si concentra davvero il costo.
+    """
+    h = hhi_index(cost_by_hour)
+    if not np.isfinite(h) or h <= 0:
+        return float("nan")
+    return float(1.0 / h)
+
+
+def top_hours_share(cost_by_hour, k):
+    """Quota del costo totale concentrata nelle k ore piu' care (0..1)."""
+    c = np.asarray(list(cost_by_hour), dtype=float)
+    c = c[np.isfinite(c) & (c > 0)]
+    if c.size == 0:
+        return float("nan")
+    k = int(k)
+    if k <= 0:
+        return float("nan")
+    k = min(k, c.size)
+    return float(np.sort(c)[-k:].sum() / c.sum())
+
+
+def ore_per_copertura(cost_by_hour, soglia_pct=80.0):
+    """Quante ore (le piu' care) servono per coprire soglia_pct% del costo."""
+    df = cumulative_curve(cost_by_hour)
+    if df.empty:
+        return float("nan")
+    hit = df[df["costo_cumulato_pct"] >= float(soglia_pct)]
+    if hit.empty:
+        return float(len(df))
+    return float(hit["ora_rank"].iloc[0])
+
+
+def cumulative_curve(cost_by_hour):
+    """Curva cumulata del costo: ore ordinate per costo decrescente.
+
+    Ritorna DataFrame con colonne ora_rank, costo_eur, quota_costo,
+    costo_cumulato_pct.
+    """
+    c = np.asarray(list(cost_by_hour), dtype=float)
+    c = c[np.isfinite(c) & (c > 0)]
+    df = pd.DataFrame({"ora_rank": np.arange(1, c.size + 1),
+                       "costo_eur": np.sort(c)[::-1]})
+    if df.empty:
+        df["quota_costo"] = pd.Series(dtype=float)
+        df["costo_cumulato_pct"] = pd.Series(dtype=float)
+        return df
+    tot = float(df["costo_eur"].sum())
+    df["quota_costo"] = df["costo_eur"] / tot if tot > 0 else 0.0
+    df["costo_cumulato_pct"] = df["quota_costo"].cumsum() * 100.0
+    return df
+
+
+def genera_costi_orari_sintetici(n_ore, costo_base_eur, extra_picco_eur,
+                                 n_ore_picco, seed=7):
+    """Serie sintetica di costi orari: base gaussiana + picchi di prezzo."""
+    rng = np.random.default_rng(int(seed))
+    n_ore = max(int(n_ore), 24)
+    base = max(float(costo_base_eur), 0.0)
+    costi = rng.normal(loc=base, scale=max(base * 0.15, 1e-9), size=n_ore)
+    costi = np.clip(costi, max(base * 0.2, 1e-9), None)
+    n_pk = min(max(int(n_ore_picco), 0), n_ore)
+    if n_pk > 0 and float(extra_picco_eur) > 0:
+        idx = rng.choice(n_ore, size=n_pk, replace=False)
+        costi[idx] += rng.uniform(float(extra_picco_eur) * 0.5,
+                                  float(extra_picco_eur) * 1.5, size=n_pk)
+    return costi
+
+
+def w239_simulate_annual_cost(monthly_costs, n_sim=10000, vol=0.10, seed=42):
+    """Monte Carlo del costo energetico annuo (EUR).
+
+    Per ogni simulazione campiona 12 mesi (bootstrap con reinserimento dai costi
+    mensili storici) e applica uno shock moltiplicativo N(0, vol^2) a ciascun mese.
+    Ritorna un array di n_sim costi annui simulati.
+    """
+    rng = np.random.default_rng(seed)
+    mc = np.asarray(list(monthly_costs), dtype=float)
+    mc = mc[np.isfinite(mc)]
+    if mc.size == 0:
+        raise ValueError("Costi mensili non validi.")
+    draws = rng.choice(mc, size=(int(n_sim), 12), replace=True)
+    noise = 1.0 + float(vol) * rng.standard_normal(size=(int(n_sim), 12))
+    return np.maximum(draws * noise, 0.0).sum(axis=1)
+
+
+def w239_breach_prob(sims, budget):
+    """P(costo annuo simulato > budget)."""
+    s = np.asarray(list(sims), dtype=float)
+    if s.size == 0:
+        raise ValueError("Nessuna simulazione.")
+    return float(np.mean(s > float(budget)))
+
+
+def w239_expected_cost(sims):
+    """Costo annuo atteso (media delle simulazioni)."""
+    s = np.asarray(list(sims), dtype=float)
+    return float(np.mean(s))
+
+
+def w239_safety_budget(sims, conf=0.95):
+    """Budget di sicurezza: quantile `conf` della distribuzione del costo annuo."""
+    s = np.asarray(list(sims), dtype=float)
+    return float(np.quantile(s, float(conf)))
+
+
+def w239_var_cost(sims, conf=0.95):
+    """VaR del costo: stesso quantile del safety budget (perdita massima attesa col livello di confidenza)."""
+    return w239_safety_budget(sims, conf=conf)
+
+
+def w239_csv_simulazioni(sims):
+    """Restituisce il CSV delle simulazioni come stringa."""
+    import io as _io
+    import csv as _csv
+    buf = _io.StringIO()
+    w = _csv.writer(buf, lineterminator="\n")
+    w.writerow(["simulazione", "costo_annuo_eur"])
+    for i, v in enumerate(np.asarray(list(sims), dtype=float), start=1):
+        w.writerow([i, f"{v:.2f}"])
+    return buf.getvalue()
+
+
+# ===========================================================================
+# W235 (05/10/2026) - tab235 "Correlazione carico-prezzo"
+# Funzioni pure: nessuna chiamata streamlit, solo numpy. Testate via appfuncs.
+# ===========================================================================
+
+def profilo_carico_sintetico_t235(ore=24, base_kw=50.0, picco_kw=150.0,
+                                  ora_picco=12.0, larghezza_picco=3.0,
+                                  rumore_pct=0.0, seed=235):
+    """Profilo di carico sintetico (kW): base + picco gaussiano + rumore."""
+    n = int(ore)
+    t = np.arange(n, dtype=float)
+    w = max(float(larghezza_picco), 0.5)
+    profilo = float(base_kw) + (float(picco_kw) - float(base_kw)) * np.exp(
+        -0.5 * ((t - float(ora_picco)) / w) ** 2)
+    if float(rumore_pct) > 0.0:
+        rng = np.random.default_rng(int(seed))
+        profilo = profilo * (1.0 + rng.normal(0.0, float(rumore_pct) / 100.0, size=n))
+    return np.maximum(profilo, 0.0)
+
+
+def profilo_prezzo_sintetico_t235(ore=24, base_eur_mwh=80.0, picco_eur_mwh=250.0,
+                                   ora_picco=18.0, larghezza_picco=2.0,
+                                   rumore_pct=0.0, seed=236):
+    """Profilo di prezzo sintetico (eur/MWh): base + picco serale + rumore."""
+    n = int(ore)
+    t = np.arange(n, dtype=float)
+    w = max(float(larghezza_picco), 0.5)
+    profilo = float(base_eur_mwh) + (float(picco_eur_mwh) - float(base_eur_mwh)) * np.exp(
+        -0.5 * ((t - float(ora_picco)) / w) ** 2
+    )
+    if float(rumore_pct) > 0.0:
+        rng = np.random.default_rng(int(seed))
+        profilo = profilo * (1.0 + rng.normal(0.0, float(rumore_pct) / 100.0, size=n))
+    return np.maximum(profilo, 0.5)
+
+
+def load_price_corr(load_kw, prezzo_eur_mwh, top_n=4):
+    """Correlazione tra profilo di carico (kW orari) e prezzo orario (eur/MWh).
+
+    Ritorna un dict con:
+      r_pearson, r_spearman: correlazione lineare / di rango [-1, 1]
+      costo_effettivo_eur: somma(carico_kWh * prezzo) sul periodo
+      costo_scorrelato_eur: stesso consumo totale ma profilo piatto
+        (nessuna concomitanza carico-prezzo)
+      extra_costo_vs_scorrelato_eur: differenza (positivo = paghi di piu'
+        perche' consumi nelle ore care)
+      ore_top_concomitanti: ore tra le top_n di carico E le top_n di prezzo
+    """
+    try:
+        load = np.asarray(load_kw, dtype=float).ravel()
+        prezzo = np.asarray(prezzo_eur_mwh, dtype=float).ravel()
+    except (ValueError, TypeError):
+        return {"valido": False, "errore": "Input non numerici."}
+    if load.size != prezzo.size:
+        return {"valido": False, "errore": "Carico e prezzo devono avere la stessa lunghezza."}
+    n = int(load.size)
+    if n < 3:
+        return {"valido": False, "errore": "Servono almeno 3 osservazioni orarie."}
+    if bool(np.isnan(load).any()) or bool(np.isnan(prezzo).any()):
+        return {"valido": False, "errore": "Valori mancanti (NaN) nelle serie."}
+    # Pearson e ranghi medi calcolati a mano (funzione autocontenuta: niente scipy)
+    def _pearson(x, y):
+        xc = x - x.mean()
+        yc = y - y.mean()
+        den = float(np.sqrt(float((xc ** 2).sum()) * float((yc ** 2).sum())))
+        if den <= 0.0:
+            return 0.0
+        return max(-1.0, min(1.0, float((xc * yc).sum() / den)))
+
+    def _ranghi(a):
+        order = np.argsort(a, kind="mergesort")
+        ranks = np.empty(int(a.size), dtype=float)
+        i, nn = 0, int(a.size)
+        while i < nn:
+            j = i
+            while j + 1 < nn and a[order[j + 1]] == a[order[i]]:
+                j += 1
+            ranks[order[i:j + 1]] = (i + j) / 2.0 + 1.0
+            i = j + 1
+        return ranks
+
+    r_p = _pearson(load, prezzo)
+    r_s = _pearson(_ranghi(load), _ranghi(prezzo))
+    costo_effettivo = float(np.sum(load * prezzo) / 1000.0)
+    costo_scorrelato = float(load.mean() * prezzo.sum() / 1000.0)
+    extra = costo_effettivo - costo_scorrelato
+    k = max(1, min(int(top_n), n))
+    idx_l = set(np.argsort(load)[-k:].tolist())
+    idx_p = set(np.argsort(prezzo)[-k:].tolist())
+    concomitanti = len(idx_l & idx_p)
+    if r_p >= 0.5:
+        verdetto = ("Profilo SFORTUNATO: il carico e' concentrato nelle ore piu' care. "
+                    "Spostare consumi fuori picco riduce il costo.")
+    elif r_p <= -0.5:
+        verdetto = ("Profilo FORTUNATO: il carico e' concentrato nelle ore piu' economiche. "
+                    "Il profilo lavora a favore del prezzo.")
+    else:
+        verdetto = ("Profilo NEUTRO: nessuna correlazione forte tra carico e prezzo "
+                    "(|r di Pearson| < 0,5).")
+    return {
+        "valido": True,
+        "errore": "",
+        "n": n,
+        "r_pearson": r_p,
+        "r_spearman": r_s,
+        "costo_effettivo_eur": costo_effettivo,
+        "costo_scorrelato_eur": costo_scorrelato,
+        "extra_costo_vs_scorrelato_eur": extra,
+        "ore_top_concomitanti": concomitanti,
+        "top_n": k,
+        "verdetto": verdetto,
+    }
+
+
+def checklist_score(items):
+    """Score ponderato di una offerta.
+    items: list di (voce, peso_pct, score) con score in [0, 5].
+    Ritorna dict(totale_ponderato, dettaglio, somma_pesi, pesi_validi).
+    """
+    dettaglio = []
+    somma_pesi = 0.0
+    accumulo = 0.0
+    for voce, peso, score in items:
+        try:
+            p = float(peso)
+            s = float(score)
+        except (TypeError, ValueError):
+            p, s = 0.0, 0.0
+        s = max(0.0, min(5.0, s))
+        p = max(0.0, p)
+        somma_pesi += p
+        accumulo += p * s
+        dettaglio.append({"Voce": voce, "Peso (%)": round(p, 1),
+                          "Punteggio": round(s, 1),
+                          "Ponderato": round(p * s, 2)})
+    totale = accumulo / somma_pesi if somma_pesi > 0 else 0.0
+    return {"totale_ponderato": round(totale, 3),
+            "dettaglio": dettaglio,
+            "somma_pesi": round(somma_pesi, 1),
+            "pesi_validi": 0 < somma_pesi <= 100}
+
+
+def rank_offers(offerte):
+    """Classifica fino a 3 offerte. offerte: list di (nome, items).
+    Ritorna lista di dict ordinata per score decrescente."""
+    righe = []
+    for nome, items in offerte:
+        ris = checklist_score(items)
+        righe.append({"offerta": nome,
+                      "score": ris["totale_ponderato"],
+                      "dettaglio": ris["dettaglio"],
+                      "somma_pesi": ris["somma_pesi"]})
+    righe.sort(key=lambda r: r["score"], reverse=True)
+    for i, r in enumerate(righe, start=1):
+        r["posizione"] = i
+    return righe
+
+
+
+def night_share238(load_kw, price_eur_mwh, ore_notte=None):
+    """Quota e costi della fascia notturna su un profilo di 24 ore (funzione pura).
+
+    load_kw: 24 valori orari di carico (kW); price_eur_mwh: 24 prezzi orari (eur/MWh).
+    Ritorna dict con quota, energia_notte_kwh, energia_giorno_kwh, costo_notte,
+    costo_giorno, prezzo_medio_notte, prezzo_medio_giorno, rapporto, ore_notte.
+    """
+    load = [float(x) for x in load_kw]
+    price = [float(x) for x in price_eur_mwh]
+    if len(load) != 24 or len(price) != 24:
+        raise ValueError("load_kw e price_eur_mwh devono avere 24 valori orari")
+    ore = list(ore_notte) if ore_notte is not None else [22, 23, 0, 1, 2, 3, 4, 5]
+    notte = [h for h in ore if 0 <= h < 24]
+    if not notte:
+        raise ValueError("nessuna ora notturna valida")
+    giorno = [h for h in range(24) if h not in set(notte)]
+    en_notte = sum(load[h] for h in notte)
+    en_tot = sum(load)
+    costo_notte = sum(load[h] * price[h] for h in notte) / 1000.0
+    costo_giorno = sum(load[h] * price[h] for h in giorno) / 1000.0
+    p_notte = sum(price[h] for h in notte) / len(notte)
+    p_giorno = sum(price[h] for h in giorno) / len(giorno) if giorno else 0.0
+    return {
+        "quota": en_notte / en_tot if en_tot > 0 else 0.0,
+        "energia_notte_kwh": en_notte,
+        "energia_giorno_kwh": en_tot - en_notte,
+        "costo_notte": costo_notte,
+        "costo_giorno": costo_giorno,
+        "prezzo_medio_notte": p_notte,
+        "prezzo_medio_giorno": p_giorno,
+        "rapporto": (p_notte / p_giorno) if p_giorno > 0 else 0.0,
+        "ore_notte": notte,
+    }
+
+
+def ghost_load238(load_kw, ore_notte=None):
+    """Carico fantasma: minimo notturno mai spento (kW) su un profilo di 24 ore (funzione pura)."""
+    load = [float(x) for x in load_kw]
+    if len(load) != 24:
+        raise ValueError("load_kw deve avere 24 valori orari")
+    ore = list(ore_notte) if ore_notte is not None else [22, 23, 0, 1, 2, 3, 4, 5]
+    notte = [h for h in ore if 0 <= h < 24]
+    if not notte:
+        raise ValueError("nessuna ora notturna valida")
+    return min(load[h] for h in notte)
+
+
+def profilo_sintetico238(base_kw, picco_kw, ora_picco, fattore_serale):
+    """Profilo 24h sintetico: baseload costante + gaussiana diurna + coda serale (funzione pura)."""
+    prof = []
+    for h in range(24):
+        gauss = picco_kw * np.exp(-((h - ora_picco) ** 2) / (2 * 4.0 ** 2))
+        sera = fattore_serale * picco_kw * np.exp(-((h - 20.0) ** 2) / (2 * 2.5 ** 2)) if h >= 15 else 0.0
+        prof.append(round(base_kw + gauss + sera, 3))
+    return prof
+
+
+def clc236_carico_residuo(carico_kw, fv_kw):
+    """Carico residuo orario = carico - FV (kW). Valori negativi = surplus immesso."""
+    import numpy as np
+    carico = np.asarray(list(carico_kw), dtype=float)
+    fv = np.asarray(list(fv_kw), dtype=float)
+    if fv.shape != carico.shape:
+        raise ValueError("carico e fv devono avere la stessa lunghezza")
+    return carico - fv
+
+
+def clc236_duration_curve(serie):
+    """Curva di durata: valori ordinati in senso decrescente."""
+    import numpy as np
+    s = np.asarray(list(serie), dtype=float)
+    return np.sort(s)[::-1]
+
+
+def clc236_kpi_anno(carico_kw, fv_kw):
+    """KPI annuali su una serie oraria (tipicamente 8760 ore)."""
+    import numpy as np
+    residuo = clc236_carico_residuo(carico_kw, fv_kw)
+    ore_surplus = int((residuo < 0).sum())
+    energia_surplus = float(-residuo[residuo < 0].sum())
+    energia_residua = float(residuo[residuo > 0].sum())
+    fv_tot = float(np.asarray(list(fv_kw), dtype=float).sum())
+    autoconsumo = float(1.0 - energia_surplus / fv_tot) if fv_tot > 0 else 1.0
+    return {
+        "ore_surplus": ore_surplus,
+        "energia_surplus_kwh": round(energia_surplus, 1),
+        "energia_residua_kwh": round(energia_residua, 1),
+        "picco_residuo_kw": round(float(residuo.max()), 2),
+        "picco_lordo_kw": round(float(np.asarray(list(carico_kw), dtype=float).max()), 2),
+        "autoconsumo_pct": round(autoconsumo * 100.0, 1),
+    }
+
+
+def clc236_profilo_giornaliero(base_kw, picco_matt_kw, ora_picco_matt, picco_sera_kw, ora_picco_sera):
+    """Profilo giornaliero sintetico 24h: baseload + due gaussiane (mattina/sera)."""
+    import numpy as np
+    h = np.arange(24)
+    prof = (base_kw
+            + picco_matt_kw * np.exp(-((h - ora_picco_matt) ** 2) / 8.0)
+            + picco_sera_kw * np.exp(-((h - ora_picco_sera) ** 2) / 8.0))
+    return [round(float(x), 3) for x in prof]
+
+
+def clc236_fv_giornaliero(kwp, ora_picco_fv, fattore_nuvola):
+    """Produzione FV giornaliera sintetica 24h: campana diurna attenuata dalle nuvole."""
+    import numpy as np
+    h = np.arange(24)
+    fv = kwp * np.exp(-((h - ora_picco_fv) ** 2) / 18.0) * (1.0 - fattore_nuvola)
+    return [round(float(max(x, 0.0)), 3) for x in fv]
+
+
+def flx237_top_bottom(load_kw, price_eur_mwh, quota_top=0.10):
+    """Indici delle ore piu' care (top quota) e piu' economiche (bottom quota)."""
+    import numpy as np
+    price = np.asarray(list(price_eur_mwh), dtype=float)
+    n = price.size
+    k = max(1, int(round(n * quota_top)))
+    idx_top = np.argsort(price)[-k:]
+    idx_bottom = np.argsort(price)[:k]
+    return idx_top.tolist(), idx_bottom.tolist()
+
+
+def flx237_shifting_saving(load_kw, price_eur_mwh, pct_shift=0.5, quota_top=0.10):
+    """Risparmio spostando pct_shift del carico dalle ore top alle ore bottom."""
+    import numpy as np
+    load = np.asarray(list(load_kw), dtype=float)
+    price = np.asarray(list(price_eur_mwh), dtype=float)
+    if load.shape != price.shape:
+        raise ValueError("carico e prezzo devono avere la stessa lunghezza")
+    idx_top, idx_bottom = flx237_top_bottom(load, price, quota_top)
+    e_top = float(load[idx_top].sum())
+    spostabile = e_top * pct_shift
+    p_top = float(price[idx_top].mean())
+    p_bottom = float(price[idx_bottom].mean())
+    risparmio = spostabile * (p_top - p_bottom) / 1000.0
+    costo_base = float((load * price).sum() / 1000.0)
+    return {
+        "energia_spostabile_kwh": round(spostabile, 1),
+        "risparmio_eur": round(risparmio, 2),
+        "risparmio_pct": round(100.0 * risparmio / costo_base, 2) if costo_base else 0.0,
+        "prezzo_medio_top": round(p_top, 2),
+        "prezzo_medio_bottom": round(p_bottom, 2),
+        "costo_base_eur": round(costo_base, 2),
+    }
+
+
+def flx237_profilo_sintetico(base_kw, picco_kw, ora_picco, seed=0):
+    """Profilo di carico giornaliero sintetico 24h con rumore (seed per ripetibilita')."""
+    import numpy as np
+    rng = np.random.default_rng(seed)
+    h = np.arange(24)
+    prof = base_kw + picco_kw * np.exp(-((h - ora_picco) ** 2) / 8.0)
+    prof = prof * (1 + rng.normal(0, 0.05, 24))
+    return [round(float(max(x, 0.0)), 3) for x in prof]
+
+
+def flx237_prezzo_sintetico(base_eur, ampiezza_eur, ora_picco, seed=0):
+    """Prezzo orario sintetico 24h: picco serale + rumore (seed per ripetibilita')."""
+    import numpy as np
+    rng = np.random.default_rng(seed)
+    h = np.arange(24)
+    prezzo = base_eur + ampiezza_eur * np.exp(-((h - ora_picco) ** 2) / 12.0)
+    prezzo = prezzo * (1 + rng.normal(0, 0.08, 24))
+    return [round(float(max(x, 1.0)), 2) for x in prezzo]
+
+
+def pot242_profilo_annuo(base_kw, picco_kw, ora_picco, stagionalita_pct, seed=242):
+    """Profilo di carico orario sintetico per un anno (8760 ore), kW.
+
+    Profilo giornaliero = base + gaussiana centrata sull'ora di picco, con
+    stagionalita' sinusoidale (max a luglio, min a gennaio) e rumore 5%.
+    Deterministico a parita' di seed. Ritorna lista di 8760 float arrotondati.
+    """
+    import numpy as np
+    base_kw = float(base_kw)
+    picco_kw = float(picco_kw)
+    ora_picco = float(ora_picco)
+    stag = float(stagionalita_pct) / 100.0
+    if base_kw < 0 or picco_kw < 0:
+        raise ValueError("base_kw e picco_kw devono essere >= 0")
+    rng = np.random.default_rng(int(seed))
+    out = []
+    for d in range(365):
+        stag_d = 1.0 + stag * (-np.cos(2.0 * np.pi * (d - 14) / 365.0)) / 2.0 * 2.0
+        for h in range(24):
+            prof = base_kw + picco_kw * np.exp(-((h - ora_picco) ** 2) / 8.0)
+            out.append(prof * stag_d * (1.0 + rng.normal(0, 0.05)))
+    return [round(float(max(x, 0.0)), 3) for x in out]
+
+
+def pot242_picchi_mensili(profilo_kw):
+    """Picchi mensili (kW) da una serie oraria annua 8760: 12 massimi su blocchi da 730 h."""
+    import numpy as np
+    p = np.asarray(list(profilo_kw), dtype=float)
+    if p.size != 8760:
+        raise ValueError(f"profilo_kw deve avere 8760 ore, trovate {p.size}")
+    if np.isnan(p).any():
+        raise ValueError("profilo_kw contiene NaN")
+    return [round(float(p[i * 730:(i + 1) * 730].max()), 3) for i in range(12)]
+
+
+def pot242_costo_annuo(picchi_mensili, p_impegnata, fisso_eur_kw_anno, penale_eur_kw_mese):
+    """Costo annuo di potenza: fisso sull'impegnata + penale mensile sugli sforamenti.
+
+    penale = sum(max(0, picco_mese - p_impegnata)) * penale_eur_kw_mese.
+    """
+    import numpy as np
+    picchi = np.asarray(list(picchi_mensili), dtype=float)
+    if picchi.size != 12:
+        raise ValueError("picchi_mensili deve avere 12 valori")
+    if np.isnan(picchi).any():
+        raise ValueError("picchi_mensili contiene NaN")
+    p_impegnata = float(p_impegnata)
+    fisso = float(fisso_eur_kw_anno)
+    penale_u = float(penale_eur_kw_mese)
+    if p_impegnata < 0 or fisso < 0 or penale_u < 0:
+        raise ValueError("p_impegnata, fisso_eur_kw_anno e penale_eur_kw_mese devono essere >= 0")
+    sforamenti = np.maximum(0.0, picchi - p_impegnata)
+    costo_fisso = p_impegnata * fisso
+    costo_penale = float(sforamenti.sum()) * penale_u
+    return {
+        "fisso": round(costo_fisso, 2),
+        "penale": round(costo_penale, 2),
+        "totale": round(costo_fisso + costo_penale, 2),
+        "mesi_sforati": int((sforamenti > 0).sum()),
+        "sforamento_max_kw": round(float(sforamenti.max()), 2),
+    }
+
+
+def pot242_curva_ottimo(picchi_mensili, fisso_eur_kw_anno, penale_eur_kw_mese,
+                        p_min=0.0, p_max=None, passo=1.0):
+    """Sweep sulla potenza impegnata: trova il minimo del costo annuo.
+
+    Ritorna {"p_ottima", "costo_ottimo", "curva": [(p, costo), ...]}.
+    p_max default = 1.5 * picco massimo. passo > 0.
+    """
+    import numpy as np
+    picchi = list(picchi_mensili)
+    if float(passo) <= 0:
+        raise ValueError("passo deve essere > 0")
+    p_hi = float(p_max) if p_max is not None else 1.5 * float(max(picchi))
+    p_lo = float(p_min)
+    if p_hi < p_lo:
+        raise ValueError("p_max deve essere >= p_min")
+    curva = []
+    for p in np.arange(p_lo, p_hi + passo / 2.0, passo):
+        c = pot242_costo_annuo(picchi, float(p), fisso_eur_kw_anno, penale_eur_kw_mese)
+        curva.append((round(float(p), 3), c["totale"]))
+    i_min = min(range(len(curva)), key=lambda i: curva[i][1])
+    return {
+        "p_ottima": curva[i_min][0],
+        "costo_ottimo": curva[i_min][1],
+        "curva": curva,
+    }
+
+
+def q243_a_quarti(profilo_orario, picco_intraore_pct=15.0, seed=243):
+    """Da una serie oraria (kW) a una serie quartoraria (kW): ogni ora -> 4 quarti.
+
+    Il quarto di picco vale h*(1+delta), gli altri tre h*(1-delta/3): l'energia
+    dell'ora si conserva esattamente. Il quarto di picco e' scelto a caso per
+    ogni ora (rng con seed -> deterministico). Ore <= 0 -> quarti a zero.
+    delta = picco_intraore_pct/100 (ammesso 0..300: oltre, i quarti non di picco
+    diventerebbero negativi). Ritorna lista di 4*N float a piena precisione
+    (l'energia dell'ora si conserva esattamente: sum(quarti)/4 == sum(ore)).
+    """
+    import numpy as np
+    try:
+        h = np.asarray(list(profilo_orario), dtype=float)
+    except (TypeError, ValueError):
+        raise ValueError("profilo_orario deve essere una sequenza numerica")
+    if h.ndim != 1 or h.size < 24:
+        raise ValueError(f"profilo_orario deve avere almeno 24 ore, trovate {int(h.size)}")
+    if np.isnan(h).any():
+        raise ValueError("profilo_orario contiene NaN")
+    if isinstance(picco_intraore_pct, bool):
+        raise ValueError("picco_intraore_pct deve essere un numero tra 0 e 300")
+    try:
+        delta = float(picco_intraore_pct) / 100.0
+    except (TypeError, ValueError):
+        raise ValueError("picco_intraore_pct deve essere un numero tra 0 e 300")
+    if delta < 0.0 or delta > 3.0:
+        raise ValueError("picco_intraore_pct deve essere tra 0 e 300")
+    rng = np.random.default_rng(int(seed))
+    out = []
+    for v in h:
+        v = float(v)
+        if v <= 0.0:
+            out.extend([0.0, 0.0, 0.0, 0.0])
+            continue
+        qp = int(rng.integers(0, 4))
+        base = v * (1.0 - delta / 3.0)
+        qq = [base, base, base, base]
+        qq[qp] = v * (1.0 + delta)
+        out.extend(qq)
+    return [float(x) for x in out]
+
+
+def q243_picchi_mensili_q(profilo_quarti):
+    """Picchi mensili (kW) da una serie quartoraria: 12 massimi (array_split in 12)."""
+    import numpy as np
+    try:
+        q = np.asarray(list(profilo_quarti), dtype=float)
+    except (TypeError, ValueError):
+        raise ValueError("profilo_quarti deve essere una sequenza numerica")
+    if q.ndim != 1 or q.size < 96:
+        raise ValueError(f"profilo_quarti deve avere almeno 96 quarti, trovati {int(q.size)}")
+    if np.isnan(q).any():
+        raise ValueError("profilo_quarti contiene NaN")
+    return [round(float(b.max()), 3) for b in np.array_split(q, 12)]
+
+
+def q243_sintesi(profilo_orario, picco_intraore_pct=15.0, seed=243):
+    """Sintesi picchi orari vs quartorari.
+
+    Ritorna dict con: n_ore, n_quarti, energia_mwh, picco_orario_kw,
+    picco_quartorario_kw, rapporto_qh_pct, delta_picco_kw,
+    picchi_mensili_orari, picchi_mensili_quartorari.
+    """
+    import numpy as np
+    try:
+        h = np.asarray(list(profilo_orario), dtype=float)
+    except (TypeError, ValueError):
+        raise ValueError("profilo_orario deve essere una sequenza numerica")
+    q = np.asarray(q243_a_quarti(h, picco_intraore_pct, seed))
+    p_h = float(h.max())
+    p_q = float(q.max())
+    return {
+        "n_ore": int(h.size),
+        "n_quarti": int(q.size),
+        "energia_mwh": round(float(h.sum()) / 1000.0, 3),
+        "picco_orario_kw": round(p_h, 3),
+        "picco_quartorario_kw": round(p_q, 3),
+        "rapporto_qh_pct": round(100.0 * p_q / p_h, 2) if p_h > 0 else 0.0,
+        "delta_picco_kw": round(p_q - p_h, 3),
+        "picchi_mensili_orari": [round(float(b.max()), 3) for b in np.array_split(h, 12)],
+        "picchi_mensili_quartorari": [round(float(b.max()), 3) for b in np.array_split(q, 12)],
+    }
+
 if workspace == _('ws1'):
     st.markdown(f"<h1>{_('ws1')}</h1>", unsafe_allow_html=True)
     banner_demo("simulatore strategico: margini, centrali e curve simulate")
@@ -32031,7 +32762,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -54018,654 +54749,94 @@ elif workspace == _('ws8'):
                 mime="text/csv", key="t242_csv",
                 help="Picchi mensili e sforamento con la potenza attuale.")
             st.caption("Modello indicativo: penale proporzionale allo sforamento mensile; non include franchigie di contratto ne' arrotondamenti di misura. Verificare sempre le clausole del contratto di fornitura.")
-
-
-def calcola_mappa_prezzo_carico(prezzi, carichi, n_prezzo=4, n_carico=4, min_ore=24):
-    """Mappa del costo per bucket di prezzo x bucket di carico (heatmap).
-
-    Ogni ora e' classificata per fascia di PREZZO (eur/MWh, righe) e fascia di
-    CARICO (kW, colonne); la cella riporta gli euro spesi (costo = p*carico/1000)
-    e il numero di ore. I bucket sono costruiti sui quantili della serie, con
-    fusione automatica dei bin vuoti (duplicates drop) quando una serie e' piatta.
-
-    Ritorna un dict con:
-      ok, valido, errore
-      mat_costo: DataFrame (righe = bucket prezzo, colonne = bucket carico) in EUR
-      mat_ore: DataFrame con il conteggio delle ore per cella
-      kpi: ore_totali, costo_totale_eur, quota_dominante_pct, quota_top3_pct
-      top_celle: DataFrame delle celle ordinato per costo_eur decrescente
-        (colonne: bucket_prezzo, bucket_carico, ore, costo_eur, quota_pct)
-    """
-    try:
-        p = np.asarray(prezzi, dtype=float).ravel()
-        c = np.asarray(carichi, dtype=float).ravel()
-    except (ValueError, TypeError):
-        return {"ok": False, "valido": False,
-                "errore": "Input non numerici: prezzi e carichi devono essere numeri."}
-    if p.size != c.size:
-        return {"ok": False, "valido": False,
-                "errore": f"Serie con lunghezze diverse: prezzi={int(p.size)}, carichi={int(c.size)}."}
-    try:
-        n_prezzo = int(n_prezzo)
-        n_carico = int(n_carico)
-        min_ore = int(min_ore)
-    except (ValueError, TypeError):
-        return {"ok": False, "valido": False, "errore": "Parametri n_prezzo/n_carico/min_ore non interi."}
-    if isinstance(n_prezzo, bool) or isinstance(n_carico, bool) or isinstance(min_ore, bool):
-        return {"ok": False, "valido": False, "errore": "Parametri n_prezzo/n_carico/min_ore non interi."}
-    if n_prezzo < 2 or n_carico < 2:
-        return {"ok": False, "valido": False,
-                "errore": "Servono almeno 2 bucket per il prezzo e 2 per il carico."}
-    if min_ore < 1:
-        return {"ok": False, "valido": False, "errore": "min_ore deve essere >= 1."}
-    mask = ~np.isnan(p) & ~np.isnan(c)
-    p, c = p[mask], c[mask]
-    n = int(p.size)
-    if n < min_ore:
-        return {"ok": False, "valido": False,
-                "errore": f"Servono almeno {min_ore} ore valide (trovate {n})."}
-    costo = p * c / 1000.0
-
-    def _edges(x, k):
-        qs = np.quantile(x, np.linspace(0.0, 1.0, k + 1))
-        edges = np.unique(qs)
-        if edges.size < 2:
-            lo = float(x.min())
-            hi = float(x.max())
-            edges = np.array([lo, hi]) if hi > lo else np.array([lo, lo + 1.0])
-        return edges
-
-    e_p = _edges(p, n_prezzo)
-    e_c = _edges(c, n_carico)
-    nb_p, nb_c = int(e_p.size - 1), int(e_c.size - 1)
-    idx_p = np.clip(np.digitize(p, e_p[1:-1], right=False), 0, nb_p - 1)
-    idx_c = np.clip(np.digitize(c, e_c[1:-1], right=False), 0, nb_c - 1)
-    lab_p = [f"{e_p[i]:.1f}\u2013{e_p[i + 1]:.1f} \u20ac/MWh" for i in range(nb_p)]
-    lab_c = [f"{e_c[i]:.0f}\u2013{e_c[i + 1]:.0f} kW" for i in range(nb_c)]
-    mat_costo = pd.DataFrame(np.zeros((nb_p, nb_c)), index=lab_p, columns=lab_c)
-    mat_ore = pd.DataFrame(np.zeros((nb_p, nb_c), dtype=int), index=lab_p, columns=lab_c)
-    for i in range(n):
-        mat_costo.iat[int(idx_p[i]), int(idx_c[i])] += float(costo[i])
-        mat_ore.iat[int(idx_p[i]), int(idx_c[i])] += 1
-    totale = float(costo.sum())
-    celle = []
-    for i in range(nb_p):
-        for j in range(nb_c):
-            co = float(mat_costo.iat[i, j])
-            ore = int(mat_ore.iat[i, j])
-            q = round(co / totale * 100.0, 2) if totale > 0 else 0.0
-            celle.append({"bucket_prezzo": lab_p[i], "bucket_carico": lab_c[j],
-                          "ore": ore, "costo_eur": round(co, 2), "quota_pct": q})
-    top_celle = pd.DataFrame(celle).sort_values("costo_eur", ascending=False).reset_index(drop=True)
-    quote = [r["quota_pct"] for r in celle]
-    quota_top3 = round(float(sum(sorted(quote, reverse=True)[:3])), 2)
-    kpi = {
-        "ore_totali": n,
-        "costo_totale_eur": round(totale, 2),
-        "quota_dominante_pct": float(max(quote)) if quote else 0.0,
-        "quota_top3_pct": quota_top3,
-    }
-    return {"ok": True, "valido": True, "errore": None,
-            "mat_costo": mat_costo, "mat_ore": mat_ore,
-            "kpi": kpi, "top_celle": top_celle}
-
-
-def hhi_index(cost_by_hour):
-    """Indice HHI sulle quote di costo orarie: somma(quote^2), in [1/N, 1].
-
-    1/N = costo perfettamente distribuito sulle N ore; 1 = tutto il costo
-    in una sola ora. Piu' e' alto, piu' la spesa e' concentrata in poche ore.
-    """
-    c = np.asarray(list(cost_by_hour), dtype=float)
-    c = c[np.isfinite(c) & (c > 0)]
-    if c.size == 0:
-        return float("nan")
-    tot = c.sum()
-    if tot <= 0:
-        return float("nan")
-    q = c / tot
-    return float((q ** 2).sum())
-
-
-def effective_hours(cost_by_hour):
-    """Numero effettivo di ore: 1 / somma(quote^2).
-
-    Se la spesa fosse uniforme su E ore, l'HHI sarebbe 1/E: E e' quindi il
-    numero di ore "equivalenti" in cui si concentra davvero il costo.
-    """
-    h = hhi_index(cost_by_hour)
-    if not np.isfinite(h) or h <= 0:
-        return float("nan")
-    return float(1.0 / h)
-
-
-def top_hours_share(cost_by_hour, k):
-    """Quota del costo totale concentrata nelle k ore piu' care (0..1)."""
-    c = np.asarray(list(cost_by_hour), dtype=float)
-    c = c[np.isfinite(c) & (c > 0)]
-    if c.size == 0:
-        return float("nan")
-    k = int(k)
-    if k <= 0:
-        return float("nan")
-    k = min(k, c.size)
-    return float(np.sort(c)[-k:].sum() / c.sum())
-
-
-def ore_per_copertura(cost_by_hour, soglia_pct=80.0):
-    """Quante ore (le piu' care) servono per coprire soglia_pct% del costo."""
-    df = cumulative_curve(cost_by_hour)
-    if df.empty:
-        return float("nan")
-    hit = df[df["costo_cumulato_pct"] >= float(soglia_pct)]
-    if hit.empty:
-        return float(len(df))
-    return float(hit["ora_rank"].iloc[0])
-
-
-def cumulative_curve(cost_by_hour):
-    """Curva cumulata del costo: ore ordinate per costo decrescente.
-
-    Ritorna DataFrame con colonne ora_rank, costo_eur, quota_costo,
-    costo_cumulato_pct.
-    """
-    c = np.asarray(list(cost_by_hour), dtype=float)
-    c = c[np.isfinite(c) & (c > 0)]
-    df = pd.DataFrame({"ora_rank": np.arange(1, c.size + 1),
-                       "costo_eur": np.sort(c)[::-1]})
-    if df.empty:
-        df["quota_costo"] = pd.Series(dtype=float)
-        df["costo_cumulato_pct"] = pd.Series(dtype=float)
-        return df
-    tot = float(df["costo_eur"].sum())
-    df["quota_costo"] = df["costo_eur"] / tot if tot > 0 else 0.0
-    df["costo_cumulato_pct"] = df["quota_costo"].cumsum() * 100.0
-    return df
-
-
-def genera_costi_orari_sintetici(n_ore, costo_base_eur, extra_picco_eur,
-                                 n_ore_picco, seed=7):
-    """Serie sintetica di costi orari: base gaussiana + picchi di prezzo."""
-    rng = np.random.default_rng(int(seed))
-    n_ore = max(int(n_ore), 24)
-    base = max(float(costo_base_eur), 0.0)
-    costi = rng.normal(loc=base, scale=max(base * 0.15, 1e-9), size=n_ore)
-    costi = np.clip(costi, max(base * 0.2, 1e-9), None)
-    n_pk = min(max(int(n_ore_picco), 0), n_ore)
-    if n_pk > 0 and float(extra_picco_eur) > 0:
-        idx = rng.choice(n_ore, size=n_pk, replace=False)
-        costi[idx] += rng.uniform(float(extra_picco_eur) * 0.5,
-                                  float(extra_picco_eur) * 1.5, size=n_pk)
-    return costi
-
-
-def w239_simulate_annual_cost(monthly_costs, n_sim=10000, vol=0.10, seed=42):
-    """Monte Carlo del costo energetico annuo (EUR).
-
-    Per ogni simulazione campiona 12 mesi (bootstrap con reinserimento dai costi
-    mensili storici) e applica uno shock moltiplicativo N(0, vol^2) a ciascun mese.
-    Ritorna un array di n_sim costi annui simulati.
-    """
-    rng = np.random.default_rng(seed)
-    mc = np.asarray(list(monthly_costs), dtype=float)
-    mc = mc[np.isfinite(mc)]
-    if mc.size == 0:
-        raise ValueError("Costi mensili non validi.")
-    draws = rng.choice(mc, size=(int(n_sim), 12), replace=True)
-    noise = 1.0 + float(vol) * rng.standard_normal(size=(int(n_sim), 12))
-    return np.maximum(draws * noise, 0.0).sum(axis=1)
-
-
-def w239_breach_prob(sims, budget):
-    """P(costo annuo simulato > budget)."""
-    s = np.asarray(list(sims), dtype=float)
-    if s.size == 0:
-        raise ValueError("Nessuna simulazione.")
-    return float(np.mean(s > float(budget)))
-
-
-def w239_expected_cost(sims):
-    """Costo annuo atteso (media delle simulazioni)."""
-    s = np.asarray(list(sims), dtype=float)
-    return float(np.mean(s))
-
-
-def w239_safety_budget(sims, conf=0.95):
-    """Budget di sicurezza: quantile `conf` della distribuzione del costo annuo."""
-    s = np.asarray(list(sims), dtype=float)
-    return float(np.quantile(s, float(conf)))
-
-
-def w239_var_cost(sims, conf=0.95):
-    """VaR del costo: stesso quantile del safety budget (perdita massima attesa col livello di confidenza)."""
-    return w239_safety_budget(sims, conf=conf)
-
-
-def w239_csv_simulazioni(sims):
-    """Restituisce il CSV delle simulazioni come stringa."""
-    import io as _io
-    import csv as _csv
-    buf = _io.StringIO()
-    w = _csv.writer(buf, lineterminator="\n")
-    w.writerow(["simulazione", "costo_annuo_eur"])
-    for i, v in enumerate(np.asarray(list(sims), dtype=float), start=1):
-        w.writerow([i, f"{v:.2f}"])
-    return buf.getvalue()
-
-
-# ===========================================================================
-# W235 (05/10/2026) - tab235 "Correlazione carico-prezzo"
-# Funzioni pure: nessuna chiamata streamlit, solo numpy. Testate via appfuncs.
-# ===========================================================================
-
-def profilo_carico_sintetico_t235(ore=24, base_kw=50.0, picco_kw=150.0,
-                                  ora_picco=12.0, larghezza_picco=3.0,
-                                  rumore_pct=0.0, seed=235):
-    """Profilo di carico sintetico (kW): base + picco gaussiano + rumore."""
-    n = int(ore)
-    t = np.arange(n, dtype=float)
-    w = max(float(larghezza_picco), 0.5)
-    profilo = float(base_kw) + (float(picco_kw) - float(base_kw)) * np.exp(
-        -0.5 * ((t - float(ora_picco)) / w) ** 2)
-    if float(rumore_pct) > 0.0:
-        rng = np.random.default_rng(int(seed))
-        profilo = profilo * (1.0 + rng.normal(0.0, float(rumore_pct) / 100.0, size=n))
-    return np.maximum(profilo, 0.0)
-
-
-def profilo_prezzo_sintetico_t235(ore=24, base_eur_mwh=80.0, picco_eur_mwh=250.0,
-                                   ora_picco=18.0, larghezza_picco=2.0,
-                                   rumore_pct=0.0, seed=236):
-    """Profilo di prezzo sintetico (eur/MWh): base + picco serale + rumore."""
-    n = int(ore)
-    t = np.arange(n, dtype=float)
-    w = max(float(larghezza_picco), 0.5)
-    profilo = float(base_eur_mwh) + (float(picco_eur_mwh) - float(base_eur_mwh)) * np.exp(
-        -0.5 * ((t - float(ora_picco)) / w) ** 2
-    )
-    if float(rumore_pct) > 0.0:
-        rng = np.random.default_rng(int(seed))
-        profilo = profilo * (1.0 + rng.normal(0.0, float(rumore_pct) / 100.0, size=n))
-    return np.maximum(profilo, 0.5)
-
-
-def load_price_corr(load_kw, prezzo_eur_mwh, top_n=4):
-    """Correlazione tra profilo di carico (kW orari) e prezzo orario (eur/MWh).
-
-    Ritorna un dict con:
-      r_pearson, r_spearman: correlazione lineare / di rango [-1, 1]
-      costo_effettivo_eur: somma(carico_kWh * prezzo) sul periodo
-      costo_scorrelato_eur: stesso consumo totale ma profilo piatto
-        (nessuna concomitanza carico-prezzo)
-      extra_costo_vs_scorrelato_eur: differenza (positivo = paghi di piu'
-        perche' consumi nelle ore care)
-      ore_top_concomitanti: ore tra le top_n di carico E le top_n di prezzo
-    """
-    try:
-        load = np.asarray(load_kw, dtype=float).ravel()
-        prezzo = np.asarray(prezzo_eur_mwh, dtype=float).ravel()
-    except (ValueError, TypeError):
-        return {"valido": False, "errore": "Input non numerici."}
-    if load.size != prezzo.size:
-        return {"valido": False, "errore": "Carico e prezzo devono avere la stessa lunghezza."}
-    n = int(load.size)
-    if n < 3:
-        return {"valido": False, "errore": "Servono almeno 3 osservazioni orarie."}
-    if bool(np.isnan(load).any()) or bool(np.isnan(prezzo).any()):
-        return {"valido": False, "errore": "Valori mancanti (NaN) nelle serie."}
-    # Pearson e ranghi medi calcolati a mano (funzione autocontenuta: niente scipy)
-    def _pearson(x, y):
-        xc = x - x.mean()
-        yc = y - y.mean()
-        den = float(np.sqrt(float((xc ** 2).sum()) * float((yc ** 2).sum())))
-        if den <= 0.0:
-            return 0.0
-        return max(-1.0, min(1.0, float((xc * yc).sum() / den)))
-
-    def _ranghi(a):
-        order = np.argsort(a, kind="mergesort")
-        ranks = np.empty(int(a.size), dtype=float)
-        i, nn = 0, int(a.size)
-        while i < nn:
-            j = i
-            while j + 1 < nn and a[order[j + 1]] == a[order[i]]:
-                j += 1
-            ranks[order[i:j + 1]] = (i + j) / 2.0 + 1.0
-            i = j + 1
-        return ranks
-
-    r_p = _pearson(load, prezzo)
-    r_s = _pearson(_ranghi(load), _ranghi(prezzo))
-    costo_effettivo = float(np.sum(load * prezzo) / 1000.0)
-    costo_scorrelato = float(load.mean() * prezzo.sum() / 1000.0)
-    extra = costo_effettivo - costo_scorrelato
-    k = max(1, min(int(top_n), n))
-    idx_l = set(np.argsort(load)[-k:].tolist())
-    idx_p = set(np.argsort(prezzo)[-k:].tolist())
-    concomitanti = len(idx_l & idx_p)
-    if r_p >= 0.5:
-        verdetto = ("Profilo SFORTUNATO: il carico e' concentrato nelle ore piu' care. "
-                    "Spostare consumi fuori picco riduce il costo.")
-    elif r_p <= -0.5:
-        verdetto = ("Profilo FORTUNATO: il carico e' concentrato nelle ore piu' economiche. "
-                    "Il profilo lavora a favore del prezzo.")
-    else:
-        verdetto = ("Profilo NEUTRO: nessuna correlazione forte tra carico e prezzo "
-                    "(|r di Pearson| < 0,5).")
-    return {
-        "valido": True,
-        "errore": "",
-        "n": n,
-        "r_pearson": r_p,
-        "r_spearman": r_s,
-        "costo_effettivo_eur": costo_effettivo,
-        "costo_scorrelato_eur": costo_scorrelato,
-        "extra_costo_vs_scorrelato_eur": extra,
-        "ore_top_concomitanti": concomitanti,
-        "top_n": k,
-        "verdetto": verdetto,
-    }
-
-
-def checklist_score(items):
-    """Score ponderato di una offerta.
-    items: list di (voce, peso_pct, score) con score in [0, 5].
-    Ritorna dict(totale_ponderato, dettaglio, somma_pesi, pesi_validi).
-    """
-    dettaglio = []
-    somma_pesi = 0.0
-    accumulo = 0.0
-    for voce, peso, score in items:
-        try:
-            p = float(peso)
-            s = float(score)
-        except (TypeError, ValueError):
-            p, s = 0.0, 0.0
-        s = max(0.0, min(5.0, s))
-        p = max(0.0, p)
-        somma_pesi += p
-        accumulo += p * s
-        dettaglio.append({"Voce": voce, "Peso (%)": round(p, 1),
-                          "Punteggio": round(s, 1),
-                          "Ponderato": round(p * s, 2)})
-    totale = accumulo / somma_pesi if somma_pesi > 0 else 0.0
-    return {"totale_ponderato": round(totale, 3),
-            "dettaglio": dettaglio,
-            "somma_pesi": round(somma_pesi, 1),
-            "pesi_validi": 0 < somma_pesi <= 100}
-
-
-def rank_offers(offerte):
-    """Classifica fino a 3 offerte. offerte: list di (nome, items).
-    Ritorna lista di dict ordinata per score decrescente."""
-    righe = []
-    for nome, items in offerte:
-        ris = checklist_score(items)
-        righe.append({"offerta": nome,
-                      "score": ris["totale_ponderato"],
-                      "dettaglio": ris["dettaglio"],
-                      "somma_pesi": ris["somma_pesi"]})
-    righe.sort(key=lambda r: r["score"], reverse=True)
-    for i, r in enumerate(righe, start=1):
-        r["posizione"] = i
-    return righe
-
-
-
-def night_share238(load_kw, price_eur_mwh, ore_notte=None):
-    """Quota e costi della fascia notturna su un profilo di 24 ore (funzione pura).
-
-    load_kw: 24 valori orari di carico (kW); price_eur_mwh: 24 prezzi orari (eur/MWh).
-    Ritorna dict con quota, energia_notte_kwh, energia_giorno_kwh, costo_notte,
-    costo_giorno, prezzo_medio_notte, prezzo_medio_giorno, rapporto, ore_notte.
-    """
-    load = [float(x) for x in load_kw]
-    price = [float(x) for x in price_eur_mwh]
-    if len(load) != 24 or len(price) != 24:
-        raise ValueError("load_kw e price_eur_mwh devono avere 24 valori orari")
-    ore = list(ore_notte) if ore_notte is not None else [22, 23, 0, 1, 2, 3, 4, 5]
-    notte = [h for h in ore if 0 <= h < 24]
-    if not notte:
-        raise ValueError("nessuna ora notturna valida")
-    giorno = [h for h in range(24) if h not in set(notte)]
-    en_notte = sum(load[h] for h in notte)
-    en_tot = sum(load)
-    costo_notte = sum(load[h] * price[h] for h in notte) / 1000.0
-    costo_giorno = sum(load[h] * price[h] for h in giorno) / 1000.0
-    p_notte = sum(price[h] for h in notte) / len(notte)
-    p_giorno = sum(price[h] for h in giorno) / len(giorno) if giorno else 0.0
-    return {
-        "quota": en_notte / en_tot if en_tot > 0 else 0.0,
-        "energia_notte_kwh": en_notte,
-        "energia_giorno_kwh": en_tot - en_notte,
-        "costo_notte": costo_notte,
-        "costo_giorno": costo_giorno,
-        "prezzo_medio_notte": p_notte,
-        "prezzo_medio_giorno": p_giorno,
-        "rapporto": (p_notte / p_giorno) if p_giorno > 0 else 0.0,
-        "ore_notte": notte,
-    }
-
-
-def ghost_load238(load_kw, ore_notte=None):
-    """Carico fantasma: minimo notturno mai spento (kW) su un profilo di 24 ore (funzione pura)."""
-    load = [float(x) for x in load_kw]
-    if len(load) != 24:
-        raise ValueError("load_kw deve avere 24 valori orari")
-    ore = list(ore_notte) if ore_notte is not None else [22, 23, 0, 1, 2, 3, 4, 5]
-    notte = [h for h in ore if 0 <= h < 24]
-    if not notte:
-        raise ValueError("nessuna ora notturna valida")
-    return min(load[h] for h in notte)
-
-
-def profilo_sintetico238(base_kw, picco_kw, ora_picco, fattore_serale):
-    """Profilo 24h sintetico: baseload costante + gaussiana diurna + coda serale (funzione pura)."""
-    prof = []
-    for h in range(24):
-        gauss = picco_kw * np.exp(-((h - ora_picco) ** 2) / (2 * 4.0 ** 2))
-        sera = fattore_serale * picco_kw * np.exp(-((h - 20.0) ** 2) / (2 * 2.5 ** 2)) if h >= 15 else 0.0
-        prof.append(round(base_kw + gauss + sera, 3))
-    return prof
-
-
-def clc236_carico_residuo(carico_kw, fv_kw):
-    """Carico residuo orario = carico - FV (kW). Valori negativi = surplus immesso."""
-    import numpy as np
-    carico = np.asarray(list(carico_kw), dtype=float)
-    fv = np.asarray(list(fv_kw), dtype=float)
-    if fv.shape != carico.shape:
-        raise ValueError("carico e fv devono avere la stessa lunghezza")
-    return carico - fv
-
-
-def clc236_duration_curve(serie):
-    """Curva di durata: valori ordinati in senso decrescente."""
-    import numpy as np
-    s = np.asarray(list(serie), dtype=float)
-    return np.sort(s)[::-1]
-
-
-def clc236_kpi_anno(carico_kw, fv_kw):
-    """KPI annuali su una serie oraria (tipicamente 8760 ore)."""
-    import numpy as np
-    residuo = clc236_carico_residuo(carico_kw, fv_kw)
-    ore_surplus = int((residuo < 0).sum())
-    energia_surplus = float(-residuo[residuo < 0].sum())
-    energia_residua = float(residuo[residuo > 0].sum())
-    fv_tot = float(np.asarray(list(fv_kw), dtype=float).sum())
-    autoconsumo = float(1.0 - energia_surplus / fv_tot) if fv_tot > 0 else 1.0
-    return {
-        "ore_surplus": ore_surplus,
-        "energia_surplus_kwh": round(energia_surplus, 1),
-        "energia_residua_kwh": round(energia_residua, 1),
-        "picco_residuo_kw": round(float(residuo.max()), 2),
-        "picco_lordo_kw": round(float(np.asarray(list(carico_kw), dtype=float).max()), 2),
-        "autoconsumo_pct": round(autoconsumo * 100.0, 1),
-    }
-
-
-def clc236_profilo_giornaliero(base_kw, picco_matt_kw, ora_picco_matt, picco_sera_kw, ora_picco_sera):
-    """Profilo giornaliero sintetico 24h: baseload + due gaussiane (mattina/sera)."""
-    import numpy as np
-    h = np.arange(24)
-    prof = (base_kw
-            + picco_matt_kw * np.exp(-((h - ora_picco_matt) ** 2) / 8.0)
-            + picco_sera_kw * np.exp(-((h - ora_picco_sera) ** 2) / 8.0))
-    return [round(float(x), 3) for x in prof]
-
-
-def clc236_fv_giornaliero(kwp, ora_picco_fv, fattore_nuvola):
-    """Produzione FV giornaliera sintetica 24h: campana diurna attenuata dalle nuvole."""
-    import numpy as np
-    h = np.arange(24)
-    fv = kwp * np.exp(-((h - ora_picco_fv) ** 2) / 18.0) * (1.0 - fattore_nuvola)
-    return [round(float(max(x, 0.0)), 3) for x in fv]
-
-
-def flx237_top_bottom(load_kw, price_eur_mwh, quota_top=0.10):
-    """Indici delle ore piu' care (top quota) e piu' economiche (bottom quota)."""
-    import numpy as np
-    price = np.asarray(list(price_eur_mwh), dtype=float)
-    n = price.size
-    k = max(1, int(round(n * quota_top)))
-    idx_top = np.argsort(price)[-k:]
-    idx_bottom = np.argsort(price)[:k]
-    return idx_top.tolist(), idx_bottom.tolist()
-
-
-def flx237_shifting_saving(load_kw, price_eur_mwh, pct_shift=0.5, quota_top=0.10):
-    """Risparmio spostando pct_shift del carico dalle ore top alle ore bottom."""
-    import numpy as np
-    load = np.asarray(list(load_kw), dtype=float)
-    price = np.asarray(list(price_eur_mwh), dtype=float)
-    if load.shape != price.shape:
-        raise ValueError("carico e prezzo devono avere la stessa lunghezza")
-    idx_top, idx_bottom = flx237_top_bottom(load, price, quota_top)
-    e_top = float(load[idx_top].sum())
-    spostabile = e_top * pct_shift
-    p_top = float(price[idx_top].mean())
-    p_bottom = float(price[idx_bottom].mean())
-    risparmio = spostabile * (p_top - p_bottom) / 1000.0
-    costo_base = float((load * price).sum() / 1000.0)
-    return {
-        "energia_spostabile_kwh": round(spostabile, 1),
-        "risparmio_eur": round(risparmio, 2),
-        "risparmio_pct": round(100.0 * risparmio / costo_base, 2) if costo_base else 0.0,
-        "prezzo_medio_top": round(p_top, 2),
-        "prezzo_medio_bottom": round(p_bottom, 2),
-        "costo_base_eur": round(costo_base, 2),
-    }
-
-
-def flx237_profilo_sintetico(base_kw, picco_kw, ora_picco, seed=0):
-    """Profilo di carico giornaliero sintetico 24h con rumore (seed per ripetibilita')."""
-    import numpy as np
-    rng = np.random.default_rng(seed)
-    h = np.arange(24)
-    prof = base_kw + picco_kw * np.exp(-((h - ora_picco) ** 2) / 8.0)
-    prof = prof * (1 + rng.normal(0, 0.05, 24))
-    return [round(float(max(x, 0.0)), 3) for x in prof]
-
-
-def flx237_prezzo_sintetico(base_eur, ampiezza_eur, ora_picco, seed=0):
-    """Prezzo orario sintetico 24h: picco serale + rumore (seed per ripetibilita')."""
-    import numpy as np
-    rng = np.random.default_rng(seed)
-    h = np.arange(24)
-    prezzo = base_eur + ampiezza_eur * np.exp(-((h - ora_picco) ** 2) / 12.0)
-    prezzo = prezzo * (1 + rng.normal(0, 0.08, 24))
-    return [round(float(max(x, 1.0)), 2) for x in prezzo]
-
-
-def pot242_profilo_annuo(base_kw, picco_kw, ora_picco, stagionalita_pct, seed=242):
-    """Profilo di carico orario sintetico per un anno (8760 ore), kW.
-
-    Profilo giornaliero = base + gaussiana centrata sull'ora di picco, con
-    stagionalita' sinusoidale (max a luglio, min a gennaio) e rumore 5%.
-    Deterministico a parita' di seed. Ritorna lista di 8760 float arrotondati.
-    """
-    import numpy as np
-    base_kw = float(base_kw)
-    picco_kw = float(picco_kw)
-    ora_picco = float(ora_picco)
-    stag = float(stagionalita_pct) / 100.0
-    if base_kw < 0 or picco_kw < 0:
-        raise ValueError("base_kw e picco_kw devono essere >= 0")
-    rng = np.random.default_rng(int(seed))
-    out = []
-    for d in range(365):
-        stag_d = 1.0 + stag * (-np.cos(2.0 * np.pi * (d - 14) / 365.0)) / 2.0 * 2.0
-        for h in range(24):
-            prof = base_kw + picco_kw * np.exp(-((h - ora_picco) ** 2) / 8.0)
-            out.append(prof * stag_d * (1.0 + rng.normal(0, 0.05)))
-    return [round(float(max(x, 0.0)), 3) for x in out]
-
-
-def pot242_picchi_mensili(profilo_kw):
-    """Picchi mensili (kW) da una serie oraria annua 8760: 12 massimi su blocchi da 730 h."""
-    import numpy as np
-    p = np.asarray(list(profilo_kw), dtype=float)
-    if p.size != 8760:
-        raise ValueError(f"profilo_kw deve avere 8760 ore, trovate {p.size}")
-    if np.isnan(p).any():
-        raise ValueError("profilo_kw contiene NaN")
-    return [round(float(p[i * 730:(i + 1) * 730].max()), 3) for i in range(12)]
-
-
-def pot242_costo_annuo(picchi_mensili, p_impegnata, fisso_eur_kw_anno, penale_eur_kw_mese):
-    """Costo annuo di potenza: fisso sull'impegnata + penale mensile sugli sforamenti.
-
-    penale = sum(max(0, picco_mese - p_impegnata)) * penale_eur_kw_mese.
-    """
-    import numpy as np
-    picchi = np.asarray(list(picchi_mensili), dtype=float)
-    if picchi.size != 12:
-        raise ValueError("picchi_mensili deve avere 12 valori")
-    if np.isnan(picchi).any():
-        raise ValueError("picchi_mensili contiene NaN")
-    p_impegnata = float(p_impegnata)
-    fisso = float(fisso_eur_kw_anno)
-    penale_u = float(penale_eur_kw_mese)
-    if p_impegnata < 0 or fisso < 0 or penale_u < 0:
-        raise ValueError("p_impegnata, fisso_eur_kw_anno e penale_eur_kw_mese devono essere >= 0")
-    sforamenti = np.maximum(0.0, picchi - p_impegnata)
-    costo_fisso = p_impegnata * fisso
-    costo_penale = float(sforamenti.sum()) * penale_u
-    return {
-        "fisso": round(costo_fisso, 2),
-        "penale": round(costo_penale, 2),
-        "totale": round(costo_fisso + costo_penale, 2),
-        "mesi_sforati": int((sforamenti > 0).sum()),
-        "sforamento_max_kw": round(float(sforamenti.max()), 2),
-    }
-
-
-def pot242_curva_ottimo(picchi_mensili, fisso_eur_kw_anno, penale_eur_kw_mese,
-                        p_min=0.0, p_max=None, passo=1.0):
-    """Sweep sulla potenza impegnata: trova il minimo del costo annuo.
-
-    Ritorna {"p_ottima", "costo_ottimo", "curva": [(p, costo), ...]}.
-    p_max default = 1.5 * picco massimo. passo > 0.
-    """
-    import numpy as np
-    picchi = list(picchi_mensili)
-    if float(passo) <= 0:
-        raise ValueError("passo deve essere > 0")
-    p_hi = float(p_max) if p_max is not None else 1.5 * float(max(picchi))
-    p_lo = float(p_min)
-    if p_hi < p_lo:
-        raise ValueError("p_max deve essere >= p_min")
-    curva = []
-    for p in np.arange(p_lo, p_hi + passo / 2.0, passo):
-        c = pot242_costo_annuo(picchi, float(p), fisso_eur_kw_anno, penale_eur_kw_mese)
-        curva.append((round(float(p), 3), c["totale"]))
-    i_min = min(range(len(curva)), key=lambda i: curva[i][1])
-    return {
-        "p_ottima": curva[i_min][0],
-        "costo_ottimo": curva[i_min][1],
-        "curva": curva,
-    }
+    with tab243:
+        titolo243 = edu("Picchi quartorari (15')", "La potenza che il distributore misura (e su cui scattano le penali di superamento della potenza impegnata) NON e' il picco orario: e' la media su 15 MINUTI. Il picco quartorario e' sempre >= del picco orario, perche' dentro l'ora peggiore c'e' sempre un quarto d'ora peggiore della media. Questa tab quantifica il divario: da un profilo orario (sintetico o il tuo) costruisce una serie quartoraria e mostra di quanto il picco misurato supera il picco orario — il margine da considerare quando dimensioni la potenza impegnata.")
+        st.markdown(f"<h1>⏱️ {titolo243}</h1>", unsafe_allow_html=True)
+        st.caption("Dal picco orario al picco quartorario: quanto la misura a 15' supera la media oraria.")
+        mode243 = st.radio("Sorgente profilo orario", ["Profilo sintetico (8760 h)", "Carico orario manuale (incolla)"],
+                           horizontal=True, key="t243_mode",
+                           help="Sintetico: genera 8760 ore come la tab242. Manuale: incolla la tua serie oraria in kW (almeno 24 valori).")
+        dati_ok243 = True
+        if mode243 == "Profilo sintetico (8760 h)":
+            banner_demo("profilo di carico orario sintetico (Mock)")
+            c1_243, c2_243, c3_243 = st.columns(3)
+            with c1_243:
+                base243 = st.slider("Carico base (kW)", 0.0, 200.0, 40.0, 5.0, key="t243_base")
+                picco243 = st.slider("Picco giornaliero (kW)", 0.0, 400.0, 120.0, 10.0, key="t243_peak")
+            with c2_243:
+                ora243 = st.slider("Ora di picco", 0.0, 23.0, 12.0, 1.0, key="t243_peak_hour")
+                stag243 = st.slider("Stagionalita' estiva (%)", 0.0, 60.0, 20.0, 5.0, key="t243_season")
+            with c3_243:
+                delta243 = st.slider("Picco intra-ora (%)", 0.0, 30.0, 15.0, 1.0, key="t243_delta",
+                                     help="Di quanto il quarto d'ora peggiore supera la media oraria (indicativo: 10-20%).")
+                seed243 = st.number_input("Seed", 0, 9999, 243, 1, key="t243_seed")
+            ore243 = pot242_profilo_annuo(base243, picco243, ora243, stag243, seed=int(seed243))
+            st.caption("Serie sintetica: 8760 ore; il quarto di picco e' distribuito a caso tra i 4 quarti di ogni ora (seed).")
+        else:
+            txt243 = st.text_area("Serie oraria (kW), un valore per riga (minimo 24 ore)",
+                                  value="\n".join(["80"] * 24), height=180, key="t243_manual")
+            ore243 = []
+            for _r243 in txt243.strip().splitlines():
+                _r243 = _r243.strip().replace(",", ".")
+                if not _r243:
+                    continue
+                try:
+                    ore243.append(float(_r243))
+                except ValueError:
+                    pass
+            delta243 = st.slider("Picco intra-ora (%)", 0.0, 30.0, 15.0, 1.0, key="t243_delta2",
+                                 help="Di quanto il quarto d'ora peggiore supera la media oraria.")
+            seed243 = st.number_input("Seed", 0, 9999, 243, 1, key="t243_seed2")
+            if len(ore243) < 24:
+                st.error(f"Servono almeno 24 valori orari, trovati {len(ore243)}.")
+                dati_ok243 = False
+        sin243 = None
+        if dati_ok243:
+            try:
+                sin243 = q243_sintesi(ore243, delta243, seed=int(seed243))
+            except ValueError as e243:
+                st.error(f"Dati non validi: {e243}")
+        if sin243 is not None:
+            k1_243, k2_243, k3_243, k4_243 = st.columns(4)
+            k1_243.metric("Picco orario", f"{sin243['picco_orario_kw']:,.0f} kW")
+            k2_243.metric("Picco quartorario", f"{sin243['picco_quartorario_kw']:,.0f} kW",
+                          delta=f"+{sin243['delta_picco_kw']:,.0f} kW")
+            k3_243.metric("Rapporto Q/H", f"{sin243['rapporto_qh_pct']:.1f} %")
+            k4_243.metric("Energia", f"{sin243['energia_mwh']:,.1f} MWh")
+            st.caption(f"Energia conservata nella conversione orario -> quartorario (l'energia non cambia, cambia solo il picco misurato). "
+                       f"Con un picco intra-ora del {float(delta243):.0f}% il picco misurato supera quello orario di circa il {float(delta243):.0f}%.")
+            n_giorni243 = max(1, sin243["n_ore"] // 24)
+            giorno243 = st.slider("Giorno campione da visualizzare", 1, n_giorni243, min(200, n_giorni243), 1,
+                                  key="t243_day")
+            q243_full = q243_a_quarti(ore243, delta243, seed=int(seed243))
+            h_g243 = list(ore243[(giorno243 - 1) * 24:giorno243 * 24])
+            q_g243 = q243_full[(giorno243 - 1) * 96:giorno243 * 96]
+            fig_d243 = go.Figure()
+            fig_d243.add_trace(go.Scatter(x=list(range(24)), y=h_g243, mode="lines+markers",
+                                          name="Orario (media)", line=dict(color="#3B82F6")))
+            fig_d243.add_trace(go.Scatter(x=[i / 4.0 for i in range(96)], y=q_g243, mode="lines",
+                                          name="15 minuti", line=dict(color="#F59E0B")))
+            fig_d243.update_layout(title=f"Giorno {giorno243}: profilo orario vs quartorario",
+                                   xaxis_title="Ora del giorno", yaxis_title="kW")
+            st.plotly_chart(fig_d243, use_container_width=True)
+            mesi243 = ["Gen", "Feb", "Mar", "Apr", "Mag", "Giu", "Lug", "Ago", "Set", "Ott", "Nov", "Dic"]
+            df_pm243 = pd.DataFrame({"Mese": mesi243,
+                                     "Orario (kW)": sin243["picchi_mensili_orari"],
+                                     "15 min (kW)": sin243["picchi_mensili_quartorari"]})
+            fig_pm243 = px.bar(df_pm243, x="Mese", y=["Orario (kW)", "15 min (kW)"], barmode="group",
+                               title="Picchi mensili: media oraria vs misura a 15'",
+                               color_discrete_sequence=["#3B82F6", "#F59E0B"])
+            st.plotly_chart(fig_pm243, use_container_width=True)
+            df_pm243["Delta (kW)"] = (df_pm243["15 min (kW)"] - df_pm243["Orario (kW)"]).round(1)
+            st.dataframe(df_pm243, use_container_width=True, hide_index=True)
+            st.download_button(
+                "Scarica CSV analisi",
+                data=df_pm243.to_csv(index=False, sep=";").encode("utf-8"),
+                file_name="picchi_quartorari.csv",
+                mime="text/csv", key="t243_csv",
+                help="Picchi mensili orari vs quartorari.")
+            st.caption("Modello indicativo: il profilo intra-ora e' sintetico (quarto di picco casuale per ora). "
+                       "Per la potenza impegnata usare i quarti misurati reali; verificare le clausole del contratto di fornitura.")
 
 
 # Footer
