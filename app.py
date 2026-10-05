@@ -28456,6 +28456,129 @@ def calcola_mef_orario(carico_picco_mw, cap_nucleare_mw=0.0, cap_idro_mw=0.0,
                     "fattore_eolico in [0,1] e stagione ('estate'/'inverno').")
 
 
+def calcola_valore_forecast(quantita_mwh, n_giorni=30, prezzo_medio_eur_mwh=95.0,
+                            vol_giornaliera_eur_mwh=6.0, sigma_forecast=3.0,
+                            n_sim=20000, seed=7):
+    """Valore economico del forecast per il timing di acquisto (EVPI).
+
+    Domanda operativa: "quanto vale in euro un forecast migliore?" Un buyer
+    deve acquistare Q MWh una sola volta dentro una finestra di N giorni.
+    Il prezzo spot giornaliero e' incerto; con un forecast (segnale rumoroso
+    del prezzo effettivo) compra nel giorno col forecast minimo. Il valore
+    del forecast = costo atteso della strategia naive (acquisto al prezzo
+    medio atteso) meno costo atteso della strategia col forecast. Con
+    forecast perfetto (sigma=0) si ottiene l'EVPI = upper bound teorico del
+    valore dell'informazione: nessun sistema di previsione puo' valere di
+    piu' di cosi'.
+
+    Modello (Monte Carlo, seed fissato -> deterministico):
+      P_t = mu + X_t,  X_t = phi * X_{t-1} + vol * sqrt(1-phi^2) * Z_t
+      (AR(1) stazionario, phi=0.7: i prezzi giornalieri sono persistenti)
+      F_t = P_t + sigma * eps_t   (segnale unbiased, errore iid)
+    Strategie per simulazione:
+      naive    -> compra al prezzo medio atteso mu (giorno casuale)
+      forecast -> compra in t* = argmin(F_t), paga P_{t*}
+      perfect  -> compra in argmin(P_t), paga min(P_t)  (EVPI)
+    KPI: risparmio atteso eur/MWh e totale per forecast e perfect,
+    % di EVPI catturata, curva valore-vs-sigma (il valore decade con
+    l'errore del forecast), distribuzione del risparmio (p5/mediana/p95).
+    """
+    _phi = 0.7  # persistenza AR(1) dei prezzi giornalieri
+
+    def _err(msg):
+        return {"valido": False, "errore": msg}
+
+    try:
+        for nome, v in (("quantita_mwh", quantita_mwh),
+                        ("n_giorni", n_giorni),
+                        ("prezzo_medio", prezzo_medio_eur_mwh),
+                        ("vol_giornaliera", vol_giornaliera_eur_mwh),
+                        ("sigma_forecast", sigma_forecast),
+                        ("n_sim", n_sim)):
+            if isinstance(v, bool):
+                raise ValueError(nome)
+        q = float(quantita_mwh)
+        n = int(n_giorni)
+        mu = float(prezzo_medio_eur_mwh)
+        vol = float(vol_giornaliera_eur_mwh)
+        sig = float(sigma_forecast)
+        ns = int(n_sim)
+        if q <= 0:
+            return _err("La quantita' da acquistare deve essere > 0 MWh.")
+        if n < 2:
+            return _err("La finestra decisionale deve avere almeno 2 giorni.")
+        if mu <= 0:
+            return _err("Il prezzo medio atteso deve essere > 0 eur/MWh.")
+        if vol < 0:
+            return _err("La volatilita' giornaliera non puo' essere negativa.")
+        if sig < 0:
+            return _err("L'errore del forecast (sigma) non puo' essere negativo.")
+        if ns < 500:
+            return _err("Servono almeno 500 simulazioni per un Monte Carlo stabile.")
+    except (TypeError, ValueError):
+        return _err("Parametri non numerici o non validi.")
+
+    rng = np.random.default_rng(seed)
+    innov = np.sqrt(max(1e-12, 1.0 - _phi ** 2))
+    z = rng.standard_normal((ns, n))
+    x = np.empty((ns, n))
+    x[:, 0] = vol * z[:, 0]
+    for t in range(1, n):
+        x[:, t] = _phi * x[:, t - 1] + vol * innov * z[:, t]
+    prezzi = mu + x
+    prezzi = np.maximum(prezzi, 0.01)  # floor: niente prezzi negativi qui
+
+    if sig <= 0:
+        forecast = prezzi.copy()
+    else:
+        forecast = prezzi + sig * rng.standard_normal((ns, n))
+
+    t_star = np.argmin(forecast, axis=1)
+    costo_forecast = prezzi[np.arange(ns), t_star]
+    costo_perfect = prezzi.min(axis=1)  # EVPI
+    risp_forecast = mu - costo_forecast
+    risp_perfect = mu - costo_perfect
+
+    evpi_mwh = float(risp_perfect.mean())
+    val_mwh = float(risp_forecast.mean())
+    pct_catturata = float(100.0 * val_mwh / evpi_mwh) if evpi_mwh > 1e-9 else 0.0
+
+    # Curva valore-vs-sigma: riusa gli stessi prezzi veri, ricampiona solo
+    # l'errore del forecast su una griglia di sigma (seed derivati -> stabile).
+    griglia = np.array([0.0, 0.5, 1.0, 2.0, 3.0, 5.0, 8.0, 12.0, 20.0])
+    griglia = griglia[griglia <= max(20.0, sig * 2.0)]
+    valori = []
+    for i, s in enumerate(griglia):
+        r2 = np.random.default_rng(seed + 1000 + i)
+        f2 = prezzi if s <= 0 else prezzi + s * r2.standard_normal((ns, n))
+        t2 = np.argmin(f2, axis=1)
+        valori.append(float((mu - prezzi[np.arange(ns), t2]).mean()))
+    df_curva = pd.DataFrame({"sigma_forecast_eur_mwh": griglia,
+                             "valore_atteso_eur_mwh": valori})
+
+    p5, p50, p95 = np.percentile(risp_forecast, [5, 50, 95])
+
+    return {
+        "valido": True,
+        "errore": "",
+        "evpi_eur_mwh": evpi_mwh,
+        "valore_forecast_eur_mwh": val_mwh,
+        "valore_forecast_eur_tot": val_mwh * q,
+        "evpi_eur_tot": evpi_mwh * q,
+        "pct_evpi_catturata": pct_catturata,
+        "costo_atteso_naive_eur_mwh": mu,
+        "costo_atteso_forecast_eur_mwh": float(costo_forecast.mean()),
+        "costo_atteso_perfect_eur_mwh": float(costo_perfect.mean()),
+        "risparmio_p5_eur_mwh": float(p5),
+        "risparmio_mediano_eur_mwh": float(p50),
+        "risparmio_p95_eur_mwh": float(p95),
+        "df_curva_sigma": df_curva,
+        "df_risparmio": pd.DataFrame({"risparmio_eur_mwh": risp_forecast}),
+        "n_giorni": n,
+        "quantita_mwh": q,
+    }
+
+
 def calcola_oneri_generali(energia_mwh_annua, quota_fissa_eur_pod_anno,
                              quota_potenza_eur_kw_anno,
                              quota_energia_eur_mwh, potenza_kw,
@@ -31653,7 +31776,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -52084,6 +52207,98 @@ elif workspace == _('ws8'):
                 file_name="mef_orario.csv",
                 mime="text/csv", key="ai228_csv",
                 help="Ora, carico, MEF e tecnologia marginale.")
+
+    with tab229:
+        titolo_vf = edu("Valore del forecast (EVPI)", "L'EVPI (Expected Value of Perfect Information) e' il massimo che un'informazione perfetta sui prezzi futuri puo' farti risparmiare: compri sempre nel giorno col prezzo minimo. Un forecast REALE e' un segnale rumoroso (prezzo vero + errore): il suo valore e' il risparmio atteso rispetto a comprare al prezzo medio, e decade man mano che l'errore (sigma) cresce. Se il sistema di forecast costa piu' del suo valore atteso, non conviene.")
+        st.markdown(f"<h1>💡 {titolo_vf}</h1>", unsafe_allow_html=True)
+        st.caption("Quanto vale in euro un forecast migliore per il timing di acquisto? Monte Carlo: devi comprare Q MWh una volta sola in N giorni; il forecast ti fa scegliere il giorno col prezzo previsto minimo.")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            q229 = st.number_input("Quantita' da acquistare (MWh)",
+                                  min_value=1.0, value=1000.0, step=100.0,
+                                  key="ai229_q",
+                                  help="Volume da fissare una sola volta nella finestra.")
+            n229 = st.number_input("Finestra decisionale (giorni)",
+                                  min_value=2, max_value=120, value=30, step=1,
+                                  key="ai229_n",
+                                  help="Giorni entro cui devi piazzare l'acquisto: piu' giorni, piu' vale il timing.")
+        with c2:
+            mu229 = st.number_input("Prezzo medio atteso (eur/MWh)",
+                                   min_value=1.0, value=95.0, step=1.0,
+                                   key="ai229_mu",
+                                   help="Prezzo atteso: la strategia naive compra a questo prezzo.")
+            vol229 = st.number_input("Volatilita' giornaliera (eur/MWh)",
+                                    min_value=0.0, value=6.0, step=0.5,
+                                    key="ai229_vol",
+                                    help="Deviazione standard giornaliera del prezzo (AR(1) con persistenza 0.7).")
+        with c3:
+            sig229 = st.slider("Errore del forecast (sigma, eur/MWh)",
+                              min_value=0.0, max_value=20.0, value=3.0, step=0.5,
+                              key="ai229_sig",
+                              help="Deviazione standard dell'errore del tuo forecast. Sigma=0 = informazione perfetta (EVPI).")
+            cicli229 = st.number_input("Acquisti simili all'anno",
+                                      min_value=1, max_value=52, value=12, step=1,
+                                      key="ai229_cicli",
+                                      help="Quante volte all'anno ripeti questo acquisto: serve per il budget massimo del sistema di forecast.")
+        ris229 = calcola_valore_forecast(q229, n_giorni=int(n229),
+                                         prezzo_medio_eur_mwh=mu229,
+                                         vol_giornaliera_eur_mwh=vol229,
+                                         sigma_forecast=sig229)
+        if not ris229["valido"]:
+            st.error(ris229["errore"])
+        else:
+            budget_max = ris229["valore_forecast_eur_tot"] * int(cicli229)
+            k1, k2, k3, k4, k5 = st.columns(5)
+            k1.metric("Valore forecast",
+                      f"{ris229['valore_forecast_eur_mwh']:.2f} eur/MWh",
+                      help=f"Risparmio atteso per acquisto: {ris229['valore_forecast_eur_tot']:,.0f} eur.")
+            k2.metric("EVPI (max teorico)",
+                      f"{ris229['evpi_eur_mwh']:.2f} eur/MWh",
+                      help="Con informazione perfetta compreresti sempre al minimo: nessun forecast puo' valere di piu'.")
+            k3.metric("% EVPI catturata",
+                      f"{ris229['pct_evpi_catturata']:.1f} %",
+                      help="Quota del valore teorico massimo che il tuo forecast (con questo sigma) cattura.")
+            k4.metric("Risparmio mediano",
+                      f"{ris229['risparmio_mediano_eur_mwh']:.2f} eur/MWh",
+                      help=f"p5: {ris229['risparmio_p5_eur_mwh']:.2f} — p95: {ris229['risparmio_p95_eur_mwh']:.2f} eur/MWh.")
+            k5.metric("Budget max sistema/anno",
+                      f"{budget_max:,.0f} eur",
+                      help="Se il sistema di forecast (dati, modelli, persone) costa piu' di cosi' all'anno, non si ripaga col timing.")
+            if ris229["pct_evpi_catturata"] >= 80:
+                st.success(f"Forecast quasi perfetto: catturi il {ris229['pct_evpi_catturata']:.0f}% dell'EVPI. Ridurre ancora sigma ha poco valore marginale.")
+            elif ris229["pct_evpi_catturata"] >= 50:
+                st.info(f"Il forecast cattura il {ris229['pct_evpi_catturata']:.0f}% dell'EVPI: c'e' ancora valore nel ridurre l'errore, vedi la curva qui sotto.")
+            else:
+                st.warning(f"Il forecast cattura solo il {ris229['pct_evpi_catturata']:.0f}% dell'EVPI: con questo errore il timing aiuta poco — o migliori il modello o allunghi la finestra.")
+            _curva229 = ris229["df_curva_sigma"]
+            fig229a = go.Figure()
+            fig229a.add_trace(go.Scatter(x=_curva229["sigma_forecast_eur_mwh"],
+                                         y=_curva229["valore_atteso_eur_mwh"],
+                                         mode="lines+markers", name="Valore atteso"))
+            fig229a.add_hline(y=ris229["evpi_eur_mwh"], line_dash="dash",
+                              annotation_text="EVPI (sigma=0)")
+            fig229a.add_vline(x=sig229, line_dash="dot",
+                              annotation_text="il tuo sigma")
+            fig229a.update_layout(title="Valore del forecast vs errore (sigma)",
+                                  xaxis_title="Sigma forecast (eur/MWh)",
+                                  yaxis_title="Valore atteso (eur/MWh)",
+                                  height=360, margin=dict(l=40, r=20, t=50, b=40))
+            st.plotly_chart(fig229a, use_container_width=True, key="ai229_chart1")
+            fig229b = go.Figure()
+            fig229b.add_trace(go.Histogram(x=ris229["df_risparmio"]["risparmio_eur_mwh"],
+                                           nbinsx=60, name="Risparmio"))
+            fig229b.update_layout(title="Distribuzione del risparmio col tuo forecast (20.000 simulazioni)",
+                                  xaxis_title="Risparmio (eur/MWh)",
+                                  yaxis_title="Frequenza",
+                                  height=320, margin=dict(l=40, r=20, t=50, b=40))
+            st.plotly_chart(fig229b, use_container_width=True, key="ai229_chart2")
+            st.caption("Modello indicativo: prezzi giornalieri AR(1) con persistenza 0.7, forecast = prezzo vero + errore gaussiano indipendente, 20.000 simulazioni con seed fisso (risultati riproducibili). Non include costi di transazione né vincoli di liquidita'.")
+            st.download_button(
+                "Scarica CSV curva valore-vs-sigma",
+                data=_curva229.to_csv(index=False, sep=";").encode("utf-8"),
+                file_name="valore_forecast_curva_sigma.csv",
+                mime="text/csv", key="ai229_csv",
+                help="Sigma del forecast e corrispondente valore atteso in eur/MWh.")
 
 # Footer
 
