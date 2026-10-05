@@ -31357,6 +31357,39 @@ def dq231_quality_summary(df, gaps, out_res, spike_res):
     }
 
 # ---------- fine W231 ----------
+
+# ---------- W233: Waterfall del costo - funzioni pure (testabili via AST) ----------
+def build_waterfall(componenti):
+    # componenti: dict {nome: eur} nell'ordine di cascata desiderato
+    # (es. energia -> perdite di rete -> oneri di sistema -> accise -> IVA).
+    # Ritorna DataFrame con colonne: componente, valore_eur, cumulata_eur.
+    nomi = [str(k) for k in componenti.keys()]
+    valori = [float(componenti[k]) for k in componenti.keys()]
+    cumulata = []
+    tot = 0.0
+    for v in valori:
+        tot += v
+        cumulata.append(tot)
+    return pd.DataFrame({"componente": nomi, "valore_eur": valori,
+                         "cumulata_eur": cumulata})
+
+
+def waterfall_total(componenti):
+    # Totale della cascata = somma delle componenti, in eur.
+    return float(sum(float(v) for v in componenti.values()))
+
+
+def waterfall_quote_pct(componenti):
+    # Quota percentuale di ciascuna componente sul totale (la somma fa 100).
+    tot = waterfall_total(componenti)
+    nomi = [str(k) for k in componenti.keys()]
+    if abs(tot) < 1e-12:
+        quote = [0.0 for _ in nomi]
+    else:
+        quote = [float(v) / tot * 100.0 for v in componenti.values()]
+    return pd.DataFrame({"componente": nomi, "quota_pct": quote})
+
+
 if workspace == _('ws1'):
     st.markdown(f"<h1>{_('ws1')}</h1>", unsafe_allow_html=True)
     banner_demo("simulatore strategico: margini, centrali e curve simulate")
@@ -31998,7 +32031,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab234, tab239, tab235 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🧮 Concentrazione temporale (HHI)", "🎯 Score di timing", "📊 Probabilità sforamento budget", "🔍 Qualità dati", "🔁 Correlazione carico-prezzo"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab234, tab239, tab235, tab233 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🧮 Concentrazione temporale (HHI)", "🎯 Score di timing", "📊 Probabilità sforamento budget", "🔍 Qualità dati", "🔁 Correlazione carico-prezzo", "💧 Waterfall del costo"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -53512,6 +53545,130 @@ def load_price_corr(load_kw, prezzo_eur_mwh, top_n=4):
                 mime="text/csv", key="t235_csv",
                 help="Ora, carico in kW, prezzo in eur/MWh e costo orario in eur.")
             st.caption("Serie sintetiche a scopo didattico: per decisioni reali usa il tuo profilo di carico misurato e i prezzi orari della tua zona. L'extra-costo confronta col profilo piatto a parita' di energia totale.")
+
+
+    with tab233:
+        titolo_wf = edu("Waterfall del costo", "La bolletta non e' solo energia: tra perdite di rete, oneri di sistema, accise e IVA il prezzo finale puo' quasi raddoppiare. La waterfall mostra, componente dopo componente, come si costruisce il totale: ogni barra parte da dove finisce la precedente, fino al totale a destra.")
+        st.markdown(f"<h1>💧 {titolo_wf}</h1>", unsafe_allow_html=True)
+        st.caption("Scomponi il costo totale dell'energia in cascata: inserisci i valori delle componenti o usa un preset, e vedi come energia, perdite di rete, oneri di sistema, accise e IVA si sommano fino al totale.")
+        banner_demo("waterfall del costo: preset e valori inseriti manualmente (Mock)")
+        _PRESETS233 = {
+            "Domestico 2.700 kWh/anno": {"t233_kwh": 2700.0, "t233_energia": 540.0, "t233_perdite": 35.0, "t233_oneri": 120.0, "t233_accise": 61.29, "t233_iva": 75.63},
+            "PMI 50 MWh/anno": {"t233_kwh": 50000.0, "t233_energia": 6500.0, "t233_perdite": 320.0, "t233_oneri": 1100.0, "t233_accise": 625.0, "t233_iva": 1879.9},
+            "Industriale 1 GWh/anno": {"t233_kwh": 1000000.0, "t233_energia": 95000.0, "t233_perdite": 4200.0, "t233_oneri": 18000.0, "t233_accise": 12500.0, "t233_iva": 28534.0},
+        }
+        _p1, _p2, _p3 = st.columns([3, 2, 2])
+        with _p1:
+            _preset233 = st.selectbox("Preset di partenza", list(_PRESETS233.keys()), index=0, key="t233_preset",
+                                      help="Valori di esempio: dopo averli applicati puoi modificarli a mano.")
+        with _p2:
+            st.write("")
+            st.write("")
+            if st.button("Applica preset", key="t233_applica",
+                         help="Copia i valori del preset nei campi qui sotto."):
+                for _k233, _v233 in _PRESETS233[_preset233].items():
+                    st.session_state[_k233] = _v233
+        with _p3:
+            kwh233 = st.number_input("Consumo annuo (kWh)", min_value=0.0, value=2700.0,
+                                     step=100.0, key="t233_kwh",
+                                     help="Serve solo per calcolare il costo medio per kWh sul totale.")
+        _d0 = _PRESETS233["Domestico 2.700 kWh/anno"]
+        _c1, _c2, _c3, _c4, _c5 = st.columns(5)
+        with _c1:
+            energia233 = st.number_input("Energia (€/anno)", min_value=0.0, value=_d0["t233_energia"],
+                                         step=10.0, key="t233_energia",
+                                         help="Materia energia: prezzo per consumo.")
+        with _c2:
+            perdite233 = st.number_input("Perdite di rete (€/anno)", min_value=0.0, value=_d0["t233_perdite"],
+                                         step=5.0, key="t233_perdite",
+                                         help="Quota perdite di rete applicata in bolletta.")
+        with _c3:
+            oneri233 = st.number_input("Oneri di sistema (€/anno)", min_value=0.0, value=_d0["t233_oneri"],
+                                       step=10.0, key="t233_oneri",
+                                       help="Oneri generali di sistema (es. ASOS/ARIM).")
+        with _c4:
+            accise233 = st.number_input("Accise (€/anno)", min_value=0.0, value=_d0["t233_accise"],
+                                        step=5.0, key="t233_accise",
+                                        help="Accisa sull'energia elettrica: concorre anche alla base imponibile IVA.")
+        with _c5:
+            iva233 = st.number_input("IVA (€/anno)", min_value=0.0, value=_d0["t233_iva"],
+                                     step=5.0, key="t233_iva",
+                                     help="IVA sulla base imponibile (energia + perdite + oneri + accise).")
+        _comp233 = {"Energia": energia233, "Perdite di rete": perdite233,
+                    "Oneri di sistema": oneri233, "Accise": accise233, "IVA": iva233}
+        _dfw233 = build_waterfall(_comp233)
+        _tot233 = waterfall_total(_comp233)
+        _q233 = waterfall_quote_pct(_comp233)
+        _k1, _k2, _k3, _k4, _k5, _k6 = st.columns(6)
+        _labs233 = ["Energia", "Perdite di rete", "Oneri di sistema", "Accise", "IVA"]
+        _klist233 = [_k1, _k2, _k3, _k4, _k5]
+        for _i233, _lab233 in enumerate(_labs233):
+            _qv233 = float(_q233.loc[_q233["componente"] == _lab233, "quota_pct"].iloc[0])
+            _klist233[_i233].metric(_lab233, f"{_comp233[_lab233]:,.2f} €",
+                                    f"{_qv233:.1f}% del totale")
+        _k6.metric("TOTALE", f"{_tot233:,.2f} €",
+                   f"{_tot233 / kwh233:.4f} €/kWh" if kwh233 > 0 else "kWh = 0")
+        _fisco233 = oneri233 + accise233 + iva233
+        if _tot233 > 0 and _fisco233 / _tot233 >= 0.5:
+            st.warning(f"Carico fiscale e parafiscale (oneri + accise + IVA): {_fisco233:,.2f} €, pari al {_fisco233 / _tot233:.0%} del totale — piu' della meta' della bolletta non e' energia.")
+        elif _tot233 > 0:
+            st.info(f"Carico fiscale e parafiscale (oneri + accise + IVA): {_fisco233:,.2f} €, pari al {_fisco233 / _tot233:.0%} del totale.")
+        _o1, _o2 = st.columns(2)
+        with _o1:
+            _show_det233 = st.checkbox("Mostra tabella di dettaglio", value=True,
+                                       key="t233_mostra_dettaglio")
+        with _o2:
+            _show_q233 = st.checkbox("Mostra quote percentuali", value=False,
+                                     key="t233_mostra_quote")
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+            _mpl233 = True
+        except Exception:
+            _mpl233 = False
+        _nomi233 = list(_dfw233["componente"]) + ["TOTALE"]
+        _vals233 = list(_dfw233["valore_eur"]) + [_tot233]
+        if _mpl233:
+            _prev233 = [0.0] + list(_dfw233["cumulata_eur"].iloc[:-1])
+            _bots233 = _prev233 + [0.0]
+            _cols233 = ["#38bdf8" if _v >= 0 else "#f87171" for _v in _vals233[:-1]] + ["#fbbf24"]
+            _fig233, _ax233 = plt.subplots(figsize=(10, 4.6))
+            _bars233 = _ax233.bar(_nomi233, _vals233, bottom=_bots233, color=_cols233,
+                                  edgecolor="white", linewidth=0.8, width=0.6)
+            for _j233 in range(len(_dfw233)):
+                _yy233 = float(_dfw233["cumulata_eur"].iloc[_j233])
+                _ax233.plot([_j233 - 0.3, _j233 + 0.7], [_yy233, _yy233],
+                            color="#94a3b8", linestyle="--", linewidth=1)
+            _ax233.bar_label(_bars233, fmt="%.0f €", padding=3, fontsize=8)
+            _ax233.set_title("Waterfall del costo energetico (€/anno)", fontsize=12)
+            _ax233.set_ylabel("€")
+            _ax233.grid(axis="y", linestyle=":", alpha=0.5)
+            _ax233.set_axisbelow(True)
+            plt.setp(_ax233.get_xticklabels(), rotation=15, ha="right")
+            _fig233.tight_layout()
+            st.pyplot(_fig233, use_container_width=True, key="t233_chart_mpl")
+            plt.close(_fig233)
+        else:
+            _figp233 = go.Figure(go.Waterfall(
+                x=_nomi233, y=_vals233,
+                measure=["relative"] * len(_dfw233) + ["total"],
+                name="Costo"))
+            _figp233.update_layout(title="Waterfall del costo energetico (€/anno)",
+                                   yaxis_title="€", height=420,
+                                   margin=dict(l=40, r=20, t=50, b=40))
+            st.plotly_chart(_figp233, use_container_width=True, key="t233_chart_plotly")
+        if _show_det233:
+            st.dataframe(_dfw233, use_container_width=True, hide_index=True)
+        if _show_q233:
+            st.dataframe(_q233, use_container_width=True, hide_index=True)
+        st.download_button(
+            "Scarica CSV waterfall",
+            data=_dfw233.to_csv(index=False, sep=";").encode("utf-8"),
+            file_name="waterfall_costo.csv",
+            mime="text/csv", key="t233_csv",
+            help="Componenti, valori in eur e cumulata progressiva della waterfall.")
+        st.caption("Modello indicativo: la cascata somma le componenti nell'ordine di bolletta (energia → perdite → oneri → accise → IVA). L'IVA si applica sulla base imponibile che include le accise. I preset sono esempi, non tariffe reali.")
 
 # Footer
 
