@@ -6,11 +6,13 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from pathlib import Path
+
 from appfuncs import load
 
 _F = load("calcola_cointegrazione")
 calcola_cointegrazione = _F["calcola_cointegrazione"]
-_APP_SRC = open("/home/hatch/workspace/dashboard-qa/app.py").read()
+_APP_SRC = Path(__file__).parent.parent.joinpath("app.py").read_text(encoding="utf-8")
 
 
 def _giorni(n, start="2025-01-01"):
