@@ -32501,6 +32501,90 @@ def d247_sintesi(corrispettivo_euro, iva_pct, bollo_euro, onere_riattivazione_eu
         "deposito": round(dep, 2),
     }
 
+def d248_tasso_moratorio(tasso_bce_pct, maggiorazione_pp=8.0):
+    """Tasso moratorio annuo nei rapporti B2B (D.Lgs. 231/2002): saggio di
+    riferimento BCE + maggiorazione di legge (8 punti percentuali).
+
+    Ritorna un dict con il saggio BCE, la maggiorazione e il tasso moratorio
+    risultante. Tutto deterministico.
+    """
+    bce = float(tasso_bce_pct)
+    magg = float(maggiorazione_pp)
+    if bce < 0 or magg < 0:
+        raise ValueError("tassi negativi non ammessi")
+    return {
+        "tasso_bce_pct": round(bce, 2),
+        "maggiorazione_pp": round(magg, 2),
+        "tasso_moratorio_pct": round(bce + magg, 2),
+    }
+
+
+def d248_interessi_moratori(importo_euro, tasso_moratorio_pct, giorni_ritardo,
+                            base_giorni=365):
+    """Interessi di mora su base giornaliera: I = C * r * giorni / base.
+
+    Ritorna capitale, tasso applicato, giorni e interessi arrotondati.
+    Tutto deterministico.
+    """
+    cap = float(importo_euro)
+    r = float(tasso_moratorio_pct)
+    gg = int(giorni_ritardo)
+    base = int(base_giorni)
+    if cap < 0 or r < 0 or gg < 0 or base <= 0:
+        raise ValueError("valori non validi per il calcolo degli interessi")
+    interessi = cap * (r / 100.0) * gg / base
+    return {
+        "capitale": round(cap, 2),
+        "tasso_pct": round(r, 2),
+        "giorni": gg,
+        "interessi": round(interessi, 2),
+    }
+
+
+def d248_costo_ritardo(importo_euro, tasso_moratorio_pct, giorni_ritardo,
+                       recupero_spese_euro=40.0, base_giorni=365):
+    """Costo totale di un ritardo di pagamento: interessi di mora + rimborso
+    forfettario delle spese di recupero (art. 6 D.Lgs. 231/2002: minimo 40 €).
+
+    Ritorna interessi, spese, totale, incidenza % sull'importo e costo medio
+    giornaliero. Tutto deterministico.
+    """
+    int_d = d248_interessi_moratori(importo_euro, tasso_moratorio_pct,
+                                    giorni_ritardo, base_giorni)
+    spese = float(recupero_spese_euro)
+    if spese < 0:
+        raise ValueError("spese di recupero negative")
+    tot = int_d["interessi"] + spese
+    cap = int_d["capitale"]
+    gg = int_d["giorni"]
+    return {
+        "interessi": int_d["interessi"],
+        "recupero_spese": round(spese, 2),
+        "totale": round(tot, 2),
+        "incidenza_pct": round(tot / cap * 100.0, 3) if cap > 0 else 0.0,
+        "costo_giornaliero": round(tot / gg, 2) if gg > 0 else round(tot, 2),
+    }
+
+
+def d248_confronto_sconto(importo_euro, costo_ritardo_totale_euro,
+                          sconto_pronta_cassa_pct):
+    """Confronto ritardo vs sconto per pronta cassa: pagare in ritardo non solo
+    costa interessi e spese, ma fa perdere lo sconto che si sarebbe ottenuto
+    pagando subito (mancato risparmio = sconto + costo del ritardo).
+    Tutto deterministico.
+    """
+    imp = float(importo_euro)
+    if imp < 0:
+        raise ValueError("importo negativo")
+    sconto = imp * float(sconto_pronta_cassa_pct) / 100.0
+    costo = float(costo_ritardo_totale_euro)
+    return {
+        "sconto_valore": round(sconto, 2),
+        "costo_ritardo": round(costo, 2),
+        "mancato_risparmio": round(sconto + costo, 2),
+    }
+
+
 
 if workspace == _('ws1'):
     st.markdown(f"<h1>{_('ws1')}</h1>", unsafe_allow_html=True)
@@ -33143,7 +33227,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -55564,6 +55648,103 @@ elif workspace == _('ws8'):
                        "subentro (ARERA, art. 28 Testo integrato condizioni economiche di connessione); corrispettivi "
                        "commerciali, oneri di riattivazione, bollo e deposito variano per venditore e distributore. "
                        "Verificare le condizioni contrattuali.")
+
+
+    with tab248:
+        titolo248 = edu("Interessi moratori & ritardo pagamenti", "Interessi di mora su una fattura pagata in ritardo: nei rapporti tra imprese il D.Lgs. 231/2002 fissa il tasso moratorio al saggio di riferimento BCE + 8 punti percentuali, con un rimborso forfettario di 40 euro per le spese di recupero. Il tab calcola il costo di un ritardo, lo confronta con lo sconto per pronta cassa e mostra la sensibilita' a giorni di ritardo e tasso.")
+        st.markdown(f"<h1>\U0001F4B2 {titolo248}</h1>", unsafe_allow_html=True)
+        st.caption("Ritardo di pagamento su fattura energia: interessi moratori, spese di recupero, confronto con lo sconto pronta cassa.")
+        banner_demo("parametri di contratto sintetici (Mock)")
+        c1_248, c2_248, c3_248 = st.columns(3)
+        with c1_248:
+            importo248 = st.number_input("Importo fattura (\u20ac)", 100.0, 1000000.0, 15000.0, 500.0,
+                                         key="t248_importo",
+                                         help="Importo della fattura pagata in ritardo.")
+            giorni248 = st.slider("Giorni di ritardo", 0, 180, 30, 1, key="t248_giorni",
+                                  help="Giorni tra la scadenza contrattuale e il pagamento effettivo.")
+        with c2_248:
+            regime248 = st.selectbox("Regime del tasso", ["Moratori B2B (BCE + 8 pp)",
+                                                          "Tasso legale (art. 1284 c.c.)",
+                                                          "Contrattuale personalizzato"],
+                                     key="t248_regime",
+                                     help="D.Lgs. 231/2002 per i rapporti tra imprese; tasso legale per gli altri casi; tasso da contratto se pattuito.")
+            bce248 = st.number_input("Saggio di riferimento BCE (%)", 0.0, 20.0, 2.0, 0.05,
+                                     key="t248_bce",
+                                     help="Saggio BCE vigente per il semestre (valore di esempio: verificare quello ufficiale).")
+        with c3_248:
+            legale248 = st.number_input("Tasso legale annuo (%)", 0.0, 20.0, 2.5, 0.1, key="t248_legale",
+                                        help="Tasso legale ex art. 1284 c.c. (valore di esempio).")
+            contrattuale248 = st.number_input("Tasso contrattuale annuo (%)", 0.0, 50.0, 10.0, 0.5,
+                                              key="t248_contrattuale",
+                                              help="Tasso di mora pattuito nel contratto di fornitura, se previsto.")
+            spese248 = st.number_input("Spese di recupero forfettarie (\u20ac)", 0.0, 500.0, 40.0, 1.0,
+                                       key="t248_spese",
+                                       help="Rimborso forfettario minimo di 40 euro (art. 6 D.Lgs. 231/2002).")
+        if regime248.startswith("Moratori"):
+            tasso248 = d248_tasso_moratorio(bce248)["tasso_moratorio_pct"]
+            fonte248 = "D.Lgs. 231/2002 (BCE + 8 pp)"
+        elif regime248.startswith("Tasso legale"):
+            tasso248 = float(legale248)
+            fonte248 = "Tasso legale art. 1284 c.c."
+        else:
+            tasso248 = float(contrattuale248)
+            fonte248 = "Tasso contrattuale"
+        costo248 = d248_costo_ritardo(importo248, tasso248, giorni248, spese248)
+        st.subheader("KPI del ritardo")
+        k1_248, k2_248, k3_248, k4_248 = st.columns(4)
+        render_kpi("Interessi di mora (\u20ac)", f"{costo248['interessi']:,.2f}", k1_248)
+        render_kpi("Spese di recupero (\u20ac)", f"{costo248['recupero_spese']:,.2f}", k2_248)
+        render_kpi("Costo totale ritardo (\u20ac)", f"{costo248['totale']:,.2f}", k3_248)
+        render_kpi("Incidenza sull'importo (%)", f"{costo248['incidenza_pct']:.3f}", k4_248)
+        k5_248, k6_248, k7_248, k8_248 = st.columns(4)
+        render_kpi("Tasso applicato (% annuo)", f"{tasso248:.2f}", k5_248)
+        render_kpi("Costo medio giornaliero (\u20ac/gg)", f"{costo248['costo_giornaliero']:,.2f}", k6_248)
+        render_kpi("Giorni di ritardo", f"{giorni248}", k7_248)
+        render_kpi("Regime", fonte248, k8_248)
+        righe248 = [{"Voce": "Interessi di mora", "Importo (\u20ac)": costo248["interessi"]},
+                    {"Voce": "Spese di recupero", "Importo (\u20ac)": costo248["recupero_spese"]},
+                    {"Voce": "Totale costo ritardo", "Importo (\u20ac)": costo248["totale"]}]
+        df248 = pd.DataFrame(righe248)
+        st.dataframe(df248, use_container_width=True, hide_index=True)
+        fig248 = px.bar(df248, x="Voce", y="Importo (\u20ac)",
+                        title="Composizione del costo del ritardo (\u20ac)",
+                        color="Voce", text_auto=".2f")
+        st.plotly_chart(fig248, use_container_width=True)
+        with st.expander("Ritardo vs sconto pronta cassa"):
+            sconto248 = st.slider("Sconto per pronta cassa (%)", 0.0, 10.0, 2.0, 0.1, key="t248_sconto",
+                                  help="Sconto che il fornitore applicherebbe pagando entro la scadenza.")
+            conf248 = d248_confronto_sconto(importo248, costo248["totale"], sconto248)
+            st.markdown(f"- Sconto ottenibile pagando subito: **{conf248['sconto_valore']:,.2f} \u20ac**\n"
+                        f"- Costo del ritardo: **{conf248['costo_ritardo']:,.2f} \u20ac**\n"
+                        f"- Mancato risparmio complessivo: **{conf248['mancato_risparmio']:,.2f} \u20ac**")
+            dfc248 = pd.DataFrame([
+                {"Scenario": "Paga subito (sconto)", "Euro": -conf248["sconto_valore"]},
+                {"Scenario": "Paga in ritardo (costo)", "Euro": conf248["costo_ritardo"]},
+            ])
+            figc248 = px.bar(dfc248, x="Scenario", y="Euro", text_auto=".2f",
+                             title="Paga subito vs paga in ritardo (\u20ac)",
+                             color="Scenario")
+            st.plotly_chart(figc248, use_container_width=True)
+        with st.expander("Sensibilita': costo totale al variare di giorni e tasso"):
+            gg_grid248 = [7, 15, 30, 60, 90, 120]
+            tasso_grid248 = [5.0, 8.0, 10.0, 12.0, 15.0]
+            z248 = [[d248_costo_ritardo(importo248, t, g, spese248)["totale"]
+                     for g in gg_grid248] for t in tasso_grid248]
+            fig_s248 = px.imshow(z248, x=[str(g) for g in gg_grid248],
+                                 y=[f"{t:.0f}%" for t in tasso_grid248],
+                                 labels=dict(x="Giorni di ritardo", y="Tasso annuo", color="Costo totale \u20ac"),
+                                 title="Costo totale del ritardo (\u20ac) al variare di giorni e tasso",
+                                 text_auto=".0f", color_continuous_scale="Reds")
+            st.plotly_chart(fig_s248, use_container_width=True)
+            st.download_button(
+                "Scarica CSV analisi",
+                data=df248.to_csv(index=False, sep=";").encode("utf-8"),
+                file_name="interessi_moratori.csv",
+                mime="text/csv", key="t248_csv",
+                help="Dettaglio interessi di mora, spese di recupero e totale del ritardo.")
+            st.caption("Modello indicativo: D.Lgs. 231/2002 (tasso moratorio BCE + 8 pp, rimborso forfettario "
+                       "spese di recupero minimo 40 \u20ac) per i rapporti tra imprese; tasso legale ex art. 1284 c.c. "
+                       "per gli altri casi. Saggio BCE e tasso legale vanno aggiornati ai valori ufficiali del periodo.")
 
 # Footer
 
