@@ -32730,6 +32730,155 @@ def cnx249_sensibilita(kw_list, metri_list, franchigia_m, tariffa_eur_kw,
 
 
 
+def cc250_ciclo_cassa(dso_gg, dpo_gg, dio_gg=0.0):
+    """Ciclo di cassa (cash conversion cycle): DSO + DIO - DPO, in giorni.
+
+    DSO: giorni medi di incasso dai clienti; DPO: giorni medi di pagamento
+    ai fornitori; DIO: giorni di giacenza (0 per trader/fornitore di energia).
+    Ciclo negativo = i fornitori finanziano l'attivita'.
+    Tutto deterministico.
+    """
+    dso = float(dso_gg)
+    dpo = float(dpo_gg)
+    dio = float(dio_gg)
+    if dso < 0:
+        raise ValueError("DSO negativo")
+    if dpo < 0:
+        raise ValueError("DPO negativo")
+    if dio < 0:
+        raise ValueError("DIO negativo")
+    return {
+        "dso_gg": dso,
+        "dpo_gg": dpo,
+        "dio_gg": dio,
+        "ciclo_gg": round(dso + dio - dpo, 1),
+    }
+
+
+def cc250_fabbisogno(costo_acquisto_annuo_eur, ciclo_gg):
+    """Fabbisogno medio di capitale circolante: costo annuo x ciclo/365."""
+    costo = float(costo_acquisto_annuo_eur)
+    ciclo = float(ciclo_gg)
+    if costo < 0:
+        raise ValueError("costo acquisto annuo negativo")
+    return {
+        "costo_acquisto_annuo_eur": costo,
+        "ciclo_gg": ciclo,
+        "fabbisogno_medio_eur": round(costo * ciclo / 365.0, 2),
+    }
+
+
+def cc250_costo_finanziario(fabbisogno_eur, wacc_pct):
+    """Costo annuo del capitale che finanzia il circolante: fabbisogno x WACC.
+
+    Il fabbisogno puo' essere negativo (ciclo di cassa negativo: i fornitori
+    finanziano l'attivita'): in tal caso il costo e' negativo = beneficio.
+    """
+    fab = float(fabbisogno_eur)
+    w = float(wacc_pct)
+    if w < 0 or w > 100:
+        raise ValueError("WACC fuori range 0-100%")
+    return {
+        "fabbisogno_eur": fab,
+        "wacc_pct": w,
+        "costo_annuo_eur": round(fab * w / 100.0, 2),
+    }
+
+
+def cc250_costo_per_mwh(costo_annuo_eur, volumi_mwh_annui):
+    """Ricarico del costo del circolante sui volumi venduti, in EUR/MWh.
+
+    Il costo puo' essere negativo (beneficio da ciclo di cassa negativo):
+    in tal caso anche il ricarico e' negativo.
+    """
+    costo = float(costo_annuo_eur)
+    vol = float(volumi_mwh_annui)
+    if vol <= 0:
+        raise ValueError("volumi annui non positivi")
+    return {
+        "costo_annuo_eur": costo,
+        "volumi_mwh_annui": vol,
+        "costo_per_mwh": round(costo / vol, 3),
+    }
+
+
+def cc250_confronto_scenari(costo_acquisto_annuo_eur, volumi_mwh_annui, scenari):
+    """Confronta scenari di incasso/pagamento.
+
+    scenari: lista di dict {"nome": str, "dso": gg, "dpo": gg, "wacc_pct": %}.
+    Ritorna una riga per scenario con ciclo, fabbisogno, costo annuo e EUR/MWh.
+    """
+    costo = float(costo_acquisto_annuo_eur)
+    vol = float(volumi_mwh_annui)
+    if costo < 0:
+        raise ValueError("costo acquisto annuo negativo")
+    if vol <= 0:
+        raise ValueError("volumi annui non positivi")
+    if not scenari:
+        raise ValueError("nessuno scenario da confrontare")
+    righe = []
+    for s in scenari:
+        try:
+            nome = str(s["nome"])
+            dso = float(s["dso"])
+            dpo = float(s["dpo"])
+            w = float(s["wacc_pct"])
+        except (KeyError, TypeError, ValueError):
+            raise ValueError("scenario malformato: servono nome, dso, dpo, wacc_pct")
+        ciclo = cc250_ciclo_cassa(dso, dpo)["ciclo_gg"]
+        fab = cc250_fabbisogno(costo, ciclo)["fabbisogno_medio_eur"]
+        cfin = cc250_costo_finanziario(fab, w)["costo_annuo_eur"]
+        pmwh = cc250_costo_per_mwh(cfin, vol)["costo_per_mwh"]
+        righe.append({
+            "scenario": nome,
+            "dso_gg": dso,
+            "dpo_gg": dpo,
+            "ciclo_gg": ciclo,
+            "fabbisogno_eur": fab,
+            "costo_annuo_eur": cfin,
+            "costo_per_mwh": pmwh,
+        })
+    return righe
+
+
+def cc250_sensibilita(dso_list, wacc_list, costo_acquisto_annuo_eur, dpo_gg,
+                      volumi_mwh_annui):
+    """Matrice costo annuo / EUR-MWh al variare di DSO e WACC."""
+    if not dso_list or not wacc_list:
+        raise ValueError("liste DSO/WACC vuote")
+    dso_l = [float(x) for x in dso_list]
+    wacc_l = [float(x) for x in wacc_list]
+    costo = float(costo_acquisto_annuo_eur)
+    dpo = float(dpo_gg)
+    vol = float(volumi_mwh_annui)
+    if any(x < 0 for x in dso_l):
+        raise ValueError("DSO negativo in lista")
+    if any(x < 0 or x > 100 for x in wacc_l):
+        raise ValueError("WACC fuori range 0-100% in lista")
+    if costo < 0:
+        raise ValueError("costo acquisto annuo negativo")
+    if dpo < 0:
+        raise ValueError("DPO negativo")
+    if vol <= 0:
+        raise ValueError("volumi annui non positivi")
+    righe = []
+    for dso in dso_l:
+        ciclo = cc250_ciclo_cassa(dso, dpo)["ciclo_gg"]
+        fab = cc250_fabbisogno(costo, ciclo)["fabbisogno_medio_eur"]
+        for w in wacc_l:
+            cfin = cc250_costo_finanziario(fab, w)["costo_annuo_eur"]
+            righe.append({
+                "dso_gg": dso,
+                "wacc_pct": w,
+                "ciclo_gg": ciclo,
+                "fabbisogno_eur": fab,
+                "costo_annuo_eur": cfin,
+                "costo_per_mwh": cc250_costo_per_mwh(cfin, vol)["costo_per_mwh"],
+            })
+    return righe
+
+
+
 if workspace == _('ws1'):
     st.markdown(f"<h1>{_('ws1')}</h1>", unsafe_allow_html=True)
     banner_demo("simulatore strategico: margini, centrali e curve simulate")
@@ -33371,7 +33520,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -55970,6 +56119,80 @@ elif workspace == _('ws8'):
                 mime="text/csv", key="t249_csv",
                 help="Griglia di sensibilita' del preventivo: potenza x distanza con franchigia e tariffe impostate.")
             st.caption("Modello semplificato: quota potenza per kW impegnato + quota distanza per i metri oltre la franchigia + onere amministrativo, IVA sul totale. Tariffe di default INDICATIVE e modificabili: il valore ufficiale e' nel preventivo del distributore (struttura ARERA TIQE).")
+
+    with tab250:
+        titolo250 = edu("Capitale circolante", "Il capitale circolante e' il denaro immobilizzato tra il pagamento ai fornitori (energia acquistata) e l'incasso dai clienti: ciclo di cassa = DSO + DIO - DPO. Il tab calcola il fabbisogno medio, il costo annuo del finanziamento al WACC e il ricarico sui volumi in euro/MWh, confronta scenari di incasso/pagamento e mostra la sensibilita' a DSO e WACC.")
+        st.markdown(f"<h1>\U0001F4B8 {titolo250}</h1>", unsafe_allow_html=True)
+        st.caption("Quanto costa finanziare il tempo tra acquisto dell'energia e incasso: ciclo di cassa, fabbisogno, WACC e ricarico EUR/MWh.")
+        banner_demo("calcolo sintetico (Mock): inserire i propri DSO/DPO, costi e WACC — i default sono indicativi")
+        c1_250, c2_250, c3_250, c4_250 = st.columns(4)
+        dso250 = c1_250.number_input("DSO — giorni medi di incasso (gg)", min_value=0.0, max_value=365.0, value=45.0, step=1.0, key="t250_dso",
+                                     help="Giorni medi tra la fattura al cliente e l'incasso.")
+        dpo250 = c2_250.number_input("DPO — giorni medi di pagamento (gg)", min_value=0.0, max_value=365.0, value=30.0, step=1.0, key="t250_dpo",
+                                     help="Giorni medi tra la fattura del fornitore e il pagamento.")
+        dio250 = c3_250.number_input("DIO — giorni di giacenza (gg)", min_value=0.0, max_value=365.0, value=0.0, step=1.0, key="t250_dio",
+                                     help="Per un trader/fornitore di energia vale 0: niente magazzino fisico.")
+        wacc250 = c4_250.number_input("WACC — costo del capitale (%/anno)", min_value=0.0, max_value=50.0, value=6.0, step=0.5, key="t250_wacc",
+                                      help="Costo medio ponderato del capitale che finanzia il circolante.")
+        c5_250, c6_250 = st.columns(2)
+        costo250 = c5_250.number_input("Costo acquisto energia annuo (\u20ac)", min_value=0.0, value=2000000.0, step=50000.0, key="t250_costo",
+                                       help="Costo annuo dell'energia acquistata dai fornitori.")
+        vol250 = c6_250.number_input("Volumi venduti annui (MWh)", min_value=1.0, value=20000.0, step=500.0, key="t250_vol",
+                                     help="Volumi annui venduti ai clienti.")
+        ciclo250 = cc250_ciclo_cassa(dso250, dpo250, dio250)
+        fab250 = cc250_fabbisogno(costo250, ciclo250["ciclo_gg"])
+        cfin250 = cc250_costo_finanziario(fab250["fabbisogno_medio_eur"], wacc250)
+        pmwh250 = cc250_costo_per_mwh(cfin250["costo_annuo_eur"], vol250)
+        k1_250, k2_250, k3_250, k4_250, k5_250 = st.columns(5)
+        render_kpi("Ciclo di cassa (gg)", f"{ciclo250['ciclo_gg']:,.1f}", k1_250)
+        render_kpi("Fabbisogno medio (\u20ac)", f"{fab250['fabbisogno_medio_eur']:,.0f}", k2_250)
+        render_kpi("Costo finanziario (\u20ac/anno)", f"{cfin250['costo_annuo_eur']:,.0f}", k3_250)
+        render_kpi("Ricarico (\u20ac/MWh)", f"{pmwh250['costo_per_mwh']:,.3f}", k4_250)
+        pct250 = (cfin250["costo_annuo_eur"] / costo250 * 100.0) if costo250 > 0 else 0.0
+        render_kpi("Ricarico su costo energia (%)", f"{pct250:,.2f}%", k5_250)
+        st.caption(f"Ogni giorno di ciclo in piu' immobilizza **{costo250 / 365.0:,.0f} \u20ac** di capitale.")
+        with st.expander("Confronto scenari di incasso/pagamento"):
+            scen250 = [
+                {"nome": "Base", "dso": dso250, "dpo": dpo250, "wacc_pct": wacc250},
+                {"nome": "Incasso rapido (DSO -15 gg)", "dso": max(0.0, dso250 - 15.0), "dpo": dpo250, "wacc_pct": wacc250},
+                {"nome": "Pagamento fornitori +15 gg", "dso": dso250, "dpo": dpo250 + 15.0, "wacc_pct": wacc250},
+                {"nome": "Incasso immediato (DSO 0)", "dso": 0.0, "dpo": dpo250, "wacc_pct": wacc250},
+            ]
+            righe_s250 = cc250_confronto_scenari(costo250, vol250, scen250)
+            dfs250 = pd.DataFrame(righe_s250)
+            figs250 = px.bar(dfs250, x="scenario", y="costo_annuo_eur", text_auto=".0f",
+                             title="Costo finanziario annuo per scenario (\u20ac)", color="scenario")
+            st.plotly_chart(figs250, use_container_width=True)
+            st.dataframe(dfs250.style.format({"dso_gg": "{:.0f}", "dpo_gg": "{:.0f}", "ciclo_gg": "{:.1f}",
+                                              "fabbisogno_eur": "{:,.0f}", "costo_annuo_eur": "{:,.0f}",
+                                              "costo_per_mwh": "{:.3f}"}),
+                         use_container_width=True)
+            best250 = min(righe_s250, key=lambda r: r["costo_annuo_eur"])
+            st.info(f"\U0001F4A1 Scenario piu' economico: **{best250['scenario']}** — {best250['costo_annuo_eur']:,.0f} \u20ac/anno ({best250['costo_per_mwh']:,.3f} \u20ac/MWh).")
+        with st.expander("Sensibilita': costo al variare di DSO e WACC"):
+            dso_grid250 = [0.0, 15.0, 30.0, 45.0, 60.0, 90.0]
+            wacc_grid250 = [2.0, 4.0, 6.0, 8.0, 10.0]
+            z250 = [[cc250_costo_finanziario(
+                        cc250_fabbisogno(costo250, cc250_ciclo_cassa(d, dpo250)["ciclo_gg"])["fabbisogno_medio_eur"],
+                        w)["costo_annuo_eur"]
+                     for w in wacc_grid250] for d in dso_grid250]
+            fig_z250 = px.imshow(z250, x=[f"{w:.0f}%" for w in wacc_grid250],
+                                 y=[f"{d:.0f} gg" for d in dso_grid250],
+                                 labels=dict(x="WACC", y="DSO", color="Costo \u20ac/anno"),
+                                 title="Costo finanziario annuo (\u20ac) al variare di DSO e WACC",
+                                 text_auto=".0f", color_continuous_scale="Reds")
+            st.plotly_chart(fig_z250, use_container_width=True)
+            dfz250 = pd.DataFrame([{"DSO (gg)": r["dso_gg"], "WACC (%)": r["wacc_pct"],
+                                    "Costo annuo (\u20ac)": r["costo_annuo_eur"],
+                                    "Costo (\u20ac/MWh)": r["costo_per_mwh"]}
+                                   for r in cc250_sensibilita(dso_grid250, wacc_grid250, costo250, dpo250, vol250)])
+            st.download_button(
+                "Scarica CSV analisi",
+                data=dfz250.to_csv(index=False, sep=";").encode("utf-8"),
+                file_name="capitale_circolante.csv",
+                mime="text/csv", key="t250_csv",
+                help="Griglia di sensibilita' del costo del circolante: DSO x WACC con DPO e volumi impostati.")
+            st.caption("Modello semplificato: fabbisogno medio = costo acquisto annuo x ciclo/365, costo finanziario = fabbisogno x WACC. Ridurre il DSO (addebito diretto, solleciti) o allungare il DPO (negoziazione fornitori) libera capitale; il factoring pro-soluto abbatte il DSO ma ha una commissione da confrontare con il WACC risparmiato.")
 
 # Footer
 

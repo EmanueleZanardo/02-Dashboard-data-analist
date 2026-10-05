@@ -15,7 +15,7 @@ Dashboard Streamlit per analisi quantitativa del mercato elettrico svizzero
 5. 📈 Exotics & Structuring
 6. 🏛️ Enterprise Risk & XVA
 7. 📈 Metodo STAR & Ottimizzazione
-8. 📊 Price Analytics (Swissix) — 249 tab analitiche
+8. 📊 Price Analytics (Swissix) — 250 tab analitiche
 
 ### Price Analytics (Swissix)
 
