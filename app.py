@@ -32423,6 +32423,85 @@ def d246_sintesi(costo_annuo_euro, mesi, sconto_sdd_pct, tan_annuo_pct,
     }
 
 
+
+
+def d247_costo_pratica(corrispettivo_euro, iva_pct, bollo_euro=0.0,
+                       contributo_distributore_euro=0.0, onere_riattivazione_euro=0.0):
+    """Costo una tantum di una pratica amministrativa: voltura o subentro.
+
+    Per voltura e subentro il contributo amministrativo del distributore e' 0 EUR
+    (ARERA, Testo integrato delle condizioni economiche di connessione, art. 28).
+    Il venditore applica un corrispettivo commerciale per la gestione della pratica
+    (IVA applicata); l'imposta di bollo da 16 EUR, quando dovuta, e' fuori campo IVA.
+    Nel subentro il punto e' disattivato: si aggiunge l'onere di riattivazione
+    (IVA applicata).
+
+    Ritorna dict con imponibile, iva, bollo e totale. Tutto deterministico.
+    """
+    corr = float(corrispettivo_euro)
+    iva_p = float(iva_pct)
+    bollo = float(bollo_euro)
+    contrib = float(contributo_distributore_euro)
+    riatt = float(onere_riattivazione_euro)
+    if corr < 0:
+        raise ValueError("corrispettivo commerciale negativo")
+    if riatt < 0:
+        raise ValueError("onere di riattivazione negativo")
+    if bollo < 0:
+        raise ValueError("imposta di bollo negativa")
+    if contrib < 0:
+        raise ValueError("contributo distributore negativo")
+    if not 0.0 <= iva_p <= 100.0:
+        raise ValueError("aliquota IVA fuori range 0-100")
+    imponibile = corr + contrib + riatt
+    iva = imponibile * iva_p / 100.0
+    totale = imponibile + iva + bollo
+    return {
+        "imponibile": round(imponibile, 2),
+        "iva": round(iva, 2),
+        "bollo": round(bollo, 2),
+        "totale": round(totale, 2),
+    }
+
+
+def d247_confronto(tot_voltura_euro, tot_subentro_euro):
+    """Delta e rapporto tra costo subentro e costo voltura."""
+    delta = float(tot_subentro_euro) - float(tot_voltura_euro)
+    rapporto = (float(tot_subentro_euro) / float(tot_voltura_euro)
+                if float(tot_voltura_euro) > 0 else None)
+    return {
+        "delta": round(delta, 2),
+        "rapporto": round(rapporto, 3) if rapporto is not None else None,
+    }
+
+
+def d247_sintesi(corrispettivo_euro, iva_pct, bollo_euro, onere_riattivazione_euro,
+                 deposito_euro=0.0, contributo_distributore_euro=0.0):
+    """Sintesi voltura vs subentro.
+
+    Ritorna i costi di pratica dei due scenari, il confronto e l'esborso iniziale
+    stimato (pratica + eventuale deposito cauzionale). Tutto deterministico.
+    """
+    dep = float(deposito_euro)
+    if dep < 0:
+        raise ValueError("deposito cauzionale negativo")
+    voltura = d247_costo_pratica(corrispettivo_euro, iva_pct, bollo_euro,
+                                 contributo_distributore_euro, 0.0)
+    subentro = d247_costo_pratica(corrispettivo_euro, iva_pct, bollo_euro,
+                                  contributo_distributore_euro,
+                                  onere_riattivazione_euro)
+    conf = d247_confronto(voltura["totale"], subentro["totale"])
+    return {
+        "voltura": voltura,
+        "subentro": subentro,
+        "delta": conf["delta"],
+        "rapporto": conf["rapporto"],
+        "esborso_voltura": round(voltura["totale"] + dep, 2),
+        "esborso_subentro": round(subentro["totale"] + dep, 2),
+        "deposito": round(dep, 2),
+    }
+
+
 if workspace == _('ws1'):
     st.markdown(f"<h1>{_('ws1')}</h1>", unsafe_allow_html=True)
     banner_demo("simulatore strategico: margini, centrali e curve simulate")
@@ -33064,7 +33143,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -55396,6 +55475,94 @@ elif workspace == _('ws8'):
                 help="Confronto scenari SDD: deposito netto, costi annui e costo totale.")
             st.caption("Modello indicativo: il deposito si calcola sul costo annuo stimato e si restituisce a fine "
                        "contratto; condizioni, mensilita' richieste e sconti SDD variano per fornitore. "
+                       "Verificare le condizioni contrattuali.")
+
+    with tab247:
+        titolo247 = edu("Voltura e subentro", "Voltura: cambio di intestatario su un contatore gia' attivo, solo pratica amministrativa. Subentro: riattivazione di un contatore disattivato, con intervento tecnico e qualche ora di disservizio. Per entrambe, ARERA (art. 28 TIC) azzera il contributo amministrativo del distributore: si paga solo il corrispettivo commerciale del venditore, IVA ed eventuale bollo.")
+        st.markdown(f"<h1>🔄 {titolo247}</h1>", unsafe_allow_html=True)
+        st.caption("Voltura e subentro: costo della pratica, confronto tra scenari ed esborso iniziale stimato.")
+        banner_demo("parametri di contratto sintetici (Mock)")
+        c1_247, c2_247, c3_247 = st.columns(3)
+        with c1_247:
+            corr247 = st.number_input("Corrispettivo commerciale venditore (\u20ac)", 0.0, 200.0, 23.0, 1.0,
+                                      key="t247_corr",
+                                      help="Una tantum per la gestione della pratica (valore tipico mercato libero ~23 \u20ac).")
+            iva247 = st.slider("Aliquota IVA (%)", 0.0, 25.0, 22.0, 1.0, key="t247_iva",
+                               help="IVA applicata al corrispettivo commerciale e all'onere di riattivazione.")
+        with c2_247:
+            bollo247 = st.checkbox("Imposta di bollo 16 \u20ac (se dovuta)", value=True, key="t247_bollo",
+                                   help="Dovuta se il contratto non e' in forma elettronica con firma digitale.")
+            riatt247 = st.number_input("Onere riattivazione punto - solo subentro (\u20ac)", 0.0, 500.0, 0.0, 5.0,
+                                       key="t247_riatt",
+                                       help="Costo tecnico di riattivazione del contatore disattivato: verificare con il distributore.")
+        with c3_247:
+            dep247 = st.number_input("Deposito cauzionale eventuale (\u20ac)", 0.0, 100000.0, 0.0, 50.0,
+                                     key="t247_dep",
+                                     help="Garanzia richiesta dal venditore; vedi tab 'Deposito cauzionale' per il suo costo.")
+            st.info("\u23f1\ufe0f **Tempi indicativi:** voltura ~5 giorni lavorativi; subentro con intervento tecnico e 1-2 ore di disservizio.")
+        sin247 = None
+        try:
+            sin247 = d247_sintesi(corr247, iva247, 16.0 if bollo247 else 0.0, riatt247, dep247)
+        except ValueError as e:
+            st.error(f"\u26a0\ufe0f {e}")
+        if sin247:
+            k1_247, k2_247, k3_247, k4_247 = st.columns(4)
+            k1_247.metric("Pratica voltura (\u20ac)", f"{sin247['voltura']['totale']:,.2f}",
+                          help="Contributo distributore 0 \u20ac (ARERA art. 28) + corrispettivo + IVA + bollo.")
+            k2_247.metric("Pratica subentro (\u20ac)", f"{sin247['subentro']['totale']:,.2f}",
+                          help="Come la voltura, piu' l'onere di riattivazione del punto disattivato.")
+            k3_247.metric("Delta subentro - voltura (\u20ac)", f"{sin247['delta']:,.2f}",
+                          delta=f"x{sin247['rapporto']}" if sin247['rapporto'] else None,
+                          help="Quanto in piu' costa il subentro rispetto alla voltura.")
+            k4_247.metric("Esborso iniziale subentro (\u20ac)", f"{sin247['esborso_subentro']:,.2f}",
+                          help="Pratica subentro + eventuale deposito cauzionale.")
+            st.subheader("Confronto scenari")
+            righe247 = [
+                {"Scenario": "Voltura (contatore attivo)",
+                 "Imponibile (\u20ac)": sin247['voltura']['imponibile'],
+                 "IVA (\u20ac)": sin247['voltura']['iva'],
+                 "Bollo (\u20ac)": sin247['voltura']['bollo'],
+                 "Totale pratica (\u20ac)": sin247['voltura']['totale'],
+                 "Esborso iniziale (\u20ac)": sin247['esborso_voltura']},
+                {"Scenario": "Subentro (contatore disattivo)",
+                 "Imponibile (\u20ac)": sin247['subentro']['imponibile'],
+                 "IVA (\u20ac)": sin247['subentro']['iva'],
+                 "Bollo (\u20ac)": sin247['subentro']['bollo'],
+                 "Totale pratica (\u20ac)": sin247['subentro']['totale'],
+                 "Esborso iniziale (\u20ac)": sin247['esborso_subentro']},
+            ]
+            df247 = pd.DataFrame(righe247)
+            st.dataframe(df247, use_container_width=True, hide_index=True)
+            fig247 = px.bar(df247, x="Scenario", y="Totale pratica (\u20ac)",
+                            title="Costo della pratica: voltura vs subentro",
+                            color="Scenario", color_discrete_sequence=["#10B981", "#F59E0B"])
+            st.plotly_chart(fig247, use_container_width=True)
+            st.subheader("Sensitivita' totale voltura: corrispettivo x IVA")
+            corr_grid247 = [10.0, 15.0, 23.0, 30.0, 40.0, 50.0]
+            iva_grid247 = [10.0, 22.0, 25.0]
+            z247 = [[d247_costo_pratica(c, iv, 16.0 if bollo247 else 0.0)["totale"]
+                     for c in corr_grid247] for iv in iva_grid247]
+            fig_s247 = px.imshow(z247, x=[f"{c:.0f}" for c in corr_grid247],
+                                 y=[f"{iv:.0f}%" for iv in iva_grid247],
+                                 labels=dict(x="Corrispettivo commerciale \u20ac", y="IVA", color="Totale \u20ac"),
+                                 title="Totale pratica voltura (\u20ac) al variare di corrispettivo e IVA",
+                                 text_auto=".2f", color_continuous_scale="YlGnBu")
+            st.plotly_chart(fig_s247, use_container_width=True)
+            st.subheader("Checklist documenti per la pratica")
+            st.markdown("- \U0001F4C4 Documento d'identita' e codice fiscale del nuovo intestatario\n"
+                        "- \U0001F50C Codice POD (luce) / PDR (gas) del punto di fornitura\n"
+                        "- \U0001F3E0 Titolo sull'immobile (atto di proprieta' o contratto di affitto)\n"
+                        "- \U0001F9FE Ultima bolletta o lettura del contatore (per la voltura)\n"
+                        "- \U0001F4DD Modulo di richiesta firmato (molti venditori lo accettano online)")
+            st.download_button(
+                "Scarica CSV analisi",
+                data=df247.to_csv(index=False, sep=";").encode("utf-8"),
+                file_name="voltura_subentro.csv",
+                mime="text/csv", key="t247_csv",
+                help="Confronto voltura vs subentro: imponibile, IVA, bollo, totale ed esborso iniziale.")
+            st.caption("Modello indicativo: il contributo amministrativo del distributore e' 0 \u20ac per voltura e "
+                       "subentro (ARERA, art. 28 Testo integrato condizioni economiche di connessione); corrispettivi "
+                       "commerciali, oneri di riattivazione, bollo e deposito variano per venditore e distributore. "
                        "Verificare le condizioni contrattuali.")
 
 # Footer
