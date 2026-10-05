@@ -28200,6 +28200,105 @@ def calcola_accise_iva(energia_kwh_annua, tipo_utenza="non_domestica",
                     "le 5 aliquote/esenzioni (numeri >= 0) e l'aliquota IVA "
                     "(0..100).")
 
+def calcola_duck_curve(carico_picco_mw, capacita_fv_mw=0.0,
+                       capacita_eolico_mw=0.0, stagione="estate",
+                       fattore_eolico=0.35):
+    """Curva dell'anatra (duck curve): carico netto residuo orario.
+
+    Domanda operativa: "con tot FV/eolico installato, quanto si svuota il
+    carico a mezzogiorno e quanto deve rampare il parco flessibile la
+    sera?" Carico netto = carico - solare - eolico, ora per ora.
+
+    Profili deterministici (frazioni di picco / capacita', niente
+    randomness):
+      - carico: 24 valori espliciti (doppia gobba: spalla mattutina,
+        plateau diurno, picco serale ore 19 = 1.00);
+      - solare: campana sinusoidale tra alba e tramonto
+        (estate: 6-20, fattore di picco 0.90; inverno: 8-16, fattore 0.60);
+      - eolico: piatto a `fattore_eolico` (default 0.35) della capacita'.
+
+    KPI: pancia (minimo del carico netto e ora), rampa serale massima
+    oraria tra le 15 e le 22 (il "collo" dell'anatra), rampa mattutina
+    massima in discesa tra le 6 e le 13, ore di overgeneration
+    (carico netto < 0) e indice duck = pancia / picco.
+    Ritorna dict con valido/errore, df_orario e i KPI. Input non validi
+    -> valido=False.
+    """
+    _PROFILO_CARICO = (
+        0.60, 0.60, 0.60, 0.60, 0.60,  # 0-4 valle notturna
+        0.62, 0.68, 0.78,              # 5-7 risveglio
+        0.85, 0.88,                    # 8-9 spalla mattutina
+        0.80, 0.80, 0.80, 0.80, 0.80, 0.80, 0.80,  # 10-16 plateau diurno
+        0.85, 0.93, 1.00,              # 17-19 picco serale
+        0.95, 0.85, 0.72, 0.64,        # 20-23 rientro
+    )
+    _STAGIONI = {"estate": (6, 20, 0.90), "inverno": (8, 16, 0.60)}
+
+    def _err(msg):
+        return {"valido": False, "errore": msg}
+
+    try:
+        if isinstance(carico_picco_mw, bool):
+            raise ValueError("picco")
+        picco = float(carico_picco_mw)
+        fv = float(capacita_fv_mw)
+        eo = float(capacita_eolico_mw)
+        fe = float(fattore_eolico)
+        for v, nome in ((picco, "carico_picco_mw"), (fv, "capacita_fv_mw"),
+                        (eo, "capacita_eolico_mw"), (fe, "fattore_eolico")):
+            if not np.isfinite(v):
+                raise ValueError(nome)
+        if picco <= 0:
+            return _err("carico_picco_mw deve essere > 0.")
+        if fv < 0 or eo < 0:
+            return _err("Le capacita' FV/eolico non possono essere negative.")
+        if not 0.0 <= fe <= 1.0:
+            return _err("fattore_eolico deve stare in [0, 1].")
+        stag = str(stagione).strip().lower()
+        if stag not in _STAGIONI:
+            return _err("stagione deve essere 'estate' o 'inverno'.")
+        alba, tramonto, cf_picco = _STAGIONI[stag]
+
+        ore = list(range(24))
+        carico = [picco * _PROFILO_CARICO[h] for h in ore]
+        solare = []
+        for h in ore:
+            if alba <= h <= tramonto:
+                f = cf_picco * max(0.0, np.sin(np.pi * (h - alba)
+                                              / (tramonto - alba)))
+            else:
+                f = 0.0
+            solare.append(fv * f)
+        eolico = [eo * fe] * 24
+        netto = [c - s - e for c, s, e in zip(carico, solare, eolico)]
+
+        i_min = int(np.argmin(netto))
+        pancia = picco - netto[i_min]
+        # rampa serale: max incremento orario tra le 15 e le 22
+        rampa_serale = max((netto[h + 1] - netto[h]) for h in range(15, 22))
+        # rampa mattutina: max decremento orario tra le 6 e le 13
+        rampa_matt = max((netto[h] - netto[h + 1]) for h in range(6, 13))
+        ore_overgen = sum(1 for v in netto if v < 0.0)
+
+        df = pd.DataFrame({"ora": ore, "carico_MW": carico,
+                           "solare_MW": solare, "eolico_MW": eolico,
+                           "carico_netto_MW": netto})
+        return {"valido": True, "errore": None,
+                "df_orario": df,
+                "carico_netto_min_MW": float(netto[i_min]),
+                "ora_minimo": i_min,
+                "profondita_pancia_MW": float(pancia),
+                "indice_duck": float(pancia / picco),
+                "rampa_serale_max_MW_h": float(rampa_serale),
+                "rampa_mattutina_max_MW_h": float(rampa_matt),
+                "ore_overgeneration": int(ore_overgen),
+                "stagione_usata": stag}
+    except (ValueError, TypeError):
+        return _err("Input non validi: controlla carico_picco_mw (>0), "
+                    "capacita_fv_mw e capacita_eolico_mw (>=0), "
+                    "fattore_eolico in [0,1] e stagione ('estate'/'inverno').")
+
+
 def calcola_oneri_generali(energia_mwh_annua, quota_fissa_eur_pod_anno,
                              quota_potenza_eur_kw_anno,
                              quota_energia_eur_mwh, potenza_kw,
@@ -31397,7 +31496,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -51661,6 +51760,75 @@ elif workspace == _('ws8'):
                 mime="text/csv", key="ai226_csv",
                 help="Dettaglio mensile di energia, accisa per scaglione e IVA.")
             st.caption("Stima indicativa: l'accisa si liquida sui consumi effettivi mensili di fatturazione e l'IVA segue le regole del DPR 633/1972; per i casi particolari (usi esenti, agevolazioni) verifica con il venditore.")
+
+    with tab227:
+        titolo_duck = edu("Duck curve", "Con molto fotovoltaico il CARICO NETTO (carico meno rinnovabili) crolla a mezzogiorno e risale la sera: il grafico giornaliero assume la forma di un'anatra. La 'pancia' misura quanto si svuota il sistema a meta' giornata, il 'collo' e' la RAMPA serale che il parco flessibile (gas, pompaggi, batterie) deve coprire quando il sole cala e il carico sale.")
+        st.markdown(f"<h1>\U0001F986 {titolo_duck}</h1>", unsafe_allow_html=True)
+        st.caption("Quanto si svuota il carico netto a mezzogiorno e quanto deve rampare il parco flessibile la sera? Carico netto = carico - FV - eolico, ora per ora.")
+        c1, c2 = st.columns(2)
+        with c1:
+            picco227 = st.number_input("Carico di picco (MW)",
+                                       min_value=1.0, value=5000.0, step=100.0,
+                                       key="ai227_picco",
+                                       help="Picco del carico di sistema (es. ~55 GW Italia, ~5 GW una regione).")
+            fv227 = st.number_input("Capacita' fotovoltaica installata (MW)",
+                                    min_value=0.0, value=3000.0, step=100.0,
+                                    key="ai227_fv",
+                                    help="Potenza FV installata: determina la profondita' della pancia di mezzogiorno.")
+            eo227 = st.number_input("Capacita' eolica installata (MW)",
+                                    min_value=0.0, value=1000.0, step=100.0,
+                                    key="ai227_eolico")
+        with c2:
+            stag227 = st.selectbox("Stagione", ["estate", "inverno"],
+                                   key="ai227_stagione",
+                                   help="Estate: sole 6-20 con fattore di picco 0.90. Inverno: sole 8-16 con fattore di picco 0.60.")
+            fe227 = st.slider("Fattore di capacita' eolico medio",
+                              min_value=0.0, max_value=1.0, value=0.35, step=0.05,
+                              key="ai227_fe",
+                              help="Quota media della capacita' eolica effettivamente prodotta (l'eolico qui e' modellato piatto).")
+        ris227 = calcola_duck_curve(picco227, fv227, eo227, stag227, fe227)
+        if not ris227["valido"]:
+            st.error(ris227["errore"])
+        else:
+            _df227 = ris227["df_orario"]
+            k1, k2, k3, k4, k5 = st.columns(5)
+            k1.metric("Carico netto minimo", f"{ris227['carico_netto_min_MW']:,.0f} MW",
+                      help=f"Ora {ris227['ora_minimo']:02d}:00")
+            k2.metric("Profondita' pancia", f"{ris227['profondita_pancia_MW']:,.0f} MW")
+            k3.metric("Indice duck", f"{ris227['indice_duck'] * 100:,.0f} %",
+                      help="Pancia / picco di carico: quota del sistema 'svuotata' dalle rinnovabili a mezzogiorno.")
+            k4.metric("Rampa serale max", f"{ris227['rampa_serale_max_MW_h']:,.0f} MW/h",
+                      help="Massimo incremento orario del carico netto tra le 15 e le 22: la flessibilita' che serve la sera.")
+            k5.metric("Ore overgeneration", f"{ris227['ore_overgeneration']}",
+                      help="Ore con carico netto negativo: eccesso rinnovabile da esportare, accumulare o tagliare.")
+            if ris227["ore_overgeneration"] > 0:
+                st.warning(f"Overgeneration in {ris227['ore_overgeneration']} ore: il FV supera il carico a mezzogiorno — serve export, accumulo o curtailment.")
+            elif ris227["indice_duck"] > 0.5:
+                st.info("Pancia profonda ma senza overgeneration: la rampa serale e' il vincolo critico per il parco flessibile.")
+            else:
+                st.success("Duck curve contenuta: il carico netto resta sempre ben positivo e le rampe sono gestibili.")
+            fig227 = go.Figure()
+            fig227.add_trace(go.Scatter(x=_df227["ora"], y=_df227["carico_MW"],
+                                        mode="lines", name="Carico"))
+            fig227.add_trace(go.Scatter(x=_df227["ora"], y=_df227["solare_MW"],
+                                        mode="lines", name="Solare FV",
+                                        fill="tozeroy", opacity=0.6))
+            fig227.add_trace(go.Scatter(x=_df227["ora"], y=_df227["eolico_MW"],
+                                        mode="lines", name="Eolico"))
+            fig227.add_trace(go.Scatter(x=_df227["ora"], y=_df227["carico_netto_MW"],
+                                        mode="lines+markers", name="Carico netto",
+                                        line=dict(width=3)))
+            fig227.update_layout(title="Duck curve: carico netto = carico - FV - eolico",
+                                 xaxis_title="Ora", yaxis_title="MW",
+                                 height=380, margin=dict(l=40, r=20, t=50, b=40))
+            st.plotly_chart(fig227, use_container_width=True, key="ai227_chart")
+            st.caption("La pancia di mezzogiorno deprime i prezzi spot (cannibalizzazione: vedi tab Price capture); il collo serale e' il mercato della flessibilita' (batterie, pompaggi, CCGT).")
+            st.download_button(
+                "Scarica CSV duck curve",
+                data=_df227.to_csv(index=False, sep=";").encode("utf-8"),
+                file_name="duck_curve_oraria.csv",
+                mime="text/csv", key="ai227_csv",
+                help="Profilo orario di carico, FV, eolico e carico netto.")
 
 # Footer
 
