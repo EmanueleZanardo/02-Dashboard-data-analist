@@ -27634,6 +27634,139 @@ def calcola_anomalie_carico(carico, soglia_z=3.5, run_min_ore=3,
         return _err("Errore interno: %s" % e)
 
 
+def calcola_cbam(quantita_annua, fattore_emissione_tco2, prezzo_ets_eur_t,
+                 anno=2026, carbonio_pagato_origine_eur=0.0,
+                 prezzo_bene_eur_unita=None):
+    """Stima del costo CBAM per merci importate nell'UE.
+
+    Domanda operativa: "quanto mi costera' il meccanismo di adeguamento del
+    carbonio alle frontiere sulle importazioni?" CBAM (fase definitiva dal
+    01/01/2026) obbliga il dichiarante UE di cemento, ferro/acciaio,
+    alluminio, fertilizzanti, idrogeno ed elettricita' a restituire
+    certificati pari alle emissioni incorporate, moltiplicate per il fattore
+    di phase-in dell'anno, al netto del prezzo del carbonio gia' pagato nel
+    paese d'origine. Prezzo del certificato = prezzo medio delle aste EU ETS
+    (Q1 2026: 75,36 €/tCO2; Q2 2026: 75,28 €/tCO2).
+
+    Fattori di phase-in (quota delle emissioni soggetta a CBAM):
+    2026: 2,5% - 2027: 5% - 2028: 10% - 2029: 22,5% - 2030: 48,5% -
+    2031: 61% - 2032: 73,5% - 2033: 86% - 2034: 100%.
+
+    Formule:
+      emissioni (tCO2) = quantita' x fattore_emissione
+      certificati_lordi = emissioni x fattore_phasein(anno)
+      deduzione_origine (tCO2 eq.) = carbonio_pagato_origine / prezzo_ets
+      certificati_netti = max(0, certificati_lordi - deduzione_origine)
+      costo = certificati_netti x prezzo_ets
+      aggravio = costo_unitario / prezzo_bene (se prezzo_bene fornito)
+
+    Nota: Islanda, Liechtenstein, Norvegia e Svizzera sono escluse dal CBAM
+    come paesi d'origine.
+
+    NaN-safe: parametri fuori range / anno non in 2026-2034 -> errore
+    pulito. Deterministico.
+
+    Ritorna dict con 'errore', 'valido', 'verdetto', 'emissioni_tco2',
+    'fattore_cbam', 'certificati_lordi', 'deduzione_origine_tco2',
+    'certificati_netti', 'costo_annuo_eur', 'costo_unitario_eur',
+    'aggravio_pct' (None se prezzo_bene non fornito),
+    'df_traiettoria' (Anno, Fattore CBAM %, Certificati netti (tCO2),
+    Costo annuo (€) per il 2026-2034 allo stesso prezzo ETS).
+    """
+    fattori = {2026: 0.025, 2027: 0.05, 2028: 0.10, 2029: 0.225,
+               2030: 0.485, 2031: 0.61, 2032: 0.735, 2033: 0.86,
+               2034: 1.0}
+    colonne_tr = ["Anno", "Fattore CBAM (%)", "Certificati netti (tCO2)",
+                  "Costo annuo (€)"]
+    vuoto = {"errore": None, "valido": False, "verdetto": None,
+             "emissioni_tco2": 0.0, "fattore_cbam": None,
+             "certificati_lordi": 0.0, "deduzione_origine_tco2": 0.0,
+             "certificati_netti": 0.0, "costo_annuo_eur": 0.0,
+             "costo_unitario_eur": 0.0, "aggravio_pct": None,
+             "df_traiettoria": pd.DataFrame(columns=colonne_tr)}
+
+    def _err(msg):
+        out = dict(vuoto)
+        out["df_traiettoria"] = pd.DataFrame(columns=colonne_tr)
+        out["errore"] = msg
+        return out
+
+    def _num(x, nome):
+        if isinstance(x, bool):
+            raise ValueError(nome)
+        v = float(x)
+        if not np.isfinite(v):
+            raise ValueError(nome)
+        return v
+
+    try:
+        q = _num(quantita_annua, "quantita")
+        fe = _num(fattore_emissione_tco2, "fattore")
+        pe = _num(prezzo_ets_eur_t, "prezzo_ets")
+        cp = _num(carbonio_pagato_origine_eur, "carbonio_pagato")
+        if isinstance(anno, bool):
+            raise ValueError("anno")
+        anno_i = int(anno)
+        if anno_i != anno:
+            raise ValueError("anno")
+        pb = None
+        if prezzo_bene_eur_unita is not None:
+            pb = _num(prezzo_bene_eur_unita, "prezzo_bene")
+    except (TypeError, ValueError):
+        return _err("Parametri non validi: numeri finiti; anno intero "
+                    "2026-2034.")
+    if q <= 0:
+        return _err("Parametri non validi: quantita' annua > 0.")
+    if fe <= 0:
+        return _err("Parametri non validi: fattore di emissione > 0.")
+    if pe <= 0:
+        return _err("Parametri non validi: prezzo ETS > 0.")
+    if cp < 0:
+        return _err("Parametri non validi: carbonio pagato >= 0.")
+    if anno_i not in fattori:
+        return _err("Parametri non validi: anno tra 2026 e 2034.")
+    if pb is not None and pb < 0:
+        return _err("Parametri non validi: prezzo del bene >= 0.")
+
+    f = fattori[anno_i]
+    emissioni = q * fe
+    lordi = emissioni * f
+    deduzione = min(lordi, cp / pe)
+    netti = lordi - deduzione
+    costo = netti * pe
+    unitario = costo / q
+    aggravio = (unitario / pb * 100.0) if (pb is not None and pb > 0) else None
+
+    righe = []
+    for a in sorted(fattori):
+        fa = fattori[a]
+        lordi_a = emissioni * fa
+        netti_a = max(0.0, lordi_a - min(lordi_a, cp / pe))
+        righe.append({"Anno": a, "Fattore CBAM (%)": round(fa * 100.0, 2),
+                      "Certificati netti (tCO2)": round(netti_a, 3),
+                      "Costo annuo (€)": round(netti_a * pe, 2)})
+    df_tr = pd.DataFrame(righe, columns=colonne_tr)
+
+    if aggravio is None:
+        verdetto = "ℹ️ STIMA COMPLETATA"
+    elif aggravio < 1.0:
+        verdetto = "🟢 AGGRAVIO TRASCURABILE (<1% del prezzo del bene)"
+    elif aggravio < 5.0:
+        verdetto = "🟡 AGGRAVIO MODERATO (<5%)"
+    elif aggravio < 15.0:
+        verdetto = "🟠 AGGRAVIO RILEVANTE (<15%)"
+    else:
+        verdetto = "🔴 AGGRAVIO CRITICO (>=15%)"
+
+    return {"errore": None, "valido": True, "verdetto": verdetto,
+            "emissioni_tco2": emissioni, "fattore_cbam": f,
+            "certificati_lordi": lordi,
+            "deduzione_origine_tco2": deduzione,
+            "certificati_netti": netti, "costo_annuo_eur": costo,
+            "costo_unitario_eur": unitario, "aggravio_pct": aggravio,
+            "df_traiettoria": df_tr}
+
+
 def calcola_radar_scadenze(df_contratti, prezzo_mercato_eur_mwh,
                            data_rif=None, orizzonte_mesi=6):
     """Radar scadenze contratti di fornitura.
@@ -30498,7 +30631,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -49986,6 +50119,91 @@ elif workspace == _('ws8'):
                 st.caption("Metodo: baseline = mediana per ora della settimana; z-score robusto = residuo / (1.4826 × MAD). "
                            "Sequenze di zeri (≥6h) e valori costanti (≥12h) segnalate come sospetto guasto contatore anche senza z-score. "
                            "Lo scostamento energetico e' la somma dei residui vs baseline.")
+
+    with tab220:
+        titolo_cb = edu("Costo CBAM stimato", "Il Carbon Border Adjustment Mechanism (fase definitiva dal 01/01/2026) fa pagare all'importatore UE di cemento, acciaio, alluminio, fertilizzanti, idrogeno ed elettricita' le emissioni incorporate nella merce, con un fattore di phase-in che sale dal 2,5% del 2026 al 100% del 2034. Questa tab stima i certificati da restituire e il costo annuo al prezzo EU ETS, al netto di eventuale carbonio gia' pagato nel paese d'origine, piu' la traiettoria 2026-2034: utile per valutare l'aggravio sul costo di approvvigionamento prima di firmare un contratto di import.")
+        st.markdown(f"<h1>🌍 {titolo_cb}</h1>", unsafe_allow_html=True)
+        st.caption("Quanto costera' il CBAM sulle importazioni? Certificati da restituire e costo annuo al prezzo EU ETS, con traiettoria 2026-2034.")
+        st.info("Fattori di phase-in (quota emissioni soggetta a CBAM): 2026: 2,5% · 2027: 5% · 2028: 10% · 2029: 22,5% · 2030: 48,5% · 2031: 61% · 2032: 73,5% · 2033: 86% · 2034: 100%. "
+                "Prezzi certificato pubblicati: Q1 2026 75,36 €/tCO2, Q2 2026 75,28 €/tCO2. Svizzera, Islanda, Liechtenstein e Norvegia sono escluse come paesi d'origine.")
+        _preset_cbam = {
+            "Elettricita' (MWh)": ("MWh", 0.40),
+            "Cemento (t)": ("t", 0.70),
+            "Acciaio (t)": ("t", 1.40),
+            "Alluminio (t)": ("t", 8.00),
+            "Fertilizzanti (t)": ("t", 2.50),
+            "Idrogeno (t)": ("t", 10.00),
+        }
+        c1, c2 = st.columns(2)
+        with c1:
+            prod220 = st.selectbox("Prodotto importato",
+                                   list(_preset_cbam.keys()),
+                                   key="cb220_prod")
+            un220, fe_def220 = _preset_cbam[prod220]
+            q220 = st.number_input("Quantita' annua importata (%s)" % un220,
+                                   min_value=0.0, value=1000.0, step=100.0,
+                                   key="cb220_qta")
+            fe220 = st.number_input("Emissioni incorporate (tCO2/%s)" % un220,
+                                    min_value=0.0, value=float(fe_def220),
+                                    step=0.05, key="cb220_fe",
+                                    help="Default indicativo: verifica il valore sul regolamento o usa il dato reale dell'impianto.")
+        with c2:
+            pe220 = st.number_input("Prezzo certificato / EU ETS (€/tCO2)",
+                                    min_value=0.0, value=75.36, step=1.0,
+                                    key="cb220_ets")
+            anno220 = st.slider("Anno di riferimento", 2026, 2034, 2026,
+                                key="cb220_anno",
+                                help="Il fattore di phase-in cresce ogni anno: il 2026 sottostima molto il costo a regime.")
+            cp220 = st.number_input("Carbonio gia' pagato all'origine (€/anno, 0 = nessuno)",
+                                    min_value=0.0, value=0.0, step=100.0,
+                                    key="cb220_orig")
+            pb220 = st.number_input("Prezzo del bene (€/%s, 0 = n.d.)" % un220,
+                                    min_value=0.0, value=0.0, step=10.0,
+                                    key="cb220_prezzo")
+        ris220 = calcola_cbam(float(q220), float(fe220), float(pe220),
+                              anno=int(anno220),
+                              carbonio_pagato_origine_eur=float(cp220),
+                              prezzo_bene_eur_unita=float(pb220) if pb220 > 0 else None)
+        if ris220["errore"]:
+            st.error(ris220["errore"])
+        else:
+            st.subheader(ris220["verdetto"])
+            k1, k2, k3, k4 = st.columns(4)
+            with k1:
+                st.metric("Certificati netti", "%.2f tCO2" % ris220["certificati_netti"])
+            with k2:
+                st.metric("Costo annuo", "€ %,.0f" % ris220["costo_annuo_eur"])
+            with k3:
+                st.metric("Costo unitario", "€ %.2f/%s" % (ris220["costo_unitario_eur"], un220))
+            with k4:
+                ag = ris220["aggravio_pct"]
+                st.metric("Aggravio sul bene",
+                          "%.2f %%" % ag if ag is not None else "n.d.")
+            st.caption("Emissioni incorporate: %,.1f tCO2 · fattore CBAM %s: %.1f%% · certificati lordi %.2f tCO2 · deduzione origine %.2f tCO2." % (
+                ris220["emissioni_tco2"], anno220, ris220["fattore_cbam"] * 100.0,
+                ris220["certificati_lordi"], ris220["deduzione_origine_tco2"]))
+            df_tr220 = ris220["df_traiettoria"]
+            import plotly.graph_objects as go
+            fig220 = go.Figure()
+            fig220.add_trace(go.Bar(
+                x=df_tr220["Anno"], y=df_tr220["Costo annuo (€)"],
+                name="Costo annuo",
+                marker=dict(color="#10b981")))
+            fig220.update_layout(
+                title="Traiettoria del costo CBAM 2026-2034 (stesso prezzo ETS)",
+                xaxis_title="Anno", yaxis_title="€/anno",
+                height=360, margin=dict(l=40, r=20, t=50, b=40))
+            st.plotly_chart(fig220, use_container_width=True, key="cb220_fig")
+            st.subheader("Traiettoria 2026-2034")
+            st.dataframe(df_tr220, use_container_width=True, hide_index=True)
+            st.download_button(
+                "Scarica CSV traiettoria CBAM",
+                data=df_tr220.to_csv(index=False, sep=";").encode("utf-8"),
+                file_name="traiettoria_cbam.csv", mime="text/csv",
+                key="cb220_csv",
+                help="Costo CBAM stimato anno per anno con il phase-in.")
+            st.caption("Stima indicativa: i fattori di emissione di default vanno verificati sul regolamento CBAM o sostituiti con i dati reali dell'impianto esportatore. "
+                       "Soglia 50 t/anno per lo status di dichiarante autorizzato.")
 
 # Footer
 
