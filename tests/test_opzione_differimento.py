@@ -118,15 +118,15 @@ class TestRegistryTab205:
                                 "lower", lambda: "")() == "tabs"):
                 titoli = [t.value for t in node.value.args[0].elts]
         assert titoli is not None
-        assert len(titoli) == 221
-        assert titoli[-1] == "⚡ Oneri di dispacciamento"
+        assert len(titoli) == 222
+        assert titoli[-1] == "💶 Oneri generali"
         import re as _re
-        m = _re.search(r"((?:tab\d+, )+tab221) = st\.tabs\(\[", src)
+        m = _re.search(r"((?:tab\d+, )+tab222) = st.tabs\(\[", src)
         assert m is not None
         vars_tab = [v.strip() for v in m.group(1).split(",")]
-        assert len(vars_tab) == 221
-        assert vars_tab[-1] == "tab221"
+        assert len(vars_tab) == 222
+        assert vars_tab[-1] == "tab222"
         withs = _re.findall(r"    with (tab\d+):", src)
-        assert len(withs) == 221 and "tab205" in withs
+        assert len(withs) == 222 and "tab205" in withs
         keys = _re.findall(r'key="(dif204_[^"]+)"', src)
         assert len(keys) == len(set(keys)) == 7
