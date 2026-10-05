@@ -169,16 +169,16 @@ class TestRegistry:
                                 and node.value.args and hasattr(node.value.args[0], "elts")):
                 titoli = [t.value for t in node.value.args[0].elts]
         assert titoli is not None
-        assert len(titoli) == 243
+        assert len(titoli) == 245
         assert titoli[217] == "🔁 Opzione di estensione"  # tab218 non piu' ultima
-        assert titoli[-1] == "⏱️ Picchi quartorari (15')"
+        assert titoli[-1] == "💳 Conguaglio a rate"
         m = re.search(r"((?:tab\d+, )+tab\d+) = st.tabs\(\[", src)
         assert m is not None
         vars_tab = [v.strip() for v in m.group(1).split(",")]
-        assert len(vars_tab) == 243
+        assert len(vars_tab) == 245
         assert "tab217" in vars_tab
         withs = re.findall(r"^\s*with (tab\d+):", src, re.M)
-        assert len(withs) == len(vars_tab) == 243
+        assert len(withs) == len(vars_tab) == 245
         assert "tab218" in withs
         # key widget univoche della tab218
         keys = re.findall(r'key="(oe218_[^"]+)"', src)

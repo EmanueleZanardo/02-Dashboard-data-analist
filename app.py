@@ -32205,6 +32205,143 @@ def a244_sintesi(consumo_annuo_kwh, quote_mensili, prezzo_kwh, fisso_annuo,
         "n_acconti": n_acconti,
     }
 
+def r245_rata_francese(capitale, tan_annuo_pct, n_rate):
+    """Rata mensile costante di un piano francese posticipato.
+
+    capitale: importo finanziato (euro); tan_annuo_pct: TAN nominale annuo
+    in percentuale; n_rate: numero di rate mensili (1..60).
+    Ritorna la rata mensile in euro. Tutto deterministico.
+    """
+    capitale = float(capitale)
+    n = int(n_rate)
+    tan = float(tan_annuo_pct)
+    if capitale <= 0:
+        raise ValueError("capitale deve essere > 0")
+    if not 1 <= n <= 60:
+        raise ValueError("n_rate deve stare tra 1 e 60")
+    if tan < 0:
+        raise ValueError("tan_annuo_pct non puo' essere negativo")
+    i = tan / 100.0 / 12.0
+    if i == 0.0:
+        return capitale / n
+    return capitale * i / (1.0 - (1.0 + i) ** -n)
+
+
+def r245_piano(capitale, tan_annuo_pct, n_rate, costi_fissi=0.0):
+    """Piano di ammortamento francese mese per mese.
+
+    I costi_fissi (spese di istruttoria, bolli) vengono addebitati con la
+    prima rata. Ritorna una lista di dict con chiavi:
+    rata_n, rata, quota_capitale, quota_interessi, costi, residuo
+    (residuo = debito residuo dopo il pagamento della rata). L'ultima rata
+    azzera il residuo per costruzione.
+    """
+    costi_fissi = float(costi_fissi)
+    if costi_fissi < 0:
+        raise ValueError("costi_fissi non puo' essere negativo")
+    capitale = float(capitale)
+    n = int(n_rate)
+    rata = r245_rata_francese(capitale, tan_annuo_pct, n)
+    i = float(tan_annuo_pct) / 100.0 / 12.0
+    piano = []
+    residuo = capitale
+    for k in range(1, n + 1):
+        interessi = residuo * i
+        if k == n:
+            quota_cap = residuo
+            rata_k = quota_cap + interessi
+        else:
+            quota_cap = rata - interessi
+            rata_k = rata
+        residuo = residuo - quota_cap
+        piano.append({
+            "rata_n": k,
+            "rata": round(rata_k, 2),
+            "quota_capitale": round(quota_cap, 2),
+            "quota_interessi": round(interessi, 2),
+            "costi": round(costi_fissi, 2) if k == 1 else 0.0,
+            "residuo": round(max(residuo, 0.0), 2),
+        })
+    return piano
+
+
+def r245_taeg(capitale, pagamenti_mensili, costi_iniziali=0.0, tol=1e-10):
+    """TAEG annuo equivalente del piano, via bisezione sul tasso mensile.
+
+    pagamenti_mensili: lista delle rate mensili in euro (costi inclusi dove
+    addebitati); costi_iniziali: esborsi al tempo 0 non inclusi nelle rate.
+    Risolve capitale = costi_iniziali + sum(p_k / (1+r)^k) e annualizza
+    come (1+r)^12 - 1, in percentuale. Se il piano e' a costo zero
+    ritorna 0.0.
+    """
+    capitale = float(capitale)
+    pag = [float(p) for p in pagamenti_mensili]
+    costi0 = float(costi_iniziali)
+    if capitale <= 0:
+        raise ValueError("capitale deve essere > 0")
+    if not pag or any(p < 0 for p in pag):
+        raise ValueError("pagamenti_mensili non valido")
+    if costi0 < 0:
+        raise ValueError("costi_iniziali non puo' essere negativo")
+
+    def van(r):
+        s = costi0
+        f = 1.0
+        for p in pag:
+            f *= (1.0 + r)
+            s += p / f
+        return s - capitale
+
+    if van(0.0) <= 0.0:
+        return 0.0
+    lo, hi = 0.0, 1.0
+    while van(hi) > 0.0 and hi < 1e6:
+        hi *= 2.0
+    for _ in range(200):
+        mid = (lo + hi) / 2.0
+        if van(mid) > 0.0:
+            lo = mid
+        else:
+            hi = mid
+        if hi - lo < tol:
+            break
+    r_m = (lo + hi) / 2.0
+    return round(((1.0 + r_m) ** 12 - 1.0) * 100.0, 3)
+
+
+def r245_sintesi(capitale, tan_annuo_pct, n_rate, costi_fissi=0.0,
+                 sconto_pronta_cassa_pct=0.0):
+    """KPI della rateizzazione del conguaglio a debito.
+
+    sconto_pronta_cassa_pct: sconto % ottenibile pagando il conguaglio in
+    un'unica soluzione immediata (se > 0, il confronto rate vs immediato
+    include lo sconto). Ritorna dict con KPI + piano. Deterministico.
+    """
+    sconto = float(sconto_pronta_cassa_pct)
+    if sconto < 0 or sconto >= 100:
+        raise ValueError("sconto_pronta_cassa_pct deve stare tra 0 e 100")
+    piano = r245_piano(capitale, tan_annuo_pct, n_rate, costi_fissi=costi_fissi)
+    pagamenti = [r["rata"] + r["costi"] for r in piano]
+    totale = round(sum(pagamenti), 2)
+    interessi = round(sum(r["quota_interessi"] for r in piano), 2)
+    taeg = r245_taeg(capitale, pagamenti)
+    rata = piano[0]["rata"]
+    immediato = round(float(capitale) * (1.0 - sconto / 100.0), 2)
+    return {
+        "piano": piano,
+        "rata_mensile": rata,
+        "totale_versato": totale,
+        "interessi_totali": interessi,
+        "costi_fissi": round(float(costi_fissi), 2),
+        "costo_finanziario": round(interessi + float(costi_fissi), 2),
+        "taeg_pct": taeg,
+        "pagamento_immediato": immediato,
+        "delta_vs_immediato": round(totale - immediato, 2),
+        "n_rate": int(n_rate),
+        "tan_annuo_pct": round(float(tan_annuo_pct), 2),
+    }
+
+
 if workspace == _('ws1'):
     st.markdown(f"<h1>{_('ws1')}</h1>", unsafe_allow_html=True)
     banner_demo("simulatore strategico: margini, centrali e curve simulate")
@@ -32846,7 +32983,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -55020,6 +55157,92 @@ elif workspace == _('ws8'):
             st.caption("Modello indicativo: acconti uguali sui mesi 1..N, conguaglio a dicembre. Nella realta' "
                        "le tempistiche di fatturazione variano per fornitore e il conguaglio puo' essere "
                        "rateizzato; verificare le condizioni contrattuali.")
+
+
+    with tab245:
+        titolo245 = edu("Conguaglio a rate", "Un conguaglio a debito si puo' pagare in un'unica soluzione oppure a rate mensili con TAN e costi di istruttoria. Questa tab calcola il piano francese di ammortamento, il TAEG effettivo, il costo finanziario totale e confronta la rateizzazione con il pagamento immediato (eventuale sconto pronta cassa).")
+        st.markdown(f"<h1>💳 {titolo245}</h1>", unsafe_allow_html=True)
+        st.caption("Rateizzare il conguaglio: rata mensile, TAEG, costo finanziario e confronto con il pagamento immediato.")
+        banner_demo("parametri di rateizzazione sintetici (Mock)")
+        c1_245, c2_245, c3_245 = st.columns(3)
+        with c1_245:
+            cong245 = st.number_input("Conguaglio a debito (€)", 100.0, 200000.0, 1500.0, 50.0,
+                                      key="t245_cong",
+                                      help="Importo del conguaglio a debito da rateizzare.")
+            nrate245 = st.slider("Numero di rate mensili", 1, 24, 6, 1, key="t245_nrate",
+                                 help="Durata del piano di ammortamento in mesi.")
+        with c2_245:
+            tan245 = st.slider("TAN annuo (%)", 0.0, 15.0, 4.5, 0.25, key="t245_tan",
+                               help="Tasso annuo nominale applicato dal fornitore al piano rate.")
+            costi245 = st.number_input("Costi fissi di rateizzazione (€)", 0.0, 1000.0, 25.0, 5.0,
+                                       key="t245_costi",
+                                       help="Spese di istruttoria/bolli addebitati con la prima rata.")
+        with c3_245:
+            sconto245 = st.slider("Sconto pronta cassa (%)", 0.0, 10.0, 0.0, 0.5, key="t245_sconto",
+                                  help="Sconto ottenibile pagando il conguaglio subito in un'unica soluzione.")
+        sin245 = None
+        try:
+            sin245 = r245_sintesi(cong245, tan245, nrate245, costi_fissi=costi245,
+                                  sconto_pronta_cassa_pct=sconto245)
+        except ValueError as e245:
+            st.error(f"Dati non validi: {e245}")
+        if sin245 is not None:
+            k1_245, k2_245, k3_245, k4_245 = st.columns(4)
+            k1_245.metric("Rata mensile", f"€ {sin245['rata_mensile']:,.2f}")
+            k2_245.metric("Totale versato", f"€ {sin245['totale_versato']:,.2f}")
+            k3_245.metric("Costo finanziario", f"€ {sin245['costo_finanziario']:,.2f}",
+                          help="Interessi + costi fissi rispetto al pagamento del solo capitale.")
+            k4_245.metric("TAEG", f"{sin245['taeg_pct']:.2f} %",
+                          help="Tasso annuo effettivo: include TAN e costi fissi.")
+            st.caption(f"Pagamento immediato (unica soluzione, sconto {float(sconto245):.1f}%): "
+                       f"€ {sin245['pagamento_immediato']:,.2f} — la rateizzazione costa "
+                       f"€ {sin245['delta_vs_immediato']:,.2f} in piu'.")
+            piano245 = sin245["piano"]
+            fig_p245 = go.Figure()
+            fig_p245.add_trace(go.Bar(x=[r["rata_n"] for r in piano245],
+                                      y=[r["quota_capitale"] for r in piano245],
+                                      name="Quota capitale", marker_color="#3B82F6"))
+            fig_p245.add_trace(go.Bar(x=[r["rata_n"] for r in piano245],
+                                      y=[r["quota_interessi"] for r in piano245],
+                                      name="Quota interessi", marker_color="#F59E0B"))
+            fig_p245.update_layout(title="Piano di ammortamento: quota capitale vs quota interessi",
+                                   xaxis_title="Rata", yaxis_title="€", barmode="stack")
+            st.plotly_chart(fig_p245, use_container_width=True)
+            fig_r245 = go.Figure()
+            fig_r245.add_trace(go.Scatter(x=[r["rata_n"] for r in piano245],
+                                          y=[r["residuo"] for r in piano245],
+                                          mode="lines+markers", name="Debito residuo",
+                                          line=dict(color="#EF4444")))
+            fig_r245.update_layout(title="Debito residuo mese per mese",
+                                   xaxis_title="Rata", yaxis_title="€")
+            st.plotly_chart(fig_r245, use_container_width=True)
+            df_p245 = pd.DataFrame({
+                "Rata": [r["rata_n"] for r in piano245],
+                "Rata (€)": [r["rata"] for r in piano245],
+                "Quota capitale (€)": [r["quota_capitale"] for r in piano245],
+                "Quota interessi (€)": [r["quota_interessi"] for r in piano245],
+                "Costi (€)": [r["costi"] for r in piano245],
+                "Residuo (€)": [r["residuo"] for r in piano245]})
+            st.dataframe(df_p245, use_container_width=True, hide_index=True)
+            st.subheader("Sensitivita' della rata mensile: TAN x numero di rate")
+            tans245 = [0.0, 2.0, 4.0, 6.0, 9.0, 12.0]
+            nrates245 = [3, 6, 9, 12, 18, 24]
+            z245 = [[r245_rata_francese(cong245, t, n) for n in nrates245] for t in tans245]
+            fig_s245 = px.imshow(z245, x=[str(n) for n in nrates245],
+                                 y=[f"{t:.1f}%" for t in tans245],
+                                 labels=dict(x="N. rate", y="TAN", color="Rata €"),
+                                 title="Rata mensile (€) al variare di TAN e durata",
+                                 text_auto=".0f", color_continuous_scale="YlOrRd")
+            st.plotly_chart(fig_s245, use_container_width=True)
+            st.download_button(
+                "Scarica CSV analisi",
+                data=df_p245.to_csv(index=False, sep=";").encode("utf-8"),
+                file_name="conguaglio_a_rate.csv",
+                mime="text/csv", key="t245_csv",
+                help="Piano di ammortamento del conguaglio: rate, quote capitale/interessi, residuo.")
+            st.caption("Modello indicativo: piano francese posticipato, costi fissi addebitati con la prima rata, "
+                       "TAEG calcolato sui flussi effettivi. Le condizioni reali dipendono dal fornitore; "
+                       "verificare il contratto e il documento 'Informazioni europee di base sul credito ai consumatori'.")
 
 
 # Footer
