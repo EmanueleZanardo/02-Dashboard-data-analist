@@ -107,7 +107,13 @@
 
 # STATUS.md — 02-Dashboard-data-analist (Singularity Quant ETRM)
 
-**Ultimo aggiornamento: 05/10/2026 ~02:00 CEST**
+**Ultimo aggiornamento: 06/10/2026 ~02:05 CEST**
+
+## 06/10/2026 ~02:05 CEST — aggiornamento documentale giornaliero
+- **Commit `0a9f8fb` (05/10 22:58 UTC):** QA ciclo — tab250 "Capitale circolante" (ciclo di cassa DSO+DPO+DIO).
+- **Ciclo QA 05/10 23:40:** nuova feature tab249 "Preventivo allacciamento" (quota potenza kW + quota distanza oltre franchigia + onere amministrativo + IVA, confronto BT vs MT con cabina MT/BT a carico cliente, heatmap sensibilità potenza×distanza, export CSV); 17 nuovi check + suite completa **1468 passed, 0 failed**; push verificato.
+- Build verde, nessun segreto hardcoded, deploy Streamlit ok.
+- Blocchi: vecchia chiave ENTSO-E resta nella storia git (da ruotare); condivisione app Streamlit non più pubblica — serve suo gesto su share.streamlit.io (Settings → Sharing → Public).
 
 ## 05/10/2026 ~02:00 CEST — aggiornamento documentale giornaliero
 - **04/10 QA orario tutto il giorno:** tab190 (00:40) → tab217 (22:40) pushate via Contents API, suite pytest sempre verde (fino a 1154 passed / 0 failed). Nota: dopo mezzanotte "QA 05/10 00:40 — fix registry test 218→219" (`c7a45f9`, 01:28 CEST).
