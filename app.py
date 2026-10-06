@@ -33689,6 +33689,194 @@ def cg255_curva_costo(prelievi_smc_g, capacita_list, tariffa_eur_smc_g_anno,
     return righe
 
 
+
+# ---------------------------------------------------------------------------
+# Tab 256 - Perdite di rete
+# ---------------------------------------------------------------------------
+
+def _pr256_num(x, nome):
+    """Valida uno scalare numerico: no bool, no NaN/inf."""
+    import math
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        raise ValueError(f"{nome}: deve essere un numero")
+    if math.isnan(x) or math.isinf(x):
+        raise ValueError(f"{nome}: NaN/inf non ammessi")
+    return float(x)
+
+
+def pr256_perdite_standard():
+    """Perdite convenzionali di rete per livello di tensione (% sull'energia immessa).
+
+    Valori convenzionali in uso in Italia (ARERA, stime modificabili in UI):
+    AT ~2,6%, MT ~5,1%, BT ~10,4%.
+    """
+    return {"AT": 2.6, "MT": 5.1, "BT": 10.4}
+
+
+def pr256_energia_immessa(prelevata_kwh, perdite_pct):
+    """Energia immessa in rete dato il prelievo misurato e le perdite %.
+
+    immessa = prelevata / (1 - p/100); perdite_kwh = immessa - prelevata.
+    """
+    p = _pr256_num(prelevata_kwh, "prelevata_kwh")
+    q = _pr256_num(perdite_pct, "perdite_pct")
+    if p < 0:
+        raise ValueError("prelevata_kwh: non puo' essere negativa")
+    if not 0 <= q < 100:
+        raise ValueError("perdite_pct: deve stare in [0, 100)")
+    immessa = p / (1.0 - q / 100.0)
+    perdite = immessa - p
+    return {"energia_immessa_kwh": immessa,
+            "perdite_kwh": perdite,
+            "perdite_pct_verificata": (perdite / immessa * 100.0) if immessa > 0 else 0.0}
+
+
+def pr256_parsa_misure(testo):
+    """Parsa l'area di testo: una riga per mese 'prelevata_kwh,immessa_kwh'.
+
+    Separatore di colonna: virgola o punto e virgola. Se il separatore e'
+    il punto e virgola, la virgola puo' essere usata come decimale
+    (es. '45210,5;49800'). Righe vuote ignorate; riga non valida ->
+    ValueError con numero riga; immessa < prelevata -> ValueError.
+    """
+    if not testo or not testo.strip():
+        raise ValueError("nessuna misura inserita")
+    righe = []
+    for i, raw in enumerate(testo.strip().splitlines(), start=1):
+        r = raw.strip()
+        if not r:
+            continue
+        if ";" in r:
+            parti = [p.strip().replace(",", ".") for p in r.split(";")]
+        else:
+            parti = [p.strip() for p in r.split(",")]
+        if len(parti) != 2:
+            raise ValueError(
+                f"riga {i}: servono 2 valori 'prelevata,immessa' separati da virgola o punto e virgola")
+        try:
+            prelevata = float(parti[0].replace(",", "."))
+            immessa = float(parti[1].replace(",", "."))
+        except ValueError:
+            raise ValueError(f"riga {i}: valori non numerici")
+        if prelevata < 0 or immessa < 0:
+            raise ValueError(f"riga {i}: valori negativi non ammessi")
+        if immessa < prelevata:
+            raise ValueError(f"riga {i}: l'energia immessa non puo' essere minore del prelievo")
+        righe.append({"prelevata_kwh": prelevata, "immessa_kwh": immessa})
+    if not righe:
+        raise ValueError("nessuna misura valida")
+    return righe
+
+
+def pr256_sintesi(misure, perdite_standard_pct, prezzo_eur_mwh):
+    """Sintesi delle perdite: effettive vs standard, costo annuo, scostamento."""
+    q = _pr256_num(perdite_standard_pct, "perdite_standard_pct")
+    prezzo = _pr256_num(prezzo_eur_mwh, "prezzo_eur_mwh")
+    if not 0 <= q < 100:
+        raise ValueError("perdite_standard_pct: deve stare in [0, 100)")
+    if prezzo < 0:
+        raise ValueError("prezzo_eur_mwh: non puo' essere negativo")
+    if not misure:
+        raise ValueError("misure: lista vuota")
+    tot_prel = 0.0
+    tot_imm = 0.0
+    per_mese = []
+    for idx, m in enumerate(misure, start=1):
+        pk = _pr256_num(m["prelevata_kwh"], f"misure[{idx}].prelevata_kwh")
+        ik = _pr256_num(m["immessa_kwh"], f"misure[{idx}].immessa_kwh")
+        if pk < 0 or ik < 0:
+            raise ValueError(f"misure[{idx}]: valori negativi non ammessi")
+        if ik < pk:
+            raise ValueError(f"misure[{idx}]: immessa < prelevata")
+        tot_prel += pk
+        tot_imm += ik
+        eff = (ik - pk) / ik * 100.0 if ik > 0 else 0.0
+        per_mese.append({"mese": idx, "prelevata_kwh": pk, "immessa_kwh": ik,
+                         "perdite_kwh": ik - pk, "perdite_eff_pct": round(eff, 2)})
+    if tot_imm <= 0:
+        raise ValueError("misure: energia immessa totale nulla")
+    perdite_eff_kwh = tot_imm - tot_prel
+    perdite_eff_pct = perdite_eff_kwh / tot_imm * 100.0
+    r_std = pr256_energia_immessa(tot_prel, q)
+    costo_eff = perdite_eff_kwh / 1000.0 * prezzo
+    costo_std = r_std["perdite_kwh"] / 1000.0 * prezzo
+    return {"mesi": len(misure),
+            "prelievo_tot_kwh": tot_prel,
+            "immessa_tot_kwh": tot_imm,
+            "perdite_eff_kwh": perdite_eff_kwh,
+            "perdite_eff_pct": perdite_eff_pct,
+            "perdite_std_kwh": r_std["perdite_kwh"],
+            "perdite_std_pct": q,
+            "scostamento_kwh": perdite_eff_kwh - r_std["perdite_kwh"],
+            "costo_perdite_eff_eur": costo_eff,
+            "costo_perdite_std_eur": costo_std,
+            "costo_scostamento_eur": costo_eff - costo_std,
+            "per_mese": per_mese}
+
+
+def pr256_confronto_livelli(prelievo_annuo_kwh, prezzo_eur_mwh, standard=None):
+    """Costo annuo delle perdite per livello di tensione sullo stesso prelievo."""
+    p = _pr256_num(prelievo_annuo_kwh, "prelievo_annuo_kwh")
+    prezzo = _pr256_num(prezzo_eur_mwh, "prezzo_eur_mwh")
+    if p < 0:
+        raise ValueError("prelievo_annuo_kwh: non puo' essere negativo")
+    if prezzo < 0:
+        raise ValueError("prezzo_eur_mwh: non puo' essere negativo")
+    std = dict(standard) if standard is not None else pr256_perdite_standard()
+    if not std:
+        raise ValueError("standard: dizionario vuoto")
+    righe = []
+    for liv, q in std.items():
+        qq = _pr256_num(q, f"standard[{liv}]")
+        if not 0 <= qq < 100:
+            raise ValueError(f"standard[{liv}]: deve stare in [0, 100)")
+        r = pr256_energia_immessa(p, qq)
+        righe.append({"livello": liv, "perdite_pct": qq,
+                      "perdite_kwh": r["perdite_kwh"],
+                      "costo_perdite_eur_anno": r["perdite_kwh"] / 1000.0 * prezzo})
+    return righe
+
+
+def pr256_risparmio_cambio_livello(prelievo_annuo_kwh, prezzo_eur_mwh, da_pct, a_pct):
+    """Risparmio annuo passando da un livello di perdite a uno inferiore (es. BT->MT)."""
+    da = _pr256_num(da_pct, "da_pct")
+    a = _pr256_num(a_pct, "a_pct")
+    prezzo = _pr256_num(prezzo_eur_mwh, "prezzo_eur_mwh")
+    if not 0 <= da < 100:
+        raise ValueError("da_pct: deve stare in [0, 100)")
+    if not 0 <= a < 100:
+        raise ValueError("a_pct: deve stare in [0, 100)")
+    if prezzo < 0:
+        raise ValueError("prezzo_eur_mwh: non puo' essere negativo")
+    r_da = pr256_energia_immessa(prelievo_annuo_kwh, da)
+    r_a = pr256_energia_immessa(prelievo_annuo_kwh, a)
+    risp_kwh = r_da["perdite_kwh"] - r_a["perdite_kwh"]
+    return {"perdite_da_kwh": r_da["perdite_kwh"],
+            "perdite_a_kwh": r_a["perdite_kwh"],
+            "risparmio_kwh_anno": risp_kwh,
+            "risparmio_eur_anno": risp_kwh / 1000.0 * prezzo}
+
+
+def pr256_curva_perdite(prelievo_annuo_kwh, prezzo_eur_mwh, pct_list):
+    """Righe perdite% -> perdite kWh e costo annuo, per grafico/sensitivita'."""
+    prezzo = _pr256_num(prezzo_eur_mwh, "prezzo_eur_mwh")
+    if prezzo < 0:
+        raise ValueError("prezzo_eur_mwh: non puo' essere negativo")
+    if not pct_list:
+        raise ValueError("pct_list: lista vuota")
+    righe = []
+    for q in pct_list:
+        qq = _pr256_num(q, "pct_list[]")
+        if not 0 <= qq < 100:
+            raise ValueError("pct_list[]: valori in [0, 100)")
+        r = pr256_energia_immessa(prelievo_annuo_kwh, qq)
+        righe.append({"perdite_pct": qq,
+                      "perdite_kwh_anno": r["perdite_kwh"],
+                      "costo_perdite_eur_anno": r["perdite_kwh"] / 1000.0 * prezzo})
+    return righe
+
+
+
 if workspace == _('ws1'):
     st.markdown(f"<h1>{_('ws1')}</h1>", unsafe_allow_html=True)
     banner_demo("simulatore strategico: margini, centrali e curve simulate")
@@ -34330,7 +34518,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -57455,6 +57643,80 @@ elif workspace == _('ws8'):
                            key="cg255_csv",
                            help="Costo capacit\u00e0 / penali / totale per capacit\u00e0 candidata.")
         st.caption("Nota: tariffa e penale sono stime modificabili \u2014 usare i valori del proprio contratto di trasporto/distribuzione. Con penali molto alte l'ottimo tende al prelievo max; con penali basse conviene prenotare meno e pagare gli sforamenti.")
+
+
+    with tab256:
+        titolo256 = edu("Perdite di rete", "L'energia che leggi al contatore e' MENO dell'energia immessa in rete per servirti: la differenza sono le PERDITE DI RETE (effetto Joule su cavi e trasformatori), pagate in bolletta come maggiorazione sull'energia. Le perdite convenzionali dipendono dal livello di tensione (in Italia circa 2,6% in AT, 5,1% in MT, 10,4% in BT). Questa tab confronta le perdite EFFETTIVE (da prelievo e immessa mensili) con quelle standard, ne calcola il costo annuo e mostra quanto varrebbe passare a un livello di tensione superiore.")
+        st.markdown(f"<h1>\u26a1 {titolo256}</h1>", unsafe_allow_html=True)
+        st.caption("Perdite effettive vs perdite standard, costo annuo e convenienza del cambio di livello di tensione.")
+        _PR256_ESEMPIO = ("42100,46800\n43800,48700\n45200,50250\n44900,49900\n"
+                          "47500,52800\n51200,56900\n54800,60900\n55600,61800\n"
+                          "50100,55700\n46200,51350\n43500,48350\n41800,46450")
+        ta256 = st.text_area("Misure mensili (prelevata_kwh, immessa_kwh)",
+                             value=_PR256_ESEMPIO, height=150, key="pr256_misure",
+                             help="Una riga per mese: kWh prelevati e kWh immessi separati da virgola o punto e virgola. Se usi la virgola come decimale, separa le colonne col punto e virgola (es. '45210,5;49800').")
+        try:
+            misure256 = pr256_parsa_misure(ta256)
+        except ValueError as e256:
+            st.error(f"Dati non validi: {e256}")
+            st.stop()
+        std256 = pr256_perdite_standard()
+        c1_256, c2_256, c3_256 = st.columns(3)
+        liv256 = c1_256.selectbox("Livello di tensione", ["AT", "MT", "BT"], index=2,
+                                  key="pr256_livello")
+        qstd256 = c2_256.number_input("Perdite standard (%)", min_value=0.0, max_value=50.0,
+                                      value=float(std256[liv256]), step=0.1, key="pr256_qstd",
+                                      help="Perdite convenzionali del tuo livello di tensione: sovrascrivile con quelle del tuo distributore se diverse.")
+        prz256 = c3_256.number_input("Prezzo energia (\u20ac/MWh)", min_value=0.0, value=140.0,
+                                     step=5.0, key="pr256_prezzo")
+        sint256 = pr256_sintesi(misure256, qstd256, prz256)
+        k1_256, k2_256, k3_256, k4_256, k5_256, k6_256 = st.columns(6)
+        render_kpi("Prelievo annuo (kWh)", f"{sint256['prelievo_tot_kwh']:,.0f}", k1_256)
+        render_kpi("Perdite effettive (%)", f"{sint256['perdite_eff_pct']:.2f}%", k2_256)
+        render_kpi("Perdite standard (%)", f"{sint256['perdite_std_pct']:.2f}%", k3_256)
+        render_kpi("Energia persa (kWh/anno)", f"{sint256['perdite_eff_kwh']:,.0f}", k4_256)
+        render_kpi("Costo perdite (\u20ac/anno)", f"{sint256['costo_perdite_eff_eur']:,.0f}", k5_256)
+        render_kpi("Scostamento vs standard (\u20ac/anno)",
+                   f"{sint256['costo_scostamento_eur']:+,.0f}", k6_256)
+        df256 = pd.DataFrame(sint256["per_mese"])
+        fig256 = px.bar(df256, x="mese", y="perdite_eff_pct",
+                        title="Perdite effettive mensili (%) vs standard",
+                        labels={"mese": "mese", "perdite_eff_pct": "perdite %"})
+        fig256.add_hline(y=qstd256, line_dash="dash", line_color="green",
+                         annotation_text=f"standard {liv256} {qstd256:.1f}%")
+        st.plotly_chart(fig256, use_container_width=True)
+        with st.expander("Confronto livelli di tensione: quanto vale passare a un livello superiore?"):
+            righe_liv256 = pr256_confronto_livelli(sint256["prelievo_tot_kwh"], prz256)
+            st.dataframe(pd.DataFrame(righe_liv256), use_container_width=True, hide_index=True)
+            d1_256, d2_256 = st.columns(2)
+            da256 = d1_256.selectbox("Livello attuale", ["AT", "MT", "BT"], index=2,
+                                     key="pr256_da")
+            a256 = d2_256.selectbox("Livello obiettivo", ["AT", "MT", "BT"], index=1,
+                                    key="pr256_a")
+            risp256 = pr256_risparmio_cambio_livello(sint256["prelievo_tot_kwh"], prz256,
+                                                     std256[da256], std256[a256])
+            if risp256["risparmio_eur_anno"] > 0:
+                st.success(f"Risparmio stimato: {risp256['risparmio_kwh_anno']:,.0f} kWh/anno "
+                           f"= {risp256['risparmio_eur_anno']:,.0f} \u20ac/anno di perdite evitate.")
+            elif risp256["risparmio_eur_anno"] < 0:
+                st.warning("Il livello obiettivo ha perdite maggiori: nessun risparmio.")
+            else:
+                st.info("Stesso livello di perdite: nessun risparmio.")
+        st.markdown("**Curva di costo: \u20ac/anno di perdite al variare delle perdite %**")
+        cand256 = [i * 0.5 for i in range(31)]
+        righe256 = pr256_curva_perdite(sint256["prelievo_tot_kwh"], prz256, cand256)
+        dfc256 = pd.DataFrame(righe256)
+        figc256 = px.line(dfc256, x="perdite_pct", y="costo_perdite_eur_anno",
+                          title="Costo annuo perdite (\u20ac) vs perdite %",
+                          labels={"perdite_pct": "perdite %",
+                                  "costo_perdite_eur_anno": "\u20ac/anno"})
+        st.plotly_chart(figc256, use_container_width=True)
+        st.download_button("\u2b07\ufe0f Export CSV perdite mensili",
+                           data=df256.to_csv(index=False, sep=";").encode("utf-8"),
+                           file_name="perdite_rete_mensili.csv", mime="text/csv",
+                           key="pr256_csv",
+                           help="Mese, prelievo, immessa, perdite kWh e % effettiva.")
+        st.caption("Nota: le perdite standard sono valori convenzionali modificabili \u2014 usare quelli del proprio distributore/contratto. Il confronto tra livelli di tensione non include i costi di allacciamento/trasformazione per il cambio livello.")
 
 # Footer
 
