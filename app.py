@@ -35189,6 +35189,183 @@ def go264_sensibilita_prezzo(consumo_netto_mwh, prezzo_max, passo):
     return righe
 
 
+# ---------------------------------------------------------------------------
+# Tab 265 - Fine vita FV: revamping vs dismissione
+# ---------------------------------------------------------------------------
+
+def fv265_num(x, nome):
+    """Valida uno scalare numerico: no bool, no NaN/inf."""
+    import math
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        raise ValueError(f"{nome}: deve essere un numero")
+    if math.isnan(x) or math.isinf(x):
+        raise ValueError(f"{nome}: NaN/inf non ammessi")
+    return float(x)
+
+
+def fv265_anni(n, nome="anni"):
+    """Valida un numero intero di anni >= 1."""
+    v = fv265_num(n, nome)
+    if v < 1 or v != int(v):
+        raise ValueError(f"{nome}: deve essere un intero >= 1")
+    return int(v)
+
+
+def fv265_produzione_annua(prod0_kwh, degrado_pct, anno):
+    """Produzione all'anno `anno` (1-based) con degrado geometrico.
+
+    prod(anno) = prod0 * (1 - degrado)^(anno-1). degrado_pct in [0, 50].
+    """
+    p0 = fv265_num(prod0_kwh, "prod0_kwh")
+    d = fv265_num(degrado_pct, "degrado_pct")
+    a = fv265_anni(anno, "anno")
+    if p0 < 0:
+        raise ValueError("prod0_kwh: non puo' essere negativo")
+    if not 0.0 <= d <= 50.0:
+        raise ValueError("degrado_pct: deve stare tra 0 e 50")
+    return p0 * (1.0 - d / 100.0) ** (a - 1)
+
+
+def fv265_npv_ricavi(prod0_kwh, degrado_pct, prezzo_kwh, anni, tasso_pct, oem_annuo=0.0):
+    """VAN dei ricavi netti (ricavi - O&M) sull'orizzonte, con degrado.
+
+    Restituisce dict con "npv", "produzioni" (kWh/anno),
+    "flussi_attualizzati" (euro/anno) e "produzione_totale_kwh".
+    """
+    p = fv265_num(prezzo_kwh, "prezzo_kwh")
+    t = fv265_num(tasso_pct, "tasso_pct")
+    o = fv265_num(oem_annuo, "oem_annuo")
+    n = fv265_anni(anni, "anni")
+    if p < 0:
+        raise ValueError("prezzo_kwh: non puo' essere negativo")
+    if t < 0:
+        raise ValueError("tasso_pct: non puo' essere negativo")
+    if o < 0:
+        raise ValueError("oem_annuo: non puo' essere negativo")
+    produzioni = [fv265_produzione_annua(prod0_kwh, degrado_pct, a)
+                  for a in range(1, n + 1)]
+    r = t / 100.0
+    flussi = [(prod * p - o) / ((1.0 + r) ** a)
+              for a, prod in enumerate(produzioni, 1)]
+    return {"npv": sum(flussi), "produzioni": produzioni,
+            "flussi_attualizzati": flussi,
+            "produzione_totale_kwh": sum(produzioni)}
+
+
+def fv265_scenario_revamping(prod0_kwh, costo_revamp, ripristino_pct, degrado_post_pct,
+                             prezzo_kwh, anni, tasso_pct, oem_annuo=0.0):
+    """Scenario revamping: costo una tantum oggi, produzione ripristinata.
+
+    La produzione riparte da prod0 * ripristino_pct/100 e poi degrada al
+    tasso degrado_post_pct. La VAN e' quella dei ricavi meno il costo.
+    """
+    c = fv265_num(costo_revamp, "costo_revamp")
+    rp = fv265_num(ripristino_pct, "ripristino_pct")
+    if c < 0:
+        raise ValueError("costo_revamp: non puo' essere negativo")
+    if not 0.0 < rp <= 100.0:
+        raise ValueError("ripristino_pct: deve stare tra 0 (escluso) e 100")
+    p0 = fv265_num(prod0_kwh, "prod0_kwh")
+    base = fv265_npv_ricavi(p0 * rp / 100.0, degrado_post_pct, prezzo_kwh,
+                            anni, tasso_pct, oem_annuo)
+    base["costo_revamping"] = c
+    base["npv"] = base["npv"] - c
+    return base
+
+
+def fv265_scenario_dismissione(costo_smaltimento, valore_moduli):
+    """Scenario dismissione: smaltimento meno eventuale valore moduli usati.
+
+    VAN = valore_moduli - costo_smaltimento (flusso una tantum, produzione 0).
+    """
+    cs = fv265_num(costo_smaltimento, "costo_smaltimento")
+    vm = fv265_num(valore_moduli, "valore_moduli")
+    if cs < 0:
+        raise ValueError("costo_smaltimento: non puo' essere negativo")
+    if vm < 0:
+        raise ValueError("valore_moduli: non puo' essere negativo")
+    return {"npv": vm - cs, "costo_netto": cs - vm}
+
+
+def fv265_confronto(npv_mantieni, npv_revamp, npv_dism):
+    """Confronta i 3 scenari di fine vita.
+
+    verdetto: "mantieni" / "revamping" / "dismissione", oppure "indifferente"
+    se i due migliori sono entro il 5%. margine_pct: vantaggio del migliore
+    sul secondo in % (None se il secondo vale 0).
+    """
+    m = fv265_num(npv_mantieni, "npv_mantieni")
+    r = fv265_num(npv_revamp, "npv_revamp")
+    d = fv265_num(npv_dism, "npv_dism")
+    ordine = sorted([("mantieni", m), ("revamping", r), ("dismissione", d)],
+                    key=lambda kv: kv[1], reverse=True)
+    (nome1, v1), (nome2, v2) = ordine[0], ordine[1]
+    if v2 == 0.0:
+        verd = "indifferente" if v1 == 0.0 else nome1
+        marg = None
+    elif abs(v1 - v2) <= 0.05 * abs(v2):
+        verd = "indifferente"
+        marg = (v1 - v2) / abs(v2) * 100.0
+    else:
+        verd = nome1
+        marg = (v1 - v2) / abs(v2) * 100.0
+    return {"npv_mantieni": m, "npv_revamping": r, "npv_dismissione": d,
+            "migliore": nome1, "secondo": nome2,
+            "verdetto": verd, "margine_pct": marg}
+
+
+def fv265_anno_pareggio(prod0_kwh, degrado_pct, costo_revamp, ripristino_pct,
+                        degrado_post_pct, prezzo_kwh, anni, tasso_pct, oem_annuo=0.0):
+    """Primo anno (1-based) in cui il cumulato attualizzato del revamping,
+    al netto del costo, raggiunge quello del mantenimento. None se mai."""
+    c = fv265_num(costo_revamp, "costo_revamp")
+    if c < 0:
+        raise ValueError("costo_revamp: non puo' essere negativo")
+    rp = fv265_num(ripristino_pct, "ripristino_pct")
+    if not 0.0 < rp <= 100.0:
+        raise ValueError("ripristino_pct: deve stare tra 0 (escluso) e 100")
+    n = fv265_anni(anni, "anni")
+    p0 = fv265_num(prod0_kwh, "prod0_kwh")
+    fm = fv265_npv_ricavi(p0, degrado_pct, prezzo_kwh, anni,
+                          tasso_pct, oem_annuo)["flussi_attualizzati"]
+    fr = fv265_npv_ricavi(p0 * rp / 100.0, degrado_post_pct, prezzo_kwh, anni,
+                          tasso_pct, oem_annuo)["flussi_attualizzati"]
+    cum_m = cum_r = 0.0
+    for t in range(n):
+        cum_m += fm[t]
+        cum_r += fr[t]
+        if cum_r - c >= cum_m:
+            return t + 1
+    return None
+
+
+def fv265_sensibilita_prezzo(prod0_kwh, degrado_pct, degrado_post_pct, ripristino_pct,
+                             costo_revamp, oem_annuo, anni, tasso_pct,
+                             prezzo_max, passo):
+    """VAN di mantieni e revamping al variare del prezzo dell'energia.
+
+    Restituisce lista di dict {"prezzo_kwh", "npv_mantieni", "npv_revamping"}.
+    """
+    pm = fv265_num(prezzo_max, "prezzo_max")
+    st_ = fv265_num(passo, "passo")
+    if pm <= 0:
+        raise ValueError("prezzo_max: deve essere > 0")
+    if st_ <= 0:
+        raise ValueError("passo: deve essere > 0")
+    righe = []
+    p = 0.0
+    while p <= pm + 1e-9:
+        m = fv265_npv_ricavi(prod0_kwh, degrado_pct, p, anni,
+                             tasso_pct, oem_annuo)["npv"]
+        r = fv265_scenario_revamping(prod0_kwh, costo_revamp, ripristino_pct,
+                                     degrado_post_pct, p, anni,
+                                     tasso_pct, oem_annuo)["npv"]
+        righe.append({"prezzo_kwh": round(p, 3),
+                      "npv_mantieni": m, "npv_revamping": r})
+        p += st_
+    return righe
+
+
 if workspace == _('ws1'):
     st.markdown(f"<h1>{_('ws1')}</h1>", unsafe_allow_html=True)
     banner_demo("simulatore strategico: margini, centrali e curve simulate")
@@ -35830,7 +36007,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256, tab257, tab258, tab259, tab260, tab261, tab262, tab263, tab264 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete", "🔥 Teleriscaldamento vs caldaia", "🌿 Clean spread (con CO₂)", "🇮🇹 PUN da prezzi zonali", "❄️ Pompa di calore vs caldaia", "🏢 PUE & costo data center", "🔌 Gruppo elettrogeno vs blackout", "🚗 Flotta aziendale: TCO diesel vs elettrico", "📜 Garanzie di origine: costo del 100% rinnovabile"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256, tab257, tab258, tab259, tab260, tab261, tab262, tab263, tab264, tab265 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete", "🔥 Teleriscaldamento vs caldaia", "🌿 Clean spread (con CO₂)", "🇮🇹 PUN da prezzi zonali", "❄️ Pompa di calore vs caldaia", "🏢 PUE & costo data center", "🔌 Gruppo elettrogeno vs blackout", "🚗 Flotta aziendale: TCO diesel vs elettrico", "📜 Garanzie di origine: costo del 100% rinnovabile", "♻️ Fine vita FV: revamping vs dismissione"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -59788,6 +59965,114 @@ elif workspace == _('ws8'):
                                key="go264_csv",
                                help="Consumi mensili e costo GO per mese.")
         st.caption("Nota: il prezzo delle GO varia con domanda/offerta e tecnologia/vintage; verificare il prezzo corrente sul mercato. Le GO vanno annullate entro i termini per l'anno di competenza e non possono coprire energia gia' conteggiata come autoconsumo.")
+
+    with tab265:
+        titolo265 = edu("Fine vita FV: revamping vs dismissione", "L'impianto fotovoltaico invecchia: la produzione cala ogni anno per il degrado dei moduli. A fine vita utile conviene (1) tenerlo cosi' com'e', (2) rifarlo con un revamping (costo una tantum, produzione ripristinata che poi degrada al tasso post-revamping) o (3) dismetterlo (costo di smaltimento meno l'eventuale valore dei moduli usati)? Questa tab confronta i tre scenari in VAN dei flussi netti (ricavi meno O&M) sull'orizzonte residuo, con anno di pareggio del revamping e sensibilita' al prezzo dell'energia.")
+        st.markdown(f"<h1>\U0000267B\uFE0F {titolo265}</h1>", unsafe_allow_html=True)
+        st.caption("Fine vita dell'impianto FV: mantieni, revamping o dismissione? Confronto in VAN sull'orizzonte residuo.")
+        a1_265, a2_265, a3_265 = st.columns(3)
+        prod265 = a1_265.number_input("Produzione attuale (kWh/anno)", min_value=0.0,
+                                      value=95000.0, step=5000.0, format="%.0f",
+                                      key="fv265_produzione",
+                                      help="Produzione annua stimata dell'impianto oggi.")
+        deg265 = a2_265.number_input("Degrado moduli (%/anno)", min_value=0.0, max_value=50.0,
+                                      value=0.5, step=0.1, format="%.2f",
+                                      key="fv265_degrado",
+                                      help="Perdita annua di produzione per degrado dei moduli.")
+        prz265 = a3_265.number_input("Prezzo energia valorizzata (€/kWh)", min_value=0.0,
+                                      value=0.12, step=0.01, format="%.3f",
+                                      key="fv265_prezzo",
+                                      help="Prezzo di valorizzazione dell'energia (autoconsumo o cessione).")
+        b1_265, b2_265, b3_265 = st.columns(3)
+        orz265 = b1_265.number_input("Orizzonte residuo (anni)", min_value=1, max_value=40,
+                                      value=10, step=1,
+                                      key="fv265_orizzonte")
+        tas265 = b2_265.number_input("Tasso di attualizzazione (%/anno)", min_value=0.0,
+                                      value=5.0, step=0.5, format="%.1f",
+                                      key="fv265_tasso")
+        oem265 = b3_265.number_input("O&M (€/anno)", min_value=0.0,
+                                      value=1500.0, step=100.0, format="%.0f",
+                                      key="fv265_oem",
+                                      help="Costi operativi e di manutenzione annui (uguali in mantieni e revamping).")
+        c1_265, c2_265, c3_265 = st.columns(3)
+        crv265 = c1_265.number_input("Costo revamping (€)", min_value=0.0,
+                                      value=45000.0, step=1000.0, format="%.0f",
+                                      key="fv265_costo_revamp",
+                                      help="Costo una tantum del revamping (moduli, inverter, manodopera).")
+        rpr265 = c2_265.number_input("Ripristino produzione (%)", min_value=0.1, max_value=100.0,
+                                      value=95.0, step=1.0, format="%.1f",
+                                      key="fv265_ripristino",
+                                      help="Produzione dopo il revamping, in % della produzione attuale.")
+        dpo265 = c3_265.number_input("Degrado post-revamping (%/anno)", min_value=0.0, max_value=50.0,
+                                      value=0.4, step=0.1, format="%.2f",
+                                      key="fv265_degrado_post")
+        d1_265, d2_265, _d3_265 = st.columns(3)
+        csm265 = d1_265.number_input("Costo smaltimento (€)", min_value=0.0,
+                                      value=8000.0, step=500.0, format="%.0f",
+                                      key="fv265_smaltimento",
+                                      help="Costo una tantum di dismissione e smaltimento moduli.")
+        vmo265 = d2_265.number_input("Valore moduli usati (€)", min_value=0.0,
+                                      value=2000.0, step=500.0, format="%.0f",
+                                      key="fv265_valore_moduli",
+                                      help="Ricavo dalla vendita dei moduli usati (second hand).")
+        try:
+            man265 = fv265_npv_ricavi(prod265, deg265, prz265, orz265, tas265, oem265)
+            rev265 = fv265_scenario_revamping(prod265, crv265, rpr265, dpo265, prz265, orz265, tas265, oem265)
+            dis265 = fv265_scenario_dismissione(csm265, vmo265)
+            cfr265 = fv265_confronto(man265["npv"], rev265["npv"], dis265["npv"])
+            par265 = fv265_anno_pareggio(prod265, deg265, crv265, rpr265, dpo265, prz265, orz265, tas265, oem265)
+            pmax265 = max(0.30, prz265 * 2.0)
+            sen265 = fv265_sensibilita_prezzo(prod265, deg265, dpo265, rpr265, crv265, oem265, orz265, tas265, pmax265, pmax265 / 60.0)
+        except ValueError as e265:
+            st.error(f"Dati non validi: {e265}")
+            st.stop()
+        k1_265, k2_265, k3_265, k4_265, k5_265, k6_265 = st.columns(6)
+        render_kpi("VAN mantieni (€)", f"{man265['npv']:,.0f}", k1_265)
+        render_kpi("VAN revamping (€)", f"{rev265['npv']:,.0f}", k2_265)
+        render_kpi("VAN dismissione (€)", f"{dis265['npv']:,.0f}", k3_265)
+        render_kpi("Produzione residua (MWh)", f"{man265['produzione_totale_kwh'] / 1000.0:,.0f}", k4_265)
+        render_kpi("Margine migliore (€)", f"{cfr265['margine_pct']:.1f} %" if cfr265['margine_pct'] is not None else "—", k5_265)
+        render_kpi("Pareggio revamping (anno)", str(par265) if par265 else "mai", k6_265)
+        if cfr265["verdetto"] == "revamping":
+            st.success(f"Conviene il revamping: VAN {rev265['npv']:,.0f} €, {cfr265['margine_pct']:.1f}% sopra lo scenario {cfr265['secondo']}. Pareggio al {('anno ' + str(par265)) if par265 else 'mai entro l\'orizzonte'}.")
+        elif cfr265["verdetto"] == "mantieni":
+            st.info(f"Conviene tenere l'impianto cosi' com'e': VAN {man265['npv']:,.0f} €, {cfr265['margine_pct']:.1f}% sopra lo scenario {cfr265['secondo']}. Il revamping non ripaga il suo costo entro l'orizzonte.")
+        elif cfr265["verdetto"] == "dismissione":
+            st.warning(f"Conviene dismettere: VAN {dis265['npv']:,.0f} € (costo netto {dis265['costo_netto']:,.0f} €), {cfr265['margine_pct']:.1f}% sopra lo scenario {cfr265['secondo']}. L'impianto non produce piu' abbastanza per ripagarsi.")
+        else:
+            st.info(f"Scenari entro il ±5% (migliore: {cfr265['migliore']}): la scelta dipende da fattori non economici (eta' reale dei componenti, rischio guasti, vincoli di sito).")
+        st.markdown("**VAN per scenario (€)**")
+        dfb265 = pd.DataFrame([{"scenario": "Mantieni", "npv": man265["npv"]},
+                               {"scenario": "Revamping", "npv": rev265["npv"]},
+                               {"scenario": "Dismissione", "npv": dis265["npv"]}])
+        figb265 = px.bar(dfb265, x="scenario", y="npv", title="VAN per scenario (€)",
+                         labels={"scenario": "Scenario", "npv": "VAN (€)"})
+        st.plotly_chart(figb265, use_container_width=True)
+        st.markdown("**VAN al variare del prezzo dell'energia (€/kWh)**")
+        dss265 = pd.DataFrame(sen265)
+        figs265 = px.line(dss265, x="prezzo_kwh", y=["npv_mantieni", "npv_revamping"],
+                          title="VAN vs prezzo energia (€)",
+                          labels={"prezzo_kwh": "Prezzo (€/kWh)", "value": "VAN (€)", "variable": "Scenario"})
+        figs265.add_vline(x=prz265, line_dash="dash", line_color="red",
+                          annotation_text="Prezzo attuale")
+        st.plotly_chart(figs265, use_container_width=True)
+        with st.expander("Dettaglio annuale ed export CSV"):
+            righe265 = [{"anno": a + 1,
+                         "produzione_mantieni_kwh": round(pm, 0),
+                         "produzione_revamping_kwh": round(pr_, 0),
+                         "flusso_mantieni_eur": round(fm, 0),
+                         "flusso_revamping_eur": round(fr, 0)}
+                        for a, (pm, pr_, fm, fr) in enumerate(zip(man265["produzioni"], rev265["produzioni"],
+                                                                  man265["flussi_attualizzati"], rev265["flussi_attualizzati"]))]
+            dft265 = pd.DataFrame(righe265)
+            st.dataframe(dft265, use_container_width=True, hide_index=True)
+            st.caption(f"Costo revamping: {crv265:,.0f} € al tempo 0 — i flussi del revamping sono al netto del costo solo nel confronto VAN (la tabella mostra i flussi operativi).")
+            st.download_button("⬇️ Export CSV annuale",
+                               data=dft265.to_csv(index=False, sep=";").encode("utf-8"),
+                               file_name="finevita_fv_annuale.csv", mime="text/csv",
+                               key="fv265_csv",
+                               help="Produzioni e flussi attualizzati per anno, scenario mantieni vs revamping.")
+        st.caption("Nota: il degrado reale dipende da tecnologia, clima e manutenzione; il valore dei moduli usati e' volatile. Verificare costi di smaltimento con gli operatori RAEE e gli incentivi residui prima di decidere.")
 
 # Footer
 
