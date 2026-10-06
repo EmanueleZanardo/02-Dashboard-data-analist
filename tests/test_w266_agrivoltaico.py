@@ -38,6 +38,7 @@ TITLE269 = "🌊 Idroelettrico run-of-river: business case"
 TITLE270 = "🔥 Geotermia profonda: business case"
 TITLE271 = "☀️ Solare termodinamico (CSP): business case"
 TITLE272 = "🌬️ Eolico offshore: business case"
+TITLE273 = "☀️ Fotovoltaico utility-scale: business case"
 TITLE265 = "\U0000267B\uFE0F Fine vita FV: revamping vs dismissione"
 
 HA = 10.0
@@ -66,12 +67,12 @@ def _registry():
 class TestRegistryTab266:
     def test_tab266_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 272
+        assert len(titoli) == len(dvars) == len(withs) == 273
         assert TITLE266 in titoli
         assert "tab266" in dvars
         assert "tab266" in withs
         assert titoli[dvars.index("tab266")] == TITLE266
-        assert titoli[-1] == TITLE272
+        assert titoli[-1] == TITLE273
         keys = re.findall(r'key="(av266_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
@@ -85,6 +86,7 @@ class TestRegistryTab266:
         assert titoli[dvars.index("tab270")] == TITLE270
         assert titoli[dvars.index("tab271")] == TITLE271
         assert titoli[dvars.index("tab272")] == TITLE272
+        assert titoli[dvars.index("tab273")] == TITLE273
 
 
 class TestAv266Num:
