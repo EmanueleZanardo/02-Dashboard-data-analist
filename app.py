@@ -34178,6 +34178,159 @@ def cs258_sensibilita_co2(prezzo_power_eur_mwh, prezzo_fuel_eur_mwh, heat_rate,
                       "clean_spread_eur_mwh": r["clean_spread_eur_mwh"]})
     return righe
 
+# ---------------------------------------------------------------------------
+# Tab 259 - PUN da prezzi zonali
+# ---------------------------------------------------------------------------
+
+def pun259_num(x, nome):
+    """Valida uno scalare numerico: no bool, no NaN/inf."""
+    import math
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        raise ValueError(f"{nome}: deve essere un numero")
+    if math.isnan(x) or math.isinf(x):
+        raise ValueError(f"{nome}: NaN/inf non ammessi")
+    return float(x)
+
+
+def pun259_zone():
+    """Le 6 zone di mercato italiane (ordine canonico)."""
+    return ["NORD", "CNOR", "CSUD", "SUD", "SICI", "SARD"]
+
+
+def pun259_pesi_default():
+    """Pesi di consumo zonali (quote indicative, sommano a 1)."""
+    return {"NORD": 0.46, "CNOR": 0.17, "CSUD": 0.12,
+            "SUD": 0.08, "SICI": 0.07, "SARD": 0.10}
+
+
+def pun259_normalizza_pesi(pesi):
+    """Valida un dict zona->peso e lo normalizza a somma 1.
+
+    Tutte e 6 le zone devono essere presenti, pesi numerici >= 0, somma > 0.
+    """
+    if not isinstance(pesi, dict):
+        raise ValueError("pesi: deve essere un dict zona->peso")
+    zone = pun259_zone()
+    out = {}
+    for z in zone:
+        if z not in pesi:
+            raise ValueError(f"pesi: manca la zona {z}")
+        w = pun259_num(pesi[z], f"peso {z}")
+        if w < 0:
+            raise ValueError(f"peso {z}: non puo' essere negativo")
+        out[z] = w
+    tot = sum(out.values())
+    if tot <= 0:
+        raise ValueError("pesi: la somma deve essere > 0")
+    return {z: w / tot for z, w in out.items()}
+
+
+def pun259_parsa_prezzi(testo):
+    """Parsa prezzi zonali orari da testo.
+
+    Formato per riga: ora;NORD;CNOR;CSUD;SUD;SICI;SARD (oppure con la virgola).
+    Righe vuote ignorate; un'eventuale riga di intestazione non numerica
+    viene saltata. Restituisce lista di dict {"ora": str, ZONA: float}.
+    I prezzi possono essere negativi (ore a prezzi negativi).
+    """
+    zone = pun259_zone()
+    righe = []
+    for ln in (testo or "").splitlines():
+        ln = ln.strip()
+        if not ln:
+            continue
+        sep = ";" if ";" in ln else ","
+        tok = [t.strip() for t in ln.split(sep)]
+        if len(tok) != 7:
+            raise ValueError(f"riga '{ln}': attesi 7 campi (ora + 6 zone)")
+        # intestazione: secondo campo non numerico
+        try:
+            float(tok[1].replace(",", "."))
+        except ValueError:
+            continue
+        prezzi = {"ora": tok[0]}
+        for z, v in zip(zone, tok[1:]):
+            try:
+                f = float(v.replace(",", "."))
+            except ValueError:
+                raise ValueError(f"riga '{ln}': prezzo non numerico per {z}")
+            prezzi[z] = pun259_num(f, f"prezzo {z} (ora {tok[0]})")
+        righe.append(prezzi)
+    if not righe:
+        raise ValueError("nessuna riga di dati valida trovata")
+    return righe
+
+
+def pun259_pun_orario(prezzi_ora, pesi):
+    """PUN orario = media dei prezzi zonali pesata per i consumi.
+
+    Restituisce dict con pun, zona/prezzo min e max, spread max-min.
+    """
+    zone = pun259_zone()
+    pw = pun259_normalizza_pesi(pesi)
+    for z in zone:
+        if z not in prezzi_ora:
+            raise ValueError(f"prezzi_ora: manca la zona {z}")
+        pun259_num(prezzi_ora[z], f"prezzi_ora[{z}]")
+    pun = sum(pw[z] * prezzi_ora[z] for z in zone)
+    zmin = min(zone, key=lambda z: prezzi_ora[z])
+    zmax = max(zone, key=lambda z: prezzi_ora[z])
+    pmin = prezzi_ora[zmin]
+    pmax = prezzi_ora[zmax]
+    return {"pun": pun, "zona_min": zmin, "prezzo_min": pmin,
+            "zona_max": zmax, "prezzo_max": pmax,
+            "spread_max_min": pmax - pmin}
+
+
+def pun259_spread_zonali(pun, prezzi_ora):
+    """Spread zona - PUN per ogni zona (positivo = zona piu' cara del PUN)."""
+    p = pun259_num(pun, "pun")
+    out = {}
+    for z in pun259_zone():
+        if z not in prezzi_ora:
+            raise ValueError(f"prezzi_ora: manca la zona {z}")
+        out[z] = pun259_num(prezzi_ora[z], f"prezzi_ora[{z}]") - p
+    return out
+
+
+def pun259_sintesi(righe, soglia_congestione=5.0):
+    """Sintesi di periodo su righe [{"ora", "pun", "spread_max_min", ZONE...}].
+
+    Restituisce PUN medio/max/min con ore, spread max-min medio, prezzo medio
+    e spread medio vs PUN per zona, zona piu' cara/economica in media,
+    numero di ore con congestione (spread_max_min >= soglia).
+    """
+    zone = pun259_zone()
+    s = pun259_num(soglia_congestione, "soglia_congestione")
+    if s < 0:
+        raise ValueError("soglia_congestione: non puo' essere negativa")
+    if not righe:
+        raise ValueError("righe: lista vuota")
+    puns = [pun259_num(r["pun"], "pun") for r in righe]
+    for r in righe:
+        for z in zone:
+            if z not in r:
+                raise ValueError(f"righe: manca la zona {z}")
+            pun259_num(r[z], f"prezzo {z}")
+    n = len(righe)
+    pun_medio = sum(puns) / n
+    i_max = max(range(n), key=lambda i: puns[i])
+    i_min = min(range(n), key=lambda i: puns[i])
+    spreads = [pun259_num(r["spread_max_min"], "spread_max_min") for r in righe]
+    prezzo_medio = {z: sum(r[z] for r in righe) / n for z in zone}
+    spread_medio = {z: sum(r[z] - r["pun"] for r in righe) / n for z in zone}
+    z_cara = max(zone, key=lambda z: prezzo_medio[z])
+    z_econ = min(zone, key=lambda z: prezzo_medio[z])
+    return {"n_ore": n,
+            "pun_medio": pun_medio,
+            "pun_max": puns[i_max], "ora_max": righe[i_max]["ora"],
+            "pun_min": puns[i_min], "ora_min": righe[i_min]["ora"],
+            "spread_max_min_medio": sum(spreads) / n,
+            "prezzo_medio_zona": prezzo_medio,
+            "spread_medio_zona_vs_pun": spread_medio,
+            "zona_piu_cara": z_cara, "zona_piu_economica": z_econ,
+            "ore_congestione": sum(1 for v in spreads if v >= s)}
+
 if workspace == _('ws1'):
     st.markdown(f"<h1>{_('ws1')}</h1>", unsafe_allow_html=True)
     banner_demo("simulatore strategico: margini, centrali e curve simulate")
@@ -34819,7 +34972,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256, tab257, tab258 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete", "🔥 Teleriscaldamento vs caldaia", "🌿 Clean spread (con CO₂)"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256, tab257, tab258, tab259 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete", "🔥 Teleriscaldamento vs caldaia", "🌿 Clean spread (con CO₂)", "🇮🇹 PUN da prezzi zonali"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -58188,6 +58341,105 @@ elif workspace == _('ws8'):
                            help="Prezzo CO2, clean spread gas e clean spread carbone.")
         st.caption("Nota: fattori di emissione di default 0,202 tCO2/MWh (gas) e 0,341 tCO2/MWh (carbone), modificabili. Un break-even CO2 negativo significa che l'impianto e' fuori mercato gia' a CO2 = 0 €/t.")
 
+
+    with tab259:
+        titolo259 = edu("PUN da prezzi zonali", "Il PUN (Prezzo Unico Nazionale) e' la media dei prezzi delle 6 zone di mercato italiane pesata per i consumi zonali. Questa tab calcola il PUN orario dai prezzi zonali, lo spread di ogni zona rispetto al PUN e le ore di congestione.")
+        st.markdown(f"<h1>🇮🇹 {titolo259}</h1>", unsafe_allow_html=True)
+        st.caption("PUN = media dei prezzi zonali pesata per i consumi: spread zona-PUN e congestione.")
+        txt259 = st.text_area("Prezzi zonali orari (€/MWh) — ora;NORD;CNOR;CSUD;SUD;SICI;SARD",
+                              value="""00;85.4;83.1;80.2;77.5;79.8;78.9
+01;82.3;80.5;77.9;75.1;76.8;76.2
+02;80.1;78.4;75.8;73.2;74.9;74.1
+03;79.5;77.8;75.2;72.6;74.2;73.5
+04;79.9;78.2;75.6;73.0;74.6;73.9
+05;84.2;82.6;80.1;77.4;79.0;78.3
+06;98.5;96.2;93.4;90.1;92.0;91.2
+07;112.4;110.1;107.3;103.8;105.6;104.9
+08;121.8;119.5;116.2;112.4;114.3;113.5
+09;118.6;116.3;113.1;109.5;111.2;110.5
+10;112.2;109.8;106.5;102.9;98.4;101.3
+11;108.5;106.1;102.8;99.2;94.1;97.6
+12;105.3;102.9;99.6;96.0;90.2;94.5
+13;103.8;101.4;98.1;94.5;88.7;93.0
+14;104.6;102.2;98.9;95.3;89.5;93.8
+15;107.9;105.5;102.2;98.6;92.8;97.1
+16;113.5;111.1;107.8;104.2;98.4;102.7
+17;124.8;122.4;119.1;115.5;109.7;114.0
+18;138.2;135.8;132.5;128.9;123.1;127.4
+19;142.5;140.1;136.8;133.2;127.4;131.7
+20;136.9;134.5;131.2;127.6;121.8;126.1
+21;126.4;124.0;120.7;117.1;111.3;115.6
+22;110.2;107.8;104.5;100.9;97.2;99.4
+23;95.8;93.4;90.1;86.5;87.9;86.9""",
+                              height=220, key="pun259_testo",
+                              help="Una riga per ora: ora;NORD;CNOR;CSUD;SUD;SICI;SARD. Separatore ; oppure ,. I prezzi possono essere negativi.")
+        def259 = pun259_pesi_default()
+        c1_259, c2_259, c3_259, c4_259, c5_259, c6_259 = st.columns(6)
+        wn259 = c1_259.number_input("Peso NORD", min_value=0.0, max_value=1.0,
+                                    value=float(def259["NORD"]), step=0.01,
+                                    format="%.2f", key="pun259_w_nord")
+        wc259 = c2_259.number_input("Peso CNOR", min_value=0.0, max_value=1.0,
+                                    value=float(def259["CNOR"]), step=0.01,
+                                    format="%.2f", key="pun259_w_cnor")
+        wcs259 = c3_259.number_input("Peso CSUD", min_value=0.0, max_value=1.0,
+                                     value=float(def259["CSUD"]), step=0.01,
+                                     format="%.2f", key="pun259_w_csud")
+        ws259 = c4_259.number_input("Peso SUD", min_value=0.0, max_value=1.0,
+                                    value=float(def259["SUD"]), step=0.01,
+                                    format="%.2f", key="pun259_w_sud")
+        wsi259 = c5_259.number_input("Peso SICI", min_value=0.0, max_value=1.0,
+                                     value=float(def259["SICI"]), step=0.01,
+                                     format="%.2f", key="pun259_w_sici")
+        wsa259 = c6_259.number_input("Peso SARD", min_value=0.0, max_value=1.0,
+                                     value=float(def259["SARD"]), step=0.01,
+                                     format="%.2f", key="pun259_w_sard")
+        try:
+            pesi259 = pun259_normalizza_pesi({"NORD": wn259, "CNOR": wc259, "CSUD": wcs259,
+                                              "SUD": ws259, "SICI": wsi259, "SARD": wsa259})
+            righe259 = pun259_parsa_prezzi(txt259)
+            ora259 = []
+            for r259 in righe259:
+                o259 = pun259_pun_orario(r259, pesi259)
+                rr259 = dict(r259)
+                rr259["pun"] = o259["pun"]
+                rr259["spread_max_min"] = o259["spread_max_min"]
+                ora259.append(rr259)
+            sin259 = pun259_sintesi(ora259)
+        except ValueError as e259:
+            st.error(f"Dati non validi: {e259}")
+            st.stop()
+        k1_259, k2_259, k3_259, k4_259, k5_259, k6_259 = st.columns(6)
+        render_kpi("PUN medio (€/MWh)", f"{sin259['pun_medio']:.2f}", k1_259)
+        render_kpi("PUN max (€/MWh)", f"{sin259['pun_max']:.2f} (h {sin259['ora_max']})", k2_259)
+        render_kpi("PUN min (€/MWh)", f"{sin259['pun_min']:.2f} (h {sin259['ora_min']})", k3_259)
+        render_kpi("Spread max-min medio (€/MWh)", f"{sin259['spread_max_min_medio']:.2f}", k4_259)
+        render_kpi("Zona più cara (media)", f"{sin259['zona_piu_cara']} {sin259['prezzo_medio_zona'][sin259['zona_piu_cara']]:.2f}", k5_259)
+        render_kpi("Zona più economica (media)", f"{sin259['zona_piu_economica']} {sin259['prezzo_medio_zona'][sin259['zona_piu_economica']]:.2f}", k6_259)
+        st.info(f"Ore con congestione (spread max-min ≥ 5 €/MWh): {sin259['ore_congestione']} su {sin259['n_ore']}.")
+        st.markdown("**Prezzi zonali e PUN (€/MWh)**")
+        df259 = pd.DataFrame([{"ora": r["ora"], **{z: r[z] for z in pun259_zone()}, "PUN": r["pun"]} for r in ora259])
+        fig259 = px.line(df259, x="ora", y=pun259_zone() + ["PUN"],
+                         title="Prezzi zonali e PUN (€/MWh)",
+                         labels={"ora": "ora", "value": "€/MWh", "variable": "zona"})
+        st.plotly_chart(fig259, use_container_width=True)
+        st.markdown("**Spread medio di zona vs PUN (€/MWh)**")
+        dsp259 = pd.DataFrame([{"zona": z, "spread_vs_pun": sin259["spread_medio_zona_vs_pun"][z]} for z in pun259_zone()])
+        figb259 = px.bar(dsp259, x="zona", y="spread_vs_pun",
+                         title="Spread medio zona - PUN (€/MWh)",
+                         labels={"zona": "zona", "spread_vs_pun": "€/MWh"})
+        figb259.add_hline(y=0, line_dash="dash", line_color="gray")
+        st.plotly_chart(figb259, use_container_width=True)
+        with st.expander("Tabella oraria e export CSV"):
+            dft259 = pd.DataFrame([{"ora": r["ora"], **{z: round(r[z], 2) for z in pun259_zone()},
+                                     "PUN": round(r["pun"], 2),
+                                     "spread_max_min": round(r["spread_max_min"], 2)} for r in ora259])
+            st.dataframe(dft259, use_container_width=True, hide_index=True)
+            st.download_button("⬇️ Export CSV PUN orario",
+                               data=dft259.to_csv(index=False, sep=";").encode("utf-8"),
+                               file_name="pun_orario_zonale.csv", mime="text/csv",
+                               key="pun259_csv",
+                               help="Ora, prezzi zonali, PUN e spread max-min.")
+        st.caption("Nota: i pesi di default sono quote di consumo indicative (NORD 46%, CNOR 17%, CSUD 12%, SUD 8%, SICI 7%, SARD 10%) e vengono normalizzati a somma 1. Uno spread zona-PUN positivo significa che la zona paga piu' del PUN.")
 
 # Footer
 
