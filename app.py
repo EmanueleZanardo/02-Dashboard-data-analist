@@ -33063,6 +33063,174 @@ def r251_analisi_fasce(attiva_fasce, reattiva_fasce, fasce, tariffa_fascia1,
     return righe
 
 
+def be252_bilancio(fonti_kwh, usi_kwh):
+    """Bilancio energetico di sito: fonti (input) vs usi (output).
+
+    fonti_kwh/usi_kwh: dict {nome: kWh}. Ritorna totali, sbilancio
+    (fonti - usi), perdite % sulle fonti. Uno sbilancio positivo e'
+    perdite/errori di misura; negativo = usi non coperti dalle fonti.
+    NaN-safe; valori negativi o dict vuoti -> ValueError.
+    """
+    def _check(d, cosa):
+        if not isinstance(d, dict) or not d:
+            raise ValueError(f"{cosa}: serve un dict non vuoto")
+        vals = {}
+        for k, v in d.items():
+            nome = str(k)
+            x = float(v)
+            if x != x:
+                raise ValueError(f"{cosa}: NaN non ammesso ({nome})")
+            if x < 0:
+                raise ValueError(f"{cosa}: valore negativo ({nome})")
+            vals[nome] = x
+        return vals
+    fonti = _check(fonti_kwh, "fonti")
+    usi = _check(usi_kwh, "usi")
+    tot_in = sum(fonti.values())
+    tot_out = sum(usi.values())
+    sbil = tot_in - tot_out
+    return {
+        "totale_fonti_kwh": round(tot_in, 2),
+        "totale_usi_kwh": round(tot_out, 2),
+        "sbilancio_kwh": round(sbil, 2),
+        "perdite_pct": round(100.0 * sbil / tot_in, 2) if tot_in > 0 else 0.0,
+    }
+
+
+def be252_quote(serie_kwh):
+    """Quote percentuali di un dict {nome: kWh}, ordinate desc.
+
+    Ritorna lista di (nome, pct) con pct a 2 decimali; la somma e'
+    normalizzata a 100% anche con arrotondamenti.
+    """
+    if not isinstance(serie_kwh, dict) or not serie_kwh:
+        raise ValueError("serve un dict non vuoto")
+    vals = {}
+    for k, v in serie_kwh.items():
+        x = float(v)
+        if x != x:
+            raise ValueError("NaN non ammesso")
+        if x < 0:
+            raise ValueError("valore negativo")
+        vals[str(k)] = x
+    tot = sum(vals.values())
+    if tot <= 0:
+        raise ValueError("totale nullo: quote non definite")
+    righe = sorted(((n, 100.0 * x / tot) for n, x in vals.items()),
+                   key=lambda r: -r[1])
+    # normalizza l'ultima riga per chiudere a 100.00
+    somma = sum(round(p, 2) for _, p in righe)
+    nome_u, _ = righe[-1]
+    righe[-1] = (nome_u, round(righe[-1][1] + (100.0 - somma), 2))
+    return [{"nome": n, "quota_pct": round(p, 2)} for n, p in righe]
+
+
+def be252_intensita(totale_kwh, unita_prodotte):
+    """Intensita' energetica (EnPI): kWh per unita' prodotta.
+
+    Es. kWh/tonnellata, kWh/pezzo. Unita' non positive -> ValueError.
+    """
+    e = float(totale_kwh)
+    u = float(unita_prodotte)
+    if e != e or u != u:
+        raise ValueError("NaN non ammesso")
+    if e < 0:
+        raise ValueError("energia negativa")
+    if u <= 0:
+        raise ValueError("unita' prodotte non positive")
+    return round(e / u, 3)
+
+
+def be252_costo_ponderato(fonti_kwh, costi_eur_kwh):
+    """Costo energia per vettore e costo medio ponderato.
+
+    fonti_kwh: {nome: kWh}; costi_eur_kwh: {nome: EUR/kWh}. Le chiavi di
+    costi devono coprire tutte le fonti. Ritorna costo per vettore,
+    costo totale, costo medio EUR/kWh e quota di costo per vettore.
+    """
+    bil = be252_bilancio(fonti_kwh, {"__dummy__": 1.0})
+    if not isinstance(costi_eur_kwh, dict):
+        raise ValueError("costi deve essere un dict")
+    righe = []
+    for nome, kwh in fonti_kwh.items():
+        if nome not in costi_eur_kwh:
+            raise ValueError(f"costo mancante per la fonte '{nome}'")
+        c = float(costi_eur_kwh[nome])
+        if c != c:
+            raise ValueError("NaN non ammesso")
+        if c < 0:
+            raise ValueError(f"costo negativo per '{nome}'")
+        righe.append({"fonte": str(nome), "kwh": float(kwh),
+                      "costo_eur_kwh": c, "costo_eur": round(float(kwh) * c, 2)})
+    tot_kwh = bil["totale_fonti_kwh"]
+    tot_costo = round(sum(r["costo_eur"] for r in righe), 2)
+    for r in righe:
+        r["quota_costo_pct"] = (round(100.0 * r["costo_eur"] / tot_costo, 2)
+                                if tot_costo > 0 else 0.0)
+    righe.sort(key=lambda r: -r["costo_eur"])
+    return {
+        "righe": righe,
+        "costo_totale_eur": tot_costo,
+        "costo_medio_eur_kwh": (round(tot_costo / tot_kwh, 4)
+                                if tot_kwh > 0 else 0.0),
+    }
+
+
+def be252_link_sankey(fonti_kwh, usi_kwh):
+    """Nodi e link per il diagramma di Sankey del bilancio.
+
+    Allocazione proporzionale che conserva l'energia su ogni nodo:
+    ogni fonte alimenta ogni uso in proporzione (fonte/tot_in x uso/tot_in
+    quando lo sbilancio e' >= 0); la quota residua va al nodo
+    'Perdite / errori di misura'. Se gli usi superano le fonti, il
+    deficit e' rappresentato come sorgente 'Deficit (usi oltre le fonti)'.
+    Valori < 0.01 kWh scartati.
+    """
+    bil = be252_bilancio(fonti_kwh, usi_kwh)
+    tot_in = bil["totale_fonti_kwh"]
+    tot_out = bil["totale_usi_kwh"]
+    sbil = bil["sbilancio_kwh"]
+    nomi_fonti = [str(k) for k in fonti_kwh]
+    nomi_usi = [str(k) for k in usi_kwh]
+    labels = nomi_fonti + nomi_usi
+    idx = {n: i for i, n in enumerate(labels)}
+    fonti_vals = {str(k): float(v) for k, v in fonti_kwh.items()}
+    usi_vals = {str(k): float(v) for k, v in usi_kwh.items()}
+    sources, targets, values = [], [], []
+
+    def _link(s, t, val):
+        if val >= 0.01:
+            sources.append(idx[s])
+            targets.append(idx[t])
+            values.append(round(val, 2))
+
+    if sbil >= 0:
+        denom = tot_in if tot_in > 0 else 1.0
+        for nf in nomi_fonti:
+            for nu in nomi_usi:
+                _link(nf, nu, fonti_vals[nf] * usi_vals[nu] / denom)
+        if sbil >= 0.01:
+            nodo_perd = "Perdite / errori di misura"
+            labels.append(nodo_perd)
+            idx[nodo_perd] = len(labels) - 1
+            for nf in nomi_fonti:
+                _link(nf, nodo_perd,
+                      fonti_vals[nf] * sbil / tot_in if tot_in > 0 else 0.0)
+    else:
+        denom = tot_out if tot_out > 0 else 1.0
+        deficit = -sbil
+        nodo_def = "Deficit (usi oltre le fonti)"
+        labels.append(nodo_def)
+        idx[nodo_def] = len(labels) - 1
+        for nf in nomi_fonti:
+            for nu in nomi_usi:
+                _link(nf, nu, fonti_vals[nf] * usi_vals[nu] / denom)
+        for nu in nomi_usi:
+            _link(nodo_def, nu, deficit * usi_vals[nu] / denom)
+    return {"labels": labels, "source": sources, "target": targets,
+            "value": values, "sbilancio_kwh": sbil}
+
+
 
 if workspace == _('ws1'):
     st.markdown(f"<h1>{_('ws1')}</h1>", unsafe_allow_html=True)
@@ -33705,7 +33873,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -56471,6 +56639,114 @@ elif workspace == _('ws8'):
                 mime="text/csv", key="r251_csv",
                 help="Analisi per fascia: energie, cosphi, eccedenze reattiva e penali mensili.")
             st.caption("Nota regolatoria: le penali si applicano ai prelievi con potenza disponibile oltre 16,5 kW, per periodo di riferimento mensile e per fascia; la reattiva si misura con contatori dedicati. Verificare soglie e corrispettivi sulla delibera ARERA vigente.")
+
+
+    with tab252:
+        titolo252 = edu("Bilancio energetico di sito", "Il bilancio energetico confronta le fonti (energia in ingresso: rete, fotovoltaico, cogenerazione...) con gli usi (processo, HVAC, illuminazione...). La differenza sono perdite di trasformazione/distribuzione o errori di misura. E' lo strumento base di ogni diagnosi energetica (audit).")
+        st.markdown(f"<h1>\U00002696 {titolo252}</h1>", unsafe_allow_html=True)
+        st.caption("Da dove viene l'energia e dove finisce: fonti, usi, perdite, costo medio e intensita' energetica del sito.")
+        banner_demo("calcolo sintetico (Mock): inserire fonti e usi mensili del sito — i costi \u20ac/kWh sono INDICATIVI")
+        mesi252 = ["Gen", "Feb", "Mar", "Apr", "Mag", "Giu", "Lug", "Ago", "Set", "Ott", "Nov", "Dic"]
+        m252 = st.selectbox("Mese di riferimento", mesi252, index=9, key="b252_mese",
+                            help="Mese a cui si riferisce il bilancio.")
+        st.markdown("**Fonti energetiche (input)**")
+        df_fonti252 = st.data_editor(
+            pd.DataFrame({"Fonte": ["Rete", "Fotovoltaico", "Cogenerazione"],
+                          "kWh": [120000.0, 30000.0, 20000.0],
+                          "\u20ac/kWh": [0.28, 0.09, 0.16]}),
+            num_rows="dynamic", key="b252_fonti",
+            help="Aggiungere righe per ogni vettore in ingresso (es. teleriscaldamento, biomassa).")
+        st.markdown("**Usi energetici (output)**")
+        df_usi252 = st.data_editor(
+            pd.DataFrame({"Uso": ["Processo produttivo", "HVAC", "Illuminazione", "Ausiliari"],
+                          "kWh": [100000.0, 40000.0, 15000.0, 10000.0]}),
+            num_rows="dynamic", key="b252_usi",
+            help="Aggiungere righe per ogni uso finale del sito.")
+        nomi_f252 = [str(x).strip() for x in df_fonti252["Fonte"].tolist()]
+        nomi_u252 = [str(x).strip() for x in df_usi252["Uso"].tolist()]
+        if any(n == "" for n in nomi_f252 + nomi_u252):
+            st.error("Ogni riga deve avere un nome non vuoto.")
+            st.stop()
+        if len(set(nomi_f252)) != len(nomi_f252) or len(set(nomi_u252)) != len(nomi_u252):
+            st.error("Nomi duplicati: ogni fonte/uso deve comparire una sola volta.")
+            st.stop()
+        fonti252 = {n: float(k) for n, k in zip(nomi_f252, df_fonti252["kWh"].tolist())}
+        usi252 = {n: float(k) for n, k in zip(nomi_u252, df_usi252["kWh"].tolist())}
+        costi252 = {n: float(c) for n, c in zip(nomi_f252, df_fonti252["\u20ac/kWh"].tolist())}
+        try:
+            bil252 = be252_bilancio(fonti252, usi252)
+            cost252 = be252_costo_ponderato(fonti252, costi252)
+        except ValueError as e:
+            st.error(f"Dati non validi: {e}")
+            st.stop()
+        soglia252 = st.number_input("Soglia perdite accettabile (%)", min_value=0.0, max_value=20.0,
+                                    value=3.0, step=0.5, key="b252_soglia",
+                                    help="Sopra questa soglia il bilancio segnala perdite anomale.")
+        perd252 = bil252["perdite_pct"]
+        if perd252 < 0:
+            st.error(f"\U0001F534 Sbilancio negativo ({perd252:.2f}%): gli usi superano le fonti di {abs(bil252['sbilancio_kwh']):,.0f} kWh. Verificare i dati.")
+        elif perd252 <= soglia252:
+            st.success(f"\U0001F7E2 Bilancio chiuso: perdite {perd252:.2f}% entro la soglia del {soglia252:.1f}%.")
+        else:
+            st.warning(f"\U0001F7E1 Perdite {perd252:.2f}% sopra la soglia del {soglia252:.1f}%: possibili perdite di trasformazione/distribuzione o errori di misura.")
+        u1_252, u2_252 = st.columns(2)
+        unome252 = u1_252.text_input("Unita' di prodotto", value="t", key="b252_unita_nome",
+                                     help="Es. t (tonnellate), pezzi, m2: serve per l'intensita' energetica.")
+        uprod252 = u2_252.number_input(f"Unita' prodotte ({unome252 or 'u.m.'})", min_value=0.0,
+                                       value=5000.0, step=100.0, key="b252_unita",
+                                       help="Produzione del mese per calcolare l'EnPI.")
+        try:
+            enpi252 = be252_intensita(bil252["totale_fonti_kwh"], uprod252)
+            enpi_txt252 = f"{enpi252:,.3f}"
+        except ValueError:
+            enpi_txt252 = "n.d."
+        k1_252, k2_252, k3_252 = st.columns(3)
+        render_kpi("Fonti totali (kWh)", f"{bil252['totale_fonti_kwh']:,.0f}", k1_252)
+        render_kpi("Usi totali (kWh)", f"{bil252['totale_usi_kwh']:,.0f}", k2_252)
+        render_kpi("Perdite (%)", f"{perd252:.2f}%", k3_252)
+        k4_252, k5_252, k6_252 = st.columns(3)
+        render_kpi("Costo energia (\u20ac)", f"{cost252['costo_totale_eur']:,.0f}", k4_252)
+        render_kpi("Costo medio (\u20ac/kWh)", f"{cost252['costo_medio_eur_kwh']:.4f}", k5_252)
+        render_kpi(f"EnPI (kWh/{unome252 or 'u.m.'})", enpi_txt252, k6_252)
+        v1_252, v2_252 = st.columns(2)
+        view252 = v1_252.selectbox("Vista", ["Diagramma Sankey", "Barre fonti/usi"], key="b252_view")
+        norm252 = v2_252.checkbox("Mostra quote % invece dei kWh", value=False, key="b252_norm")
+        if view252 == "Diagramma Sankey" and st.checkbox("Mostra Sankey", value=True, key="b252_sankey_on"):
+            sk252 = be252_link_sankey(fonti252, usi252)
+            fig252 = go.Figure(data=[go.Sankey(
+                node=dict(pad=15, thickness=20, label=sk252["labels"]),
+                link=dict(source=sk252["source"], target=sk252["target"],
+                          value=sk252["value"]))])
+            fig252.update_layout(title_text=f"Bilancio energetico — {m252} (kWh)", font_size=12)
+            st.plotly_chart(fig252, use_container_width=True)
+        else:
+            qf252 = be252_quote(fonti252)
+            qu252 = be252_quote(usi252)
+            dfq252 = pd.DataFrame(
+                [{"voce": r["nome"], "quota_pct": r["quota_pct"], "tipo": "Fonte"} for r in qf252] +
+                [{"voce": r["nome"], "quota_pct": r["quota_pct"], "tipo": "Uso"} for r in qu252])
+            figb252 = px.bar(dfq252, x="voce", y="quota_pct" if norm252 else "quota_pct",
+                             color="tipo", barmode="group", text_auto=".1f",
+                             title="Quote % fonti vs usi" if norm252 else "Ripartizione fonti e usi (% sul rispettivo totale)")
+            st.plotly_chart(figb252, use_container_width=True)
+        with st.expander("Dettaglio costi per vettore"):
+            dfc252 = pd.DataFrame(cost252["righe"])
+            figc252 = px.bar(dfc252, x="fonte", y="costo_eur", text_auto=".0f",
+                             title="Costo mensile per vettore (\u20ac)", color="fonte")
+            st.plotly_chart(figc252, use_container_width=True)
+            st.dataframe(dfc252.style.format({"kwh": "{:,.0f}", "costo_eur_kwh": "{:.4f}",
+                                              "costo_eur": "{:,.2f}", "quota_costo_pct": "{:.2f}%"}),
+                         use_container_width=True)
+            st.caption(f"Costo medio ponderato: {cost252['costo_medio_eur_kwh']:.4f} \u20ac/kWh su {bil252['totale_fonti_kwh']:,.0f} kWh.")
+        righe_csv252 = ([{"sezione": "fonte", "voce": r["nome"], "kwh": fonti252[r["nome"]],
+                           "quota_pct": r["quota_pct"],
+                           "costo_eur": next(x["costo_eur"] for x in cost252["righe"] if x["fonte"] == r["nome"])}
+                          for r in be252_quote(fonti252)] +
+                         [{"sezione": "uso", "voce": r["nome"], "kwh": usi252[r["nome"]],
+                           "quota_pct": r["quota_pct"], "costo_eur": ""}
+                          for r in be252_quote(usi252)])
+        st.download_button("⬇️ Export CSV bilancio", pd.DataFrame(righe_csv252).to_csv(index=False, sep=";"),
+                           file_name=f"bilancio_energetico_{m252}.csv", mime="text/csv", key="b252_csv")
 
 # Footer
 
