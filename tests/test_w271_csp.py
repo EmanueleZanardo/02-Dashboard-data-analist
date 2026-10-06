@@ -37,6 +37,7 @@ APP = Path(__file__).parent.parent / "app.py"
 TITLE271 = "☀️ Solare termodinamico (CSP): business case"
 TITLE272 = "🌬️ Eolico offshore: business case"
 TITLE273 = "☀️ Fotovoltaico utility-scale: business case"
+TITLE274 = "⚛️ Nucleare SMR: business case"
 TITLE270 = "🔥 Geotermia profonda: business case"
 TITLE269 = "🌊 Idroelettrico run-of-river: business case"
 
@@ -65,12 +66,12 @@ def _registry():
 class TestRegistryTab271:
     def test_tab271_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 273
+        assert len(titoli) == len(dvars) == len(withs) == 274
         assert TITLE271 in titoli
         assert "tab271" in dvars
         assert "tab271" in withs
         assert titoli[dvars.index("tab271")] == TITLE271
-        assert titoli[-1] == TITLE273
+        assert titoli[-1] == TITLE274
         keys = re.findall(r'key="(cs271_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
@@ -81,6 +82,7 @@ class TestRegistryTab271:
         assert titoli[dvars.index("tab271")] == TITLE271
         assert titoli[dvars.index("tab272")] == TITLE272
         assert titoli[dvars.index("tab273")] == TITLE273
+        assert titoli[dvars.index("tab274")] == TITLE274
 
 
 class TestCs271Num:

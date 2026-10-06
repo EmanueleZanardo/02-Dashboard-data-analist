@@ -40,6 +40,7 @@ TITLE270 = "🔥 Geotermia profonda: business case"
 TITLE271 = "☀️ Solare termodinamico (CSP): business case"
 TITLE272 = "🌬️ Eolico offshore: business case"
 TITLE273 = "☀️ Fotovoltaico utility-scale: business case"
+TITLE274 = "⚛️ Nucleare SMR: business case"
 TITLE261 = "🏢 PUE & costo data center"
 
 # Parametri di riferimento usati nei test
@@ -62,12 +63,12 @@ def _registry():
 class TestRegistryTab262:
     def test_tab262_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 273
+        assert len(titoli) == len(dvars) == len(withs) == 274
         assert TITLE262 in titoli
         assert "tab262" in dvars
         assert "tab262" in withs
         assert titoli[dvars.index("tab262")] == TITLE262
-        assert titoli[-1] == TITLE273
+        assert titoli[-1] == TITLE274
         keys = re.findall(r'key="(gen262_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 10
 
@@ -86,6 +87,7 @@ class TestRegistryTab262:
         assert titoli[dvars.index("tab271")] == TITLE271
         assert titoli[dvars.index("tab272")] == TITLE272
         assert titoli[dvars.index("tab273")] == TITLE273
+        assert titoli[dvars.index("tab274")] == TITLE274
 
 
 class TestGen262Num:

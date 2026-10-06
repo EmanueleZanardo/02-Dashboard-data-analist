@@ -36,6 +36,7 @@ fv273_co2_evitata = _F["fv273_co2_evitata"]
 APP = Path(__file__).parent.parent / "app.py"
 
 TITLE273 = "☀️ Fotovoltaico utility-scale: business case"
+TITLE274 = "⚛️ Nucleare SMR: business case"
 TITLE272 = "🌬️ Eolico offshore: business case"
 TITLE271 = "☀️ Solare termodinamico (CSP): business case"
 
@@ -67,12 +68,12 @@ def _registry():
 class TestRegistryTab273:
     def test_tab273_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 273
+        assert len(titoli) == len(dvars) == len(withs) == 274
         assert TITLE273 in titoli
         assert "tab273" in dvars
         assert "tab273" in withs
         assert titoli[dvars.index("tab273")] == TITLE273
-        assert titoli[-1] == TITLE273
+        assert titoli[-1] == TITLE274
         keys = re.findall(r'key="(fv273_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
@@ -81,6 +82,7 @@ class TestRegistryTab273:
         assert titoli[dvars.index("tab271")] == TITLE271
         assert titoli[dvars.index("tab272")] == TITLE272
         assert titoli[dvars.index("tab273")] == TITLE273
+        assert titoli[dvars.index("tab274")] == TITLE274
 
 
 class TestFv273Num:
