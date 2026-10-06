@@ -32,6 +32,7 @@ av266_sensibilita_prezzo = _F["av266_sensibilita_prezzo"]
 APP = Path(__file__).parent.parent / "app.py"
 
 TITLE266 = "\U0001F33E\uFE0F Agrivoltaico: doppio reddito"
+TITLE267 = "🟢 Biometano: business case"
 TITLE265 = "\U0000267B\uFE0F Fine vita FV: revamping vs dismissione"
 
 HA = 10.0
@@ -60,12 +61,12 @@ def _registry():
 class TestRegistryTab266:
     def test_tab266_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 266
+        assert len(titoli) == len(dvars) == len(withs) == 267
         assert TITLE266 in titoli
         assert "tab266" in dvars
         assert "tab266" in withs
         assert titoli[dvars.index("tab266")] == TITLE266
-        assert titoli[-1] == TITLE266
+        assert titoli[-1] == TITLE267
         keys = re.findall(r'key="(av266_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
@@ -73,6 +74,7 @@ class TestRegistryTab266:
         _, titoli, dvars, _ = _registry()
         assert titoli[dvars.index("tab265")] == TITLE265
         assert titoli[dvars.index("tab266")] == TITLE266
+        assert titoli[dvars.index("tab267")] == TITLE267
 
 
 class TestAv266Num:

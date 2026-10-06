@@ -28,6 +28,7 @@ APP = Path(__file__).parent.parent / "app.py"
 TITLE264 = "\U0001F4DC Garanzie di origine: costo del 100% rinnovabile"
 TITLE265 = "♻️ Fine vita FV: revamping vs dismissione"
 TITLE266 = "🌾️ Agrivoltaico: doppio reddito"
+TITLE267 = "🟢 Biometano: business case"
 TITLE263 = "\U0001F697 Flotta aziendale: TCO diesel vs elettrico"
 
 CONSUMI_TXT = "85\n78\n82\n75\n70\n65\n60\n62\n68\n75\n82\n90"
@@ -46,12 +47,12 @@ def _registry():
 class TestRegistryTab264:
     def test_tab264_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 266
+        assert len(titoli) == len(dvars) == len(withs) == 267
         assert TITLE264 in titoli
         assert "tab264" in dvars
         assert "tab264" in withs
         assert titoli[dvars.index("tab264")] == TITLE264
-        assert titoli[-1] == TITLE266
+        assert titoli[-1] == TITLE267
         keys = re.findall(r'key="(go264_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
@@ -61,6 +62,7 @@ class TestRegistryTab264:
         assert titoli[dvars.index("tab264")] == TITLE264
         assert titoli[dvars.index("tab265")] == TITLE265
         assert titoli[dvars.index("tab266")] == TITLE266
+        assert titoli[dvars.index("tab267")] == TITLE267
 
 
 class TestGo264Num:
