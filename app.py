@@ -34519,6 +34519,150 @@ def pc260_cashflow(extra_capex_eur, risparmio_annuo_eur, anni, tasso_pct):
     return {"righe": righe, "payback_anni": payback, "van_eur": van,
             "capex_eur": capex}
 
+# ---------------------------------------------------------------------------
+# Tab 261 - PUE & costo data center
+# ---------------------------------------------------------------------------
+
+def pue261_num(x, nome):
+    """Valida uno scalare numerico: no bool, no NaN/inf."""
+    import math
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        raise ValueError(f"{nome}: deve essere un numero")
+    if math.isnan(x) or math.isinf(x):
+        raise ValueError(f"{nome}: NaN/inf non ammessi")
+    return float(x)
+
+
+def pue261_potenza_totale_kw(potenza_it_kw, pue):
+    """Potenza elettrica totale assorbita (kW) = potenza IT * PUE."""
+    pit = pue261_num(potenza_it_kw, "potenza_it_kw")
+    p = pue261_num(pue, "pue")
+    if pit < 0:
+        raise ValueError("potenza_it_kw: non puo' essere negativa")
+    if p < 1.0:
+        raise ValueError("pue: deve essere >= 1.0")
+    return pit * p
+
+
+def pue261_energia_annua_mwh(potenza_it_kw, pue, ore_annue=8760.0):
+    """Energia annua (MWh) = potenza totale (kW) * ore / 1000."""
+    ore = pue261_num(ore_annue, "ore_annue")
+    if ore <= 0:
+        raise ValueError("ore_annue: deve essere > 0")
+    return pue261_potenza_totale_kw(potenza_it_kw, pue) * ore / 1000.0
+
+
+def pue261_overhead_pct(pue):
+    """Quota % di energia non-IT sul totale = (PUE-1)/PUE * 100."""
+    p = pue261_num(pue, "pue")
+    if p < 1.0:
+        raise ValueError("pue: deve essere >= 1.0")
+    return (p - 1.0) / p * 100.0
+
+
+def pue261_costo_annuo_energia(energia_mwh, prezzo_eur_mwh):
+    """Costo annuo dell'energia (€) = energia (MWh) * prezzo (€/MWh)."""
+    e = pue261_num(energia_mwh, "energia_mwh")
+    pr = pue261_num(prezzo_eur_mwh, "prezzo_eur_mwh")
+    if e < 0:
+        raise ValueError("energia_mwh: non puo' essere negativa")
+    if pr < 0:
+        raise ValueError("prezzo_eur_mwh: non puo' essere negativo")
+    return e * pr
+
+
+def pue261_costo_totale_annuo(potenza_it_kw, pue, prezzo_eur_mwh,
+                              ore_annue=8760.0, costo_potenza_eur_kw_anno=0.0):
+    """Costo annuo totale (€): energia + eventuale corrispettivo di potenza
+    impegnata applicato alla potenza totale assorbita."""
+    cp = pue261_num(costo_potenza_eur_kw_anno, "costo_potenza_eur_kw_anno")
+    if cp < 0:
+        raise ValueError("costo_potenza_eur_kw_anno: non puo' essere negativo")
+    e = pue261_energia_annua_mwh(potenza_it_kw, pue, ore_annue)
+    pr = pue261_num(prezzo_eur_mwh, "prezzo_eur_mwh")
+    if pr < 0:
+        raise ValueError("prezzo_eur_mwh: non puo' essere negativo")
+    ptot = pue261_potenza_totale_kw(potenza_it_kw, pue)
+    return e * pr + ptot * cp
+
+
+def pue261_risparmio_miglioramento(potenza_it_kw, pue_da, pue_a,
+                                   prezzo_eur_mwh, ore_annue=8760.0):
+    """Risparmio annuo riducendo il PUE da pue_da a pue_a.
+
+    Restituisce {"risparmio_mwh", "risparmio_eur", "risparmio_pct"} dove
+    risparmio_pct e' la quota di energia risparmiata sul totale iniziale.
+    """
+    pda = pue261_num(pue_da, "pue_da")
+    pa = pue261_num(pue_a, "pue_a")
+    if pda < 1.0 or pa < 1.0:
+        raise ValueError("pue: deve essere >= 1.0")
+    if pa > pda:
+        raise ValueError("pue_a: deve essere <= pue_da (miglioramento)")
+    e_da = pue261_energia_annua_mwh(potenza_it_kw, pda, ore_annue)
+    e_a = pue261_energia_annua_mwh(potenza_it_kw, pa, ore_annue)
+    pr = pue261_num(prezzo_eur_mwh, "prezzo_eur_mwh")
+    if pr < 0:
+        raise ValueError("prezzo_eur_mwh: non puo' essere negativo")
+    risp_mwh = e_da - e_a
+    return {"risparmio_mwh": risp_mwh,
+            "risparmio_eur": risp_mwh * pr,
+            "risparmio_pct": (risp_mwh / e_da * 100.0) if e_da > 0 else 0.0}
+
+
+def pue261_emissioni_tco2(energia_mwh, fattore_t_mwh=0.35):
+    """Emissioni annue (tCO2) = energia (MWh) * fattore di emissione."""
+    e = pue261_num(energia_mwh, "energia_mwh")
+    f = pue261_num(fattore_t_mwh, "fattore_t_mwh")
+    if e < 0:
+        raise ValueError("energia_mwh: non puo' essere negativa")
+    if f < 0:
+        raise ValueError("fattore_t_mwh: non puo' essere negativo")
+    return e * f
+
+
+def pue261_giudizio(pue):
+    """Giudizio sintetico sul PUE (benchmark per data center moderni)."""
+    p = pue261_num(pue, "pue")
+    if p < 1.0:
+        raise ValueError("pue: deve essere >= 1.0")
+    if p < 1.3:
+        return "ottimo"
+    if p < 1.6:
+        return "buono"
+    if p < 2.0:
+        return "medio"
+    return "critico"
+
+
+def pue261_sensibilita(potenza_it_kw, pue_min, pue_max, passo,
+                       prezzo_eur_mwh, ore_annue=8760.0):
+    """Curva energia e costo annuo al variare del PUE.
+
+    Restituisce lista di dict {"pue", "energia_mwh", "costo_eur"}.
+    """
+    pmin = pue261_num(pue_min, "pue_min")
+    pmax = pue261_num(pue_max, "pue_max")
+    st_ = pue261_num(passo, "passo")
+    if pmin < 1.0:
+        raise ValueError("pue_min: deve essere >= 1.0")
+    if pmax < pmin:
+        raise ValueError("pue_max: deve essere >= pue_min")
+    if st_ <= 0:
+        raise ValueError("passo: deve essere > 0")
+    pr = pue261_num(prezzo_eur_mwh, "prezzo_eur_mwh")
+    if pr < 0:
+        raise ValueError("prezzo_eur_mwh: non puo' essere negativo")
+    righe = []
+    p = pmin
+    while p <= pmax + 1e-9:
+        e = pue261_energia_annua_mwh(potenza_it_kw, p, ore_annue)
+        righe.append({"pue": round(p, 3), "energia_mwh": e,
+                      "costo_eur": e * pr})
+        p += st_
+    return righe
+
+
 if workspace == _('ws1'):
     st.markdown(f"<h1>{_('ws1')}</h1>", unsafe_allow_html=True)
     banner_demo("simulatore strategico: margini, centrali e curve simulate")
@@ -35160,7 +35304,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256, tab257, tab258, tab259, tab260 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete", "🔥 Teleriscaldamento vs caldaia", "🌿 Clean spread (con CO₂)", "🇮🇹 PUN da prezzi zonali", "❄️ Pompa di calore vs caldaia"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256, tab257, tab258, tab259, tab260, tab261 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete", "🔥 Teleriscaldamento vs caldaia", "🌿 Clean spread (con CO₂)", "🇮🇹 PUN da prezzi zonali", "❄️ Pompa di calore vs caldaia", "🏢 PUE & costo data center"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -58736,6 +58880,89 @@ elif workspace == _('ws8'):
                                key="pc260_csv",
                                help="Cashflow differenziale annuo PDC vs caldaia.")
         st.caption("Nota: il costo CO2 sulla caldaia usa il fattore di emissione del gas 0,202 tCO2/MWh (PCI). Lo SCOP dipende da clima, temperatura di mandata e dimensionamento: valori 2,5-4 tipici per aria-acqua in clima padano.")
+
+    with tab261:
+        titolo261 = edu("PUE & costo data center", "Il PUE (Power Usage Effectiveness) e' il rapporto tra l'energia totale assorbita dal data center e quella usata dai soli server (IT). Un PUE di 1,5 significa che per ogni kWh utile ai server se ne consumano 0,5 in raffreddamento, UPS e ausiliari. Questa tab stima energia, costi ed emissioni a partire dal carico IT e mostra il risparmio ottenibile migliorando il PUE.")
+        st.markdown(f"<h1>🏢 {titolo261}</h1>", unsafe_allow_html=True)
+        st.caption("Energia, costi ed emissioni del data center a partire dal carico IT e dal PUE; risparmio da efficientamento.")
+        i1_261, i2_261, i3_261 = st.columns(3)
+        pit261 = i1_261.number_input("Potenza IT (kW)", min_value=0.0,
+                                    value=500.0, step=10.0, format="%.2f",
+                                    key="pue261_potenza_it",
+                                    help="Potenza assorbita dai soli apparati IT (server, storage, rete).")
+        pue261v = i2_261.number_input("PUE attuale", min_value=1.0,
+                                      max_value=3.0, value=1.5, step=0.05,
+                                      format="%.2f", key="pue261_pue",
+                                      help="Energia totale / energia IT. 1,0 = ideale.")
+        ore261 = i3_261.number_input("Ore di esercizio/anno", min_value=1.0,
+                                     max_value=8760.0, value=8760.0, step=1.0,
+                                     format="%.0f", key="pue261_ore")
+        i4_261, i5_261, i6_261, i7_261 = st.columns(4)
+        pre261 = i4_261.number_input("Prezzo energia (€/MWh)", min_value=0.0,
+                                     value=180.0, step=5.0, format="%.2f",
+                                     key="pue261_prezzo")
+        cpw261 = i5_261.number_input("Costo potenza (€/kW/anno)", min_value=0.0,
+                                     value=0.0, step=1.0, format="%.2f",
+                                     key="pue261_costo_potenza",
+                                     help="Eventuale corrispettivo di potenza impegnata applicato alla potenza totale.")
+        fe261 = i6_261.number_input("Fattore emissione (tCO2/MWh)", min_value=0.0,
+                                    max_value=2.0, value=0.35, step=0.01,
+                                    format="%.3f", key="pue261_fattore_co2",
+                                    help="Fattore di emissione del mix elettrico usato.")
+        tgt261 = i7_261.number_input("PUE target", min_value=1.0,
+                                     max_value=3.0, value=1.3, step=0.05,
+                                     format="%.2f", key="pue261_pue_target",
+                                     help="PUE obiettivo dopo gli interventi di efficientamento.")
+        try:
+            ptot261 = pue261_potenza_totale_kw(pit261, pue261v)
+            eann261 = pue261_energia_annua_mwh(pit261, pue261v, ore261)
+            cene261 = pue261_costo_annuo_energia(eann261, pre261)
+            ctot261 = pue261_costo_totale_annuo(pit261, pue261v, pre261, ore261, cpw261)
+            ovh261 = pue261_overhead_pct(pue261v)
+            emi261 = pue261_emissioni_tco2(eann261, fe261)
+            giu261 = pue261_giudizio(pue261v)
+            ris261 = pue261_risparmio_miglioramento(pit261, pue261v, tgt261, pre261, ore261)
+            sen261 = pue261_sensibilita(pit261, 1.0, 2.5, 0.05, pre261, ore261)
+        except ValueError as e261:
+            st.error(f"Dati non validi: {e261}")
+            st.stop()
+        k1_261, k2_261, k3_261, k4_261, k5_261, k6_261 = st.columns(6)
+        render_kpi("Potenza totale (kW)", f"{ptot261:,.0f}", k1_261)
+        render_kpi("Energia annua (MWh)", f"{eann261:,.0f}", k2_261)
+        render_kpi("Costo energia (€/anno)", f"{cene261:,.0f}", k3_261)
+        render_kpi("Costo totale (€/anno)", f"{ctot261:,.0f}", k4_261)
+        render_kpi("Overhead non-IT (%)", f"{ovh261:.1f}%", k5_261)
+        render_kpi("Emissioni (tCO2/anno)", f"{emi261:,.0f}", k6_261)
+        if giu261 == "ottimo":
+            st.success(f"PUE {pue261v:.2f}: livello ottimo (benchmark < 1,3).")
+        elif giu261 == "buono":
+            st.success(f"PUE {pue261v:.2f}: livello buono.")
+        elif giu261 == "medio":
+            st.warning(f"PUE {pue261v:.2f}: livello medio — c'e' margine di efficientamento.")
+        else:
+            st.error(f"PUE {pue261v:.2f}: livello critico — l'overhead non-IT supera il 50% del consumo.")
+        st.info(f"Portando il PUE da {pue261v:.2f} a {tgt261:.2f}: risparmio di {ris261['risparmio_mwh']:,.0f} MWh/anno ({ris261['risparmio_pct']:.1f}%), pari a {ris261['risparmio_eur']:,.0f} €/anno.")
+        st.markdown("**Costo annuo energia al variare del PUE (€)**")
+        ds261 = pd.DataFrame(sen261)
+        fig261 = px.line(ds261, x="pue", y="costo_eur",
+                         title="Sensibilita' al PUE (€/anno)",
+                         labels={"pue": "PUE", "costo_eur": "€/anno"})
+        fig261.add_vline(x=pue261v, line_dash="dash", line_color="red",
+                         annotation_text="PUE attuale")
+        st.plotly_chart(fig261, use_container_width=True)
+        with st.expander("Dettaglio sensibilita' ed export CSV"):
+            dfd261 = pd.DataFrame([{"pue": r["pue"],
+                                    "energia_mwh": round(r["energia_mwh"], 1),
+                                    "costo_eur": round(r["costo_eur"], 0)}
+                                   for r in sen261])
+            st.dataframe(dfd261, use_container_width=True, hide_index=True)
+            st.caption(f"Potenza totale: {ptot261:,.0f} kW — Overhead non-IT: {ovh261:.1f}% — Giudizio: {giu261}.")
+            st.download_button("⬇️ Export CSV sensibilita'",
+                               data=dfd261.to_csv(index=False, sep=";").encode("utf-8"),
+                               file_name="pue_sensibilita.csv", mime="text/csv",
+                               key="pue261_csv",
+                               help="Energia e costo annuo al variare del PUE.")
+        st.caption("Nota: il PUE dipende da clima, carico IT effettivo e progettazione del raffreddamento. Valori tipici: 1,1-1,4 per data center iperscalari moderni, 1,5-2,0 per sale CED tradizionali.")
 
 # Footer
 
