@@ -32879,6 +32879,191 @@ def cc250_sensibilita(dso_list, wacc_list, costo_acquisto_annuo_eur, dpo_gg,
 
 
 
+def r251_fattore_potenza(attiva_kwh, reattiva_kvarh):
+    """Fattore di potenza da energie mensili: tan(phi) = Q/P, cos(phi).
+
+    NaN-safe; energie negative o attiva nulla -> ValueError (cosphi non
+    definito senza potenza attiva).
+    """
+    p = float(attiva_kwh)
+    q = float(reattiva_kvarh)
+    if p != p or q != q:
+        raise ValueError("NaN non ammesso")
+    if p < 0:
+        raise ValueError("energia attiva negativa")
+    if q < 0:
+        raise ValueError("energia reattiva negativa")
+    if p <= 0:
+        raise ValueError("energia attiva nulla: cos(phi) non definito")
+    tan_phi = q / p
+    cos_phi = 1.0 / (1.0 + tan_phi * tan_phi) ** 0.5
+    return {
+        "attiva_kwh": p,
+        "reattiva_kvarh": q,
+        "tan_phi": round(tan_phi, 4),
+        "cos_phi": round(cos_phi, 4),
+    }
+
+
+def r251_eccedenze(attiva_kwh, reattiva_kvarh, soglia1_pct=33.0,
+                   soglia2_pct=75.0):
+    """Ripartisce la reattiva mensile in esente / fascia1 / fascia2.
+
+    fascia1: quota di Q tra soglia1% e soglia2% di P (penale base);
+    fascia2: quota di Q oltre soglia2% di P (penale maggiorata).
+    Default 33/75 = regola italiana (ARERA) per periodo di riferimento.
+    """
+    p = float(attiva_kwh)
+    q = float(reattiva_kvarh)
+    s1 = float(soglia1_pct)
+    s2 = float(soglia2_pct)
+    if p != p or q != q or s1 != s1 or s2 != s2:
+        raise ValueError("NaN non ammesso")
+    if p <= 0:
+        raise ValueError("energia attiva non positiva")
+    if q < 0:
+        raise ValueError("energia reattiva negativa")
+    if not (0 < s1 < s2):
+        raise ValueError("soglie non valide: serve 0 < soglia1 < soglia2")
+    lim1 = p * s1 / 100.0
+    lim2 = p * s2 / 100.0
+    q_f1 = max(0.0, min(q, lim2) - lim1)
+    q_f2 = max(0.0, q - lim2)
+    q_esente = max(0.0, q - q_f1 - q_f2)
+    return {
+        "attiva_kwh": p,
+        "reattiva_kvarh": q,
+        "q_esente_kvarh": round(q_esente, 2),
+        "q_fascia1_kvarh": round(q_f1, 2),
+        "q_fascia2_kvarh": round(q_f2, 2),
+    }
+
+
+def r251_penale(eccedenze, tariffa_fascia1_eur_kvarh,
+                tariffa_fascia2_eur_kvarh):
+    """Penale mensile: eccedenza fascia1 x tariffa1 + fascia2 x tariffa2."""
+    if not isinstance(eccedenze, dict):
+        raise ValueError("eccedenze deve essere un dict da r251_eccedenze")
+    try:
+        q1 = float(eccedenze["q_fascia1_kvarh"])
+        q2 = float(eccedenze["q_fascia2_kvarh"])
+    except (KeyError, TypeError, ValueError):
+        raise ValueError("dict eccedenze malformato")
+    t1 = float(tariffa_fascia1_eur_kvarh)
+    t2 = float(tariffa_fascia2_eur_kvarh)
+    if t1 != t1 or t2 != t2:
+        raise ValueError("NaN non ammesso")
+    if t1 < 0 or t2 < 0:
+        raise ValueError("tariffe negative")
+    p1 = q1 * t1
+    p2 = q2 * t2
+    return {
+        "penale_fascia1_eur": round(p1, 2),
+        "penale_fascia2_eur": round(p2, 2),
+        "penale_totale_eur": round(p1 + p2, 2),
+    }
+
+
+def r251_rifasamento(attiva_kwh, reattiva_kvarh, cosphi_target,
+                     ore_mese=730.0):
+    """Batteria di condensatori (kVAr) per raggiungere cosphi_target.
+
+    Stima su profilo piatto: potenza media = energia / ore_mese, poi
+    Qc = P_media * (tan(phi) - tan(phi_target)). Per profili variabili il
+    dimensionamento va fatto sul picco di reattiva, non sulla media.
+    """
+    import math
+    p = float(attiva_kwh)
+    q = float(reattiva_kvarh)
+    tgt = float(cosphi_target)
+    ore = float(ore_mese)
+    if p != p or q != q or tgt != tgt or ore != ore:
+        raise ValueError("NaN non ammesso")
+    if p <= 0:
+        raise ValueError("energia attiva non positiva")
+    if q < 0:
+        raise ValueError("energia reattiva negativa")
+    if not (0.0 < tgt < 1.0):
+        raise ValueError("cosphi target fuori (0, 1)")
+    if ore <= 0:
+        raise ValueError("ore mese non positive")
+    p_med = p / ore
+    q_med = q / ore
+    tan_phi = q_med / p_med if p_med > 0 else 0.0
+    tan_tgt = math.sqrt(1.0 - tgt * tgt) / tgt
+    kvar = max(0.0, p_med * (tan_phi - tan_tgt))
+    return {
+        "potenza_media_kw": round(p_med, 2),
+        "reattiva_media_kvar": round(q_med, 2),
+        "cosphi_target": tgt,
+        "batteria_kvar": round(kvar, 2),
+    }
+
+
+def r251_payback(penale_annua_eur, batteria_kvar, costo_batteria_eur_kvar):
+    """Payback della batteria di rifasamento contro le penali annue evitate."""
+    pen = float(penale_annua_eur)
+    kvar = float(batteria_kvar)
+    costo = float(costo_batteria_eur_kvar)
+    if pen != pen or kvar != kvar or costo != costo:
+        raise ValueError("NaN non ammesso")
+    if pen < 0:
+        raise ValueError("penale annua negativa")
+    if kvar < 0:
+        raise ValueError("batteria negativa")
+    if costo < 0:
+        raise ValueError("costo batteria negativo")
+    investimento = kvar * costo
+    if pen <= 0 or kvar <= 0:
+        return {
+            "investimento_eur": round(investimento, 2),
+            "risparmio_annuo_eur": round(pen, 2),
+            "payback_mesi": None,
+            "conviene": False,
+        }
+    mesi = investimento / pen * 12.0
+    return {
+        "investimento_eur": round(investimento, 2),
+        "risparmio_annuo_eur": round(pen, 2),
+        "payback_mesi": round(mesi, 1),
+        "conviene": mesi <= 60.0,
+    }
+
+
+def r251_analisi_fasce(attiva_fasce, reattiva_fasce, fasce, tariffa_fascia1,
+                       tariffa_fascia2, soglia1_pct=33.0, soglia2_pct=75.0):
+    """Analisi per fascia oraria: cosphi, eccedenze e penale per fascia.
+
+    attiva_fasce/reattiva_fasce: liste di kWh/kVArh; fasce: nomi (es. F1..F3).
+    Ritorna una riga per fascia.
+    """
+    att = [float(x) for x in attiva_fasce]
+    rea = [float(x) for x in reattiva_fasce]
+    nomi = [str(x) for x in fasce]
+    if not att or not rea or not nomi:
+        raise ValueError("liste vuote")
+    if not (len(att) == len(rea) == len(nomi)):
+        raise ValueError("liste di lunghezza diversa")
+    righe = []
+    for nome, p, q in zip(nomi, att, rea):
+        fp = r251_fattore_potenza(p, q)
+        ecc = r251_eccedenze(p, q, soglia1_pct, soglia2_pct)
+        pen = r251_penale(ecc, tariffa_fascia1, tariffa_fascia2)
+        righe.append({
+            "fascia": nome,
+            "attiva_kwh": p,
+            "reattiva_kvarh": q,
+            "tan_phi": fp["tan_phi"],
+            "cos_phi": fp["cos_phi"],
+            "q_esente_kvarh": ecc["q_esente_kvarh"],
+            "q_fascia1_kvarh": ecc["q_fascia1_kvarh"],
+            "q_fascia2_kvarh": ecc["q_fascia2_kvarh"],
+            "penale_eur": pen["penale_totale_eur"],
+        })
+    return righe
+
+
+
 if workspace == _('ws1'):
     st.markdown(f"<h1>{_('ws1')}</h1>", unsafe_allow_html=True)
     banner_demo("simulatore strategico: margini, centrali e curve simulate")
@@ -33520,7 +33705,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -56193,6 +56378,99 @@ elif workspace == _('ws8'):
                 mime="text/csv", key="t250_csv",
                 help="Griglia di sensibilita' del costo del circolante: DSO x WACC con DPO e volumi impostati.")
             st.caption("Modello semplificato: fabbisogno medio = costo acquisto annuo x ciclo/365, costo finanziario = fabbisogno x WACC. Ridurre il DSO (addebito diretto, solleciti) o allungare il DPO (negoziazione fornitori) libera capitale; il factoring pro-soluto abbatte il DSO ma ha una commissione da confrontare con il WACC risparmiato.")
+
+    with tab251:
+        titolo251 = edu("Energia reattiva & penali cosphi", "In Italia l'energia reattiva oltre il 33% dell'attiva (per fascia, nel mese) paga una penale; oltre il 75% la penale e' maggiorata (regola ARERA per i prelievi in MT/BT oltre 16,5 kW). La tab calcola cosphi per fascia, le eccedenze nelle due fasce di penale, il costo mensile e dimensiona la batteria di rifasamento con il payback contro le penali evitate.")
+        st.markdown(f"<h1>\U0001F9F2 {titolo251}</h1>", unsafe_allow_html=True)
+        st.caption("Quanto costa il cattivo fattore di potenza: cosphi per fascia, eccedenze reattiva, penali mensili e batteria di rifasamento.")
+        banner_demo("calcolo sintetico (Mock): inserire le energie attiva/reattiva mensili per fascia dalla bolletta — tariffe e soglie sono INDICATIVE, verificare sulla delibera ARERA vigente")
+        st.markdown("**Energie mensili per fascia (dalla bolletta)**")
+        f1_251, f2_251, f3_251 = st.columns(3)
+        p1_251 = f1_251.number_input("F1 — attiva (kWh)", min_value=0.0, value=40000.0, step=1000.0, key="r251_p1",
+                                     help="Energia attiva mensile in fascia F1.")
+        q1_251 = f1_251.number_input("F1 — reattiva (kVArh)", min_value=0.0, value=18000.0, step=500.0, key="r251_q1",
+                                     help="Energia reattiva mensile in fascia F1.")
+        p2_251 = f2_251.number_input("F2 — attiva (kWh)", min_value=0.0, value=30000.0, step=1000.0, key="r251_p2")
+        q2_251 = f2_251.number_input("F2 — reattiva (kVArh)", min_value=0.0, value=14000.0, step=500.0, key="r251_q2")
+        p3_251 = f3_251.number_input("F3 — attiva (kWh)", min_value=0.0, value=60000.0, step=1000.0, key="r251_p3")
+        q3_251 = f3_251.number_input("F3 — reattiva (kVArh)", min_value=0.0, value=28000.0, step=500.0, key="r251_q3")
+        with st.expander("Tariffe penali e soglie (editabili — default INDICATIVI)"):
+            t1_251, t2_251, s1_251, s2_251 = st.columns(4)
+            tar1_251 = t1_251.number_input("Penale fascia 33-75% (\u20ac/kVArh)", min_value=0.0, value=0.046, step=0.001, format="%.3f", key="r251_tar1",
+                                           help="Corrispettivo per kVArh di reattiva tra soglia1 e soglia2.")
+            tar2_251 = t2_251.number_input("Penale fascia >75% (\u20ac/kVArh)", min_value=0.0, value=0.061, step=0.001, format="%.3f", key="r251_tar2",
+                                           help="Corrispettivo per kVArh di reattiva oltre soglia2.")
+            sog1_251 = s1_251.number_input("Soglia 1 (% di P)", min_value=0.1, max_value=90.0, value=33.0, step=1.0, key="r251_s1")
+            sog2_251 = s2_251.number_input("Soglia 2 (% di P)", min_value=1.0, max_value=200.0, value=75.0, step=1.0, key="r251_s2")
+            st.caption("Default indicativi coerenti con i corrispettivi ARERA recenti: verificare sempre sulla delibera vigente e sulla propria bolletta.")
+        righe251 = r251_analisi_fasce([p1_251, p2_251, p3_251], [q1_251, q2_251, q3_251],
+                                      ["F1", "F2", "F3"], tar1_251, tar2_251, sog1_251, sog2_251)
+        ptot251 = p1_251 + p2_251 + p3_251
+        qtot251 = q1_251 + q2_251 + q3_251
+        pen_tot251 = sum(r["penale_eur"] for r in righe251)
+        ecc_tot251 = sum(r["q_fascia1_kvarh"] + r["q_fascia2_kvarh"] for r in righe251)
+        if ptot251 > 0:
+            cosg251 = r251_fattore_potenza(ptot251, qtot251)["cos_phi"]
+            if pen_tot251 <= 0:
+                st.success(f"\U0001F7E2 cos\u03c6 globale {cosg251:.4f}: nessuna eccedenza, nessuna penale. Fattore di potenza in regola.")
+            elif any(r["q_fascia2_kvarh"] > 0 for r in righe251):
+                st.error(f"\U0001F534 cos\u03c6 globale {cosg251:.4f}: reattiva oltre il {sog2_251:.0f}% dell'attiva in almeno una fascia — penale maggiorata. Rifasamento consigliato.")
+            else:
+                st.warning(f"\U0001F7E1 cos\u03c6 globale {cosg251:.4f}: eccedenze entro la prima fascia di penale ({pen_tot251:,.2f} \u20ac/mese). Valutare il rifasamento.")
+        else:
+            cosg251 = None
+            st.info("Inserire le energie attive mensili per calcolare il fattore di potenza.")
+        k1_251, k2_251, k3_251, k4_251 = st.columns(4)
+        render_kpi("cos\u03c6 globale", f"{cosg251:.4f}" if cosg251 is not None else "n.d.", k1_251)
+        render_kpi("Penale mensile (\u20ac)", f"{pen_tot251:,.2f}", k2_251)
+        render_kpi("Reattiva in eccesso (kVArh)", f"{ecc_tot251:,.0f}", k3_251)
+        render_kpi("tan\u03c6 globale", f"{(qtot251 / ptot251):.4f}" if ptot251 > 0 else "n.d.", k4_251)
+        df251 = pd.DataFrame(righe251)
+        fig251 = px.bar(df251, x="fascia", y="penale_eur", text_auto=".2f",
+                        title="Penale mensile per fascia (\u20ac)", color="fascia")
+        st.plotly_chart(fig251, use_container_width=True)
+        st.dataframe(df251.style.format({"attiva_kwh": "{:,.0f}", "reattiva_kvarh": "{:,.0f}",
+                                         "tan_phi": "{:.4f}", "cos_phi": "{:.4f}",
+                                         "q_esente_kvarh": "{:,.0f}", "q_fascia1_kvarh": "{:,.0f}",
+                                         "q_fascia2_kvarh": "{:,.0f}", "penale_eur": "{:,.2f}"}),
+                      use_container_width=True)
+        with st.expander("Batteria di rifasamento e payback"):
+            b1_251, b2_251, b3_251 = st.columns(3)
+            tgt251 = b1_251.slider("cos\u03c6 target", min_value=0.90, max_value=0.99, value=0.95, step=0.01, key="r251_tgt",
+                                   help="Obiettivo di rifasamento: 0,95 e' lo standard industriale.")
+            ore251 = b2_251.number_input("Ore di funzionamento / mese", min_value=1.0, max_value=744.0, value=730.0, step=10.0, key="r251_ore",
+                                         help="Serve per stimare la potenza media dal consumo mensile (profilo piatto).")
+            cbat251 = b3_251.number_input("Costo batteria (\u20ac/kVAr)", min_value=0.0, value=25.0, step=1.0, key="r251_cbat",
+                                          help="Costo installato indicativo della batteria di condensatori per kVAr.")
+            if ptot251 > 0:
+                rif251 = r251_rifasamento(ptot251, qtot251, tgt251, ore251)
+                pb251 = r251_payback(pen_tot251 * 12.0, rif251["batteria_kvar"], cbat251)
+                kr1_251, kr2_251, kr3_251 = st.columns(3)
+                render_kpi("Batteria consigliata (kVAr)", f"{rif251['batteria_kvar']:,.1f}", kr1_251)
+                render_kpi("Investimento (\u20ac)", f"{pb251['investimento_eur']:,.0f}", kr2_251)
+                render_kpi("Payback", f"{pb251['payback_mesi']:,.1f} mesi" if pb251["payback_mesi"] is not None else "mai", kr3_251)
+                if pb251["conviene"]:
+                    st.success(f"\U0001F4A1 Rifasamento conveniente: payback {pb251['payback_mesi']:,.1f} mesi contro penali da {pen_tot251 * 12.0:,.0f} \u20ac/anno.")
+                elif pb251["payback_mesi"] is not None:
+                    st.info(f"Payback {pb251['payback_mesi']:,.1f} mesi (> 5 anni): il rifasamento si ripaga solo con penali piu' alte o costi batteria minori.")
+                else:
+                    st.info("Nessuna penale da evitare: il rifasamento non si ripaga.")
+                st.caption(f"Stima su profilo piatto: potenza media {rif251['potenza_media_kw']:,.1f} kW, reattiva media {rif251['reattiva_media_kvar']:,.1f} kVAr. Con profilo variabile dimensionare la batteria sul picco di reattiva, non sulla media.")
+            curve251 = [{"cosphi_target": round(t / 100.0, 2),
+                         "batteria_kvar": r251_rifasamento(ptot251 if ptot251 > 0 else 1.0,
+                                                          qtot251, t / 100.0, ore251)["batteria_kvar"]}
+                        for t in range(90, 100)]
+            figc251 = px.line(curve251, x="cosphi_target", y="batteria_kvar",
+                              title="Batteria necessaria (kVAr) al variare del cos\u03c6 target",
+                              markers=True)
+            st.plotly_chart(figc251, use_container_width=True)
+            st.download_button(
+                "Scarica CSV analisi",
+                data=df251.to_csv(index=False, sep=";").encode("utf-8"),
+                file_name="energia_reattiva_cosphi.csv",
+                mime="text/csv", key="r251_csv",
+                help="Analisi per fascia: energie, cosphi, eccedenze reattiva e penali mensili.")
+            st.caption("Nota regolatoria: le penali si applicano ai prelievi con potenza disponibile oltre 16,5 kW, per periodo di riferimento mensile e per fascia; la reattiva si misura con contatori dedicati. Verificare soglie e corrispettivi sulla delibera ARERA vigente.")
 
 # Footer
 
