@@ -31,6 +31,7 @@ TITLE266 = "🌾️ Agrivoltaico: doppio reddito"
 TITLE267 = "🟢 Biometano: business case"
 TITLE268 = "🌬️ Eolico onshore: business case"
 TITLE269 = "🌊 Idroelettrico run-of-river: business case"
+TITLE270 = "🔥 Geotermia profonda: business case"
 TITLE263 = "\U0001F697 Flotta aziendale: TCO diesel vs elettrico"
 
 CONSUMI_TXT = "85\n78\n82\n75\n70\n65\n60\n62\n68\n75\n82\n90"
@@ -49,12 +50,12 @@ def _registry():
 class TestRegistryTab264:
     def test_tab264_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 269
+        assert len(titoli) == len(dvars) == len(withs) == 270
         assert TITLE264 in titoli
         assert "tab264" in dvars
         assert "tab264" in withs
         assert titoli[dvars.index("tab264")] == TITLE264
-        assert titoli[-1] == TITLE269
+        assert titoli[-1] == TITLE270
         keys = re.findall(r'key="(go264_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
@@ -67,6 +68,7 @@ class TestRegistryTab264:
         assert titoli[dvars.index("tab267")] == TITLE267
         assert titoli[dvars.index("tab268")] == TITLE268
         assert titoli[dvars.index("tab269")] == TITLE269
+        assert titoli[dvars.index("tab270")] == TITLE270
 
 
 class TestGo264Num:

@@ -26,13 +26,13 @@ class TestRegistryTab237:
         src = APP.read_text(encoding="utf-8")
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
-        assert len(titoli) == 269
+        assert len(titoli) == 270
         assert "⚡ Flessibilità implicita" in titoli
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         assert "tab237" in dvars
         withs = re.findall(r"    with (tab\d+):", src)
         assert "tab237" in withs
-        assert len(withs) == len(dvars) == 269
+        assert len(withs) == len(dvars) == 270
         keys = re.findall(r'key="(t237_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 10
 
@@ -40,7 +40,7 @@ class TestRegistryTab237:
         src = APP.read_text(encoding="utf-8")
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
-        assert titoli[-1] == "🌊 Idroelettrico run-of-river: business case"
+        assert titoli[-1] == "🔥 Geotermia profonda: business case"
 
 
 class TestPureFlessibilitaImplicita:

@@ -35,6 +35,7 @@ id269_co2_evitata = _F["id269_co2_evitata"]
 APP = Path(__file__).parent.parent / "app.py"
 
 TITLE269 = "🌊 Idroelettrico run-of-river: business case"
+TITLE270 = "🔥 Geotermia profonda: business case"
 TITLE268 = "🌬️ Eolico onshore: business case"
 
 POT = 2.0
@@ -62,12 +63,12 @@ def _registry():
 class TestRegistryTab269:
     def test_tab269_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 269
+        assert len(titoli) == len(dvars) == len(withs) == 270
         assert TITLE269 in titoli
         assert "tab269" in dvars
         assert "tab269" in withs
         assert titoli[dvars.index("tab269")] == TITLE269
-        assert titoli[-1] == TITLE269
+        assert titoli[-1] == TITLE270
         keys = re.findall(r'key="(id269_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
@@ -75,6 +76,7 @@ class TestRegistryTab269:
         _, titoli, dvars, _ = _registry()
         assert titoli[dvars.index("tab268")] == TITLE268
         assert titoli[dvars.index("tab269")] == TITLE269
+        assert titoli[dvars.index("tab270")] == TITLE270
 
 
 class TestId269Num:
