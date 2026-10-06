@@ -33535,6 +33535,160 @@ def wh254_sensitivita_pdc(prezzi_gas_list, ore_list, calore_scarico_kw, cop,
     return righe
 
 
+def _cg255_num(x, nome):
+    """Valida uno scalare numerico: no bool, no NaN/inf."""
+    import math
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        raise ValueError(f"{nome}: deve essere un numero")
+    if math.isnan(x) or math.isinf(x):
+        raise ValueError(f"{nome}: NaN/inf non ammessi")
+    return float(x)
+
+
+def cg255_parsa_prelievi(testo):
+    """Parsa l'area di testo: un valore Smc/giorno per riga, righe vuote ignorate.
+
+    Accetta la virgola come separatore decimale. Riga non numerica -> ValueError
+    con il numero di riga; testo vuoto -> ValueError.
+    """
+    if testo is None or not str(testo).strip():
+        raise ValueError("nessun dato inserito")
+    vals = []
+    for i, riga in enumerate(str(testo).strip().splitlines(), start=1):
+        riga = riga.strip().replace(",", ".")
+        if not riga:
+            continue
+        try:
+            vals.append(float(riga))
+        except ValueError:
+            raise ValueError(f"riga {i}: '{riga}' non e' un numero")
+    if not vals:
+        raise ValueError("nessun valore valido trovato")
+    return vals
+
+
+def cg255_statistiche_prelievi(prelievi_smc_g):
+    """Statistiche dei prelievi giornalieri (Smc/giorno): max, p95, media, giorni.
+
+    p95 = percentile 95 con metodo nearest-rank. Lista vuota o negativi -> ValueError.
+    """
+    if not prelievi_smc_g:
+        raise ValueError("prelievi_smc_g: lista vuota")
+    vals = [_cg255_num(v, f"prelievi_smc_g[{i}]") for i, v in enumerate(prelievi_smc_g)]
+    if any(v < 0 for v in vals):
+        raise ValueError("prelievi_smc_g: valori negativi non ammessi")
+    s = sorted(vals)
+    n = len(s)
+    p95 = s[min(n - 1, int(0.95 * n))]
+    return {"giorni": n,
+            "prelievo_max_smc_g": round(max(vals), 2),
+            "prelievo_p95_smc_g": round(p95, 2),
+            "prelievo_medio_smc_g": round(sum(vals) / n, 2)}
+
+
+def cg255_costo_capacita(capacita_smc_g, tariffa_eur_smc_g_anno, giorni_fatturazione=365.0):
+    """Costo annuo della capacita' giornaliera prenotata (Smc/giorno).
+
+    costo = capacita x tariffa annua x giorni_fatturazione/365.
+    """
+    c = _cg255_num(capacita_smc_g, "capacita_smc_g")
+    t = _cg255_num(tariffa_eur_smc_g_anno, "tariffa_eur_smc_g_anno")
+    g = _cg255_num(giorni_fatturazione, "giorni_fatturazione")
+    if c < 0:
+        raise ValueError("capacita_smc_g: non puo' essere negativa")
+    if t < 0:
+        raise ValueError("tariffa_eur_smc_g_anno: non puo' essere negativa")
+    if not 0 < g <= 366:
+        raise ValueError("giorni_fatturazione: deve stare in (0, 366]")
+    return {"costo_capacita_eur_anno": round(c * t * g / 365.0, 2)}
+
+
+def cg255_sforamenti(prelievi_smc_g, capacita_smc_g):
+    """Sforamenti: giorni sopra capacita', volume eccedente totale, sforamento max."""
+    if not prelievi_smc_g:
+        raise ValueError("prelievi_smc_g: lista vuota")
+    vals = [_cg255_num(v, f"prelievi_smc_g[{i}]") for i, v in enumerate(prelievi_smc_g)]
+    c = _cg255_num(capacita_smc_g, "capacita_smc_g")
+    if c < 0:
+        raise ValueError("capacita_smc_g: non puo' essere negativa")
+    eccedenze = [max(0.0, v - c) for v in vals]
+    giorni = sum(1 for e in eccedenze if e > 0)
+    return {"giorni_sforamento": giorni,
+            "volume_eccedente_smc": round(sum(eccedenze), 2),
+            "sforamento_max_smc_g": round(max(eccedenze), 2),
+            "quota_giorni_sforamento_pct": round(giorni / len(vals) * 100.0, 2)}
+
+
+def cg255_costo_totale(prelievi_smc_g, capacita_smc_g, tariffa_eur_smc_g_anno,
+                      penale_eur_smc, giorni_fatturazione=365.0):
+    """Costo totale annuo = corrispettivo di capacita' + penali di sforamento.
+
+    penali = volume eccedente (Smc) x penale unitaria (€/Smc).
+    """
+    pen = _cg255_num(penale_eur_smc, "penale_eur_smc")
+    if pen < 0:
+        raise ValueError("penale_eur_smc: non puo' essere negativa")
+    cap = cg255_costo_capacita(capacita_smc_g, tariffa_eur_smc_g_anno, giorni_fatturazione)
+    sfo = cg255_sforamenti(prelievi_smc_g, capacita_smc_g)
+    penali = sfo["volume_eccedente_smc"] * pen
+    return {"costo_capacita_eur_anno": cap["costo_capacita_eur_anno"],
+            "giorni_sforamento": sfo["giorni_sforamento"],
+            "volume_eccedente_smc": sfo["volume_eccedente_smc"],
+            "penali_eur_anno": round(penali, 2),
+            "costo_totale_eur_anno": round(cap["costo_capacita_eur_anno"] + penali, 2)}
+
+
+def cg255_capacita_ottimale(prelievi_smc_g, tariffa_eur_smc_g_anno, penale_eur_smc,
+                           n_punti=50, giorni_fatturazione=365.0):
+    """Capacita' che minimizza il costo totale annuo.
+
+    Scorre n_punti capacita' candidate dal 50-esimo percentile al massimo dei
+    prelievi: il costo totale (capacita' crescente + penali decrescenti) e'
+    convesso a tratti, quindi il primo minimo trovato e' l'ottimo.
+    Penale 0 -> ottimo = p50 (mai pagare capacita' inutile).
+    """
+    if not prelievi_smc_g:
+        raise ValueError("prelievi_smc_g: lista vuota")
+    n_p = int(n_punti)
+    if n_p < 2:
+        raise ValueError("n_punti: almeno 2")
+    vals = sorted(_cg255_num(v, "prelievi_smc_g") for v in prelievi_smc_g)
+    lo, hi = vals[len(vals) // 2], vals[-1]
+    if hi <= 0:
+        return {"capacita_ottimale_smc_g": 0.0,
+                "costo_capacita_eur_anno": 0.0,
+                "penali_eur_anno": 0.0,
+                "costo_totale_eur_anno": 0.0,
+                "giorni_sforamento": 0,
+                "volume_eccedente_smc": 0.0}
+    best = None
+    for i in range(n_p):
+        cand = lo + (hi - lo) * i / (n_p - 1)
+        tot = cg255_costo_totale(prelievi_smc_g, cand, tariffa_eur_smc_g_anno,
+                                penale_eur_smc, giorni_fatturazione)
+        if best is None or tot["costo_totale_eur_anno"] < best["costo_totale_eur_anno"]:
+            best = dict(tot)
+            best["capacita_ottimale_smc_g"] = round(cand, 2)
+    return best
+
+
+def cg255_curva_costo(prelievi_smc_g, capacita_list, tariffa_eur_smc_g_anno,
+                     penale_eur_smc, giorni_fatturazione=365.0):
+    """Righe capacita' -> costi (per grafico e export): una riga per capacita' candidata."""
+    if not capacita_list:
+        raise ValueError("capacita_list: non puo' essere vuota")
+    righe = []
+    for c in capacita_list:
+        tot = cg255_costo_totale(prelievi_smc_g, float(c), tariffa_eur_smc_g_anno,
+                                penale_eur_smc, giorni_fatturazione)
+        righe.append({"capacita_smc_g": round(float(c), 2),
+                      "costo_capacita_eur_anno": tot["costo_capacita_eur_anno"],
+                      "penali_eur_anno": tot["penali_eur_anno"],
+                      "costo_totale_eur_anno": tot["costo_totale_eur_anno"],
+                      "giorni_sforamento": tot["giorni_sforamento"]})
+    return righe
+
+
 if workspace == _('ws1'):
     st.markdown(f"<h1>{_('ws1')}</h1>", unsafe_allow_html=True)
     banner_demo("simulatore strategico: margini, centrali e curve simulate")
@@ -34176,7 +34330,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -57208,6 +57362,99 @@ elif workspace == _('ws8'):
                            file_name="recupero_calore_sensitivita.csv", mime="text/csv", key="wh254_csv",
                            help="Matrice ore x prezzo gas del risparmio netto annuo.")
         st.caption("Nota: i rendimenti di recupero realistici sono 50-80% per scambiatori fumi/acqua, 60-90% per condense; le PdC su calore di scarto lavorano tipicamente con COP 3-6. Verificare sempre temperature e portate reali del flusso.")
+
+    with tab255:
+        titolo255 = edu("Capacità gas giornaliera", "Sul gas paghi anche la 'capacita' giornaliera': gli Smc/giorno prenotati sulla rete di trasporto. Prenotarne troppa e' un costo fisso sprecato, prenotarne troppo poca fa scattare le penali di sforamento. L'ottimo e' la capacita' che minimizza capacita' pagata + penali attese.")
+        st.markdown(f"<h1>\u26fd {titolo255}</h1>", unsafe_allow_html=True)
+        st.caption("Quanto vale la capacità giornaliera giusta? Corrispettivo di capacità vs penali di sforamento, con capacità ottimale e curva di costo.")
+        _CG255_ESEMPIO = ("1180\n1240\n1310\n1290\n1420\n1560\n1480\n1390\n1270\n1190\n"
+                          "1150\n1210\n1330\n1470\n1590\n1620\n1510\n1440\n1360\n1280\n"
+                          "1220\n1170\n1130\n1190\n1260\n1380\n1490\n1580\n1520\n1410")
+        ta255 = st.text_area("Prelievi giornalieri (Smc/giorno, uno per riga)", value=_CG255_ESEMPIO,
+                             height=150, key="cg255_prelievi",
+                             help="Incolla i prelievi giornalieri reali (da bolletta o telelettura), uno per riga. La virgola e' accettata come separatore decimale.")
+        try:
+            prelievi255 = cg255_parsa_prelievi(ta255)
+            stats255 = cg255_statistiche_prelievi(prelievi255)
+        except ValueError as e255:
+            st.error(f"Dati non validi: {e255}")
+            st.stop()
+        c1_255, c2_255, c3_255, c4_255 = st.columns(4)
+        cap255 = c1_255.slider("Capacit\u00e0 prenotata (Smc/giorno)",
+                               min_value=0.0,
+                               max_value=float(stats255["prelievo_max_smc_g"]) * 1.2,
+                               value=float(stats255["prelievo_p95_smc_g"]),
+                               step=10.0, key="cg255_capacita",
+                               help="Capacit\u00e0 giornaliera attualmente prenotata sul punto di riconsegna.")
+        tar255 = c2_255.number_input("Tariffa capacit\u00e0 (\u20ac/Smc/g/anno)", min_value=0.0, value=0.90,
+                                     step=0.05, format="%.2f", key="cg255_tariffa",
+                                     help="Corrispettivo unitario di capacit\u00e0 di trasporto (stima modificabile).")
+        pen255 = c3_255.number_input("Penale sforamento (\u20ac/Smc)", min_value=0.0, value=2.70,
+                                     step=0.10, format="%.2f", key="cg255_penale",
+                                     help="Penale per ogni Smc prelevato oltre la capacit\u00e0 prenotata.")
+        gio255 = c4_255.number_input("Giorni fatturazione capacit\u00e0", min_value=1.0, max_value=366.0,
+                                     value=365.0, step=1.0, key="cg255_giorni")
+        tot255 = cg255_costo_totale(prelievi255, cap255, tar255, pen255, gio255)
+        k1_255, k2_255, k3_255, k4_255, k5_255, k6_255 = st.columns(6)
+        render_kpi("Prelievo max (Smc/g)", f"{stats255['prelievo_max_smc_g']:,.0f}", k1_255)
+        render_kpi("Capacit\u00e0 prenotata (Smc/g)", f"{cap255:,.0f}", k2_255)
+        render_kpi("Giorni di sforamento", f"{tot255['giorni_sforamento']}", k3_255)
+        render_kpi("Costo capacit\u00e0 (\u20ac/anno)", f"{tot255['costo_capacita_eur_anno']:,.0f}", k4_255)
+        render_kpi("Penali (\u20ac/anno)", f"{tot255['penali_eur_anno']:,.0f}", k5_255)
+        render_kpi("Costo totale (\u20ac/anno)", f"{tot255['costo_totale_eur_anno']:,.0f}", k6_255)
+        df255 = pd.DataFrame({"giorno": range(1, len(prelievi255) + 1), "prelievo_smc_g": prelievi255})
+        fig255 = px.line(df255, x="giorno", y="prelievo_smc_g",
+                         title="Prelievi giornalieri vs capacit\u00e0 prenotata",
+                         labels={"giorno": "giorno", "prelievo_smc_g": "Smc/giorno"})
+        fig255.add_hline(y=cap255, line_dash="dash", line_color="green",
+                         annotation_text="capacit\u00e0 prenotata")
+        if st.checkbox("Evidenzia i giorni di sforamento", value=True, key="cg255_mostra_eccedenze"):
+            df_exc255 = df255[df255["prelievo_smc_g"] > cap255]
+            if not df_exc255.empty:
+                fig255.add_scatter(x=df_exc255["giorno"], y=df_exc255["prelievo_smc_g"],
+                                   mode="markers", marker=dict(color="red", size=8),
+                                   name="sforamento")
+        st.plotly_chart(fig255, use_container_width=True)
+        with st.expander("Capacit\u00e0 ottimale: minimizza il costo totale"):
+            n1_255, n2_255 = st.columns(2)
+            np255 = n1_255.slider("Punti di scansione", min_value=10, max_value=200, value=50,
+                                  step=10, key="cg255_n_punti")
+            arr255 = n2_255.selectbox("Arrotonda l'ottimo a (Smc/g)", [1, 10, 50, 100],
+                                      index=1, key="cg255_arrotonda")
+            if st.button("Calcola capacit\u00e0 ottimale", key="cg255_opt_run"):
+                opt255 = cg255_capacita_ottimale(prelievi255, tar255, pen255, np255, gio255)
+                cap_ott255 = round(opt255["capacita_ottimale_smc_g"] / arr255) * arr255
+                tot_ott255 = cg255_costo_totale(prelievi255, cap_ott255, tar255, pen255, gio255)
+                risp255 = tot255["costo_totale_eur_anno"] - tot_ott255["costo_totale_eur_anno"]
+                st.success(f"Capacit\u00e0 ottimale: {cap_ott255:,.0f} Smc/giorno \u2014 costo totale "
+                           f"{tot_ott255['costo_totale_eur_anno']:,.0f} \u20ac/anno (capacit\u00e0 "
+                           f"{tot_ott255['costo_capacita_eur_anno']:,.0f} \u20ac + penali "
+                           f"{tot_ott255['penali_eur_anno']:,.0f} \u20ac, "
+                           f"{tot_ott255['giorni_sforamento']} giorni di sforamento).")
+                if risp255 > 0:
+                    st.info(f"Risparmio vs capacit\u00e0 attuale ({cap255:,.0f} Smc/g): {risp255:,.0f} \u20ac/anno.")
+                elif risp255 < 0:
+                    st.warning("La capacit\u00e0 attuale costa meno dell'ottimo calcolato: verificare i parametri.")
+                else:
+                    st.info("La capacit\u00e0 attuale \u00e8 gi\u00e0 ottimale con questi parametri.")
+        st.markdown("**Curva di costo: totale annuo al variare della capacit\u00e0 prenotata**")
+        lo255 = stats255["prelievo_medio_smc_g"] * 0.5
+        hi255 = stats255["prelievo_max_smc_g"] * 1.1
+        cand255 = [lo255 + (hi255 - lo255) * i / 24 for i in range(25)]
+        righe255 = cg255_curva_costo(prelievi255, cand255, tar255, pen255, gio255)
+        dfc255 = pd.DataFrame(righe255)
+        figc255 = px.line(dfc255, x="capacita_smc_g",
+                          y=["costo_capacita_eur_anno", "penali_eur_anno", "costo_totale_eur_anno"],
+                          title="Costo annuo (\u20ac) vs capacit\u00e0 prenotata (Smc/giorno)",
+                          labels={"capacita_smc_g": "capacit\u00e0 (Smc/giorno)",
+                                  "value": "\u20ac/anno", "variable": "voce"})
+        st.plotly_chart(figc255, use_container_width=True)
+        st.download_button("\u2b07\ufe0f Export CSV curva di costo",
+                           data=dfc255.to_csv(index=False, sep=";").encode("utf-8"),
+                           file_name="capacita_gas_curva_costo.csv", mime="text/csv",
+                           key="cg255_csv",
+                           help="Costo capacit\u00e0 / penali / totale per capacit\u00e0 candidata.")
+        st.caption("Nota: tariffa e penale sono stime modificabili \u2014 usare i valori del proprio contratto di trasporto/distribuzione. Con penali molto alte l'ottimo tende al prelievo max; con penali basse conviene prenotare meno e pagare gli sforamenti.")
 
 # Footer
 
