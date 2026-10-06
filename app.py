@@ -36348,6 +36348,197 @@ def gt270_co2_evitata(mwh_annui, fattore_kg_mwh):
     return m * f / 1000.0
 
 
+def cs271_num(x, nome):
+    """Valida uno scalare numerico: no bool, no NaN/inf."""
+    import math
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        raise ValueError(f"{nome}: deve essere un numero")
+    if math.isnan(x) or math.isinf(x):
+        raise ValueError(f"{nome}: NaN/inf non ammessi")
+    return float(x)
+
+
+def cs271_int(n, nome="anni"):
+    """Valida un numero intero di anni >= 1."""
+    v = cs271_num(n, nome)
+    if v < 1 or v != int(v):
+        raise ValueError(f"{nome}: deve essere un intero >= 1")
+    return int(v)
+
+
+def cs271_produzione_annua(potenza_mw, fattore_carico_pct):
+    """MWh/anno da potenza nominale e fattore di carico.
+
+    L'accumulo termico (sali fusi) sposta la produzione nelle ore serali e
+    alza il fattore di carico rispetto al FV senza storage.
+    """
+    p = cs271_num(potenza_mw, "potenza_mw")
+    f = cs271_num(fattore_carico_pct, "fattore_carico_pct")
+    if p <= 0:
+        raise ValueError("potenza_mw: deve essere > 0")
+    if f <= 0 or f > 100:
+        raise ValueError("fattore_carico_pct: deve stare tra 0 e 100")
+    return p * 8760.0 * f / 100.0
+
+
+def cs271_quota_capex(capex, anni, tasso_pct):
+    """Quota annua del capex (rendita; tasso 0 => capex/anni)."""
+    cx = cs271_num(capex, "capex")
+    n = cs271_int(anni, "anni")
+    t = cs271_num(tasso_pct, "tasso_pct")
+    if cx < 0:
+        raise ValueError("capex: non puo' essere negativo")
+    if t < 0:
+        raise ValueError("tasso_pct: non puo' essere negativo")
+    if t == 0.0:
+        return cx / n
+    r = t / 100.0
+    return cx * r / (1.0 - (1.0 + r) ** -n)
+
+
+def cs271_costo_annuo(capex, anni, tasso_pct, oem_pct_capex, costo_acqua_annuo):
+    """Costo annuo totale: quota capex + O&M (% capex) + acqua/pulizia specchi.
+
+    L'acqua serve per il raffreddamento del ciclo termodinamico e il lavaggio
+    degli eliostati/parabole: voce tipica del CSP in zone aride.
+    Restituisce dict {"quota_capex", "oem", "acqua", "totale"}.
+    """
+    cx = cs271_num(capex, "capex")
+    o = cs271_num(oem_pct_capex, "oem_pct_capex")
+    ac = cs271_num(costo_acqua_annuo, "costo_acqua_annuo")
+    if not 0.0 <= o <= 100.0:
+        raise ValueError("oem_pct_capex: deve stare tra 0 e 100")
+    if ac < 0:
+        raise ValueError("costo_acqua_annuo: non puo' essere negativo")
+    quota = cs271_quota_capex(capex, anni, tasso_pct)
+    oem = cx * o / 100.0
+    return {"quota_capex": quota, "oem": oem,
+            "acqua": ac,
+            "totale": quota + oem + ac}
+
+
+def cs271_lcoe(costo_totale_annuo, mwh_annui):
+    """Costo livellato dell'energia (€/MWh). None se produzione nulla."""
+    c = cs271_num(costo_totale_annuo, "costo_totale_annuo")
+    m = cs271_num(mwh_annui, "mwh_annui")
+    if c < 0:
+        raise ValueError("costo_totale_annuo: non puo' essere negativo")
+    if m < 0:
+        raise ValueError("mwh_annui: non puo' essere negativo")
+    if m == 0.0:
+        return None
+    return c / m
+
+
+def cs271_ricavi(mwh_annui, prezzo_energia):
+    """Ricavi annui: MWh x prezzo energia."""
+    m = cs271_num(mwh_annui, "mwh_annui")
+    p = cs271_num(prezzo_energia, "prezzo_energia")
+    if m < 0:
+        raise ValueError("mwh_annui: non puo' essere negativo")
+    if p < 0:
+        raise ValueError("prezzo_energia: non puo' essere negativo")
+    return m * p
+
+
+def cs271_margine(ricavi_annui, costo_totale_annuo):
+    """Margine annuo = ricavi - costi."""
+    r = cs271_num(ricavi_annui, "ricavi_annui")
+    c = cs271_num(costo_totale_annuo, "costo_totale_annuo")
+    if c < 0:
+        raise ValueError("costo_totale_annuo: non puo' essere negativo")
+    return r - c
+
+
+def cs271_fattore_rendita(tasso_pct, anni):
+    """Fattore di rendita posticipata (tasso 0 => anni)."""
+    t = cs271_num(tasso_pct, "tasso_pct")
+    n = cs271_int(anni, "anni")
+    if t < 0:
+        raise ValueError("tasso_pct: non puo' essere negativo")
+    if t == 0.0:
+        return float(n)
+    r = t / 100.0
+    return sum(1.0 / (1.0 + r) ** a for a in range(1, n + 1))
+
+
+def cs271_van(margine_annuo, anni, tasso_pct):
+    """VAN del margine annuo costante su orizzonte e tasso."""
+    mg = cs271_num(margine_annuo, "margine_annuo")
+    return mg * cs271_fattore_rendita(tasso_pct, anni)
+
+
+def cs271_payback(capex, margine_annuo):
+    """Payback semplice in anni (frazionario). None se il margine non e' positivo."""
+    cx = cs271_num(capex, "capex")
+    mg = cs271_num(margine_annuo, "margine_annuo")
+    if cx < 0:
+        raise ValueError("capex: non puo' essere negativo")
+    if mg <= 0:
+        return None
+    return cx / mg
+
+
+def cs271_confronto(lcoe, prezzo_energia):
+    """Confronto LCOE vs prezzo di mercato.
+
+    Verdetto: "competitivo" se il margine >= +5% del prezzo di mercato,
+    "indifferente" se entro il ±5%, "non_competitivo" altrimenti.
+    """
+    l = cs271_num(lcoe, "lcoe")
+    p = cs271_num(prezzo_energia, "prezzo_energia")
+    if l < 0:
+        raise ValueError("lcoe: non puo' essere negativo")
+    if p <= 0:
+        raise ValueError("prezzo_energia: deve essere > 0")
+    margine = p - l
+    soglia = 0.05 * p
+    if margine >= soglia:
+        verdetto = "competitivo"
+    elif margine >= -soglia:
+        verdetto = "indifferente"
+    else:
+        verdetto = "non_competitivo"
+    return {"verdetto": verdetto, "prezzo_energia": p,
+            "margine_eur_mwh": margine, "soglia_eur_mwh": soglia}
+
+
+def cs271_sensibilita(prezzo_max, passo, mwh_annui, costo_totale_annuo):
+    """Margine annuo al variare del prezzo dell'energia (0..prezzo_max).
+
+    Restituisce lista di dict {"prezzo_energia", "ricavi_annui",
+    "margine_annuo"}.
+    """
+    pm = cs271_num(prezzo_max, "prezzo_max")
+    st_ = cs271_num(passo, "passo")
+    c = cs271_num(costo_totale_annuo, "costo_totale_annuo")
+    m = cs271_num(mwh_annui, "mwh_annui")
+    if pm <= 0:
+        raise ValueError("prezzo_max: deve essere > 0")
+    if st_ <= 0:
+        raise ValueError("passo: deve essere > 0")
+    if m < 0:
+        raise ValueError("mwh_annui: non puo' essere negativo")
+    righe = []
+    p = 0.0
+    while p <= pm + 1e-9:
+        ric = cs271_ricavi(m, p)
+        righe.append({"prezzo_energia": round(p, 2),
+                      "ricavi_annui": ric, "margine_annuo": ric - c})
+        p += st_
+    return righe
+
+
+def cs271_co2_evitata(mwh_annui, fattore_kg_mwh):
+    """tCO2/anno evitate rispetto al mix di riferimento."""
+    m = cs271_num(mwh_annui, "mwh_annui")
+    f = cs271_num(fattore_kg_mwh, "fattore_kg_mwh")
+    if m < 0:
+        raise ValueError("mwh_annui: non puo' essere negativo")
+    if f < 0:
+        raise ValueError("fattore_kg_mwh: non puo' essere negativo")
+    return m * f / 1000.0
+
 
 if workspace == _('ws1'):
     st.markdown(f"<h1>{_('ws1')}</h1>", unsafe_allow_html=True)
@@ -36990,7 +37181,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256, tab257, tab258, tab259, tab260, tab261, tab262, tab263, tab264, tab265, tab266, tab267, tab268, tab269, tab270 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete", "🔥 Teleriscaldamento vs caldaia", "🌿 Clean spread (con CO₂)", "🇮🇹 PUN da prezzi zonali", "❄️ Pompa di calore vs caldaia", "🏢 PUE & costo data center", "🔌 Gruppo elettrogeno vs blackout", "🚗 Flotta aziendale: TCO diesel vs elettrico", "📜 Garanzie di origine: costo del 100% rinnovabile", "♻️ Fine vita FV: revamping vs dismissione", "🌾️ Agrivoltaico: doppio reddito", "🟢 Biometano: business case", "🌬️ Eolico onshore: business case", "🌊 Idroelettrico run-of-river: business case", "🔥 Geotermia profonda: business case"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256, tab257, tab258, tab259, tab260, tab261, tab262, tab263, tab264, tab265, tab266, tab267, tab268, tab269, tab270, tab271 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete", "🔥 Teleriscaldamento vs caldaia", "🌿 Clean spread (con CO₂)", "🇮🇹 PUN da prezzi zonali", "❄️ Pompa di calore vs caldaia", "🏢 PUE & costo data center", "🔌 Gruppo elettrogeno vs blackout", "🚗 Flotta aziendale: TCO diesel vs elettrico", "📜 Garanzie di origine: costo del 100% rinnovabile", "♻️ Fine vita FV: revamping vs dismissione", "🌾️ Agrivoltaico: doppio reddito", "🟢 Biometano: business case", "🌬️ Eolico onshore: business case", "🌊 Idroelettrico run-of-river: business case", "🔥 Geotermia profonda: business case", "☀️ Solare termodinamico (CSP): business case"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -61579,6 +61770,105 @@ elif workspace == _('ws8'):
                                key="gt270_csv",
                                help="Margine annuo e VAN al variare del prezzo dell'energia.")
         st.caption("Nota: la produttivita' del serbatoio puo' declinare nel tempo e richiedere pozzi di reintegro; il rischio geologico (pozzi sterili) va valutato prima del capex. Verificare concessioni, vincoli ambientali e connessione prima di decidere.")
+    with tab271:
+        titolo271 = edu("Solare termodinamico (CSP): business case", "Un impianto solare termodinamico concentra il sole su un ricevitore e produce elettricita' da un ciclo termico, con accumulo a sali fusi che sposta la produzione nelle ore serali: il business case confronta il LCOE (capex annualizzato + O&M + acqua/pulizia specchi) con il prezzo di mercato atteso. Questa tab calcola produzione, costi, LCOE, ricavi, margine, VAN e payback, con la CO2 evitata e la sensibilita' al prezzo dell'energia.")
+        st.markdown(f"<h1>☀️ {titolo271}</h1>", unsafe_allow_html=True)
+        st.caption("Solare termodinamico (CSP): il LCOE regge contro il prezzo di mercato? Produzione dispacciabile, costi, VAN, CO2 evitata e payback con sensibilita' al prezzo.")
+        a1_271, a2_271, a3_271 = st.columns(3)
+        pot271 = a1_271.number_input("Potenza (MW)", min_value=0.0,
+                                     value=50.0, step=5.0, format="%.1f",
+                                     key="cs271_potenza",
+                                     help="Potenza elettrica nominale del blocco di potenza in MW.")
+        cf271 = a2_271.number_input("Fattore di carico (%/anno)", min_value=0.0, max_value=100.0,
+                                     value=45.0, step=1.0, format="%.1f",
+                                     key="cs271_cf",
+                                     help="Frazione dell'anno a piena potenza: con accumulo termico 40-55% nelle zone ad alta irradiazione, senza accumulo 20-30%.")
+        cx271 = a3_271.number_input("Capex totale (€)", min_value=0.0,
+                                    value=180000000.0, step=1000000.0, format="%.0f",
+                                    key="cs271_capex",
+                                    help="Costo chiavi in mano: campo solare (eliostati/parabole), ricevitore, accumulo a sali fusi, blocco di potenza, connessione rete.")
+        b1_271, b2_271, b3_271 = st.columns(3)
+        oem271 = b1_271.number_input("O&M (% del capex/anno)", min_value=0.0, max_value=100.0,
+                                     value=2.5, step=0.5, format="%.1f",
+                                     key="cs271_oem",
+                                     help="Manutenzione e gestione come % del capex all'anno.")
+        acq271 = b2_271.number_input("Acqua e pulizia specchi (€/anno)", min_value=0.0,
+                                     value=800000.0, step=50000.0, format="%.0f",
+                                     key="cs271_acqua",
+                                     help="Costo annuo di acqua per raffreddamento e lavaggio degli specchi (voce tipica del CSP in zone aride).")
+        orz271 = b3_271.number_input("Orizzonte (anni)", min_value=1, max_value=40,
+                                     value=30, step=1,
+                                     key="cs271_orizzonte")
+        c1_271, c2_271, c3_271 = st.columns(3)
+        prz271 = c1_271.number_input("Prezzo energia atteso (€/MWh)", min_value=0.0,
+                                     value=110.0, step=1.0, format="%.1f",
+                                     key="cs271_prezzo",
+                                     help="Prezzo medio atteso di cessione sull'orizzonte (media annua).")
+        co2271 = c2_271.number_input("Fattore CO2 mix (kg/MWh)", min_value=0.0,
+                                      value=350.0, step=10.0, format="%.0f",
+                                      key="cs271_co2",
+                                      help="Emissioni del mix di riferimento sostituito (mix italiano ~350 kg/MWh).")
+        tas271 = c3_271.number_input("Tasso di attualizzazione (%/anno)", min_value=0.0,
+                                     value=6.0, step=0.5, format="%.1f",
+                                     key="cs271_tasso")
+        try:
+            mwh271 = cs271_produzione_annua(pot271, cf271)
+            cst271 = cs271_costo_annuo(cx271, orz271, tas271, oem271, acq271)
+            lcoe271 = cs271_lcoe(cst271["totale"], mwh271)
+            ric271 = cs271_ricavi(mwh271, prz271)
+            mar271 = cs271_margine(ric271, cst271["totale"])
+            van271 = cs271_van(mar271, orz271, tas271)
+            pay271 = cs271_payback(cx271, mar271)
+            cfr271 = cs271_confronto(lcoe271, prz271)
+            cox271 = cs271_co2_evitata(mwh271, co2271)
+            pmax271 = max(220.0, prz271 * 2.0)
+            sen271 = cs271_sensibilita(pmax271, pmax271 / 60.0, mwh271, cst271["totale"])
+        except ValueError as e271:
+            st.error(f"Dati non validi: {e271}")
+            st.stop()
+        k1_271, k2_271, k3_271, k4_271, k5_271, k6_271 = st.columns(6)
+        render_kpi("Produzione (MWh/anno)", f"{mwh271:,.0f}", k1_271)
+        render_kpi("LCOE (€/MWh)", f"{lcoe271:.2f}" if lcoe271 is not None else "—", k2_271)
+        render_kpi("Ricavi (€/anno)", f"{ric271:,.0f}", k3_271)
+        render_kpi("Margine (€/anno)", f"{mar271:,.0f}", k4_271)
+        render_kpi("Payback (anni)", f"{pay271:.1f}" if pay271 else "mai", k5_271)
+        render_kpi("CO2 evitata (t/anno)", f"{cox271:,.0f}", k6_271)
+        if cfr271["verdetto"] == "competitivo":
+            st.success(f"Impianto competitivo: LCOE {lcoe271:.2f} €/MWh contro prezzo {prz271:.1f} €/MWh, margine {cfr271['margine_eur_mwh']:.2f} €/MWh. VAN {van271:,.0f} € su {orz271} anni, {cox271:,.0f} tCO2/anno evitate.")
+        elif cfr271["verdetto"] == "indifferente":
+            st.info(f"Quasi in parita': LCOE {lcoe271:.2f} €/MWh vs prezzo {prz271:.1f} €/MWh (entro il ±5%). La decisione dipende dal prezzo forward reale, dall'irradiazione diretta del sito (DNI) e dalle ore di accumulo.")
+        else:
+            st.warning(f"Impianto non competitivo: LCOE {lcoe271:.2f} €/MWh sopra il prezzo {prz271:.1f} €/MWh di {abs(cfr271['margine_eur_mwh']):.2f} €/MWh. Serve un sito con DNI piu' alto, un prezzo piu' alto o capex/O&M piu' bassi.")
+        st.markdown("**Costo livellato vs mercato (€/MWh)**")
+        dfb271 = pd.DataFrame([{"voce": "LCOE CSP", "eur_mwh": lcoe271},
+                               {"voce": "Prezzo energia atteso", "eur_mwh": prz271}])
+        figb271 = px.bar(dfb271, x="voce", y="eur_mwh", title="LCOE vs prezzo di mercato (€/MWh)",
+                         labels={"voce": "Voce", "eur_mwh": "€/MWh"})
+        st.plotly_chart(figb271, use_container_width=True)
+        st.markdown("**Margine annuo al variare del prezzo (€/MWh)**")
+        dss271 = pd.DataFrame(sen271)
+        figs271 = px.line(dss271, x="prezzo_energia", y="margine_annuo",
+                          title="Margine annuo vs prezzo energia (€)",
+                          labels={"prezzo_energia": "Prezzo energia (€/MWh)", "margine_annuo": "Margine (€/anno)"})
+        figs271.add_hline(y=0.0, line_dash="dot", line_color="#9ca3af",
+                          annotation_text="Pareggio")
+        figs271.add_vline(x=prz271, line_dash="dash", line_color="red",
+                          annotation_text="Prezzo attuale")
+        st.plotly_chart(figs271, use_container_width=True)
+        with st.expander("Dettaglio sensibilita' ed export CSV"):
+            dft271 = pd.DataFrame([{"prezzo_energia_eur_mwh": r["prezzo_energia"],
+                                    "ricavi_annui_eur": round(r["ricavi_annui"], 0),
+                                    "margine_annuo_eur": round(r["margine_annuo"], 0),
+                                    "van_eur": round(r["margine_annuo"] * cs271_fattore_rendita(tas271, orz271), 0)}
+                                   for r in sen271])
+            st.dataframe(dft271, use_container_width=True, hide_index=True)
+            st.caption(f"Costo annuo totale: {cst271['totale']:,.0f} € (quota capex {cst271['quota_capex']:,.0f} € + O&M {cst271['oem']:,.0f} € + acqua {cst271['acqua']:,.0f} €). VAN calcolato sul margine a prezzo variabile.")
+            st.download_button("⬇️ Export CSV sensibilita'",
+                               data=dft271.to_csv(index=False, sep=";").encode("utf-8"),
+                               file_name="csp_sensibilita.csv", mime="text/csv",
+                               key="cs271_csv",
+                               help="Margine annuo e VAN al variare del prezzo dell'energia.")
+        st.caption("Nota: il CSP richiede alta irradiazione diretta (DNI) e grandi superfici; l'accumulo a sali fusi alza il fattore di carico ma anche il capex. In zone aride verificare disponibilita' idrica e permessi. Verificare autorizzazioni, vincoli ambientali e connessione prima di decidere.")
 
 # Footer
 

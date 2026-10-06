@@ -34,6 +34,7 @@ TITLE267 = "🟢 Biometano: business case"
 TITLE268 = "🌬️ Eolico onshore: business case"
 TITLE269 = "🌊 Idroelettrico run-of-river: business case"
 TITLE270 = "🔥 Geotermia profonda: business case"
+TITLE271 = "☀️ Solare termodinamico (CSP): business case"
 TITLE264 = "\U0001F4DC Garanzie di origine: costo del 100% rinnovabile"
 
 PROD0 = 100000.0
@@ -56,12 +57,12 @@ def _registry():
 class TestRegistryTab265:
     def test_tab265_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 270
+        assert len(titoli) == len(dvars) == len(withs) == 271
         assert TITLE265 in titoli
         assert "tab265" in dvars
         assert "tab265" in withs
         assert titoli[dvars.index("tab265")] == TITLE265
-        assert titoli[-1] == TITLE270
+        assert titoli[-1] == TITLE271
         keys = re.findall(r'key="(fv265_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
@@ -74,6 +75,7 @@ class TestRegistryTab265:
         assert titoli[dvars.index("tab268")] == TITLE268
         assert titoli[dvars.index("tab269")] == TITLE269
         assert titoli[dvars.index("tab270")] == TITLE270
+        assert titoli[dvars.index("tab271")] == TITLE271
 
 
 class TestFv265Num:

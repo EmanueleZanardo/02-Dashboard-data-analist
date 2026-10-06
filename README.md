@@ -15,7 +15,7 @@ Dashboard Streamlit per analisi quantitativa del mercato elettrico svizzero
 5. 📈 Exotics & Structuring
 6. 🏛️ Enterprise Risk & XVA
 7. 📈 Metodo STAR & Ottimizzazione
-8. 📊 Price Analytics (Swissix) — 270 tab analitiche
+8. 📊 Price Analytics (Swissix) — 271 tab analitiche
 
 ### Price Analytics (Swissix)
 
@@ -302,6 +302,7 @@ stoccaggio gas, PPA, idroelettrico, power-to-heat.
 268. 🌬️ Eolico onshore: business case
 269. 🌊 Idroelettrico run-of-river: business case
 270. 🔥 Geotermia profonda: business case
+271. ☀️ Solare termodinamico (CSP): business case
 </details>
 
 ## Avvio locale

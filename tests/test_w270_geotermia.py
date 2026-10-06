@@ -35,6 +35,7 @@ gt270_co2_evitata = _F["gt270_co2_evitata"]
 APP = Path(__file__).parent.parent / "app.py"
 
 TITLE270 = "🔥 Geotermia profonda: business case"
+TITLE271 = "☀️ Solare termodinamico (CSP): business case"
 TITLE269 = "🌊 Idroelettrico run-of-river: business case"
 
 POT = 5.0
@@ -62,12 +63,12 @@ def _registry():
 class TestRegistryTab270:
     def test_tab270_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 270
+        assert len(titoli) == len(dvars) == len(withs) == 271
         assert TITLE270 in titoli
         assert "tab270" in dvars
         assert "tab270" in withs
         assert titoli[dvars.index("tab270")] == TITLE270
-        assert titoli[-1] == TITLE270
+        assert titoli[-1] == TITLE271
         keys = re.findall(r'key="(gt270_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
@@ -75,6 +76,7 @@ class TestRegistryTab270:
         _, titoli, dvars, _ = _registry()
         assert titoli[dvars.index("tab269")] == TITLE269
         assert titoli[dvars.index("tab270")] == TITLE270
+        assert titoli[dvars.index("tab271")] == TITLE271
 
 
 class TestGt270Num:
