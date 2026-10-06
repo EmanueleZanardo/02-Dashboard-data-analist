@@ -1,0 +1,212 @@
+"""Test tab262 'Gruppo elettrogeno vs blackout': registry + funzioni pure.
+
+Funzioni pure estratte da app.py via AST con tests/appfuncs.py (niente Streamlit).
+Verifica consistenza del registry (titoli/dvar/with coerenti) e l'allineamento
+titolo-contenuto inclusa la tab262.
+"""
+
+import re
+from pathlib import Path
+
+import pytest
+
+from appfuncs import load
+
+_F = load("gen262_num", "gen262_costo_blackout_atteso", "gen262_consumo_lh",
+          "gen262_costo_fuel_annuo", "gen262_quota_annua",
+          "gen262_costo_annuo_gruppo", "gen262_confronto",
+          "gen262_break_even_ore", "gen262_sensibilita_ore")
+gen262_num = _F["gen262_num"]
+gen262_costo_blackout_atteso = _F["gen262_costo_blackout_atteso"]
+gen262_consumo_lh = _F["gen262_consumo_lh"]
+gen262_costo_fuel_annuo = _F["gen262_costo_fuel_annuo"]
+gen262_quota_annua = _F["gen262_quota_annua"]
+gen262_costo_annuo_gruppo = _F["gen262_costo_annuo_gruppo"]
+gen262_confronto = _F["gen262_confronto"]
+gen262_break_even_ore = _F["gen262_break_even_ore"]
+gen262_sensibilita_ore = _F["gen262_sensibilita_ore"]
+
+APP = Path(__file__).parent.parent / "app.py"
+
+TITLE262 = "🔌 Gruppo elettrogeno vs blackout"
+TITLE261 = "🏢 PUE & costo data center"
+
+# Parametri di riferimento usati nei test
+P = dict(potenza_nom_kw=250.0, carico_kw=200.0, capex=45000.0, anni=15.0,
+         tasso_pct=4.0, om_annuo=1500.0, prezzo_diesel_l=1.70,
+         costo_kwh_non_fornito=5.0, ore_test_mese=1.0)
+# Sottoinsieme senza VoLL per gen262_costo_annuo_gruppo
+P_G = {k: v for k, v in P.items() if k != "costo_kwh_non_fornito"}
+
+
+def _registry():
+    src = APP.read_text(encoding="utf-8")
+    line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
+    titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
+    dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
+    withs = re.findall(r"    with (tab\d+):", src)
+    return src, titoli, dvars, withs
+
+
+class TestRegistryTab262:
+    def test_tab262_dichiarata(self):
+        src, titoli, dvars, withs = _registry()
+        assert len(titoli) == len(dvars) == len(withs) == 262
+        assert TITLE262 in titoli
+        assert "tab262" in dvars
+        assert "tab262" in withs
+        assert titoli[dvars.index("tab262")] == TITLE262
+        assert titoli[-1] == TITLE262
+        keys = re.findall(r'key="(gen262_[^"]+)"', src)
+        assert len(keys) == len(set(keys)) >= 10
+
+    def test_titoli_allineati_261_262(self):
+        _, titoli, dvars, _ = _registry()
+        assert titoli[dvars.index("tab261")] == TITLE261
+        assert titoli[dvars.index("tab262")] == TITLE262
+
+
+class TestGen262Num:
+    def test_ok(self):
+        assert gen262_num(3, "x") == 3.0
+        assert gen262_num(2.5, "x") == 2.5
+
+    def test_invalidi(self):
+        for bad in (True, False, float("nan"), float("inf"), "3", None):
+            with pytest.raises(ValueError):
+                gen262_num(bad, "x")
+
+
+class TestGen262Blackout:
+    def test_base(self):
+        # 8 h * 200 kW * 5 €/kWh = 8000 €
+        assert gen262_costo_blackout_atteso(8.0, 200.0, 5.0) == pytest.approx(8000.0)
+
+    def test_zero_ore(self):
+        assert gen262_costo_blackout_atteso(0.0, 200.0, 5.0) == pytest.approx(0.0)
+
+    def test_invalidi(self):
+        with pytest.raises(ValueError):
+            gen262_costo_blackout_atteso(-1.0, 200.0, 5.0)
+        with pytest.raises(ValueError):
+            gen262_costo_blackout_atteso(8.0, -5.0, 5.0)
+        with pytest.raises(ValueError):
+            gen262_costo_blackout_atteso(8.0, 200.0, -1.0)
+
+
+class TestGen262Consumo:
+    def test_base(self):
+        # 200*0,27 + 250*0,04 = 54 + 10 = 64 l/h
+        assert gen262_consumo_lh(250.0, 200.0) == pytest.approx(64.0)
+
+    def test_a_vuoto(self):
+        assert gen262_consumo_lh(250.0, 0.0) == pytest.approx(10.0)
+
+    def test_sovraccarico_errore(self):
+        with pytest.raises(ValueError):
+            gen262_consumo_lh(250.0, 251.0)
+
+    def test_potenza_zero_errore(self):
+        with pytest.raises(ValueError):
+            gen262_consumo_lh(0.0, 0.0)
+
+
+class TestGen262FuelQuota:
+    def test_fuel_annuo(self):
+        # 8 h * 64 l/h * 1,70 €/l = 870,40 €
+        assert gen262_costo_fuel_annuo(8.0, 250.0, 200.0, 1.70) == pytest.approx(870.4)
+
+    def test_quota_tasso_zero(self):
+        assert gen262_quota_annua(45000.0, 15.0, 0.0) == pytest.approx(3000.0)
+
+    def test_quota_annuity(self):
+        # 45000 * 0,04 / (1 - 1,04^-15) ≈ 4047,33
+        assert gen262_quota_annua(45000.0, 15.0, 4.0) == pytest.approx(4047.33, rel=1e-3)
+
+    def test_quota_invalidi(self):
+        with pytest.raises(ValueError):
+            gen262_quota_annua(-100.0, 15.0, 4.0)
+        with pytest.raises(ValueError):
+            gen262_quota_annua(45000.0, 0.0, 4.0)
+        with pytest.raises(ValueError):
+            gen262_quota_annua(45000.0, 15.0, -1.0)
+
+
+class TestGen262CostoGruppo:
+    def test_breakdown(self):
+        g = gen262_costo_annuo_gruppo(ore_blackout_anno=8.0, **P_G)
+        assert set(g) == {"quota_annua", "om_annuo", "fuel_test_annuo",
+                          "fuel_blackout_annuo", "fuel_totale", "costo_totale"}
+        assert g["quota_annua"] == pytest.approx(4047.33, rel=1e-3)
+        assert g["om_annuo"] == pytest.approx(1500.0)
+        # test: 12*1 h * 64 l/h * 1,70 = 1305,60 €
+        assert g["fuel_test_annuo"] == pytest.approx(1305.6)
+        assert g["fuel_blackout_annuo"] == pytest.approx(870.4)
+        assert g["fuel_totale"] == pytest.approx(2176.0)
+        assert g["costo_totale"] == pytest.approx(
+            g["quota_annua"] + g["om_annuo"] + g["fuel_totale"])
+
+    def test_om_negativo_errore(self):
+        with pytest.raises(ValueError):
+            gen262_costo_annuo_gruppo(ore_blackout_anno=-2.0, **P_G)
+
+
+class TestGen262Confronto:
+    def test_conviene_gruppo(self):
+        c = gen262_confronto(ore_blackout_anno=12.0, **P)
+        assert c["verdetto"] == "gruppo"
+        assert c["risparmio_annuo"] > 0
+        assert c["costo_blackout_atteso"] == pytest.approx(12000.0)
+
+    def test_conviene_blackout(self):
+        c = gen262_confronto(ore_blackout_anno=0.0, **P)
+        assert c["verdetto"] == "blackout"
+        assert c["risparmio_annuo"] < 0
+        assert c["risparmio_pct"] == pytest.approx(0.0)
+
+    def test_indifferente(self):
+        # 8 h: blackout 8000, gruppo ~7723 -> risparmio 277 < 5% di 8000
+        c = gen262_confronto(ore_blackout_anno=8.0, **P)
+        assert c["verdetto"] == "indifferente"
+        assert abs(c["risparmio_annuo"]) <= 0.05 * c["costo_blackout_atteso"]
+
+
+class TestGen262BreakEven:
+    def test_forma_chiusa(self):
+        be = gen262_break_even_ore(**P)
+        quota = gen262_quota_annua(P["capex"], P["anni"], P["tasso_pct"])
+        fixed = quota + P["om_annuo"] + 12.0 * P["ore_test_mese"] * 64.0 * P["prezzo_diesel_l"]
+        atteso = fixed / (P["carico_kw"] * P["costo_kwh_non_fornito"] - 64.0 * P["prezzo_diesel_l"])
+        assert be == pytest.approx(atteso)
+        assert be == pytest.approx(7.69, rel=1e-2)
+
+    def test_mai_conveniente(self):
+        # VoLL 0,40: danno orario 80 €/h < fuel orario 108,80 €/h
+        q = dict(P)
+        q["costo_kwh_non_fornito"] = 0.40
+        assert gen262_break_even_ore(**q) is None
+
+
+class TestGen262Sensibilita:
+    def test_lunghezza_e_chiavi(self):
+        righe = gen262_sensibilita_ore(20.0, 5.0, **P)
+        assert len(righe) == 5
+        assert righe[0]["ore"] == pytest.approx(0.0)
+        assert righe[-1]["ore"] == pytest.approx(20.0)
+        assert set(righe[0]) == {"ore", "costo_blackout", "costo_gruppo"}
+
+    def test_monotonia_e_coerenza(self):
+        righe = gen262_sensibilita_ore(20.0, 5.0, **P)
+        bo = [r["costo_blackout"] for r in righe]
+        gr = [r["costo_gruppo"] for r in righe]
+        assert all(b > a for a, b in zip(bo, bo[1:]))
+        assert all(b > a for a, b in zip(gr, gr[1:]))
+        assert righe[2]["costo_blackout"] == pytest.approx(10.0 * 200.0 * 5.0)
+        g0 = gen262_costo_annuo_gruppo(ore_blackout_anno=0.0, **P_G)
+        assert righe[0]["costo_gruppo"] == pytest.approx(g0["costo_totale"])
+
+    def test_invalidi(self):
+        with pytest.raises(ValueError):
+            gen262_sensibilita_ore(0.0, 5.0, **P)
+        with pytest.raises(ValueError):
+            gen262_sensibilita_ore(20.0, 0.0, **P)
