@@ -29,6 +29,7 @@ gen262_sensibilita_ore = _F["gen262_sensibilita_ore"]
 APP = Path(__file__).parent.parent / "app.py"
 
 TITLE262 = "🔌 Gruppo elettrogeno vs blackout"
+TITLE263 = "🚗 Flotta aziendale: TCO diesel vs elettrico"
 TITLE261 = "🏢 PUE & costo data center"
 
 # Parametri di riferimento usati nei test
@@ -51,12 +52,12 @@ def _registry():
 class TestRegistryTab262:
     def test_tab262_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 262
+        assert len(titoli) == len(dvars) == len(withs) == 263
         assert TITLE262 in titoli
         assert "tab262" in dvars
         assert "tab262" in withs
         assert titoli[dvars.index("tab262")] == TITLE262
-        assert titoli[-1] == TITLE262
+        assert titoli[-1] == TITLE263
         keys = re.findall(r'key="(gen262_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 10
 
@@ -64,6 +65,7 @@ class TestRegistryTab262:
         _, titoli, dvars, _ = _registry()
         assert titoli[dvars.index("tab261")] == TITLE261
         assert titoli[dvars.index("tab262")] == TITLE262
+        assert titoli[dvars.index("tab263")] == TITLE263
 
 
 class TestGen262Num:

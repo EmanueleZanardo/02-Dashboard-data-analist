@@ -34856,6 +34856,206 @@ def gen262_sensibilita_ore(ore_max, passo, potenza_nom_kw, carico_kw, capex,
     return righe
 
 
+# ---------------------------------------------------------------------------
+# Tab 263 - Flotta aziendale: TCO diesel vs elettrico
+# ---------------------------------------------------------------------------
+
+def fl263_num(x, nome):
+    """Valida uno scalare numerico: no bool, no NaN/inf."""
+    import math
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        raise ValueError(f"{nome}: deve essere un numero")
+    if math.isnan(x) or math.isinf(x):
+        raise ValueError(f"{nome}: NaN/inf non ammessi")
+    return float(x)
+
+
+def fl263_quota_annua(capex, valore_residuo_pct, anni):
+    """Quota annua di ammortamento lineare (€) = (capex - residuo) / anni."""
+    cx = fl263_num(capex, "capex")
+    rv = fl263_num(valore_residuo_pct, "valore_residuo_pct")
+    nn = fl263_num(anni, "anni")
+    if cx < 0:
+        raise ValueError("capex: non puo' essere negativo")
+    if rv < 0 or rv > 100:
+        raise ValueError("valore_residuo_pct: deve stare tra 0 e 100")
+    if nn <= 0:
+        raise ValueError("anni: deve essere > 0")
+    return cx * (1.0 - rv / 100.0) / nn
+
+
+def fl263_costo_annuo_veicolo(capex, valore_residuo_pct, anni, km_anno,
+                             consumo_100km, prezzo_unitario, manut_eur_km,
+                             costi_fissi_annui):
+    """TCO annuo di un veicolo (€) con dettaglio delle voci.
+
+    Somma: quota ammortamento + carburante/energia (km*consumo/100*prezzo)
+    + manutenzione (km*€/km) + costi fissi (bollo, assicurazione).
+    Restituisce dict con le singole voci, "costo_totale" e "costo_per_km".
+    """
+    quota = fl263_quota_annua(capex, valore_residuo_pct, anni)
+    km = fl263_num(km_anno, "km_anno")
+    cons = fl263_num(consumo_100km, "consumo_100km")
+    prz = fl263_num(prezzo_unitario, "prezzo_unitario")
+    mk = fl263_num(manut_eur_km, "manut_eur_km")
+    fx = fl263_num(costi_fissi_annui, "costi_fissi_annui")
+    if km < 0:
+        raise ValueError("km_anno: non puo' essere negativo")
+    if cons < 0:
+        raise ValueError("consumo_100km: non puo' essere negativo")
+    if prz < 0:
+        raise ValueError("prezzo_unitario: non puo' essere negativo")
+    if mk < 0:
+        raise ValueError("manut_eur_km: non puo' essere negativo")
+    if fx < 0:
+        raise ValueError("costi_fissi_annui: non puo' essere negativo")
+    fuel = km * cons / 100.0 * prz
+    manut = km * mk
+    tot = quota + fuel + manut + fx
+    return {"quota_annua": quota, "costo_carburante": fuel,
+            "costo_manutenzione": manut, "costi_fissi": fx,
+            "costo_totale": tot,
+            "costo_per_km": (tot / km) if km > 0 else 0.0}
+
+
+def fl263_emissioni_annue(km_anno, consumo_100km, fattore_kg_per_unita):
+    """Emissioni annue di CO2 (kg) = km * consumo/100 * fattore.
+
+    Fattore: kg CO2 per litro (diesel ~2,68) o per kWh (mix elettrico).
+    """
+    km = fl263_num(km_anno, "km_anno")
+    cons = fl263_num(consumo_100km, "consumo_100km")
+    fat = fl263_num(fattore_kg_per_unita, "fattore_kg_per_unita")
+    if km < 0:
+        raise ValueError("km_anno: non puo' essere negativo")
+    if cons < 0:
+        raise ValueError("consumo_100km: non puo' essere negativo")
+    if fat < 0:
+        raise ValueError("fattore_kg_per_unita: non puo' essere negativo")
+    return km * cons / 100.0 * fat
+
+
+def fl263_confronto(n_veicoli, km_anno, anni, tasso_pct,
+                    d_capex, d_residuo_pct, d_consumo, d_prezzo, d_manut_km,
+                    d_fissi,
+                    e_capex, e_residuo_pct, e_consumo, e_prezzo, e_manut_km,
+                    e_fissi):
+    """Confronta il TCO annuo della flotta diesel vs elettrica.
+
+    verdetto: "elettrico" se il risparmio supera il 5% del TCO diesel,
+    "diesel" se e' negativo oltre il 5%, altrimenti "indifferente".
+    payback_anni: delta capex / risparmio annuo (None se risparmio <= 0).
+    """
+    nv = fl263_num(n_veicoli, "n_veicoli")
+    if nv <= 0:
+        raise ValueError("n_veicoli: deve essere > 0")
+    td = fl263_costo_annuo_veicolo(d_capex, d_residuo_pct, anni, km_anno,
+                                   d_consumo, d_prezzo, d_manut_km, d_fissi)
+    te = fl263_costo_annuo_veicolo(e_capex, e_residuo_pct, anni, km_anno,
+                                   e_consumo, e_prezzo, e_manut_km, e_fissi)
+    tco_d = td["costo_totale"] * nv
+    tco_e = te["costo_totale"] * nv
+    risp = tco_d - tco_e
+    soglia = 0.05 * tco_d
+    if risp > soglia:
+        verd = "elettrico"
+    elif risp < -soglia:
+        verd = "diesel"
+    else:
+        verd = "indifferente"
+    dcapex = (fl263_num(e_capex, "e_capex") - fl263_num(d_capex, "d_capex")) * nv
+    payback = (dcapex / risp) if risp > 0 else None
+    van = fl263_van(dcapex, risp, anni, tasso_pct)
+    return {"tco_diesel_veicolo": td["costo_totale"],
+            "tco_elettrico_veicolo": te["costo_totale"],
+            "tco_diesel_flotta": tco_d, "tco_elettrico_flotta": tco_e,
+            "risparmio_annuo": risp,
+            "risparmio_pct": (risp / tco_d * 100.0) if tco_d > 0 else 0.0,
+            "verdetto": verd, "delta_capex": dcapex,
+            "payback_anni": payback, "van": van,
+            "dettaglio_diesel": td, "dettaglio_elettrico": te}
+
+
+def fl263_break_even_km(anni, d_capex, d_residuo_pct, d_consumo, d_prezzo,
+                        d_manut_km, d_fissi,
+                        e_capex, e_residuo_pct, e_consumo, e_prezzo,
+                        e_manut_km, e_fissi):
+    """km/anno di pareggio tra TCO diesel ed elettrico (forma chiusa).
+
+    fixed = (quota_e - quota_d) + (fissi_e - fissi_d): il maggior costo fisso
+    annuo dell'elettrico. marg_km = costo variabile al km diesel - elettrico.
+    Se il margine al km non e' positivo, restituisce None (mai conveniente).
+    """
+    qd = fl263_quota_annua(d_capex, d_residuo_pct, anni)
+    qe = fl263_quota_annua(e_capex, e_residuo_pct, anni)
+    fd = fl263_num(d_fissi, "d_fissi")
+    fe = fl263_num(e_fissi, "e_fissi")
+    if fd < 0 or fe < 0:
+        raise ValueError("costi fissi: non possono essere negativi")
+    fixed = (qe - qd) + (fe - fd)
+    vd = (fl263_num(d_consumo, "d_consumo") / 100.0
+          * fl263_num(d_prezzo, "d_prezzo")
+          + fl263_num(d_manut_km, "d_manut_km"))
+    ve = (fl263_num(e_consumo, "e_consumo") / 100.0
+          * fl263_num(e_prezzo, "e_prezzo")
+          + fl263_num(e_manut_km, "e_manut_km"))
+    marg = vd - ve
+    if marg <= 0:
+        return None
+    return max(fixed / marg, 0.0)
+
+
+def fl263_van(delta_capex, risparmio_annuo, anni, tasso_pct):
+    """VAN del passaggio all'elettrico (€) = -delta_capex + risparmio * fattore.
+
+    Fattore di attualizzazione della rendita; con tasso 0 vale `anni`.
+    """
+    dc = fl263_num(delta_capex, "delta_capex")
+    rs = fl263_num(risparmio_annuo, "risparmio_annuo")
+    nn = fl263_num(anni, "anni")
+    ts = fl263_num(tasso_pct, "tasso_pct")
+    if nn <= 0:
+        raise ValueError("anni: deve essere > 0")
+    if ts < 0:
+        raise ValueError("tasso_pct: non puo' essere negativo")
+    if ts == 0.0:
+        fattore = nn
+    else:
+        r = ts / 100.0
+        fattore = (1.0 - (1.0 + r) ** (-nn)) / r
+    return -dc + rs * fattore
+
+
+def fl263_sensibilita_km(km_max, passo, anni,
+                         d_capex, d_residuo_pct, d_consumo, d_prezzo,
+                         d_manut_km, d_fissi,
+                         e_capex, e_residuo_pct, e_consumo, e_prezzo,
+                         e_manut_km, e_fissi):
+    """Curva TCO per veicolo al variare dei km/anno.
+
+    Restituisce lista di dict {"km", "tco_diesel", "tco_elettrico"}.
+    """
+    kmax = fl263_num(km_max, "km_max")
+    st_ = fl263_num(passo, "passo")
+    if kmax <= 0:
+        raise ValueError("km_max: deve essere > 0")
+    if st_ <= 0:
+        raise ValueError("passo: deve essere > 0")
+    righe = []
+    km = 0.0
+    while km <= kmax + 1e-9:
+        td = fl263_costo_annuo_veicolo(d_capex, d_residuo_pct, anni, km,
+                                       d_consumo, d_prezzo, d_manut_km,
+                                       d_fissi)["costo_totale"]
+        te = fl263_costo_annuo_veicolo(e_capex, e_residuo_pct, anni, km,
+                                       e_consumo, e_prezzo, e_manut_km,
+                                       e_fissi)["costo_totale"]
+        righe.append({"km": round(km, 1), "tco_diesel": td,
+                      "tco_elettrico": te})
+        km += st_
+    return righe
+
+
 if workspace == _('ws1'):
     st.markdown(f"<h1>{_('ws1')}</h1>", unsafe_allow_html=True)
     banner_demo("simulatore strategico: margini, centrali e curve simulate")
@@ -35497,7 +35697,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256, tab257, tab258, tab259, tab260, tab261, tab262 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete", "🔥 Teleriscaldamento vs caldaia", "🌿 Clean spread (con CO₂)", "🇮🇹 PUN da prezzi zonali", "❄️ Pompa di calore vs caldaia", "🏢 PUE & costo data center", "🔌 Gruppo elettrogeno vs blackout"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256, tab257, tab258, tab259, tab260, tab261, tab262, tab263 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete", "🔥 Teleriscaldamento vs caldaia", "🌿 Clean spread (con CO₂)", "🇮🇹 PUN da prezzi zonali", "❄️ Pompa di calore vs caldaia", "🏢 PUE & costo data center", "🔌 Gruppo elettrogeno vs blackout", "🚗 Flotta aziendale: TCO diesel vs elettrico"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -59260,6 +59460,125 @@ elif workspace == _('ws8'):
                                key="gen262_csv",
                                help="Costo blackout vs costo gruppo al variare delle ore.")
         st.caption("Nota: consumo stimato come 0,27 l/kWh erogato + 4% della potenza nominale a vuoto. Non include costi di installazione locale, pratiche, insonorizzazione e vincoli sulle emissioni. Il VoLL varia molto per settore: 1-3 €/kWh per il terziario, 5-15 €/kWh per l'industria di processo.")
+
+    with tab263:
+        titolo263 = edu("Flotta aziendale: TCO diesel vs elettrico", "Quanto costa davvero un veicolo aziendale all'anno? Il TCO (Total Cost of Ownership) somma la quota di ammortamento (capex meno valore residuo), il carburante o l'energia, la manutenzione e i costi fissi (bollo, assicurazione). Questa tab confronta il TCO annuo di una flotta diesel con l'equivalente elettrico, calcola i km/anno di pareggio, il payback sul maggior capex e il VAN dell'investimento.")
+        st.markdown(f"<h1>\U0001F697 {titolo263}</h1>", unsafe_allow_html=True)
+        st.caption("Costo totale di possesso: diesel vs elettrico per flotte aziendali.")
+        i1_263, i2_263, i3_263 = st.columns(3)
+        nv263 = i1_263.number_input("Veicoli in flotta", min_value=1.0,
+                                    value=10.0, step=1.0, format="%.0f",
+                                    key="fl263_n_veicoli")
+        km263 = i2_263.number_input("km/anno per veicolo", min_value=0.0,
+                                    value=30000.0, step=1000.0, format="%.0f",
+                                    key="fl263_km_anno",
+                                    help="Percorrenza media annua per veicolo.")
+        an263 = i3_263.number_input("Anni di possesso", min_value=1.0,
+                                    value=5.0, step=1.0, format="%.0f",
+                                    key="fl263_anni",
+                                    help="Orizzonte di possesso per ammortamento e VAN.")
+        i4_263, i5_263, i6_263 = st.columns(3)
+        cxd263 = i4_263.number_input("Capex diesel (€/veicolo)", min_value=0.0,
+                                     value=28000.0, step=1000.0, format="%.0f",
+                                     key="fl263_capex_diesel")
+        cxe263 = i5_263.number_input("Capex elettrico (€/veicolo)", min_value=0.0,
+                                     value=42000.0, step=1000.0, format="%.0f",
+                                     key="fl263_capex_elettrico")
+        res263 = i6_263.number_input("Valore residuo (% capex)", min_value=0.0,
+                                     max_value=100.0, value=30.0, step=5.0,
+                                     format="%.1f", key="fl263_residuo",
+                                     help="Valore di rivendita a fine possesso, in % del capex.")
+        i7_263, i8_263, i9_263, i10_263 = st.columns(4)
+        cd263 = i7_263.number_input("Consumo diesel (l/100km)", min_value=0.0,
+                                    value=6.5, step=0.1, format="%.2f",
+                                    key="fl263_consumo_diesel")
+        pd263 = i8_263.number_input("Prezzo diesel (€/l)", min_value=0.0,
+                                    value=1.75, step=0.05, format="%.2f",
+                                    key="fl263_prezzo_diesel")
+        ce263 = i9_263.number_input("Consumo elettrico (kWh/100km)", min_value=0.0,
+                                    value=18.0, step=0.5, format="%.1f",
+                                    key="fl263_consumo_elettrico")
+        pe263 = i10_263.number_input("Prezzo elettricita' (€/kWh)", min_value=0.0,
+                                     value=0.25, step=0.01, format="%.2f",
+                                     key="fl263_prezzo_elettricita")
+        i11_263, i12_263, i13_263, i14_263, i15_263 = st.columns(5)
+        md263 = i11_263.number_input("Manut. diesel (€/km)", min_value=0.0,
+                                     value=0.06, step=0.01, format="%.3f",
+                                     key="fl263_manut_diesel")
+        me263 = i12_263.number_input("Manut. elettrico (€/km)", min_value=0.0,
+                                     value=0.04, step=0.01, format="%.3f",
+                                     key="fl263_manut_elettrico")
+        fd263 = i13_263.number_input("Fissi diesel (€/anno)", min_value=0.0,
+                                     value=900.0, step=50.0, format="%.0f",
+                                     key="fl263_fissi_diesel",
+                                     help="Bollo + assicurazione per veicolo.")
+        fe263 = i14_263.number_input("Fissi elettrico (€/anno)", min_value=0.0,
+                                     value=700.0, step=50.0, format="%.0f",
+                                     key="fl263_fissi_elettrico")
+        ts263 = i15_263.number_input("Tasso (%)", min_value=0.0,
+                                     value=4.0, step=0.5, format="%.2f",
+                                     key="fl263_tasso",
+                                     help="Costo del capitale per il VAN.")
+        try:
+            cf263 = fl263_confronto(nv263, km263, an263, ts263,
+                                    cxd263, res263, cd263, pd263, md263, fd263,
+                                    cxe263, res263, ce263, pe263, me263, fe263)
+            be263 = fl263_break_even_km(an263,
+                                        cxd263, res263, cd263, pd263, md263, fd263,
+                                        cxe263, res263, ce263, pe263, me263, fe263)
+            kmax263 = max(60000.0, km263 * 2.0, (be263 or 0.0) * 2.0)
+            sen263 = fl263_sensibilita_km(kmax263, kmax263 / 50.0, an263,
+                                          cxd263, res263, cd263, pd263, md263, fd263,
+                                          cxe263, res263, ce263, pe263, me263, fe263)
+            emd263 = fl263_emissioni_annue(km263, cd263, 2.68)
+            eme263 = fl263_emissioni_annue(km263, ce263, 0.10)
+        except ValueError as e263:
+            st.error(f"Dati non validi: {e263}")
+            st.stop()
+        pb263 = cf263["payback_anni"]
+        pb_txt = ("mai" if (pb263 is None or pb263 > an263)
+                  else f"{pb263:.1f}")
+        k1_263, k2_263, k3_263, k4_263, k5_263, k6_263 = st.columns(6)
+        render_kpi("TCO diesel flotta (€/anno)", f"{cf263['tco_diesel_flotta']:,.0f}", k1_263)
+        render_kpi("TCO elettrico flotta (€/anno)", f"{cf263['tco_elettrico_flotta']:,.0f}", k2_263)
+        render_kpi("Risparmio (€/anno)", f"{cf263['risparmio_annuo']:,.0f}", k3_263)
+        render_kpi("Break-even (km/anno)", f"{be263:,.0f}" if be263 is not None else "mai", k4_263)
+        render_kpi("Payback delta capex (anni)", pb_txt, k5_263)
+        render_kpi("VAN delta capex (€)", f"{cf263['van']:,.0f}", k6_263)
+        if cf263["verdetto"] == "elettrico":
+            st.success(f"Conviene l'elettrico: risparmio di {cf263['risparmio_annuo']:,.0f} €/anno sulla flotta ({cf263['risparmio_pct']:.1f}% del TCO diesel).")
+        elif cf263["verdetto"] == "diesel":
+            st.warning(f"Conviene restare sul diesel: l'elettrico costerebbe {-cf263['risparmio_annuo']:,.0f} €/anno in piu' ({-cf263['risparmio_pct']:.1f}%).")
+        else:
+            st.info("Situazione di indifferenza economica (±5%): la scelta dipende da fattori non economici (immagine, vincoli ZTL, infrastruttura di ricarica).")
+        if be263 is not None:
+            st.info(f"L'elettrico diventa conveniente oltre {be263:,.0f} km/anno per veicolo (percorrenza impostata: {km263:,.0f}).")
+        else:
+            st.error("L'elettrico non conviene mai: il costo variabile al km non e' inferiore a quello del diesel.")
+        st.markdown("**TCO per veicolo al variare dei km/anno (€)**")
+        ds263 = pd.DataFrame(sen263)
+        dsm263 = ds263.melt(id_vars="km", value_vars=["tco_diesel", "tco_elettrico"],
+                            var_name="voce", value_name="eur")
+        fig263 = px.line(dsm263, x="km", y="eur", color="voce",
+                         title="TCO diesel vs elettrico al variare della percorrenza (€/anno/veicolo)",
+                         labels={"km": "km/anno per veicolo", "eur": "€/anno", "voce": ""})
+        if be263 is not None and be263 <= kmax263:
+            fig263.add_vline(x=be263, line_dash="dash", line_color="red",
+                             annotation_text="Break-even")
+        st.plotly_chart(fig263, use_container_width=True)
+        with st.expander("Dettaglio sensibilita' ed export CSV"):
+            dfd263 = pd.DataFrame([{"km": r["km"],
+                                    "tco_diesel": round(r["tco_diesel"], 0),
+                                    "tco_elettrico": round(r["tco_elettrico"], 0)}
+                                   for r in sen263])
+            st.dataframe(dfd263, use_container_width=True, hide_index=True)
+            st.caption(f"CO2 per veicolo: diesel {emd263:,.0f} kg/anno vs elettrico {eme263:,.0f} kg/anno (fattori 2,68 kg/l e 0,10 kg/kWh) — Delta capex flotta: {cf263['delta_capex']:,.0f} € — Costo al km: diesel {cf263['dettaglio_diesel']['costo_per_km']:.3f} € vs elettrico {cf263['dettaglio_elettrico']['costo_per_km']:.3f} €.")
+            st.download_button("⬇️ Export CSV sensibilita'",
+                               data=dfd263.to_csv(index=False, sep=";").encode("utf-8"),
+                               file_name="flotta_tco_sensibilita.csv", mime="text/csv",
+                               key="fl263_csv",
+                               help="TCO diesel vs elettrico al variare dei km/anno.")
+        st.caption("Nota: ammortamento lineare su (capex - valore residuo). Non include incentivi all'acquisto, costi dell'infrastruttura di ricarica, fermi per ricarica in orario di lavoro e differenze di valore residuo tra le due tecnologie: personalizzare gli input per il caso reale.")
 
 # Footer
 

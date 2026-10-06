@@ -15,7 +15,7 @@ Dashboard Streamlit per analisi quantitativa del mercato elettrico svizzero
 5. 📈 Exotics & Structuring
 6. 🏛️ Enterprise Risk & XVA
 7. 📈 Metodo STAR & Ottimizzazione
-8. 📊 Price Analytics (Swissix) — 262 tab analitiche
+8. 📊 Price Analytics (Swissix) — 263 tab analitiche
 
 ### Price Analytics (Swissix)
 
@@ -294,6 +294,7 @@ stoccaggio gas, PPA, idroelettrico, power-to-heat.
 260. ❄️ Pompa di calore vs caldaia
 261. 🏢 PUE & costo data center
 262. 🔌 Gruppo elettrogeno vs blackout
+263. 🚗 Flotta aziendale: TCO diesel vs elettrico
 </details>
 
 ## Avvio locale

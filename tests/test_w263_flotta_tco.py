@@ -1,0 +1,242 @@
+"""Test tab263 'Flotta aziendale: TCO diesel vs elettrico': registry + funzioni pure.
+
+Funzioni pure estratte da app.py via AST con tests/appfuncs.py (niente Streamlit).
+Verifica consistenza del registry (titoli/dvar/with coerenti) e l'allineamento
+titolo-contenuto inclusa la tab263.
+"""
+
+import re
+from pathlib import Path
+
+import pytest
+
+from appfuncs import load
+
+_F = load("fl263_num", "fl263_quota_annua", "fl263_costo_annuo_veicolo",
+          "fl263_emissioni_annue", "fl263_confronto", "fl263_break_even_km",
+          "fl263_van", "fl263_sensibilita_km")
+fl263_num = _F["fl263_num"]
+fl263_quota_annua = _F["fl263_quota_annua"]
+fl263_costo_annuo_veicolo = _F["fl263_costo_annuo_veicolo"]
+fl263_emissioni_annue = _F["fl263_emissioni_annue"]
+fl263_confronto = _F["fl263_confronto"]
+fl263_break_even_km = _F["fl263_break_even_km"]
+fl263_van = _F["fl263_van"]
+fl263_sensibilita_km = _F["fl263_sensibilita_km"]
+
+APP = Path(__file__).parent.parent / "app.py"
+
+TITLE263 = "\U0001F697 Flotta aziendale: TCO diesel vs elettrico"
+TITLE262 = "\U0001F50C Gruppo elettrogeno vs blackout"
+
+# Parametri di riferimento usati nei test
+D = dict(capex=28000.0, valore_residuo_pct=30.0, anni=5.0, km_anno=30000.0,
+         consumo_100km=6.5, prezzo_unitario=1.75, manut_eur_km=0.06,
+         costi_fissi_annui=900.0)
+E = dict(capex=42000.0, valore_residuo_pct=30.0, anni=5.0, km_anno=30000.0,
+         consumo_100km=18.0, prezzo_unitario=0.25, manut_eur_km=0.04,
+         costi_fissi_annui=700.0)
+P = dict(n_veicoli=10.0, km_anno=30000.0, anni=5.0, tasso_pct=4.0,
+         d_capex=28000.0, d_residuo_pct=30.0, d_consumo=6.5, d_prezzo=1.75,
+         d_manut_km=0.06, d_fissi=900.0,
+         e_capex=42000.0, e_residuo_pct=30.0, e_consumo=18.0, e_prezzo=0.25,
+         e_manut_km=0.04, e_fissi=700.0)
+P_BE = {k: v for k, v in P.items()
+        if k not in ("n_veicoli", "km_anno", "tasso_pct")}
+
+
+def _registry():
+    src = APP.read_text(encoding="utf-8")
+    line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
+    titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
+    dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
+    withs = re.findall(r"    with (tab\d+):", src)
+    return src, titoli, dvars, withs
+
+
+class TestRegistryTab263:
+    def test_tab263_dichiarata(self):
+        src, titoli, dvars, withs = _registry()
+        assert len(titoli) == len(dvars) == len(withs) == 263
+        assert TITLE263 in titoli
+        assert "tab263" in dvars
+        assert "tab263" in withs
+        assert titoli[dvars.index("tab263")] == TITLE263
+        assert titoli[-1] == TITLE263
+        keys = re.findall(r'key="(fl263_[^"]+)"', src)
+        assert len(keys) == len(set(keys)) >= 16
+
+    def test_titoli_allineati_262_263(self):
+        _, titoli, dvars, _ = _registry()
+        assert titoli[dvars.index("tab262")] == TITLE262
+        assert titoli[dvars.index("tab263")] == TITLE263
+
+
+class TestFl263Num:
+    def test_ok(self):
+        assert fl263_num(3, "x") == 3.0
+        assert fl263_num(2.5, "x") == 2.5
+
+    def test_invalidi(self):
+        for bad in (True, False, float("nan"), float("inf"), "3", None):
+            with pytest.raises(ValueError):
+                fl263_num(bad, "x")
+
+
+class TestFl263Quota:
+    def test_base(self):
+        # (28000 - 30%) / 5 = 19600 / 5 = 3920
+        assert fl263_quota_annua(28000.0, 30.0, 5.0) == pytest.approx(3920.0)
+
+    def test_residuo_zero(self):
+        assert fl263_quota_annua(28000.0, 0.0, 5.0) == pytest.approx(5600.0)
+
+    def test_invalidi(self):
+        with pytest.raises(ValueError):
+            fl263_quota_annua(-100.0, 30.0, 5.0)
+        with pytest.raises(ValueError):
+            fl263_quota_annua(28000.0, 101.0, 5.0)
+        with pytest.raises(ValueError):
+            fl263_quota_annua(28000.0, 30.0, 0.0)
+
+
+class TestFl263CostoVeicolo:
+    def test_diesel(self):
+        v = fl263_costo_annuo_veicolo(**D)
+        assert set(v) == {"quota_annua", "costo_carburante",
+                          "costo_manutenzione", "costi_fissi",
+                          "costo_totale", "costo_per_km"}
+        assert v["quota_annua"] == pytest.approx(3920.0)
+        # 30000 * 6,5/100 * 1,75 = 3412,50
+        assert v["costo_carburante"] == pytest.approx(3412.5)
+        assert v["costo_manutenzione"] == pytest.approx(1800.0)
+        assert v["costi_fissi"] == pytest.approx(900.0)
+        assert v["costo_totale"] == pytest.approx(10032.5)
+        assert v["costo_per_km"] == pytest.approx(10032.5 / 30000.0)
+
+    def test_elettrico(self):
+        v = fl263_costo_annuo_veicolo(**E)
+        assert v["quota_annua"] == pytest.approx(5880.0)
+        # 30000 * 18/100 * 0,25 = 1350
+        assert v["costo_carburante"] == pytest.approx(1350.0)
+        assert v["costo_manutenzione"] == pytest.approx(1200.0)
+        assert v["costo_totale"] == pytest.approx(9130.0)
+
+    def test_km_zero(self):
+        v = fl263_costo_annuo_veicolo(**{**D, "km_anno": 0.0})
+        assert v["costo_totale"] == pytest.approx(3920.0 + 900.0)
+        assert v["costo_per_km"] == pytest.approx(0.0)
+
+    def test_invalidi(self):
+        with pytest.raises(ValueError):
+            fl263_costo_annuo_veicolo(**{**D, "km_anno": -1.0})
+        with pytest.raises(ValueError):
+            fl263_costo_annuo_veicolo(**{**D, "prezzo_unitario": -0.5})
+
+
+class TestFl263Confronto:
+    def test_conviene_elettrico(self):
+        c = fl263_confronto(**P)
+        assert c["tco_diesel_flotta"] == pytest.approx(100325.0)
+        assert c["tco_elettrico_flotta"] == pytest.approx(91300.0)
+        assert c["risparmio_annuo"] == pytest.approx(9025.0)
+        assert c["risparmio_pct"] == pytest.approx(9025.0 / 100325.0 * 100.0)
+        assert c["verdetto"] == "elettrico"
+        assert c["delta_capex"] == pytest.approx(140000.0)
+        # 140000 / 9025 = 15,51 anni
+        assert c["payback_anni"] == pytest.approx(15.51, rel=1e-2)
+        # -140000 + 9025 * (1-1,04^-5)/0,04 = -99822
+        assert c["van"] == pytest.approx(-99822.0, rel=1e-3)
+
+    def test_conviene_diesel(self):
+        q = dict(P)
+        q["km_anno"] = 5000.0
+        c = fl263_confronto(**q)
+        assert c["verdetto"] == "diesel"
+        assert c["risparmio_annuo"] < 0
+        assert c["payback_anni"] is None
+
+    def test_indifferente(self):
+        # ai km di pareggio il risparmio e' nullo
+        be = fl263_break_even_km(**P_BE)
+        q = dict(P)
+        q["km_anno"] = be
+        c = fl263_confronto(**q)
+        assert c["verdetto"] == "indifferente"
+        assert abs(c["risparmio_annuo"]) <= 0.05 * c["tco_diesel_flotta"]
+
+    def test_n_veicoli_invalido(self):
+        with pytest.raises(ValueError):
+            fl263_confronto(**{**P, "n_veicoli": 0.0})
+
+
+class TestFl263BreakEven:
+    def test_forma_chiusa(self):
+        be = fl263_break_even_km(**P_BE)
+        fixed = (5880.0 - 3920.0) + (700.0 - 900.0)  # 1760
+        marg = (0.065 * 1.75 + 0.06) - (0.18 * 0.25 + 0.04)  # 0,08875
+        assert be == pytest.approx(fixed / marg)
+        assert be == pytest.approx(19831.0, rel=1e-3)
+
+    def test_mai_conveniente(self):
+        # elettricita' a 1 €/kWh: costo variabile elettrico > diesel
+        q = dict(P_BE)
+        q["e_prezzo"] = 1.0
+        assert fl263_break_even_km(**q) is None
+
+
+class TestFl263Van:
+    def test_base(self):
+        # -140000 + 9025 * 4,4518 = -99822
+        assert fl263_van(140000.0, 9025.0, 5.0, 4.0) == pytest.approx(-99822.0, rel=1e-3)
+
+    def test_tasso_zero(self):
+        assert fl263_van(140000.0, 9025.0, 5.0, 0.0) == pytest.approx(-94875.0)
+
+    def test_invalidi(self):
+        with pytest.raises(ValueError):
+            fl263_van(140000.0, 9025.0, 0.0, 4.0)
+        with pytest.raises(ValueError):
+            fl263_van(140000.0, 9025.0, 5.0, -1.0)
+
+
+class TestFl263Sensibilita:
+    def test_lunghezza_e_chiavi(self):
+        righe = fl263_sensibilita_km(60000.0, 30000.0, **P_BE)
+        assert len(righe) == 3
+        assert righe[0]["km"] == pytest.approx(0.0)
+        assert righe[-1]["km"] == pytest.approx(60000.0)
+        assert set(righe[0]) == {"km", "tco_diesel", "tco_elettrico"}
+
+    def test_monotonia_e_coerenza(self):
+        righe = fl263_sensibilita_km(60000.0, 30000.0, **P_BE)
+        td = [r["tco_diesel"] for r in righe]
+        te = [r["tco_elettrico"] for r in righe]
+        assert all(b > a for a, b in zip(td, td[1:]))
+        assert all(b > a for a, b in zip(te, te[1:]))
+        vd = fl263_costo_annuo_veicolo(**{**D, "km_anno": 30000.0})
+        ve = fl263_costo_annuo_veicolo(**{**E, "km_anno": 30000.0})
+        assert righe[1]["tco_diesel"] == pytest.approx(vd["costo_totale"])
+        assert righe[1]["tco_elettrico"] == pytest.approx(ve["costo_totale"])
+
+    def test_invalidi(self):
+        with pytest.raises(ValueError):
+            fl263_sensibilita_km(0.0, 30000.0, **P_BE)
+        with pytest.raises(ValueError):
+            fl263_sensibilita_km(60000.0, 0.0, **P_BE)
+
+
+class TestFl263Emissioni:
+    def test_diesel(self):
+        # 30000 * 6,5/100 * 2,68 = 5226 kg
+        assert fl263_emissioni_annue(30000.0, 6.5, 2.68) == pytest.approx(5226.0)
+
+    def test_elettrico(self):
+        # 30000 * 18/100 * 0,10 = 540 kg
+        assert fl263_emissioni_annue(30000.0, 18.0, 0.10) == pytest.approx(540.0)
+
+    def test_invalidi(self):
+        with pytest.raises(ValueError):
+            fl263_emissioni_annue(-1.0, 6.5, 2.68)
+        with pytest.raises(ValueError):
+            fl263_emissioni_annue(30000.0, 6.5, -0.5)
