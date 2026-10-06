@@ -33374,6 +33374,167 @@ def ci253_matrice(durate_ore, frequenze_anno, voll_eur_kwh, potenza_kw):
 
 
 
+
+
+def _wh254_num(x, nome):
+    """Valida uno scalare numerico: no bool, no NaN/inf."""
+    import math
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        raise ValueError(f"{nome}: deve essere un numero")
+    if math.isnan(x) or math.isinf(x):
+        raise ValueError(f"{nome}: NaN/inf non ammessi")
+    return float(x)
+
+
+def wh254_energia_recuperabile(potenza_termica_kw, ore_anno, rendimento_recupero_pct):
+    """Energia termica utile recuperabile in un anno.
+
+    energia_utile_kwh = potenza_termica_kw x ore_anno x rendimento_recupero.
+    NaN-safe; negativi / ore > 8760 / rendimento fuori [0,100] -> ValueError.
+    """
+    p = _wh254_num(potenza_termica_kw, "potenza_termica_kw")
+    ore = _wh254_num(ore_anno, "ore_anno")
+    eta = _wh254_num(rendimento_recupero_pct, "rendimento_recupero_pct")
+    if p < 0:
+        raise ValueError("potenza_termica_kw: non puo' essere negativa")
+    if not 0 <= ore <= 8760:
+        raise ValueError("ore_anno: deve stare in [0, 8760]")
+    if not 0 <= eta <= 100:
+        raise ValueError("rendimento_recupero_pct: deve stare in [0, 100]")
+    energia_utile_kwh = p * ore * eta / 100.0
+    return {"potenza_utile_kw": round(p * eta / 100.0, 2),
+            "energia_utile_kwh": round(energia_utile_kwh, 2)}
+
+
+def wh254_risparmio_gas(energia_utile_kwh, prezzo_gas_eur_kwh, rendimento_caldaia_pct):
+    """Gas sostituito e risparmio lordo.
+
+    gas_risparmiato = energia_utile / rendimento_caldaia (il gas bruciato
+    con rendimento eta fornisce energia_utile); risparmio = gas x prezzo.
+    """
+    e = _wh254_num(energia_utile_kwh, "energia_utile_kwh")
+    pg = _wh254_num(prezzo_gas_eur_kwh, "prezzo_gas_eur_kwh")
+    eta = _wh254_num(rendimento_caldaia_pct, "rendimento_caldaia_pct")
+    if e < 0:
+        raise ValueError("energia_utile_kwh: non puo' essere negativa")
+    if pg < 0:
+        raise ValueError("prezzo_gas_eur_kwh: non puo' essere negativo")
+    if not 0 < eta <= 100:
+        raise ValueError("rendimento_caldaia_pct: deve stare in (0, 100]")
+    gas_risparmiato_kwh = e / (eta / 100.0)
+    return {"gas_risparmiato_kwh": round(gas_risparmiato_kwh, 2),
+            "risparmio_lordo_eur": round(gas_risparmiato_kwh * pg, 2)}
+
+
+def wh254_pompa_calore(calore_scarico_kw, cop, ore_anno, prezzo_elettrico_eur_kwh,
+                      prezzo_gas_eur_kwh, rendimento_caldaia_pct):
+    """Recupero con pompa di calore: il calore di scarto e' la sorgente fredda.
+
+    calore_utile = calore_scarico x COP/(COP-1); elettricita' = calore_utile/COP.
+    Convenienza vs caldaia a gas: cop_min = prezzo_elettrico x eta_caldaia / prezzo_gas
+    (la PdC costa meno del gas per kWh utile quando COP > cop_min).
+    COP deve essere > 1.
+    """
+    q = _wh254_num(calore_scarico_kw, "calore_scarico_kw")
+    c = _wh254_num(cop, "cop")
+    ore = _wh254_num(ore_anno, "ore_anno")
+    pe = _wh254_num(prezzo_elettrico_eur_kwh, "prezzo_elettrico_eur_kwh")
+    pg = _wh254_num(prezzo_gas_eur_kwh, "prezzo_gas_eur_kwh")
+    eta = _wh254_num(rendimento_caldaia_pct, "rendimento_caldaia_pct")
+    if q < 0:
+        raise ValueError("calore_scarico_kw: non puo' essere negativo")
+    if c <= 1:
+        raise ValueError("cop: deve essere > 1")
+    if not 0 <= ore <= 8760:
+        raise ValueError("ore_anno: deve stare in [0, 8760]")
+    if pe < 0 or pg < 0:
+        raise ValueError("i prezzi non possono essere negativi")
+    if not 0 < eta <= 100:
+        raise ValueError("rendimento_caldaia_pct: deve stare in (0, 100]")
+    calore_utile_kw = q * c / (c - 1.0)
+    energia_utile_kwh = calore_utile_kw * ore
+    energia_elettrica_kwh = calore_utile_kw / c * ore
+    costo_elettrico_eur = energia_elettrica_kwh * pe
+    gas_risparmiato_kwh = energia_utile_kwh / (eta / 100.0)
+    risparmio_lordo_eur = gas_risparmiato_kwh * pg
+    cop_min = pe * (eta / 100.0) / pg if pg > 0 else None
+    return {"calore_utile_kw": round(calore_utile_kw, 2),
+            "energia_utile_kwh": round(energia_utile_kwh, 2),
+            "energia_elettrica_kwh": round(energia_elettrica_kwh, 2),
+            "costo_elettrico_eur": round(costo_elettrico_eur, 2),
+            "gas_risparmiato_kwh": round(gas_risparmiato_kwh, 2),
+            "risparmio_lordo_eur": round(risparmio_lordo_eur, 2),
+            "risparmio_netto_eur": round(risparmio_lordo_eur - costo_elettrico_eur, 2),
+            "cop_min_convenienza": round(cop_min, 2) if cop_min is not None else None,
+            "pdc_conveniente": bool(cop_min is not None and c > cop_min)}
+
+
+def wh254_co2_evitata(gas_risparmiato_kwh, fattore_kg_kwh=0.201):
+    """CO2 evitata sostituendo gas naturale (default 0,201 kgCO2/kWh)."""
+    g = _wh254_num(gas_risparmiato_kwh, "gas_risparmiato_kwh")
+    f = _wh254_num(fattore_kg_kwh, "fattore_kg_kwh")
+    if g < 0:
+        raise ValueError("gas_risparmiato_kwh: non puo' essere negativo")
+    if f < 0:
+        raise ValueError("fattore_kg_kwh: non puo' essere negativo")
+    return {"co2_evitata_t_anno": round(g * f / 1000.0, 2)}
+
+
+def wh254_business_case(risparmio_netto_annuo_eur, capex_eur, opex_annuo_eur):
+    """Payback semplice dell'intervento di recupero.
+
+    flusso = risparmio_netto - OPEX; payback = CAPEX/flusso (mesi).
+    Conviene se payback <= 60 mesi; None/mai se il flusso non e' positivo.
+    """
+    r = _wh254_num(risparmio_netto_annuo_eur, "risparmio_netto_annuo_eur")
+    cx = _wh254_num(capex_eur, "capex_eur")
+    ox = _wh254_num(opex_annuo_eur, "opex_annuo_eur")
+    if cx < 0:
+        raise ValueError("capex_eur: non puo' essere negativo")
+    if ox < 0:
+        raise ValueError("opex_annuo_eur: non puo' essere negativo")
+    flusso = r - ox
+    payback = round(cx / flusso * 12.0, 1) if flusso > 0 else None
+    return {"flusso_annuo_eur": round(flusso, 2),
+            "payback_mesi": payback,
+            "conviene": bool(payback is not None and payback <= 60)}
+
+
+def wh254_sensitivita(prezzi_gas_list, ore_list, potenza_kw, rendimento_pct,
+                     eta_caldaia_pct, opex_annuo):
+    """Matrice risparmio netto annuo al variare di prezzo gas e ore/anno."""
+    if not prezzi_gas_list or not ore_list:
+        raise ValueError("prezzi_gas_list e ore_list non possono essere vuoti")
+    righe = []
+    for pg in prezzi_gas_list:
+        for ore in ore_list:
+            en = wh254_energia_recuperabile(potenza_kw, ore, rendimento_pct)
+            rg = wh254_risparmio_gas(en["energia_utile_kwh"], pg, eta_caldaia_pct)
+            righe.append({"prezzo_gas_eur_kwh": float(pg),
+                          "ore_anno": float(ore),
+                          "risparmio_netto_annuo_eur": round(rg["risparmio_lordo_eur"] - float(opex_annuo), 2)})
+    return righe
+
+
+def wh254_sensitivita_pdc(prezzi_gas_list, ore_list, calore_scarico_kw, cop,
+                          prezzo_elettrico_eur_kwh, eta_caldaia_pct, opex_annuo):
+    """Matrice risparmio netto annuo (pompa di calore) al variare di prezzo gas e ore/anno.
+
+    Per ogni cella: risparmio netto PdC - OPEX.
+    """
+    if not prezzi_gas_list or not ore_list:
+        raise ValueError("prezzi_gas_list e ore_list non possono essere vuoti")
+    righe = []
+    for pg in prezzi_gas_list:
+        for ore in ore_list:
+            r = wh254_pompa_calore(calore_scarico_kw, cop, ore,
+                                   prezzo_elettrico_eur_kwh, pg, eta_caldaia_pct)
+            righe.append({"prezzo_gas_eur_kwh": float(pg),
+                          "ore_anno": float(ore),
+                          "risparmio_netto_annuo_eur": round(r["risparmio_netto_eur"] - float(opex_annuo), 2)})
+    return righe
+
+
 if workspace == _('ws1'):
     st.markdown(f"<h1>{_('ws1')}</h1>", unsafe_allow_html=True)
     banner_demo("simulatore strategico: margini, centrali e curve simulate")
@@ -34015,7 +34176,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -56972,6 +57133,81 @@ elif workspace == _('ws8'):
                            file_name="costo_interruzioni_voll.csv", mime="text/csv", key="ci253_csv",
                            help="Matrice durata \u00d7 frequenza del costo atteso annuo.")
         st.caption("Nota: il VoLL varia molto per settore (industriale 5-25 \u20ac/kWh in letteratura, servizi critici anche oltre 100 \u20ac/kWh). Usare sempre una stima basata sui costi di fermo del proprio sito.")
+
+    with tab254:
+        titolo254 = edu("Recupero calore di scarto", "Fumi, condense, aria di processo e raffreddamenti buttano via calore gia' pagato: recuperarlo (scambiatore diretto o pompa di calore) taglia il gas in caldaia. Il conto e' semplice: energia utile = potenza scartata x ore x rendimento di recupero, divisa per il rendimento della caldaia per sapere quanto gas si evita di bruciare.")
+        st.markdown(f"<h1>\u2668\ufe0f {titolo254}</h1>", unsafe_allow_html=True)
+        st.caption("Quanto vale il calore che oggi butti via? Confronto scambiatore diretto vs pompa di calore, con payback e CO2 evitata.")
+        c1_254, c2_254, c3_254, c4_254 = st.columns(4)
+        pot254 = c1_254.number_input("Potenza termica scartata (kW)", min_value=0.0, value=500.0, step=10.0, key="wh254_potenza",
+                                     help="Potenza termica del flusso di scarto (fumi, condense, aria calda).")
+        ore254 = c2_254.number_input("Ore di funzionamento / anno", min_value=0.0, max_value=8760.0, value=4000.0, step=100.0, key="wh254_ore")
+        rend254 = c3_254.slider("Rendimento di recupero (%)", min_value=0, max_value=100, value=70, key="wh254_rend",
+                                help="Quota del calore di scarto effettivamente recuperata dallo scambiatore.")
+        tec254 = c4_254.radio("Tecnologia", ["Scambiatore diretto", "Pompa di calore"], key="wh254_tec", horizontal=True)
+        d1_254, d2_254, d3_254, d4_254 = st.columns(4)
+        pgas254 = d1_254.number_input("Prezzo gas (€/kWh)", min_value=0.0, value=0.09, step=0.005, format="%.3f", key="wh254_pgas")
+        eta254 = d2_254.number_input("Rendimento caldaia sostituita (%)", min_value=1.0, max_value=100.0, value=90.0, step=1.0, key="wh254_eta")
+        capex254 = d3_254.number_input("CAPEX intervento (€)", min_value=0.0, value=250000.0, step=10000.0, key="wh254_capex")
+        opex254 = d4_254.number_input("OPEX (€/anno)", min_value=0.0, value=8000.0, step=500.0, key="wh254_opex",
+                                      help="Manutenzione scambiatori, pompe, controlli.")
+        if tec254 == "Pompa di calore":
+            e1_254, e2_254 = st.columns(2)
+            cop254 = e1_254.slider("COP pompa di calore", min_value=1.5, max_value=8.0, value=4.0, step=0.1, key="wh254_cop",
+                                   help="Coefficiente di prestazione: kWh termici utili per kWh elettrico.")
+            pele254 = e2_254.number_input("Prezzo elettricita' (€/kWh)", min_value=0.0, value=0.18, step=0.005, format="%.3f", key="wh254_pele")
+        co2f254 = st.number_input("Fattore emissione gas (kgCO2/kWh)", min_value=0.0, value=0.201, step=0.001, format="%.3f", key="wh254_co2f",
+                                  help="Gas naturale: ~0,201 kgCO2/kWh di potere calorifico inferiore.")
+        if tec254 == "Scambiatore diretto":
+            en254 = wh254_energia_recuperabile(pot254, ore254, rend254)
+            rg254 = wh254_risparmio_gas(en254["energia_utile_kwh"], pgas254, eta254)
+            netto254 = rg254["risparmio_lordo_eur"]
+            gas254 = rg254["gas_risparmiato_kwh"]
+            extra254 = {}
+        else:
+            pdc254 = wh254_pompa_calore(pot254, cop254, ore254, pele254, pgas254, eta254)
+            en254 = {"energia_utile_kwh": pdc254["energia_utile_kwh"],
+                     "potenza_utile_kw": pdc254["calore_utile_kw"]}
+            netto254 = pdc254["risparmio_netto_eur"]
+            gas254 = pdc254["gas_risparmiato_kwh"]
+            extra254 = pdc254
+        bc254 = wh254_business_case(netto254, capex254, opex254)
+        co2254 = wh254_co2_evitata(gas254, co2f254)
+        k1_254, k2_254, k3_254, k4_254, k5_254 = st.columns(5)
+        render_kpi("Energia utile (MWh/anno)", f"{en254['energia_utile_kwh']/1000:,.1f}", k1_254)
+        render_kpi("Gas evitato (MWh/anno)", f"{gas254/1000:,.1f}", k2_254)
+        render_kpi("Risparmio netto (€/anno)", f"{bc254['flusso_annuo_eur']:,.0f}", k3_254)
+        render_kpi("Payback", f"{bc254['payback_mesi']:,.1f} mesi" if bc254["payback_mesi"] is not None else "mai", k4_254)
+        render_kpi("CO2 evitata (t/anno)", f"{co2254['co2_evitata_t_anno']:,.1f}", k5_254)
+        if tec254 == "Pompa di calore":
+            st.caption(f"Elettricita' assorbita dalla PdC: {extra254['energia_elettrica_kwh']/1000:,.1f} MWh/anno "
+                       f"({extra254['costo_elettrico_eur']:,.0f} €/anno); COP minimo di convenienza vs gas: "
+                       f"{extra254['cop_min_convenienza']:.2f} — "
+                       f"{'PdC conveniente' if extra254['pdc_conveniente'] else 'a questo COP conviene il gas diretto'}.")
+        if bc254["conviene"]:
+            st.success(f"\U0001F4A1 Intervento conveniente: payback {bc254['payback_mesi']:,.1f} mesi contro {bc254['flusso_annuo_eur']:,.0f} €/anno di flusso netto.")
+        elif bc254["payback_mesi"] is not None:
+            st.info(f"Payback {bc254['payback_mesi']:,.1f} mesi (> 5 anni): conviene solo con piu' ore, gas piu' caro o CAPEX minore.")
+        else:
+            st.warning("Il flusso annuo non e' positivo: l'intervento non si ripaga con questi parametri.")
+        st.markdown("**Sensitivita': risparmio netto annuo al variare di ore e prezzo gas**")
+        if tec254 == "Scambiatore diretto":
+            righe254 = wh254_sensitivita([0.05, 0.07, 0.09, 0.12, 0.15], [2000.0, 4000.0, 6000.0, 8000.0],
+                                         pot254, rend254, eta254, opex254)
+        else:
+            righe254 = wh254_sensitivita_pdc([0.05, 0.07, 0.09, 0.12, 0.15], [2000.0, 4000.0, 6000.0, 8000.0],
+                                             pot254, cop254, pele254, eta254, opex254)
+        dfm254 = pd.DataFrame(righe254).pivot(index="ore_anno", columns="prezzo_gas_eur_kwh",
+                                              values="risparmio_netto_annuo_eur")
+        fig254 = px.imshow(dfm254, text_auto=".0f", aspect="auto",
+                           title="Risparmio netto annuo (€) — righe: ore/anno, colonne: prezzo gas (€/kWh)",
+                           labels=dict(x="prezzo gas (€/kWh)", y="ore/anno", color="€/anno"))
+        st.plotly_chart(fig254, use_container_width=True)
+        st.download_button("\u2b07\ufe0f Export CSV sensitivita'",
+                           data=pd.DataFrame(righe254).to_csv(index=False, sep=";").encode("utf-8"),
+                           file_name="recupero_calore_sensitivita.csv", mime="text/csv", key="wh254_csv",
+                           help="Matrice ore x prezzo gas del risparmio netto annuo.")
+        st.caption("Nota: i rendimenti di recupero realistici sono 50-80% per scambiatori fumi/acqua, 60-90% per condense; le PdC su calore di scarto lavorano tipicamente con COP 3-6. Verificare sempre temperature e portate reali del flusso.")
 
 # Footer
 
