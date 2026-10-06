@@ -35056,6 +35056,139 @@ def fl263_sensibilita_km(km_max, passo, anni,
     return righe
 
 
+# ---------------------------------------------------------------------------
+# Tab 264 - Garanzie di origine: costo del 100% rinnovabile
+# ---------------------------------------------------------------------------
+
+def go264_num(x, nome):
+    """Valida uno scalare numerico: no bool, no NaN/inf."""
+    import math
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        raise ValueError(f"{nome}: deve essere un numero")
+    if math.isnan(x) or math.isinf(x):
+        raise ValueError(f"{nome}: NaN/inf non ammessi")
+    return float(x)
+
+
+def go264_parse_consumi(testo):
+    """Parsa 12 consumi mensili (MWh) da testo: uno per riga (';' ammesso).
+
+    La virgola e' accettata come separatore decimale. Restituisce lista di
+    12 float >= 0. ValueError se il conteggio non e' 12 o un valore non e'
+    numerico/negativo.
+    """
+    import re
+    pezzi = [p for p in re.split(r"[\s;]+", (testo or "").strip()) if p]
+    if len(pezzi) != 12:
+        raise ValueError(f"servono 12 valori mensili, trovati {len(pezzi)}")
+    consumi = []
+    for i, p in enumerate(pezzi, 1):
+        try:
+            v = float(p.replace(",", "."))
+        except ValueError:
+            raise ValueError(f"mese {i}: '{p}' non e' un numero")
+        if v < 0:
+            raise ValueError(f"mese {i}: il consumo non puo' essere negativo")
+        consumi.append(v)
+    return consumi
+
+
+def go264_costo_go(consumo_mwh, prezzo_go):
+    """Costo delle GO da annullare (€) = consumo (MWh) * prezzo (€/MWh)."""
+    c = go264_num(consumo_mwh, "consumo_mwh")
+    p = go264_num(prezzo_go, "prezzo_go")
+    if c < 0:
+        raise ValueError("consumo_mwh: non puo' essere negativo")
+    if p < 0:
+        raise ValueError("prezzo_go: non puo' essere negativo")
+    return c * p
+
+
+def go264_costo_annuo(consumi, prezzo_go):
+    """Costo GO annuo (€) da 12 consumi mensili.
+
+    Restituisce dict con "costo_totale" e "costi_mensili" (lista di 12).
+    """
+    if len(consumi) != 12:
+        raise ValueError("servono 12 consumi mensili")
+    mensili = [go264_costo_go(c, prezzo_go) for c in consumi]
+    return {"costo_totale": sum(mensili), "costi_mensili": mensili}
+
+
+def go264_copertura_fv(consumo_tot_mwh, produzione_fv_mwh):
+    """Quota di consumo coperta dal FV proprio e consumo netto da certificare.
+
+    Le GO servono solo sul consumo non coperto dall'autoconsumo FV:
+    consumo_netto = max(0, consumo - FV). Con consumo nullo la copertura
+    e' convenzionalmente 100%.
+    """
+    ct = go264_num(consumo_tot_mwh, "consumo_tot_mwh")
+    fv = go264_num(produzione_fv_mwh, "produzione_fv_mwh")
+    if ct < 0:
+        raise ValueError("consumo_tot_mwh: non puo' essere negativo")
+    if fv < 0:
+        raise ValueError("produzione_fv_mwh: non puo' essere negativa")
+    if ct == 0:
+        return {"copertura_pct": 100.0, "consumo_netto_mwh": 0.0}
+    return {"copertura_pct": min(1.0, fv / ct) * 100.0,
+            "consumo_netto_mwh": max(0.0, ct - fv)}
+
+
+def go264_confronto(consumo_netto_mwh, prezzo_go, premio_verde, fisso_verde=0.0):
+    """GO annullate in proprio vs offerta 'verde' del fornitore.
+
+    costo_verde = consumo_netto * premio + fisso. verdetto: "GO" se il costo
+    GO e' inferiore di oltre il 5% al costo verde, "fornitore verde" se e'
+    superiore di oltre il 5%, altrimenti "indifferente".
+    """
+    cn = go264_num(consumo_netto_mwh, "consumo_netto_mwh")
+    if cn < 0:
+        raise ValueError("consumo_netto_mwh: non puo' essere negativo")
+    pv = go264_num(premio_verde, "premio_verde")
+    fx = go264_num(fisso_verde, "fisso_verde")
+    if pv < 0:
+        raise ValueError("premio_verde: non puo' essere negativo")
+    if fx < 0:
+        raise ValueError("fisso_verde: non puo' essere negativo")
+    cg = go264_costo_go(cn, prezzo_go)
+    cv = cn * pv + fx
+    delta = cv - cg
+    risp_pct = (delta / cv * 100.0) if cv > 0 else 0.0
+    if cv <= 0:
+        verd = "indifferente" if cg <= 0 else "fornitore verde"
+    elif cg < 0.95 * cv:
+        verd = "GO"
+    elif cg > 1.05 * cv:
+        verd = "fornitore verde"
+    else:
+        verd = "indifferente"
+    return {"costo_go": cg, "costo_verde": cv, "delta": delta,
+            "risparmio_pct": risp_pct, "verdetto": verd}
+
+
+def go264_sensibilita_prezzo(consumo_netto_mwh, prezzo_max, passo):
+    """Curva costo GO annuo al variare del prezzo GO (€/MWh).
+
+    Restituisce lista di dict {"prezzo_go", "costo_annuo"}.
+    """
+    cn = go264_num(consumo_netto_mwh, "consumo_netto_mwh")
+    if cn < 0:
+        raise ValueError("consumo_netto_mwh: non puo' essere negativo")
+    pm = go264_num(prezzo_max, "prezzo_max")
+    st_ = go264_num(passo, "passo")
+    if pm <= 0:
+        raise ValueError("prezzo_max: deve essere > 0")
+    if st_ <= 0:
+        raise ValueError("passo: deve essere > 0")
+    righe = []
+    p = 0.0
+    while p <= pm + 1e-9:
+        righe.append({"prezzo_go": round(p, 2),
+                      "costo_annuo": go264_costo_go(cn, p)})
+        p += st_
+    return righe
+
+
 if workspace == _('ws1'):
     st.markdown(f"<h1>{_('ws1')}</h1>", unsafe_allow_html=True)
     banner_demo("simulatore strategico: margini, centrali e curve simulate")
@@ -35697,7 +35830,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256, tab257, tab258, tab259, tab260, tab261, tab262, tab263 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete", "🔥 Teleriscaldamento vs caldaia", "🌿 Clean spread (con CO₂)", "🇮🇹 PUN da prezzi zonali", "❄️ Pompa di calore vs caldaia", "🏢 PUE & costo data center", "🔌 Gruppo elettrogeno vs blackout", "🚗 Flotta aziendale: TCO diesel vs elettrico"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256, tab257, tab258, tab259, tab260, tab261, tab262, tab263, tab264 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete", "🔥 Teleriscaldamento vs caldaia", "🌿 Clean spread (con CO₂)", "🇮🇹 PUN da prezzi zonali", "❄️ Pompa di calore vs caldaia", "🏢 PUE & costo data center", "🔌 Gruppo elettrogeno vs blackout", "🚗 Flotta aziendale: TCO diesel vs elettrico", "📜 Garanzie di origine: costo del 100% rinnovabile"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -59579,6 +59712,82 @@ elif workspace == _('ws8'):
                                key="fl263_csv",
                                help="TCO diesel vs elettrico al variare dei km/anno.")
         st.caption("Nota: ammortamento lineare su (capex - valore residuo). Non include incentivi all'acquisto, costi dell'infrastruttura di ricarica, fermi per ricarica in orario di lavoro e differenze di valore residuo tra le due tecnologie: personalizzare gli input per il caso reale.")
+
+    with tab264:
+        titolo264 = edu("Garanzie di origine: costo del 100% rinnovabile", "Quanto costa certificare i consumi come 100% rinnovabili annullando Garanzie di Origine (GO)? Il costo annuo e' il consumo netto in MWh per il prezzo delle GO in €/MWh. Il consumo netto e' il consumo totale meno l'energia autoconsumata dal fotovoltaico proprio: sulle quote gia' coperte dal FV non servono GO. Questa tab confronta l'annullamento GO in proprio con l'offerta 'verde' del fornitore.")
+        st.markdown(f"<h1>\U0001F4DC {titolo264}</h1>", unsafe_allow_html=True)
+        st.caption("Costo della certificazione 100% rinnovabile: GO annullate in proprio vs offerta verde del fornitore.")
+        con264 = st.text_area("Consumi mensili (MWh, 12 valori)", value="85\n78\n82\n75\n70\n65\n60\n62\n68\n75\n82\n90",
+                              height=170, key="go264_consumi",
+                              help="12 consumi mensili in MWh, uno per riga (il ';' e' ammesso come separatore).")
+        i1_264, i2_264, i3_264, i4_264 = st.columns(4)
+        pg264 = i1_264.number_input("Prezzo GO (€/MWh)", min_value=0.0,
+                                    value=1.20, step=0.10, format="%.2f",
+                                    key="go264_prezzo_go",
+                                    help="Prezzo di mercato delle Garanzie di Origine.")
+        fv264 = i2_264.number_input("Produzione FV propria (MWh/anno)", min_value=0.0,
+                                     value=120.0, step=10.0, format="%.0f",
+                                     key="go264_fv",
+                                     help="Energia autoconsumata dal fotovoltaico proprio: riduce le GO da acquistare.")
+        pv264 = i3_264.number_input("Premio fornitore verde (€/MWh)", min_value=0.0,
+                                     value=3.00, step=0.25, format="%.2f",
+                                     key="go264_premio_verde",
+                                     help="Sovrapprezzo dell'offerta '100% rinnovabile' del fornitore.")
+        fx264 = i4_264.number_input("Costo fisso verde (€/anno)", min_value=0.0,
+                                     value=0.0, step=50.0, format="%.0f",
+                                     key="go264_fisso_verde")
+        try:
+            cm264 = go264_parse_consumi(con264)
+            tot264 = sum(cm264)
+            cop264 = go264_copertura_fv(tot264, fv264)
+            net264 = cop264["consumo_netto_mwh"]
+            ca264 = go264_costo_annuo(cm264, pg264)
+            # il costo GO annuo va calcolato sul netto (il FV copre la sua quota)
+            cg264 = go264_costo_go(net264, pg264)
+            cf264 = go264_confronto(net264, pg264, pv264, fx264)
+            pmax264 = max(6.0, pg264 * 2.0)
+            sen264 = go264_sensibilita_prezzo(net264, pmax264, pmax264 / 60.0)
+        except ValueError as e264:
+            st.error(f"Dati non validi: {e264}")
+            st.stop()
+        k1_264, k2_264, k3_264, k4_264, k5_264, k6_264 = st.columns(6)
+        render_kpi("Consumo netto da certificare (MWh)", f"{net264:,.0f}", k1_264)
+        render_kpi("Costo GO annuo (€)", f"{cg264:,.0f}", k2_264)
+        render_kpi("Costo fornitore verde (€)", f"{cf264['costo_verde']:,.0f}", k3_264)
+        render_kpi("Risparmio GO vs verde (€/anno)", f"{cf264['delta']:,.0f}", k4_264)
+        render_kpi("Quota coperta da FV (%)", f"{cop264['copertura_pct']:.1f}", k5_264)
+        render_kpi("Costo GO per MWh totale (€/MWh)", f"{cg264 / tot264:.2f}" if tot264 > 0 else "—", k6_264)
+        if cf264["verdetto"] == "GO":
+            st.success(f"Conviene annullare le GO in proprio: {cf264['delta']:,.0f} €/anno in meno rispetto all'offerta verde ({cf264['risparmio_pct']:.1f}%).")
+        elif cf264["verdetto"] == "fornitore verde":
+            st.warning(f"Conviene l'offerta verde del fornitore: {-cf264['delta']:,.0f} €/anno in meno rispetto alle GO in proprio ({-cf264['risparmio_pct']:.1f}%).")
+        else:
+            st.info("Costo GO e offerta verde entro il ±5%: la scelta dipende da fattori non economici (reporting ESG, semplicita' amministrativa).")
+        st.info(f"Il FV proprio copre il {cop264['copertura_pct']:.1f}% del consumo: le GO servono solo sui restanti {net264:,.0f} MWh.")
+        st.markdown("**Costo GO annuo al variare del prezzo GO (€/MWh)**")
+        ds264 = pd.DataFrame(sen264)
+        fig264 = px.line(ds264, x="prezzo_go", y="costo_annuo",
+                         title="Costo GO annuo vs prezzo GO (€)",
+                         labels={"prezzo_go": "Prezzo GO (€/MWh)", "costo_annuo": "€/anno"})
+        fig264.add_hline(y=cf264["costo_verde"], line_dash="dash", line_color="green",
+                         annotation_text="Costo fornitore verde")
+        fig264.add_vline(x=pg264, line_dash="dash", line_color="red",
+                         annotation_text="Prezzo attuale")
+        st.plotly_chart(fig264, use_container_width=True)
+        with st.expander("Dettaglio mensile ed export CSV"):
+            mesi264 = ["Gen", "Feb", "Mar", "Apr", "Mag", "Giu",
+                       "Lug", "Ago", "Set", "Ott", "Nov", "Dic"]
+            dfm264 = pd.DataFrame([{"mese": m, "consumo_mwh": round(c, 1),
+                                    "costo_go_eur": round(cm, 0)}
+                                   for m, c, cm in zip(mesi264, cm264, ca264["costi_mensili"])])
+            st.dataframe(dfm264, use_container_width=True, hide_index=True)
+            st.caption(f"Consumo totale: {tot264:,.0f} MWh/anno — GO da annullare: {net264:,.0f} MWh (quota FV {fv264:,.0f} MWh esclusa).")
+            st.download_button("⬇️ Export CSV mensile",
+                               data=dfm264.to_csv(index=False, sep=";").encode("utf-8"),
+                               file_name="garanzie_origine_mensile.csv", mime="text/csv",
+                               key="go264_csv",
+                               help="Consumi mensili e costo GO per mese.")
+        st.caption("Nota: il prezzo delle GO varia con domanda/offerta e tecnologia/vintage; verificare il prezzo corrente sul mercato. Le GO vanno annullate entro i termini per l'anno di competenza e non possono coprire energia gia' conteggiata come autoconsumo.")
 
 # Footer
 

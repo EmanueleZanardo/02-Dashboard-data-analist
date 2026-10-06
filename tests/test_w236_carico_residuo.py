@@ -26,13 +26,13 @@ class TestRegistryTab236:
         src = APP.read_text(encoding="utf-8")
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
-        assert len(titoli) == 263
+        assert len(titoli) == 264
         assert "📊 Curva di carico residua" in titoli
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         assert "tab236" in dvars
         withs = re.findall(r"    with (tab\d+):", src)
         assert "tab236" in withs
-        assert len(withs) == len(dvars) == 263
+        assert len(withs) == len(dvars) == 264
         keys = re.findall(r'key="(t236_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 10
 
@@ -40,7 +40,7 @@ class TestRegistryTab236:
         src = APP.read_text(encoding="utf-8")
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
-        assert titoli[-1] == "🚗 Flotta aziendale: TCO diesel vs elettrico"
+        assert titoli[-1] == "📜 Garanzie di origine: costo del 100% rinnovabile"
 
 
 class TestPureCaricoResiduo:

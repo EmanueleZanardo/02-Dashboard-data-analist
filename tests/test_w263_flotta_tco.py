@@ -27,6 +27,7 @@ fl263_sensibilita_km = _F["fl263_sensibilita_km"]
 APP = Path(__file__).parent.parent / "app.py"
 
 TITLE263 = "\U0001F697 Flotta aziendale: TCO diesel vs elettrico"
+TITLE264 = "📜 Garanzie di origine: costo del 100% rinnovabile"
 TITLE262 = "\U0001F50C Gruppo elettrogeno vs blackout"
 
 # Parametri di riferimento usati nei test
@@ -57,12 +58,12 @@ def _registry():
 class TestRegistryTab263:
     def test_tab263_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 263
+        assert len(titoli) == len(dvars) == len(withs) == 264
         assert TITLE263 in titoli
         assert "tab263" in dvars
         assert "tab263" in withs
         assert titoli[dvars.index("tab263")] == TITLE263
-        assert titoli[-1] == TITLE263
+        assert titoli[-1] == TITLE264
         keys = re.findall(r'key="(fl263_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 16
 
@@ -70,6 +71,7 @@ class TestRegistryTab263:
         _, titoli, dvars, _ = _registry()
         assert titoli[dvars.index("tab262")] == TITLE262
         assert titoli[dvars.index("tab263")] == TITLE263
+        assert titoli[dvars.index("tab264")] == TITLE264
 
 
 class TestFl263Num:
