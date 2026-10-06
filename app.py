@@ -35366,6 +35366,229 @@ def fv265_sensibilita_prezzo(prod0_kwh, degrado_pct, degrado_post_pct, ripristin
     return righe
 
 
+# ---------------------------------------------------------------------------
+# Tab 266 - Agrivoltaico: doppio reddito
+# ---------------------------------------------------------------------------
+
+
+def av266_num(x, nome):
+    """Valida uno scalare numerico: no bool, no NaN/inf."""
+    import math
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        raise ValueError(f"{nome}: deve essere un numero")
+    if math.isnan(x) or math.isinf(x):
+        raise ValueError(f"{nome}: NaN/inf non ammessi")
+    return float(x)
+
+
+def av266_int(n, nome="anni"):
+    """Valida un numero intero di anni >= 1."""
+    v = av266_num(n, nome)
+    if v < 1 or v != int(v):
+        raise ValueError(f"{nome}: deve essere un intero >= 1")
+    return int(v)
+
+
+def av266_ler(perdita_agri_pct):
+    """Land Equivalent Ratio dell'agrivoltaico.
+
+    LER = resa_agricola_relativa + resa_fv_relativa, dove la resa agricola
+    relativa e' (1 - perdita_agri_pct/100) e la resa FV relativa e' posta = 1
+    (ipotesi: resa per kWp invariata rispetto al FV a terra di riferimento).
+    perdita_agri_pct in [0, 100]. LER > 1: il doppio uso e' piu' efficiente.
+    """
+    p = av266_num(perdita_agri_pct, "perdita_agri_pct")
+    if not 0.0 <= p <= 100.0:
+        raise ValueError("perdita_agri_pct: deve stare tra 0 e 100")
+    return 1.0 + (1.0 - p / 100.0)
+
+
+def av266_produzione_annua(kwp, resa_kwh_kwp, degrado_pct, anno):
+    """Produzione FV all'anno `anno` (1-based) con degrado geometrico."""
+    k = av266_num(kwp, "kwp")
+    r = av266_num(resa_kwh_kwp, "resa_kwh_kwp")
+    d = av266_num(degrado_pct, "degrado_pct")
+    a = av266_int(anno, "anno")
+    if k < 0:
+        raise ValueError("kwp: non puo' essere negativo")
+    if r < 0:
+        raise ValueError("resa_kwh_kwp: non puo' essere negativa")
+    if not 0.0 <= d <= 50.0:
+        raise ValueError("degrado_pct: deve stare tra 0 e 50")
+    return k * r * (1.0 - d / 100.0) ** (a - 1)
+
+
+def av266_fattore_rendita(tasso_pct, anni):
+    """Fattore di rendita: somma di 1/(1+r)^t per t=1..anni (tasso 0 => anni)."""
+    r = av266_num(tasso_pct, "tasso_pct")
+    n = av266_int(anni, "anni")
+    if r < 0:
+        raise ValueError("tasso_pct: non puo' essere negativo")
+    if r == 0.0:
+        return float(n)
+    return (1.0 - (1.0 + r / 100.0) ** (-n)) / (r / 100.0)
+
+
+def av266_npv_solo_agri(ha, margine_ha, anni, tasso_pct):
+    """VAN dello scenario 'solo agricoltura': rendita del margine agricolo annuo."""
+    h = av266_num(ha, "ha")
+    m = av266_num(margine_ha, "margine_ha")
+    if h <= 0:
+        raise ValueError("ha: deve essere > 0")
+    reddito = h * m
+    return {"npv": reddito * av266_fattore_rendita(tasso_pct, anni),
+            "reddito_annuo": reddito}
+
+
+def av266_npv_agrivoltaico(ha, margine_ha, perdita_pct, kwp, resa_kwh_kwp,
+                          degrado_pct, prezzo_kwh, capex_agriv, oem_annuo,
+                          anni, tasso_pct):
+    """VAN agrivoltaico: -capex al t0 + (margine agricolo residuo + ricavi FV - O&M)."""
+    h = av266_num(ha, "ha")
+    m = av266_num(margine_ha, "margine_ha")
+    p = av266_num(perdita_pct, "perdita_pct")
+    prz = av266_num(prezzo_kwh, "prezzo_kwh")
+    cx = av266_num(capex_agriv, "capex_agriv")
+    oem = av266_num(oem_annuo, "oem_annuo")
+    n = av266_int(anni, "anni")
+    t = av266_num(tasso_pct, "tasso_pct")
+    if h <= 0:
+        raise ValueError("ha: deve essere > 0")
+    if not 0.0 <= p <= 100.0:
+        raise ValueError("perdita_pct: deve stare tra 0 e 100")
+    if prz < 0:
+        raise ValueError("prezzo_kwh: non puo' essere negativo")
+    if cx < 0:
+        raise ValueError("capex_agriv: non puo' essere negativo")
+    if oem < 0:
+        raise ValueError("oem_annuo: non puo' essere negativo")
+    if t < 0:
+        raise ValueError("tasso_pct: non puo' essere negativo")
+    margine_residuo = h * m * (1.0 - p / 100.0)
+    produzioni = [av266_produzione_annua(kwp, resa_kwh_kwp, degrado_pct, a)
+                  for a in range(1, n + 1)]
+    flussi = [(margine_residuo + prod * prz - oem) / (1.0 + t / 100.0) ** a
+              for a, prod in enumerate(produzioni, start=1)]
+    return {"npv": sum(flussi) - cx,
+            "capex": cx,
+            "margine_agri_residuo": margine_residuo,
+            "produzioni": produzioni,
+            "flussi_attualizzati": flussi,
+            "produzione_totale_kwh": sum(produzioni)}
+
+
+def av266_npv_fv_terra(kwp, resa_kwh_kwp, degrado_pct, prezzo_kwh,
+                       capex_fv, oem_annuo, anni, tasso_pct):
+    """VAN del FV a terra senza agricoltura: -capex al t0 + (ricavi FV - O&M)."""
+    prz = av266_num(prezzo_kwh, "prezzo_kwh")
+    cx = av266_num(capex_fv, "capex_fv")
+    oem = av266_num(oem_annuo, "oem_annuo")
+    n = av266_int(anni, "anni")
+    t = av266_num(tasso_pct, "tasso_pct")
+    if prz < 0:
+        raise ValueError("prezzo_kwh: non puo' essere negativo")
+    if cx < 0:
+        raise ValueError("capex_fv: non puo' essere negativo")
+    if oem < 0:
+        raise ValueError("oem_annuo: non puo' essere negativo")
+    if t < 0:
+        raise ValueError("tasso_pct: non puo' essere negativo")
+    produzioni = [av266_produzione_annua(kwp, resa_kwh_kwp, degrado_pct, a)
+                  for a in range(1, n + 1)]
+    flussi = [(prod * prz - oem) / (1.0 + t / 100.0) ** a
+              for a, prod in enumerate(produzioni, start=1)]
+    return {"npv": sum(flussi) - cx,
+            "capex": cx,
+            "produzioni": produzioni,
+            "flussi_attualizzati": flussi,
+            "produzione_totale_kwh": sum(produzioni)}
+
+
+def av266_confronto(npv_agri, npv_agriv, npv_fv):
+    """Verdetto tra i 3 scenari ('solo_agri'/'agrivoltaico'/'fv_terra'/'indifferente').
+
+    Soglia 5%: se il migliore supera il secondo di meno del 5% (sul |migliore|),
+    il verdetto e' 'indifferente'. margine_pct e' None se il migliore vale 0.
+    """
+    valori = {"solo_agri": av266_num(npv_agri, "npv_agri"),
+              "agrivoltaico": av266_num(npv_agriv, "npv_agriv"),
+              "fv_terra": av266_num(npv_fv, "npv_fv")}
+    migliore = max(valori, key=valori.get)
+    secondo = max(((k, x) for k, x in valori.items() if k != migliore),
+                 key=lambda kv: kv[1])[0]
+    if valori[migliore] == 0.0:
+        margine = None
+    else:
+        margine = ((valori[migliore] - valori[secondo])
+                   / abs(valori[migliore]) * 100.0)
+    verdetto = migliore if (margine is None or margine >= 5.0) else "indifferente"
+    return {"verdetto": verdetto, "migliore": migliore, "secondo": secondo,
+            "margine_pct": margine}
+
+
+def av266_anno_pareggio(ha, margine_ha, perdita_pct, kwp, resa_kwh_kwp,
+                        degrado_pct, prezzo_kwh, capex_agriv, oem_annuo,
+                        anni, tasso_pct):
+    """Primo anno in cui il flusso incrementale attualizzato dell'agrivoltaico
+    rispetto al solo-agricoltura diventa >= 0. None se mai entro l'orizzonte."""
+    h = av266_num(ha, "ha")
+    m = av266_num(margine_ha, "margine_ha")
+    p = av266_num(perdita_pct, "perdita_pct")
+    prz = av266_num(prezzo_kwh, "prezzo_kwh")
+    cx = av266_num(capex_agriv, "capex_agriv")
+    oem = av266_num(oem_annuo, "oem_annuo")
+    n = av266_int(anni, "anni")
+    t = av266_num(tasso_pct, "tasso_pct")
+    if h <= 0:
+        raise ValueError("ha: deve essere > 0")
+    if not 0.0 <= p <= 100.0:
+        raise ValueError("perdita_pct: deve stare tra 0 e 100")
+    if prz < 0:
+        raise ValueError("prezzo_kwh: non puo' essere negativo")
+    if cx < 0:
+        raise ValueError("capex_agriv: non puo' essere negativo")
+    if oem < 0:
+        raise ValueError("oem_annuo: non puo' essere negativo")
+    if t < 0:
+        raise ValueError("tasso_pct: non puo' essere negativo")
+    perdita_margine = h * m * p / 100.0
+    cumulato = -cx
+    for a in range(1, n + 1):
+        prod = av266_produzione_annua(kwp, resa_kwh_kwp, degrado_pct, a)
+        cumulato += (prod * prz - oem - perdita_margine) / (1.0 + t / 100.0) ** a
+        if cumulato >= 0:
+            return a
+    return None
+
+
+def av266_sensibilita_prezzo(ha, margine_ha, perdita_pct, kwp, resa_kwh_kwp,
+                             degrado_pct, capex_agriv, capex_fv, oem_annuo,
+                             anni, tasso_pct, prezzo_max, passo):
+    """VAN dei 3 scenari al variare del prezzo dell'energia.
+
+    Restituisce lista di dict {"prezzo_kwh", "npv_agri", "npv_agrivoltaico", "npv_fv"}.
+    """
+    pm = av266_num(prezzo_max, "prezzo_max")
+    st_ = av266_num(passo, "passo")
+    if pm <= 0:
+        raise ValueError("prezzo_max: deve essere > 0")
+    if st_ <= 0:
+        raise ValueError("passo: deve essere > 0")
+    agri = av266_npv_solo_agri(ha, margine_ha, anni, tasso_pct)["npv"]
+    righe = []
+    p = 0.0
+    while p <= pm + 1e-9:
+        v = av266_npv_agrivoltaico(ha, margine_ha, perdita_pct, kwp,
+                                  resa_kwh_kwp, degrado_pct, p, capex_agriv,
+                                  oem_annuo, anni, tasso_pct)["npv"]
+        f = av266_npv_fv_terra(kwp, resa_kwh_kwp, degrado_pct, p, capex_fv,
+                              oem_annuo, anni, tasso_pct)["npv"]
+        righe.append({"prezzo_kwh": round(p, 3), "npv_agri": agri,
+                      "npv_agrivoltaico": v, "npv_fv": f})
+        p += st_
+    return righe
+
+
 if workspace == _('ws1'):
     st.markdown(f"<h1>{_('ws1')}</h1>", unsafe_allow_html=True)
     banner_demo("simulatore strategico: margini, centrali e curve simulate")
@@ -36007,7 +36230,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256, tab257, tab258, tab259, tab260, tab261, tab262, tab263, tab264, tab265 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete", "🔥 Teleriscaldamento vs caldaia", "🌿 Clean spread (con CO₂)", "🇮🇹 PUN da prezzi zonali", "❄️ Pompa di calore vs caldaia", "🏢 PUE & costo data center", "🔌 Gruppo elettrogeno vs blackout", "🚗 Flotta aziendale: TCO diesel vs elettrico", "📜 Garanzie di origine: costo del 100% rinnovabile", "♻️ Fine vita FV: revamping vs dismissione"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256, tab257, tab258, tab259, tab260, tab261, tab262, tab263, tab264, tab265, tab266 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete", "🔥 Teleriscaldamento vs caldaia", "🌿 Clean spread (con CO₂)", "🇮🇹 PUN da prezzi zonali", "❄️ Pompa di calore vs caldaia", "🏢 PUE & costo data center", "🔌 Gruppo elettrogeno vs blackout", "🚗 Flotta aziendale: TCO diesel vs elettrico", "📜 Garanzie di origine: costo del 100% rinnovabile", "♻️ Fine vita FV: revamping vs dismissione", "🌾️ Agrivoltaico: doppio reddito"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -60073,6 +60296,126 @@ elif workspace == _('ws8'):
                                key="fv265_csv",
                                help="Produzioni e flussi attualizzati per anno, scenario mantieni vs revamping.")
         st.caption("Nota: il degrado reale dipende da tecnologia, clima e manutenzione; il valore dei moduli usati e' volatile. Verificare costi di smaltimento con gli operatori RAEE e gli incentivi residui prima di decidere.")
+
+    with tab266:
+        titolo266 = edu("Agrivoltaico: doppio reddito", "L'agrivoltaico mette i pannelli sopra le colture: la stessa terra rende due volte (agricoltura + energia), ma le strutture rialzate costano di piu' e l'ombra riduce il margine agricolo. Il Land Equivalent Ratio (LER) misura l'efficienza del doppio uso: sopra 1, coltivare ed elettrificare la stessa terra conviene rispetto agli usi separati. Questa tab confronta in VAN tre scenari: (1) solo agricoltura, (2) agrivoltaico, (3) FV a terra senza colture, con anno di pareggio dell'agrivoltaico rispetto al solo-agricoltura e sensibilita' al prezzo dell'energia.")
+        st.markdown(f"<h1>\U0001F33E\uFE0F {titolo266}</h1>", unsafe_allow_html=True)
+        st.caption("Agrivoltaico: la stessa terra rende agricoltura + energia? Confronto in VAN di 3 scenari con LER e pareggio.")
+        a1_266, a2_266, a3_266 = st.columns(3)
+        ha266 = a1_266.number_input("Superficie (ha)", min_value=0.1,
+                                    value=10.0, step=1.0, format="%.1f",
+                                    key="av266_ha",
+                                    help="Superficie agricola disponibile per l'impianto.")
+        mar266 = a2_266.number_input("Margine agricolo (€/ha/anno)", min_value=0.0,
+                                     value=1200.0, step=100.0, format="%.0f",
+                                     key="av266_margine_ha",
+                                     help="Margine lordo agricolo annuo per ettaro (ricavi meno costi colturali).")
+        per266 = a3_266.number_input("Perdita margine agricolo (%)", min_value=0.0, max_value=100.0,
+                                     value=25.0, step=1.0, format="%.1f",
+                                     key="av266_perdita",
+                                     help="Quota di margine agricolo persa per ombreggiamento e ingombri delle strutture.")
+        b1_266, b2_266, b3_266 = st.columns(3)
+        kwp266 = b1_266.number_input("Potenza FV (kWp)", min_value=0.0,
+                                     value=1000.0, step=100.0, format="%.0f",
+                                     key="av266_kwp",
+                                     help="Potenza di picco installabile sulla superficie.")
+        res266 = b2_266.number_input("Resa specifica (kWh/kWp/anno)", min_value=0.0,
+                                     value=1100.0, step=50.0, format="%.0f",
+                                     key="av266_resa",
+                                     help="Produzione annua attesa per kWp installato.")
+        deg266 = b3_266.number_input("Degrado moduli (%/anno)", min_value=0.0, max_value=50.0,
+                                     value=0.5, step=0.1, format="%.2f",
+                                     key="av266_degrado",
+                                     help="Perdita annua di produzione per degrado dei moduli.")
+        c1_266, c2_266, c3_266 = st.columns(3)
+        prz266 = c1_266.number_input("Prezzo energia (€/kWh)", min_value=0.0,
+                                     value=0.10, step=0.01, format="%.3f",
+                                     key="av266_prezzo",
+                                     help="Prezzo di valorizzazione dell'energia (autoconsumo o cessione).")
+        cxb266 = c2_266.number_input("Capex FV base a terra (€)", min_value=0.0,
+                                     value=700000.0, step=10000.0, format="%.0f",
+                                     key="av266_capex_base",
+                                     help="Costo chiavi in mano del FV standard a terra, stessa potenza.")
+        sov266 = c3_266.number_input("Sovraccosto strutture agrivoltaiche (%)", min_value=0.0,
+                                     value=35.0, step=1.0, format="%.1f",
+                                     key="av266_sovraccosto",
+                                     help="Maggiorazione del capex per strutture rialzate e fondazioni compatibili con le colture.")
+        d1_266, d2_266, d3_266 = st.columns(3)
+        oem266 = d1_266.number_input("O&M FV (€/anno)", min_value=0.0,
+                                     value=12000.0, step=1000.0, format="%.0f",
+                                     key="av266_oem",
+                                     help="O&M annuo dell'impianto FV (uguale nei due scenari con pannelli).")
+        orz266 = d2_266.number_input("Orizzonte (anni)", min_value=1, max_value=40,
+                                     value=25, step=1,
+                                     key="av266_orizzonte")
+        tas266 = d3_266.number_input("Tasso di attualizzazione (%/anno)", min_value=0.0,
+                                     value=5.0, step=0.5, format="%.1f",
+                                     key="av266_tasso")
+        try:
+            cxagr266 = cxb266 * (1.0 + sov266 / 100.0)
+            ag266 = av266_npv_solo_agri(ha266, mar266, orz266, tas266)
+            av266r = av266_npv_agrivoltaico(ha266, mar266, per266, kwp266, res266,
+                                            deg266, prz266, cxagr266, oem266, orz266, tas266)
+            fv266r = av266_npv_fv_terra(kwp266, res266, deg266, prz266, cxb266,
+                                        oem266, orz266, tas266)
+            cfr266 = av266_confronto(ag266["npv"], av266r["npv"], fv266r["npv"])
+            ler266 = av266_ler(per266)
+            par266 = av266_anno_pareggio(ha266, mar266, per266, kwp266, res266,
+                                         deg266, prz266, cxagr266, oem266, orz266, tas266)
+            pmax266 = max(0.30, prz266 * 2.0)
+            sen266 = av266_sensibilita_prezzo(ha266, mar266, per266, kwp266, res266,
+                                              deg266, cxagr266, cxb266, oem266, orz266,
+                                              tas266, pmax266, pmax266 / 60.0)
+        except ValueError as e266:
+            st.error(f"Dati non validi: {e266}")
+            st.stop()
+        k1_266, k2_266, k3_266, k4_266, k5_266, k6_266 = st.columns(6)
+        render_kpi("VAN solo agri (€)", f"{ag266['npv']:,.0f}", k1_266)
+        render_kpi("VAN agrivoltaico (€)", f"{av266r['npv']:,.0f}", k2_266)
+        render_kpi("VAN FV a terra (€)", f"{fv266r['npv']:,.0f}", k3_266)
+        render_kpi("LER", f"{ler266:.2f}", k4_266)
+        render_kpi("Margine migliore (%)", f"{cfr266['margine_pct']:.1f}" if cfr266['margine_pct'] is not None else "—", k5_266)
+        render_kpi("Pareggio agriv. (anno)", str(par266) if par266 else "mai", k6_266)
+        if cfr266["verdetto"] == "agrivoltaico":
+            st.success(f"Conviene l'agrivoltaico: VAN {av266r['npv']:,.0f} €, {cfr266['margine_pct']:.1f}% sopra lo scenario {cfr266['secondo']}. LER {ler266:.2f}: il doppio uso batte gli usi separati." + (f" Pareggio all'anno {par266}." if par266 else ""))
+        elif cfr266["verdetto"] == "solo_agri":
+            st.info(f"Conviene restare solo agricoltura: VAN {ag266['npv']:,.0f} €, {cfr266['margine_pct']:.1f}% sopra lo scenario {cfr266['secondo']}. Il FV non ripaga capex e perdita agricola a questo prezzo dell'energia.")
+        elif cfr266["verdetto"] == "fv_terra":
+            st.warning(f"Conviene il FV a terra senza colture: VAN {fv266r['npv']:,.0f} €, {cfr266['margine_pct']:.1f}% sopra lo scenario {cfr266['secondo']}. Le strutture agrivoltaiche costano piu' di quanto valga il margine agricolo residuo.")
+        else:
+            st.info(f"Scenari entro il ±5% (migliore: {cfr266['migliore']}): la scelta dipende da fattori non economici (tipo di coltura, vincoli paesaggistici, incentivi dedicati).")
+        st.markdown("**VAN per scenario (€)**")
+        dfb266 = pd.DataFrame([{"scenario": "Solo agri", "npv": ag266["npv"]},
+                               {"scenario": "Agrivoltaico", "npv": av266r["npv"]},
+                               {"scenario": "FV a terra", "npv": fv266r["npv"]}])
+        figb266 = px.bar(dfb266, x="scenario", y="npv", title="VAN per scenario (€)",
+                         labels={"scenario": "Scenario", "npv": "VAN (€)"})
+        st.plotly_chart(figb266, use_container_width=True)
+        st.markdown("**VAN al variare del prezzo dell'energia (€/kWh)**")
+        dss266 = pd.DataFrame(sen266)
+        figs266 = px.line(dss266, x="prezzo_kwh", y=["npv_agri", "npv_agrivoltaico", "npv_fv"],
+                          title="VAN vs prezzo energia (€)",
+                          labels={"prezzo_kwh": "Prezzo (€/kWh)", "value": "VAN (€)", "variable": "Scenario"})
+        figs266.add_vline(x=prz266, line_dash="dash", line_color="red",
+                          annotation_text="Prezzo attuale")
+        st.plotly_chart(figs266, use_container_width=True)
+        with st.expander("Dettaglio annuale ed export CSV"):
+            righe266 = [{"anno": a + 1,
+                         "produzione_fv_kwh": round(pr_, 0),
+                         "flusso_agrivoltaico_att_eur": round(fa, 0),
+                         "flusso_fv_terra_att_eur": round(ff, 0)}
+                        for a, (pr_, fa, ff) in enumerate(zip(av266r["produzioni"],
+                                                              av266r["flussi_attualizzati"],
+                                                              fv266r["flussi_attualizzati"]))]
+            dft266 = pd.DataFrame(righe266)
+            st.dataframe(dft266, use_container_width=True, hide_index=True)
+            st.caption(f"Capex agrivoltaico: {cxagr266:,.0f} € al tempo 0 (base {cxb266:,.0f} € + sovraccosto {sov266:.1f}%) — margine agricolo residuo: {av266r['margine_agri_residuo']:,.0f} €/anno vs {ag266['reddito_annuo']:,.0f} €/anno del solo-agricoltura.")
+            st.download_button("⬇️ Export CSV annuale",
+                               data=dft266.to_csv(index=False, sep=";").encode("utf-8"),
+                               file_name="agrivoltaico_annuale.csv", mime="text/csv",
+                               key="av266_csv",
+                               help="Produzione FV e flussi attualizzati per anno, scenario agrivoltaico vs FV a terra.")
+        st.caption("Nota: il LER assume resa FV per kWp invariata rispetto al FV a terra; la perdita agricola reale dipende da coltura, altezza e densita' delle strutture. Verificare incentivi dedicati e vincoli paesaggistici prima di decidere.")
 
 # Footer
 
