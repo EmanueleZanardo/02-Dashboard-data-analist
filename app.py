@@ -33877,6 +33877,198 @@ def pr256_curva_perdite(prelievo_annuo_kwh, prezzo_eur_mwh, pct_list):
 
 
 
+
+# ---------------------------------------------------------------------------
+# Tab 257 - Teleriscaldamento vs caldaia
+# ---------------------------------------------------------------------------
+
+def _tl257_num(x, nome):
+    """Valida uno scalare numerico: no bool, no NaN/inf."""
+    import math
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        raise ValueError(f"{nome}: deve essere un numero")
+    if math.isnan(x) or math.isinf(x):
+        raise ValueError(f"{nome}: NaN/inf non ammessi")
+    return float(x)
+
+
+def tl257_quote_mensili_default():
+    """Quote mensili del fabbisogno termico: riscaldamento, clima Nord Italia.
+
+    Distribuzione tipica (gen..dic); solo riscaldamento, ACS esclusa.
+    La somma fa 1.0.
+    """
+    return [0.19, 0.16, 0.13, 0.06, 0.01, 0.0,
+            0.0, 0.0, 0.0, 0.08, 0.15, 0.22]
+
+
+def tl257_costo_caldaia(fabbisogno_kwh, prezzo_gas_eur_kwh, rendimento_pct,
+                        manutenzione_eur_anno):
+    """Costo annuo del calore con caldaia a gas.
+
+    gas_kwh = fabbisogno / rendimento; costo = gas_kwh * prezzo_gas + manutenzione.
+    """
+    f = _tl257_num(fabbisogno_kwh, "fabbisogno_kwh")
+    p = _tl257_num(prezzo_gas_eur_kwh, "prezzo_gas_eur_kwh")
+    r = _tl257_num(rendimento_pct, "rendimento_pct")
+    m = _tl257_num(manutenzione_eur_anno, "manutenzione_eur_anno")
+    if f < 0:
+        raise ValueError("fabbisogno_kwh: non puo' essere negativo")
+    if p < 0:
+        raise ValueError("prezzo_gas_eur_kwh: non puo' essere negativo")
+    if not 0 < r <= 100:
+        raise ValueError("rendimento_pct: deve stare in (0, 100]")
+    if m < 0:
+        raise ValueError("manutenzione_eur_anno: non puo' essere negativa")
+    gas_kwh = f / (r / 100.0)
+    costo_gas = gas_kwh * p
+    totale = costo_gas + m
+    return {"gas_kwh_anno": gas_kwh,
+            "costo_gas_eur": costo_gas,
+            "manutenzione_eur": m,
+            "costo_totale_eur": totale,
+            "costo_eur_kwh_termico": totale / f if f > 0 else 0.0}
+
+
+def tl257_costo_tlr(fabbisogno_kwh, quota_fissa_eur_anno, prezzo_variabile_eur_kwh):
+    """Costo annuo del calore con teleriscaldamento: quota fissa + variabile*kWh."""
+    f = _tl257_num(fabbisogno_kwh, "fabbisogno_kwh")
+    qf = _tl257_num(quota_fissa_eur_anno, "quota_fissa_eur_anno")
+    pv = _tl257_num(prezzo_variabile_eur_kwh, "prezzo_variabile_eur_kwh")
+    if f < 0:
+        raise ValueError("fabbisogno_kwh: non puo' essere negativo")
+    if qf < 0:
+        raise ValueError("quota_fissa_eur_anno: non puo' essere negativa")
+    if pv < 0:
+        raise ValueError("prezzo_variabile_eur_kwh: non puo' essere negativo")
+    variabile = f * pv
+    totale = qf + variabile
+    return {"quota_fissa_eur": qf,
+            "costo_variabile_eur": variabile,
+            "costo_totale_eur": totale,
+            "costo_eur_kwh_termico": totale / f if f > 0 else 0.0}
+
+
+def tl257_confronto(fabbisogno_kwh, prezzo_gas_eur_kwh, rendimento_pct,
+                    manutenzione_eur_anno, quota_fissa_eur_anno,
+                    prezzo_variabile_eur_kwh):
+    """Confronta caldaia vs TLR: costi annui, risparmio e convenienza."""
+    caldaia = tl257_costo_caldaia(fabbisogno_kwh, prezzo_gas_eur_kwh,
+                                  rendimento_pct, manutenzione_eur_anno)
+    tlr = tl257_costo_tlr(fabbisogno_kwh, quota_fissa_eur_anno,
+                          prezzo_variabile_eur_kwh)
+    cc = caldaia["costo_totale_eur"]
+    ct = tlr["costo_totale_eur"]
+    risparmio = cc - ct
+    if risparmio > 0:
+        conv = "tlr"
+    elif risparmio < 0:
+        conv = "caldaia"
+    else:
+        conv = "pari"
+    return {"costo_caldaia_eur": cc,
+            "costo_tlr_eur": ct,
+            "risparmio_eur_anno": risparmio,
+            "risparmio_pct": (risparmio / cc * 100.0) if cc > 0 else 0.0,
+            "conveniente": conv,
+            "costo_kwh_caldaia": caldaia["costo_eur_kwh_termico"],
+            "costo_kwh_tlr": tlr["costo_eur_kwh_termico"]}
+
+
+def tl257_break_even_gas(fabbisogno_kwh, rendimento_pct, manutenzione_eur_anno,
+                         quota_fissa_eur_anno, prezzo_variabile_eur_kwh):
+    """Prezzo del gas (EUR/kWh) al quale caldaia e TLR costano uguale.
+
+    fabbisogno/r * p* + manut = quota_fissa + pv * fabbisogno
+    -> p* = r * (quota_fissa + pv*fabbisogno - manut) / fabbisogno.
+    Se p* e' negativo, il TLR conviene a qualsiasi prezzo del gas >= 0.
+    """
+    f = _tl257_num(fabbisogno_kwh, "fabbisogno_kwh")
+    r = _tl257_num(rendimento_pct, "rendimento_pct")
+    m = _tl257_num(manutenzione_eur_anno, "manutenzione_eur_anno")
+    qf = _tl257_num(quota_fissa_eur_anno, "quota_fissa_eur_anno")
+    pv = _tl257_num(prezzo_variabile_eur_kwh, "prezzo_variabile_eur_kwh")
+    if f <= 0:
+        raise ValueError("fabbisogno_kwh: deve essere positivo")
+    if not 0 < r <= 100:
+        raise ValueError("rendimento_pct: deve stare in (0, 100]")
+    if m < 0:
+        raise ValueError("manutenzione_eur_anno: non puo' essere negativa")
+    if qf < 0:
+        raise ValueError("quota_fissa_eur_anno: non puo' essere negativa")
+    if pv < 0:
+        raise ValueError("prezzo_variabile_eur_kwh: non puo' essere negativo")
+    return (r / 100.0) * (qf + pv * f - m) / f
+
+
+def tl257_profilo_mensile(fabbisogno_annuo_kwh, quote=None):
+    """Distribuisce il fabbisogno annuo sui 12 mesi.
+
+    quote: lista di 12 quote che sommano a 1.0 (default: Nord Italia).
+    """
+    f = _tl257_num(fabbisogno_annuo_kwh, "fabbisogno_annuo_kwh")
+    if f < 0:
+        raise ValueError("fabbisogno_annuo_kwh: non puo' essere negativo")
+    q = list(quote) if quote is not None else tl257_quote_mensili_default()
+    if len(q) != 12:
+        raise ValueError("quote: servono 12 valori mensili")
+    tot = 0.0
+    for i, qi in enumerate(q, start=1):
+        v = _tl257_num(qi, f"quote[{i}]")
+        if v < 0:
+            raise ValueError(f"quote[{i}]: valori negativi non ammessi")
+        tot += v
+    if abs(tot - 1.0) > 1e-6:
+        raise ValueError(f"quote: la somma deve essere 1.0 (trovato {tot})")
+    return [{"mese": i + 1, "quota": q[i], "fabbisogno_kwh": f * q[i]}
+            for i in range(12)]
+
+
+def tl257_cashflow_allaccio(investimento_eur, risparmio_annuo_eur, anni, tasso_pct):
+    """Valuta l'investimento di allaccio al TLR: flussi, payback semplice, VAN.
+
+    Flussi: -investimento all'anno 0, poi risparmio costante per `anni` anni.
+    Il payback e' frazionario per interpolazione; None se mai recuperato.
+    """
+    inv = _tl257_num(investimento_eur, "investimento_eur")
+    risp = _tl257_num(risparmio_annuo_eur, "risparmio_annuo_eur")
+    t = _tl257_num(tasso_pct, "tasso_pct")
+    if inv < 0:
+        raise ValueError("investimento_eur: non puo' essere negativo")
+    if not isinstance(anni, int) or isinstance(anni, bool):
+        raise ValueError("anni: deve essere un intero")
+    if anni < 1:
+        raise ValueError("anni: deve essere >= 1")
+    if not 0 <= t < 100:
+        raise ValueError("tasso_pct: deve stare in [0, 100)")
+    flussi = [-inv] + [risp] * anni
+    cumulato = []
+    c = 0.0
+    for v in flussi:
+        c += v
+        cumulato.append(c)
+    payback = None
+    if risp > 0:
+        if cumulato[1] >= 0:
+            payback = inv / risp
+        else:
+            for n in range(2, anni + 1):
+                if cumulato[n] >= 0:
+                    prev = cumulato[n - 1]
+                    payback = (n - 1) + (-prev) / risp
+                    break
+    van = sum(risp / (1.0 + t / 100.0) ** n for n in range(1, anni + 1)) - inv
+    return {"investimento_eur": inv,
+            "risparmio_annuo_eur": risp,
+            "anni": anni,
+            "flussi": flussi,
+            "cumulato": cumulato,
+            "payback_anni": payback,
+            "van_eur": van,
+            "risparmio_totale_eur": risp * anni}
+
+
+
 if workspace == _('ws1'):
     st.markdown(f"<h1>{_('ws1')}</h1>", unsafe_allow_html=True)
     banner_demo("simulatore strategico: margini, centrali e curve simulate")
@@ -34518,7 +34710,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256, tab257 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete", "🔥 Teleriscaldamento vs caldaia"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -57717,6 +57909,89 @@ elif workspace == _('ws8'):
                            key="pr256_csv",
                            help="Mese, prelievo, immessa, perdite kWh e % effettiva.")
         st.caption("Nota: le perdite standard sono valori convenzionali modificabili \u2014 usare quelli del proprio distributore/contratto. Il confronto tra livelli di tensione non include i costi di allacciamento/trasformazione per il cambio livello.")
+
+
+    with tab257:
+        titolo257 = edu("Teleriscaldamento vs caldaia", "Il teleriscaldamento (TLR) sostituisce la caldaia a gas con calore da rete: paghi una quota fissa annua + un prezzo variabile per kWh termico, ed eviti gas, rendimento di combustione e manutenzione della caldaia. Questa tab confronta il costo annuo del calore con caldaia a gas vs TLR, calcola il prezzo del gas di break-even (sotto il quale conviene la caldaia), distribuisce il confronto sul profilo mensile di riscaldamento e valuta l'investimento di allaccio con payback e VAN.")
+        st.markdown(f"<h1>🔥 {titolo257}</h1>", unsafe_allow_html=True)
+        st.caption("Costo del calore: caldaia a gas vs teleriscaldamento, break-even gas, profilo mensile e payback dell'allaccio.")
+        c1_257, c2_257, c3_257, c4_257 = st.columns(4)
+        fab257 = c1_257.number_input("Fabbisogno termico (kWh/anno)", min_value=0.0,
+                                     value=200000.0, step=10000.0, key="tl257_fabbisogno")
+        pg257 = c2_257.number_input("Prezzo gas (€/kWh)", min_value=0.0, value=0.10,
+                                    step=0.005, format="%.4f", key="tl257_pgas")
+        rend257 = c3_257.number_input("Rendimento caldaia (%)", min_value=1.0, max_value=100.0,
+                                      value=92.0, step=0.5, key="tl257_rend")
+        man257 = c4_257.number_input("Manutenzione caldaia (€/anno)", min_value=0.0,
+                                     value=800.0, step=50.0, key="tl257_manut")
+        d1_257, d2_257, d3_257, d4_257 = st.columns(4)
+        fis257 = d1_257.number_input("TLR quota fissa (€/anno)", min_value=0.0,
+                                     value=2500.0, step=100.0, key="tl257_fisso")
+        pv257 = d2_257.number_input("TLR prezzo variabile (€/kWh)", min_value=0.0, value=0.085,
+                                    step=0.005, format="%.4f", key="tl257_pvar")
+        all257 = d3_257.number_input("Costo allacciamento TLR (€)", min_value=0.0,
+                                     value=15000.0, step=1000.0, key="tl257_allaccio")
+        tas257 = d4_257.number_input("Tasso di sconto (%)", min_value=0.0, max_value=50.0,
+                                     value=4.0, step=0.5, key="tl257_tasso")
+        anni257 = st.slider("Orizzonte valutazione (anni)", 5, 25, 15, key="tl257_anni")
+        conf257 = tl257_confronto(fab257, pg257, rend257, man257, fis257, pv257)
+        be257 = tl257_break_even_gas(fab257, rend257, man257, fis257, pv257) if fab257 > 0 else None
+        cf257 = tl257_cashflow_allaccio(all257, conf257["risparmio_eur_anno"], anni257, tas257)
+        k1_257, k2_257, k3_257, k4_257, k5_257, k6_257 = st.columns(6)
+        render_kpi("Caldaia (€/anno)", f"{conf257['costo_caldaia_eur']:,.0f}", k1_257)
+        render_kpi("TLR (€/anno)", f"{conf257['costo_tlr_eur']:,.0f}", k2_257)
+        render_kpi("Risparmio TLR (€/anno)", f"{conf257['risparmio_eur_anno']:+,.0f}", k3_257)
+        render_kpi("Break-even gas (€/kWh)", f"{be257:.4f}" if be257 is not None else "n/d", k4_257)
+        render_kpi("Payback allaccio (anni)",
+                   f"{cf257['payback_anni']:.1f}" if cf257["payback_anni"] is not None else "mai",
+                   k5_257)
+        render_kpi("VAN allaccio (€)", f"{cf257['van_eur']:+,.0f}", k6_257)
+        if conf257["conveniente"] == "tlr":
+            st.success(f"Il teleriscaldamento costa meno: risparmio {conf257['risparmio_eur_anno']:,.0f} €/anno ({conf257['risparmio_pct']:.1f}% del costo caldaia).")
+        elif conf257["conveniente"] == "caldaia":
+            st.warning(f"La caldaia a gas costa meno di {-conf257['risparmio_eur_anno']:,.0f} €/anno: il TLR non conviene a questi prezzi.")
+        else:
+            st.info("Costi equivalenti: indifferente tra caldaia e TLR.")
+        st.markdown("**Profilo mensile: costo del calore caldaia vs TLR (quota fissa TLR esclusa)**")
+        prof257 = tl257_profilo_mensile(fab257)
+        righe257 = []
+        for r257 in prof257:
+            ck257 = tl257_costo_caldaia(r257["fabbisogno_kwh"], pg257, rend257, 0.0)["costo_totale_eur"]
+            ct257 = tl257_costo_tlr(r257["fabbisogno_kwh"], 0.0, pv257)["costo_totale_eur"]
+            righe257.append({"mese": r257["mese"],
+                             "fabbisogno_kwh": round(r257["fabbisogno_kwh"], 1),
+                             "caldaia_eur": round(ck257, 2),
+                             "tlr_variabile_eur": round(ct257, 2)})
+        df257 = pd.DataFrame(righe257)
+        fig257 = px.bar(df257, x="mese", y=["caldaia_eur", "tlr_variabile_eur"], barmode="group",
+                        title="Costo mensile del calore (€): caldaia vs TLR",
+                        labels={"mese": "mese", "value": "€/mese", "variable": "voce"})
+        st.plotly_chart(fig257, use_container_width=True)
+        with st.expander("Sensibilità al prezzo del gas: dove sta il break-even?"):
+            prezzi257 = [0.04 + i * 0.005 for i in range(25)]
+            sr257 = []
+            for p257 in prezzi257:
+                cc257 = tl257_costo_caldaia(fab257, p257, rend257, man257)["costo_totale_eur"]
+                sr257.append({"prezzo_gas_eur_kwh": round(p257, 4),
+                              "costo_caldaia_eur": round(cc257, 2),
+                              "costo_tlr_eur": round(conf257["costo_tlr_eur"], 2),
+                              "risparmio_tlr_eur": round(cc257 - conf257["costo_tlr_eur"], 2)})
+            dfs257 = pd.DataFrame(sr257)
+            figs257 = px.line(dfs257, x="prezzo_gas_eur_kwh", y=["costo_caldaia_eur", "costo_tlr_eur"],
+                              title="Costo annuo (€) vs prezzo del gas (€/kWh)",
+                              labels={"prezzo_gas_eur_kwh": "prezzo gas €/kWh",
+                                      "value": "€/anno", "variable": "voce"})
+            if be257 is not None and 0.04 <= be257 <= 0.16:
+                figs257.add_vline(x=be257, line_dash="dash", line_color="red",
+                                  annotation_text=f"break-even {be257:.4f} €/kWh")
+            st.plotly_chart(figs257, use_container_width=True)
+            st.dataframe(dfs257, use_container_width=True, hide_index=True)
+        st.download_button("⬇️ Export CSV profilo mensile",
+                           data=df257.to_csv(index=False, sep=";").encode("utf-8"),
+                           file_name="tlr_vs_caldaia_mensile.csv", mime="text/csv",
+                           key="tl257_csv",
+                           help="Mese, fabbisogno kWh, costo caldaia e quota variabile TLR.")
+        st.caption("Nota: il profilo mensile è una distribuzione tipica del riscaldamento in Nord Italia; la quota fissa TLR è ripartita sull'anno, non sul mese. Un break-even negativo significa che il TLR conviene a qualsiasi prezzo del gas ≥ 0.")
 
 # Footer
 
