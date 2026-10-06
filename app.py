@@ -33232,6 +33232,148 @@ def be252_link_sankey(fonti_kwh, usi_kwh):
 
 
 
+def ci253_costo_evento(voll_eur_kwh, potenza_kw, durata_ore):
+    """Costo di un singolo evento di interruzione.
+
+    ENS (energia non servita) = potenza interrotta x durata;
+    costo = ENS x VoLL (Value of Lost Load, EUR/kWh).
+    NaN-safe; valori negativi -> ValueError.
+    """
+    v = float(voll_eur_kwh)
+    p = float(potenza_kw)
+    t = float(durata_ore)
+    if v != v or p != p or t != t:
+        raise ValueError("NaN non ammesso")
+    if v < 0:
+        raise ValueError("VoLL negativo")
+    if p < 0:
+        raise ValueError("potenza negativa")
+    if t < 0:
+        raise ValueError("durata negativa")
+    ens = p * t
+    return {
+        "voll_eur_kwh": v,
+        "potenza_kw": p,
+        "durata_ore": t,
+        "ens_kwh": round(ens, 2),
+        "costo_eur": round(ens * v, 2),
+    }
+
+
+def ci253_costo_atteso(voll_eur_kwh, potenza_kw, durata_media_ore, eventi_anno):
+    """Costo atteso annuo = costo del singolo evento x eventi attesi/anno."""
+    ev = ci253_costo_evento(voll_eur_kwh, potenza_kw, durata_media_ore)
+    n = float(eventi_anno)
+    if n != n:
+        raise ValueError("NaN non ammesso")
+    if n < 0:
+        raise ValueError("eventi/anno negativi")
+    return {
+        "costo_evento_eur": ev["costo_eur"],
+        "ens_evento_kwh": ev["ens_kwh"],
+        "eventi_anno": n,
+        "ens_annua_kwh": round(ev["ens_kwh"] * n, 2),
+        "costo_atteso_annuo_eur": round(ev["costo_eur"] * n, 2),
+    }
+
+
+def ci253_indici(storico_durate_ore):
+    """Indici di affidabilita' dallo storico delle durate (ore per evento).
+
+    SAIDI = ore totali di interruzione / anno; n = eventi / anno;
+    CAIDI = durata media per evento;
+    disponibilita' % = (1 - SAIDI / 8760) * 100.
+    """
+    durs = [float(x) for x in storico_durate_ore]
+    if not durs:
+        raise ValueError("storico vuoto")
+    for d in durs:
+        if d != d:
+            raise ValueError("NaN non ammesso")
+        if d < 0:
+            raise ValueError("durata negativa")
+    saidi = sum(durs)
+    n = len(durs)
+    return {
+        "eventi_anno": n,
+        "saidi_ore_anno": round(saidi, 3),
+        "caidi_ore_evento": round(saidi / n, 3),
+        "disponibilita_pct": round((1.0 - saidi / 8760.0) * 100.0, 4),
+    }
+
+
+def ci253_backup(costo_atteso_annuo, quota_coperta_pct, capex_eur,
+                 opex_annuo_eur):
+    """Convenienza di un sistema di backup (UPS / gruppo elettrogeno).
+
+    quota_coperta_pct: % del costo atteso annuo evitata dal backup;
+    risparmio = costo_atteso - (residuo + opex); payback semplice sul capex,
+    conveniente se <= 60 mesi.
+    """
+    c = float(costo_atteso_annuo)
+    q = float(quota_coperta_pct)
+    k = float(capex_eur)
+    o = float(opex_annuo_eur)
+    if c != c or q != q or k != k or o != o:
+        raise ValueError("NaN non ammesso")
+    if c < 0:
+        raise ValueError("costo atteso negativo")
+    if not (0.0 <= q <= 100.0):
+        raise ValueError("quota coperta fuori [0, 100]")
+    if k < 0:
+        raise ValueError("capex negativo")
+    if o < 0:
+        raise ValueError("opex negativo")
+    residuo = c * (1.0 - q / 100.0)
+    con_backup = residuo + o
+    risparmio = c - con_backup
+    if risparmio <= 0 or k <= 0:
+        payback = None
+        conviene = False
+    else:
+        payback = k / risparmio * 12.0
+        conviene = payback <= 60.0
+    return {
+        "costo_atteso_senza_eur": round(c, 2),
+        "quota_coperta_pct": q,
+        "costo_residuo_eur": round(residuo, 2),
+        "opex_annuo_eur": round(o, 2),
+        "costo_con_backup_eur": round(con_backup, 2),
+        "risparmio_annuo_eur": round(risparmio, 2),
+        "capex_eur": round(k, 2),
+        "payback_mesi": round(payback, 1) if payback is not None else None,
+        "conviene": conviene,
+    }
+
+
+def ci253_matrice(durate_ore, frequenze_anno, voll_eur_kwh, potenza_kw):
+    """Matrice costo atteso annuo per durata x frequenza (per heatmap).
+
+    Ritorna una riga per combinazione (durata_ore, eventi_anno).
+    """
+    durs = [float(x) for x in durate_ore]
+    freqs = [float(x) for x in frequenze_anno]
+    v = float(voll_eur_kwh)
+    p = float(potenza_kw)
+    if not durs or not freqs:
+        raise ValueError("assi vuoti")
+    for x in durs + freqs + [v, p]:
+        if x != x:
+            raise ValueError("NaN non ammesso")
+    if any(x < 0 for x in durs + freqs) or v < 0 or p < 0:
+        raise ValueError("valori negativi")
+    righe = []
+    for d in durs:
+        for n in freqs:
+            righe.append({
+                "durata_ore": d,
+                "eventi_anno": n,
+                "costo_atteso_annuo_eur": round(v * p * d * n, 2),
+            })
+    return righe
+
+
+
 if workspace == _('ws1'):
     st.markdown(f"<h1>{_('ws1')}</h1>", unsafe_allow_html=True)
     banner_demo("simulatore strategico: margini, centrali e curve simulate")
@@ -33873,7 +34015,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -56747,6 +56889,89 @@ elif workspace == _('ws8'):
                           for r in be252_quote(usi252)])
         st.download_button("⬇️ Export CSV bilancio", pd.DataFrame(righe_csv252).to_csv(index=False, sep=";"),
                            file_name=f"bilancio_energetico_{m252}.csv", mime="text/csv", key="b252_csv")
+
+    with tab253:
+        titolo253 = edu("Costo interruzioni (VoLL)", "Il VoLL (Value of Lost Load) e' il valore economico di 1 kWh non servito: fermo produzione, scarti, penali. Moltiplicato per l'energia non servita attesa (potenza interrotta x durata x frequenza) da' il costo atteso annuo delle interruzioni: la cifra contro cui confrontare UPS e gruppi elettrogeni.")
+        st.markdown(f"<h1>\U0001F311 {titolo253}</h1>", unsafe_allow_html=True)
+        st.caption("Quanto costa un blackout al sito: energia non servita, costo atteso annuo e convenienza del backup.")
+        banner_demo("calcolo sintetico (Mock): VoLL e frequenze sono INDICATIVI — stimare il VoLL dai costi reali di fermo del proprio sito")
+        c1_253, c2_253, c3_253, c4_253 = st.columns(4)
+        voll253 = c1_253.number_input("VoLL (\u20ac/kWh non servito)", min_value=0.0, value=12.0, step=0.5, key="ci253_voll",
+                                     help="Valore economico di 1 kWh non fornito: fermo produzione, scarti, penali. Letteratura: 5-25 \u20ac/kWh per utenze industriali, molto di piu' per processi critici.")
+        pot253 = c2_253.number_input("Potenza interrotta (kW)", min_value=0.0, value=500.0, step=50.0, key="ci253_pot",
+                                     help="Carico che si ferma durante il blackout.")
+        dur253 = c3_253.number_input("Durata media evento (ore)", min_value=0.0, value=2.0, step=0.25, key="ci253_dur",
+                                     help="Durata media di un'interruzione.")
+        fre253 = c4_253.number_input("Eventi attesi / anno", min_value=0.0, value=3.0, step=0.5, key="ci253_freq",
+                                     help="Frequenza attesa di interruzioni (da storico del distributore o propria esperienza).")
+        soglia253 = st.number_input("Soglia esposizione critica (\u20ac/anno)", min_value=0.0, value=50000.0, step=5000.0, key="ci253_soglia",
+                                     help="Sopra questa soglia l'esposizione e' considerata critica.")
+        try:
+            att253 = ci253_costo_atteso(voll253, pot253, dur253, fre253)
+        except ValueError as e:
+            st.error(f"Dati non validi: {e}")
+            st.stop()
+        costo_annuo253 = att253["costo_atteso_annuo_eur"]
+        if costo_annuo253 >= soglia253 and soglia253 > 0:
+            st.error(f"\U0001F534 Costo atteso {costo_annuo253:,.0f} \u20ac/anno oltre la soglia critica: valutare subito UPS/gruppo elettrogeno.")
+        elif costo_annuo253 >= soglia253 / 5.0 and soglia253 > 0:
+            st.warning(f"\U0001F7E1 Costo atteso {costo_annuo253:,.0f} \u20ac/anno: esposizione rilevante, il backup potrebbe ripagarsi.")
+        elif costo_annuo253 > 0:
+            st.success(f"\U0001F7E2 Costo atteso {costo_annuo253:,.0f} \u20ac/anno: esposizione contenuta.")
+        else:
+            st.info("Parametri a zero: nessun costo atteso.")
+        k1_253, k2_253, k3_253, k4_253 = st.columns(4)
+        render_kpi("ENS per evento (kWh)", f"{att253['ens_evento_kwh']:,.0f}", k1_253)
+        render_kpi("Costo per evento (\u20ac)", f"{att253['costo_evento_eur']:,.0f}", k2_253)
+        render_kpi("ENS annua (kWh)", f"{att253['ens_annua_kwh']:,.0f}", k3_253)
+        render_kpi("Costo atteso (\u20ac/anno)", f"{costo_annuo253:,.0f}", k4_253)
+        with st.expander("Storico eventi e indici di affidabilit\u00e0 (SAIDI/CAIDI)"):
+            df_stor253 = st.data_editor(
+                pd.DataFrame({"durata_ore": [0.5, 2.0, 1.5]}),
+                num_rows="dynamic", key="ci253_storico",
+                help="Una riga per evento storico: durata in ore.")
+            try:
+                durs253 = [float(x) for x in df_stor253["durata_ore"].tolist()]
+                ind253 = ci253_indici(durs253)
+            except (ValueError, TypeError) as e:
+                st.error(f"Storico non valido: {e}")
+                st.stop()
+            i1_253, i2_253, i3_253, i4_253 = st.columns(4)
+            render_kpi("Eventi / anno", f"{ind253['eventi_anno']}", i1_253)
+            render_kpi("SAIDI (ore/anno)", f"{ind253['saidi_ore_anno']:.2f}", i2_253)
+            render_kpi("CAIDI (ore/evento)", f"{ind253['caidi_ore_evento']:.2f}", i3_253)
+            render_kpi("Disponibilit\u00e0 (%)", f"{ind253['disponibilita_pct']:.3f}%", i4_253)
+            st.caption("SAIDI = ore totali di interruzione all'anno; CAIDI = durata media per evento; disponibilit\u00e0 = (1 \u2212 SAIDI/8760) \u00d7 100.")
+        with st.expander("Backup: UPS / gruppo elettrogeno"):
+            b1_253, b2_253, b3_253 = st.columns(3)
+            quota253 = b1_253.slider("Quota costo coperta dal backup (%)", min_value=0, max_value=100, value=90, key="ci253_quota",
+                                     help="Percentuale del costo atteso che il backup evita (UPS per i buchi brevi, gruppo per le interruzioni lunghe).")
+            capex253 = b2_253.number_input("CAPEX backup (\u20ac)", min_value=0.0, value=50000.0, step=1000.0, key="ci253_capex")
+            opex253 = b3_253.number_input("OPEX backup (\u20ac/anno)", min_value=0.0, value=2000.0, step=100.0, key="ci253_opex",
+                                          help="Manutenzione, prove periodiche, carburante.")
+            bk253 = ci253_backup(costo_annuo253, quota253, capex253, opex253)
+            r1_253, r2_253, r3_253 = st.columns(3)
+            render_kpi("Costo con backup (\u20ac/anno)", f"{bk253['costo_con_backup_eur']:,.0f}", r1_253)
+            render_kpi("Risparmio annuo (\u20ac)", f"{bk253['risparmio_annuo_eur']:,.0f}", r2_253)
+            render_kpi("Payback", f"{bk253['payback_mesi']:,.1f} mesi" if bk253["payback_mesi"] is not None else "mai", r3_253)
+            if bk253["conviene"]:
+                st.success(f"\U0001F4A1 Backup conveniente: payback {bk253['payback_mesi']:,.1f} mesi contro {costo_annuo253:,.0f} \u20ac/anno di interruzioni.")
+            elif bk253["payback_mesi"] is not None:
+                st.info(f"Payback {bk253['payback_mesi']:,.1f} mesi (> 5 anni): il backup si ripaga solo con VoLL o frequenze maggiori.")
+            else:
+                st.info("Il backup non riduce il costo atteso: verificare quota coperta e OPEX.")
+        st.markdown("**Sensitivit\u00e0: costo atteso annuo al variare di durata e frequenza**")
+        righe253 = ci253_matrice([0.5, 1.0, 2.0, 4.0, 8.0], [1.0, 2.0, 3.0, 5.0, 10.0], voll253, pot253)
+        dfm253 = pd.DataFrame(righe253).pivot(index="durata_ore", columns="eventi_anno", values="costo_atteso_annuo_eur")
+        fig253 = px.imshow(dfm253, text_auto=".0f", aspect="auto",
+                           title="Costo atteso annuo (\u20ac) \u2014 righe: durata evento (ore), colonne: eventi/anno",
+                           labels=dict(x="eventi/anno", y="durata (ore)", color="\u20ac/anno"))
+        st.plotly_chart(fig253, use_container_width=True)
+        st.download_button("\u2b07\ufe0f Export CSV sensitivit\u00e0",
+                           data=pd.DataFrame(righe253).to_csv(index=False, sep=";").encode("utf-8"),
+                           file_name="costo_interruzioni_voll.csv", mime="text/csv", key="ci253_csv",
+                           help="Matrice durata \u00d7 frequenza del costo atteso annuo.")
+        st.caption("Nota: il VoLL varia molto per settore (industriale 5-25 \u20ac/kWh in letteratura, servizi critici anche oltre 100 \u20ac/kWh). Usare sempre una stima basata sui costi di fermo del proprio sito.")
 
 # Footer
 
