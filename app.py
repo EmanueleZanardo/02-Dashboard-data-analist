@@ -35782,6 +35782,200 @@ def bm267_sensibilita(prezzo_max, passo, mwh_annui, costo_totale_annuo, incentiv
 
 
 
+# ---------------------------------------------------------------------------
+# Tab 268 - Eolico onshore: business case (LCOE vs prezzo catturato)
+# ---------------------------------------------------------------------------
+
+
+def eo268_num(x, nome):
+    """Valida uno scalare numerico: no bool, no NaN/inf."""
+    import math
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        raise ValueError(f"{nome}: deve essere un numero")
+    if math.isnan(x) or math.isinf(x):
+        raise ValueError(f"{nome}: NaN/inf non ammessi")
+    return float(x)
+
+
+def eo268_int(n, nome="anni"):
+    """Valida un numero intero di anni >= 1."""
+    v = eo268_num(n, nome)
+    if v < 1 or v != int(v):
+        raise ValueError(f"{nome}: deve essere un intero >= 1")
+    return int(v)
+
+
+def eo268_produzione_annua(potenza_mw, ore_equivalenti):
+    """MWh/anno da potenza nominale e ore equivalenti a piena potenza."""
+    p = eo268_num(potenza_mw, "potenza_mw")
+    h = eo268_num(ore_equivalenti, "ore_equivalenti")
+    if p <= 0:
+        raise ValueError("potenza_mw: deve essere > 0")
+    if h <= 0 or h > 8760:
+        raise ValueError("ore_equivalenti: deve stare tra 0 e 8760")
+    return p * h
+
+
+def eo268_quota_capex(capex, anni, tasso_pct):
+    """Quota annua del capex (rendita; tasso 0 => capex/anni)."""
+    cx = eo268_num(capex, "capex")
+    n = eo268_int(anni, "anni")
+    t = eo268_num(tasso_pct, "tasso_pct")
+    if cx < 0:
+        raise ValueError("capex: non puo' essere negativo")
+    if t < 0:
+        raise ValueError("tasso_pct: non puo' essere negativo")
+    if t == 0.0:
+        return cx / n
+    r = t / 100.0
+    return cx * r / (1.0 - (1.0 + r) ** -n)
+
+
+def eo268_costo_annuo(capex, anni, tasso_pct, oem_pct_capex, opex_fisso_kw_anno, potenza_mw):
+    """Costo annuo totale: quota capex + O&M (% capex) + opex fisso (€/kW/anno).
+
+    Restituisce dict {"quota_capex", "oem", "opex_fisso", "totale"}.
+    """
+    cx = eo268_num(capex, "capex")
+    o = eo268_num(oem_pct_capex, "oem_pct_capex")
+    of = eo268_num(opex_fisso_kw_anno, "opex_fisso_kw_anno")
+    p = eo268_num(potenza_mw, "potenza_mw")
+    if not 0.0 <= o <= 100.0:
+        raise ValueError("oem_pct_capex: deve stare tra 0 e 100")
+    if of < 0:
+        raise ValueError("opex_fisso_kw_anno: non puo' essere negativo")
+    if p <= 0:
+        raise ValueError("potenza_mw: deve essere > 0")
+    quota = eo268_quota_capex(cx, anni, tasso_pct)
+    oem = cx * o / 100.0
+    opex_fisso = p * 1000.0 * of
+    return {"quota_capex": quota, "oem": oem,
+            "opex_fisso": opex_fisso,
+            "totale": quota + oem + opex_fisso}
+
+
+def eo268_lcoe(costo_totale_annuo, mwh_annui):
+    """Costo livellato dell'energia (€/MWh). None se produzione nulla."""
+    c = eo268_num(costo_totale_annuo, "costo_totale_annuo")
+    m = eo268_num(mwh_annui, "mwh_annui")
+    if c < 0:
+        raise ValueError("costo_totale_annuo: non puo' essere negativo")
+    if m < 0:
+        raise ValueError("mwh_annui: non puo' essere negativo")
+    if m == 0.0:
+        return None
+    return c / m
+
+
+def eo268_prezzo_catturato(prezzo_baseload, sconto_pct):
+    """Prezzo medio realizzato dall'impianto = baseload x (1 - sconto/100)."""
+    p = eo268_num(prezzo_baseload, "prezzo_baseload")
+    s = eo268_num(sconto_pct, "sconto_pct")
+    if p < 0:
+        raise ValueError("prezzo_baseload: non puo' essere negativo")
+    if not 0.0 <= s <= 100.0:
+        raise ValueError("sconto_pct: deve stare tra 0 e 100")
+    return p * (1.0 - s / 100.0)
+
+
+def eo268_ricavi(mwh_annui, prezzo_catturato):
+    """Ricavi annui: MWh x prezzo catturato."""
+    m = eo268_num(mwh_annui, "mwh_annui")
+    p = eo268_num(prezzo_catturato, "prezzo_catturato")
+    if m < 0:
+        raise ValueError("mwh_annui: non puo' essere negativo")
+    if p < 0:
+        raise ValueError("prezzo_catturato: non puo' essere negativo")
+    return m * p
+
+
+def eo268_margine(ricavi_annui, costo_totale_annuo):
+    """Margine annuo = ricavi - costi."""
+    r = eo268_num(ricavi_annui, "ricavi_annui")
+    c = eo268_num(costo_totale_annuo, "costo_totale_annuo")
+    if c < 0:
+        raise ValueError("costo_totale_annuo: non puo' essere negativo")
+    return r - c
+
+
+def eo268_fattore_rendita(tasso_pct, anni):
+    """Fattore di rendita posticipata (tasso 0 => anni)."""
+    t = eo268_num(tasso_pct, "tasso_pct")
+    n = eo268_int(anni, "anni")
+    if t < 0:
+        raise ValueError("tasso_pct: non puo' essere negativo")
+    if t == 0.0:
+        return float(n)
+    r = t / 100.0
+    return sum(1.0 / (1.0 + r) ** a for a in range(1, n + 1))
+
+
+def eo268_van(margine_annuo, anni, tasso_pct):
+    """VAN del margine annuo costante su orizzonte e tasso."""
+    mg = eo268_num(margine_annuo, "margine_annuo")
+    return mg * eo268_fattore_rendita(tasso_pct, anni)
+
+
+def eo268_payback(capex, margine_annuo):
+    """Payback semplice in anni (frazionario). None se il margine non e' positivo."""
+    cx = eo268_num(capex, "capex")
+    mg = eo268_num(margine_annuo, "margine_annuo")
+    if cx < 0:
+        raise ValueError("capex: non puo' essere negativo")
+    if mg <= 0:
+        return None
+    return cx / mg
+
+
+def eo268_confronto(lcoe, prezzo_catturato):
+    """Confronto LCOE vs prezzo catturato.
+
+    Verdetto: "competitivo" se il margine >= +5% del prezzo catturato,
+    "indifferente" se entro il ±5%, "non_competitivo" altrimenti.
+    """
+    l = eo268_num(lcoe, "lcoe")
+    p = eo268_num(prezzo_catturato, "prezzo_catturato")
+    if l < 0:
+        raise ValueError("lcoe: non puo' essere negativo")
+    if p <= 0:
+        raise ValueError("prezzo_catturato: deve essere > 0")
+    margine = p - l
+    soglia = 0.05 * p
+    if margine >= soglia:
+        verdetto = "competitivo"
+    elif margine >= -soglia:
+        verdetto = "indifferente"
+    else:
+        verdetto = "non_competitivo"
+    return {"verdetto": verdetto, "prezzo_catturato": p,
+            "margine_eur_mwh": margine, "soglia_eur_mwh": soglia}
+
+
+def eo268_sensibilita(prezzo_max, passo, mwh_annui, costo_totale_annuo, sconto_pct):
+    """Margine annuo al variare del prezzo baseload (0..prezzo_max).
+
+    Restituisce lista di dict {"prezzo_baseload", "prezzo_catturato",
+    "ricavi_annui", "margine_annuo"}.
+    """
+    pm = eo268_num(prezzo_max, "prezzo_max")
+    st_ = eo268_num(passo, "passo")
+    c = eo268_num(costo_totale_annuo, "costo_totale_annuo")
+    if pm <= 0:
+        raise ValueError("prezzo_max: deve essere > 0")
+    if st_ <= 0:
+        raise ValueError("passo: deve essere > 0")
+    righe = []
+    p = 0.0
+    while p <= pm + 1e-9:
+        pc = eo268_prezzo_catturato(p, sconto_pct)
+        ric = eo268_ricavi(mwh_annui, pc)
+        righe.append({"prezzo_baseload": round(p, 2), "prezzo_catturato": round(pc, 2),
+                      "ricavi_annui": ric, "margine_annuo": ric - c})
+        p += st_
+    return righe
+
+
+
 if workspace == _('ws1'):
     st.markdown(f"<h1>{_('ws1')}</h1>", unsafe_allow_html=True)
     banner_demo("simulatore strategico: margini, centrali e curve simulate")
@@ -36423,7 +36617,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256, tab257, tab258, tab259, tab260, tab261, tab262, tab263, tab264, tab265, tab266, tab267 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete", "🔥 Teleriscaldamento vs caldaia", "🌿 Clean spread (con CO₂)", "🇮🇹 PUN da prezzi zonali", "❄️ Pompa di calore vs caldaia", "🏢 PUE & costo data center", "🔌 Gruppo elettrogeno vs blackout", "🚗 Flotta aziendale: TCO diesel vs elettrico", "📜 Garanzie di origine: costo del 100% rinnovabile", "♻️ Fine vita FV: revamping vs dismissione", "🌾️ Agrivoltaico: doppio reddito", "🟢 Biometano: business case"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256, tab257, tab258, tab259, tab260, tab261, tab262, tab263, tab264, tab265, tab266, tab267, tab268 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete", "🔥 Teleriscaldamento vs caldaia", "🌿 Clean spread (con CO₂)", "🇮🇹 PUN da prezzi zonali", "❄️ Pompa di calore vs caldaia", "🏢 PUE & costo data center", "🔌 Gruppo elettrogeno vs blackout", "🚗 Flotta aziendale: TCO diesel vs elettrico", "📜 Garanzie di origine: costo del 100% rinnovabile", "♻️ Fine vita FV: revamping vs dismissione", "🌾️ Agrivoltaico: doppio reddito", "🟢 Biometano: business case", "🌬️ Eolico onshore: business case"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -60710,6 +60904,108 @@ elif workspace == _('ws8'):
                                key="bm267_csv",
                                help="Margine annuo e VAN al variare del prezzo del gas.")
         st.caption("Nota: resa e costi dipendono molto dal substrato (reflui vs colture dedicate vs FORSU); il PCS usato e' 10,5 kWh/Nm³. Verificare incentivi vigenti e costi di allaccio prima di decidere.")
+
+    with tab268:
+        titolo268 = edu("Eolico onshore: business case", "Un parco eolico onshore vende energia al PREZZO CATTURATO: quasi sempre sotto il prezzo baseload di mercato, perche' produce di piu' quando il prezzo e' basso (effetto cannibalizzazione). Il business case confronta il LCOE (costo livellato: capex annualizzato + O&M) con il prezzo catturato: se il LCOE sta sotto con margine, il progetto e' competitivo. Questa tab calcola produzione, costi, LCOE, ricavi, margine, VAN e payback, con sensibilita' al prezzo baseload.")
+        st.markdown(f"<h1>\U0001F32C {titolo268}</h1>", unsafe_allow_html=True)
+        st.caption("Eolico onshore: il LCOE regge contro il prezzo catturato? Produzione, costi, VAN e payback con sensibilita' al baseload.")
+        a1_268, a2_268, a3_268 = st.columns(3)
+        pot268 = a1_268.number_input("Potenza (MW)", min_value=0.0,
+                                     value=10.0, step=1.0, format="%.1f",
+                                     key="eo268_potenza",
+                                     help="Potenza nominale del parco eolico in MW.")
+        ore268 = a2_268.number_input("Ore equivalenti (h/anno)", min_value=0.0, max_value=8760.0,
+                                     value=2500.0, step=50.0, format="%.0f",
+                                     key="eo268_ore",
+                                     help="Ore equivalenti a piena potenza: produzione annua / potenza. In Italia onshore tipicamente 1.800-2.800 h.")
+        cx268 = a3_268.number_input("Capex totale (€)", min_value=0.0,
+                                    value=12000000.0, step=100000.0, format="%.0f",
+                                    key="eo268_capex",
+                                    help="Costo chiavi in mano: turbine, fondazioni, opere civili, connessione rete.")
+        b1_268, b2_268, b3_268 = st.columns(3)
+        oem268 = b1_268.number_input("O&M (% del capex/anno)", min_value=0.0, max_value=100.0,
+                                     value=2.5, step=0.5, format="%.1f",
+                                     key="eo268_oem",
+                                     help="Manutenzione e gestione come % del capex all'anno.")
+        ofx268 = b2_268.number_input("Opex fisso (€/kW/anno)", min_value=0.0,
+                                     value=40.0, step=5.0, format="%.1f",
+                                     key="eo268_opex_fisso",
+                                     help="Costi fissi annui per kW installato (assicurazioni, affitti terreni, gestione).")
+        orz268 = b3_268.number_input("Orizzonte (anni)", min_value=1, max_value=40,
+                                     value=25, step=1,
+                                     key="eo268_orizzonte")
+        c1_268, c2_268, c3_268 = st.columns(3)
+        pba268 = c1_268.number_input("Prezzo baseload forward (€/MWh)", min_value=0.0,
+                                     value=75.0, step=1.0, format="%.1f",
+                                     key="eo268_prezzo",
+                                     help="Prezzo forward baseload atteso sull'orizzonte (media annua).")
+        sco268 = c2_268.number_input("Sconto di cattura (%)", min_value=0.0, max_value=100.0,
+                                     value=12.0, step=1.0, format="%.1f",
+                                     key="eo268_sconto",
+                                     help="Quanto il prezzo medio realizzato sta sotto il baseload (correlazione negativa produzione-prezzo).")
+        tas268 = c3_268.number_input("Tasso di attualizzazione (%/anno)", min_value=0.0,
+                                     value=5.0, step=0.5, format="%.1f",
+                                     key="eo268_tasso")
+        try:
+            mwh268 = eo268_produzione_annua(pot268, ore268)
+            cst268 = eo268_costo_annuo(cx268, orz268, tas268, oem268, ofx268, pot268)
+            lcoe268 = eo268_lcoe(cst268["totale"], mwh268)
+            pcat268 = eo268_prezzo_catturato(pba268, sco268)
+            ric268 = eo268_ricavi(mwh268, pcat268)
+            mar268 = eo268_margine(ric268, cst268["totale"])
+            van268 = eo268_van(mar268, orz268, tas268)
+            pay268 = eo268_payback(cx268, mar268)
+            cfr268 = eo268_confronto(lcoe268, pcat268)
+            pmax268 = max(150.0, pba268 * 2.0)
+            sen268 = eo268_sensibilita(pmax268, pmax268 / 60.0, mwh268, cst268["totale"], sco268)
+        except ValueError as e268:
+            st.error(f"Dati non validi: {e268}")
+            st.stop()
+        k1_268, k2_268, k3_268, k4_268, k5_268, k6_268 = st.columns(6)
+        render_kpi("Produzione (MWh/anno)", f"{mwh268:,.0f}", k1_268)
+        render_kpi("LCOE (€/MWh)", f"{lcoe268:.2f}" if lcoe268 is not None else "—", k2_268)
+        render_kpi("Prezzo catturato (€/MWh)", f"{pcat268:.2f}", k3_268)
+        render_kpi("Ricavi (€/anno)", f"{ric268:,.0f}", k4_268)
+        render_kpi("Margine (€/anno)", f"{mar268:,.0f}", k5_268)
+        render_kpi("Payback (anni)", f"{pay268:.1f}" if pay268 else "mai", k6_268)
+        if cfr268["verdetto"] == "competitivo":
+            st.success(f"Parco competitivo: LCOE {lcoe268:.2f} €/MWh contro prezzo catturato {pcat268:.2f} €/MWh (baseload {pba268:.1f} meno sconto {sco268:.1f}%), margine {cfr268['margine_eur_mwh']:.2f} €/MWh. VAN {van268:,.0f} € su {orz268} anni.")
+        elif cfr268["verdetto"] == "indifferente":
+            st.info(f"Quasi in parita': LCOE {lcoe268:.2f} €/MWh vs prezzo catturato {pcat268:.2f} €/MWh (entro il ±5%). La decisione dipende dal prezzo forward reale, dallo sconto di cattura del sito e dai costi di connessione.")
+        else:
+            st.warning(f"Parco non competitivo: LCOE {lcoe268:.2f} €/MWh sopra il prezzo catturato {pcat268:.2f} €/MWh di {abs(cfr268['margine_eur_mwh']):.2f} €/MWh. Serve un sito piu' ventoso, un baseload piu' alto o capex/O&M piu' bassi.")
+        st.markdown("**Costo livellato vs mercato (€/MWh)**")
+        dfb268 = pd.DataFrame([{"voce": "LCOE eolico", "eur_mwh": lcoe268},
+                               {"voce": "Baseload forward", "eur_mwh": pba268},
+                               {"voce": "Prezzo catturato", "eur_mwh": pcat268}])
+        figb268 = px.bar(dfb268, x="voce", y="eur_mwh", title="LCOE vs mercato (€/MWh)",
+                         labels={"voce": "Voce", "eur_mwh": "€/MWh"})
+        st.plotly_chart(figb268, use_container_width=True)
+        st.markdown("**Margine annuo al variare del prezzo baseload (€/MWh)**")
+        dss268 = pd.DataFrame(sen268)
+        figs268 = px.line(dss268, x="prezzo_baseload", y="margine_annuo",
+                          title="Margine annuo vs prezzo baseload (€)",
+                          labels={"prezzo_baseload": "Prezzo baseload (€/MWh)", "margine_annuo": "Margine (€/anno)"})
+        figs268.add_hline(y=0.0, line_dash="dot", line_color="#9ca3af",
+                          annotation_text="Pareggio")
+        figs268.add_vline(x=pba268, line_dash="dash", line_color="red",
+                          annotation_text="Prezzo attuale")
+        st.plotly_chart(figs268, use_container_width=True)
+        with st.expander("Dettaglio sensibilita' ed export CSV"):
+            dft268 = pd.DataFrame([{"prezzo_baseload_eur_mwh": r["prezzo_baseload"],
+                                    "prezzo_catturato_eur_mwh": r["prezzo_catturato"],
+                                    "ricavi_annui_eur": round(r["ricavi_annui"], 0),
+                                    "margine_annuo_eur": round(r["margine_annuo"], 0),
+                                    "van_eur": round(r["margine_annuo"] * eo268_fattore_rendita(tas268, orz268), 0)}
+                                   for r in sen268])
+            st.dataframe(dft268, use_container_width=True, hide_index=True)
+            st.caption(f"Costo annuo totale: {cst268['totale']:,.0f} € (quota capex {cst268['quota_capex']:,.0f} € + O&M {cst268['oem']:,.0f} € + opex fisso {cst268['opex_fisso']:,.0f} €). VAN calcolato sul margine a prezzo variabile.")
+            st.download_button("⬇️ Export CSV sensibilita'",
+                               data=dft268.to_csv(index=False, sep=";").encode("utf-8"),
+                               file_name="eolico_onshore_sensibilita.csv", mime="text/csv",
+                               key="eo268_csv",
+                               help="Margine annuo e VAN al variare del prezzo baseload.")
+        st.caption("Nota: lo sconto di cattura cresce con la penetrazione eolica nella zona di prezzo; le ore equivalenti dipendono dal sito (ventosita') e dalla taglia delle turbine. Verificare connessione, autorizzazioni e vincoli paesaggistici prima di decidere.")
 
 # Footer
 

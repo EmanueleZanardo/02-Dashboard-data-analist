@@ -31,6 +31,7 @@ TITLE264 = "📜 Garanzie di origine: costo del 100% rinnovabile"
 TITLE265 = "♻️ Fine vita FV: revamping vs dismissione"
 TITLE266 = "🌾️ Agrivoltaico: doppio reddito"
 TITLE267 = "🟢 Biometano: business case"
+TITLE268 = "🌬️ Eolico onshore: business case"
 TITLE262 = "\U0001F50C Gruppo elettrogeno vs blackout"
 
 # Parametri di riferimento usati nei test
@@ -61,12 +62,12 @@ def _registry():
 class TestRegistryTab263:
     def test_tab263_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 267
+        assert len(titoli) == len(dvars) == len(withs) == 268
         assert TITLE263 in titoli
         assert "tab263" in dvars
         assert "tab263" in withs
         assert titoli[dvars.index("tab263")] == TITLE263
-        assert titoli[-1] == TITLE267
+        assert titoli[-1] == TITLE268
         keys = re.findall(r'key="(fl263_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 16
 
@@ -78,6 +79,7 @@ class TestRegistryTab263:
         assert titoli[dvars.index("tab265")] == TITLE265
         assert titoli[dvars.index("tab266")] == TITLE266
         assert titoli[dvars.index("tab267")] == TITLE267
+        assert titoli[dvars.index("tab268")] == TITLE268
 
 
 class TestFl263Num:
