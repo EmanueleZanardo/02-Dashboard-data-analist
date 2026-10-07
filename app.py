@@ -39217,6 +39217,207 @@ def css288_verdetto(margine_ora, soglia):
     return {"verdetto": v, "margine_ora": m, "soglia": s}
 
 
+def cds289_num(x, nome):
+    """Valida uno scalare numerico: no bool, no NaN/inf."""
+    import math
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        raise ValueError(f"{nome}: deve essere un numero")
+    if math.isnan(x) or math.isinf(x):
+        raise ValueError(f"{nome}: NaN/inf non ammessi")
+    return float(x)
+
+
+def cds289_pos(x, nome):
+    """Valida un numero >= 0."""
+    v = cds289_num(x, nome)
+    if v < 0:
+        raise ValueError(f"{nome}: non puo' essere negativo")
+    return v
+
+
+def cds289_frac(x, nome):
+    """Valida un'efficienza in (0, 1]."""
+    v = cds289_num(x, nome)
+    if v <= 0 or v > 1:
+        raise ValueError(f"{nome}: deve essere in (0, 1]")
+    return v
+
+
+def cds289_carbone_mwh(prezzo_usd_t, cambio, pci_mwh_t):
+    """Prezzo del carbone in EUR/MWh termico: $/t diviso il PCI (MWh/t),
+    convertito in euro al cambio USD/EUR."""
+    p = cds289_pos(prezzo_usd_t, "prezzo_usd_t")
+    c = cds289_num(cambio, "cambio")
+    pci = cds289_num(pci_mwh_t, "pci_mwh_t")
+    if c <= 0:
+        raise ValueError("cambio: deve essere > 0")
+    if pci <= 0:
+        raise ValueError("pci_mwh_t: deve essere > 0")
+    return p / pci / c
+
+
+def cds289_costo_carbone_el(costo_termico, efficienza):
+    """Costo carbone (EUR/MWh el): EUR/MWh termico diviso efficienza."""
+    ct = cds289_pos(costo_termico, "costo_termico")
+    e = cds289_frac(efficienza, "efficienza")
+    return ct / e
+
+
+def cds289_emissioni(fattore_co2, efficienza):
+    """Emissioni specifiche (tCO2/MWh el): fattore del combustibile
+    (tCO2/MWh termico) diviso l'efficienza della centrale."""
+    f = cds289_pos(fattore_co2, "fattore_co2")
+    e = cds289_frac(efficienza, "efficienza")
+    return f / e
+
+
+def cds289_costo_co2(prezzo_co2, emissioni):
+    """Costo CO2 (EUR/MWh el): prezzo EUA per le emissioni specifiche."""
+    c = cds289_pos(prezzo_co2, "prezzo_co2")
+    em = cds289_pos(emissioni, "emissioni")
+    return c * em
+
+
+def cds289_dark(prezzo_power, costo_carbone_el):
+    """Dark spread (EUR/MWh el): prezzo dell'energia meno costo del carbone
+    elettrico."""
+    p = cds289_pos(prezzo_power, "prezzo_power")
+    cc = cds289_pos(costo_carbone_el, "costo_carbone_el")
+    return p - cc
+
+
+def cds289_clean_dark(prezzo_power, prezzo_usd_t, cambio, pci_mwh_t,
+                      efficienza, prezzo_co2, fattore_co2):
+    """Clean dark spread (EUR/MWh el): dark spread meno costo CO2."""
+    carbone_el = cds289_costo_carbone_el(
+        cds289_carbone_mwh(prezzo_usd_t, cambio, pci_mwh_t), efficienza)
+    dark = cds289_dark(prezzo_power, carbone_el)
+    co2 = cds289_costo_co2(prezzo_co2,
+                           cds289_emissioni(fattore_co2, efficienza))
+    return dark - co2
+
+
+def cds289_fissi_unitari(costi_fissi, ore, capacita_mw):
+    """Quota fissa unitaria (EUR/MWh): costi fissi annui / (ore x capacita')."""
+    cf = cds289_pos(costi_fissi, "costi_fissi")
+    h = cds289_pos(ore, "ore")
+    cap = cds289_pos(capacita_mw, "capacita_mw")
+    if h <= 0 or cap <= 0:
+        raise ValueError("ore e capacita_mw: devono essere > 0")
+    return cf / (h * cap)
+
+
+def cds289_margine_ora(clean_dark, fissi_unitari):
+    """Margine dopo i costi fissi (EUR/MWh el): clean dark spread meno quota
+    unitaria dei costi fissi annui."""
+    c = cds289_num(clean_dark, "clean_dark")
+    f = cds289_pos(fissi_unitari, "fissi_unitari")
+    return c - f
+
+
+def cds289_pnl(clean_dark, ore, capacita_mw, costi_fissi):
+    """P&L annuo (EUR): margine lordo da energia meno costi fissi."""
+    c = cds289_num(clean_dark, "clean_dark")
+    h = cds289_pos(ore, "ore")
+    cap = cds289_pos(capacita_mw, "capacita_mw")
+    cf = cds289_pos(costi_fissi, "costi_fissi")
+    if h <= 0 or cap <= 0:
+        raise ValueError("ore e capacita_mw: devono essere > 0")
+    return c * h * cap - cf
+
+
+def cds289_be_power(prezzo_usd_t, cambio, pci_mwh_t, efficienza,
+                    prezzo_co2, fattore_co2, fissi_unitari):
+    """Prezzo power di break-even (EUR/MWh): il power che azzera il margine
+    dopo carbone, CO2 e quota fissa."""
+    carbone_el = cds289_costo_carbone_el(
+        cds289_carbone_mwh(prezzo_usd_t, cambio, pci_mwh_t), efficienza)
+    co2_el = cds289_costo_co2(prezzo_co2,
+                              cds289_emissioni(fattore_co2, efficienza))
+    fu = cds289_pos(fissi_unitari, "fissi_unitari")
+    return carbone_el + co2_el + fu
+
+
+def cds289_be_carbone(prezzo_power, cambio, pci_mwh_t, efficienza,
+                      prezzo_co2, fattore_co2, fissi_unitari):
+    """Prezzo carbone di break-even ($/t): il carbone che azzera il margine
+    dopo CO2 e quota fissa. None se il power non copre CO2+fissi nemmeno
+    a carbone gratis."""
+    p = cds289_pos(prezzo_power, "prezzo_power")
+    co2_el = cds289_costo_co2(prezzo_co2,
+                              cds289_emissioni(fattore_co2, efficienza))
+    fu = cds289_pos(fissi_unitari, "fissi_unitari")
+    eff = cds289_frac(efficienza, "efficienza")
+    c = cds289_num(cambio, "cambio")
+    if c <= 0:
+        raise ValueError("cambio: deve essere > 0")
+    pci = cds289_num(pci_mwh_t, "pci_mwh_t")
+    if pci <= 0:
+        raise ValueError("pci_mwh_t: deve essere > 0")
+    carbone_term = (p - co2_el - fu) * eff
+    if carbone_term <= 0:
+        return None
+    return carbone_term * c * pci
+
+
+def cds289_breakdown(prezzo_power, costo_carbone, costo_co2, fissi_unitari,
+                     margine):
+    """Scomposizione del clean dark spread e del margine (dict)."""
+    return {"prezzo_power": cds289_pos(prezzo_power, "prezzo_power"),
+            "costo_carbone": cds289_pos(costo_carbone, "costo_carbone"),
+            "costo_co2": cds289_pos(costo_co2, "costo_co2"),
+            "quota_fissa": cds289_pos(fissi_unitari, "fissi_unitari"),
+            "margine_ora": cds289_num(margine, "margine")}
+
+
+def cds289_sensibilita_carbone(coal_usd_t, cambio, pci_mwh_t, efficienza,
+                               prezzo_co2, fattore_co2, power,
+                               fissi_unitari, n_punti=9, ampiezza=0.15):
+    """Clean dark spread e margine al variare del prezzo del carbone
+    (coal_usd_t*(1 +/- ampiezza))."""
+    c0 = cds289_pos(coal_usd_t, "coal_usd_t")
+    carbone_term_base = cds289_carbone_mwh(1.0, cambio, pci_mwh_t)
+    eff = cds289_frac(efficienza, "efficienza")
+    co2 = cds289_pos(prezzo_co2, "prezzo_co2")
+    fco2 = cds289_pos(fattore_co2, "fattore_co2")
+    pwr = cds289_pos(power, "power")
+    fu = cds289_pos(fissi_unitari, "fissi_unitari")
+    c = cds289_num(cambio, "cambio")
+    pci = cds289_num(pci_mwh_t, "pci_mwh_t")
+    if isinstance(n_punti, bool) or not isinstance(n_punti, int) \
+            or n_punti < 3:
+        raise ValueError("n_punti: deve essere un intero >= 3")
+    amp = cds289_num(ampiezza, "ampiezza")
+    if amp <= 0:
+        raise ValueError("ampiezza: deve essere > 0")
+    co2_el = co2 * fco2 / eff
+    righe = []
+    for j in range(n_punti):
+        mult = 1.0 - amp + 2.0 * amp * j / (n_punti - 1)
+        ct = c0 * mult
+        carbone_el = ct / pci / c / eff
+        dark = pwr - carbone_el
+        clean = dark - co2_el
+        righe.append({"coal_usd_t": ct, "dark": dark, "clean_dark": clean,
+                      "margine": clean - fu})
+    return righe
+
+
+def cds289_verdetto(margine_ora, soglia):
+    """Verdetto: 'profittevole' (margine >= soglia), 'copre_i_costi'
+    (0 <= margine < soglia), 'in_perdita' (margine < 0)."""
+    m = cds289_num(margine_ora, "margine_ora")
+    s = cds289_num(soglia, "soglia")
+    if s < 0:
+        raise ValueError("soglia: non puo' essere negativa")
+    if m >= s:
+        v = "profittevole"
+    elif m >= 0:
+        v = "copre_i_costi"
+    else:
+        v = "in_perdita"
+    return {"verdetto": v, "margine_ora": m, "soglia": s}
+
 
 if workspace == _('ws1'):
     st.markdown(f"<h1>{_('ws1')}</h1>", unsafe_allow_html=True)
@@ -39859,7 +40060,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256, tab257, tab258, tab259, tab260, tab261, tab262, tab263, tab264, tab265, tab266, tab267, tab268, tab269, tab270, tab271, tab272, tab273, tab274, tab275, tab276, tab277, tab278, tab279, tab280, tab281, tab282, tab283, tab284, tab285, tab286, tab287, tab288 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete", "🔥 Teleriscaldamento vs caldaia", "🌿 Clean spread (con CO₂)", "🇮🇹 PUN da prezzi zonali", "❄️ Pompa di calore vs caldaia", "🏢 PUE & costo data center", "🔌 Gruppo elettrogeno vs blackout", "🚗 Flotta aziendale: TCO diesel vs elettrico", "📜 Garanzie di origine: costo del 100% rinnovabile", "♻️ Fine vita FV: revamping vs dismissione", "🌾️ Agrivoltaico: doppio reddito", "🟢 Biometano: business case", "🌬️ Eolico onshore: business case", "🌊 Idroelettrico run-of-river: business case", "🔥 Geotermia profonda: business case", "☀️ Solare termodinamico (CSP): business case", "🌬️ Eolico offshore: business case", "☀️ Fotovoltaico utility-scale: business case", "⚛️ Nucleare SMR: business case", "📊 Posizione vs limiti di rischio", "💧 Cash flow at risk (CFaR)", "⚡ Aste MI: scostamenti vs MGP", "🌡️ Stress climatico: domanda e prezzo", "🌪️ Derivati meteo: pricing HDD/CDD", "🚢 LNG vs gasdotto: costo delivered", "🛢️ Crack spread: margine raffinazione 3-2-1", "🧪 Margine petrolchimico: nafta → etilene", "🛢️ Carry petrolio: contango & stoccaggio fisico", "🏭 Unit commitment CCGT: accendere o no?", "🛛️ Differenziali greggio: sweet vs sour", "⛽ Basis gas TTF–PSV", "🚢⚡ Rigassificazione GNL: margine terminale", "⚡🔥 Clean spark spread: margine centrale a gas"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256, tab257, tab258, tab259, tab260, tab261, tab262, tab263, tab264, tab265, tab266, tab267, tab268, tab269, tab270, tab271, tab272, tab273, tab274, tab275, tab276, tab277, tab278, tab279, tab280, tab281, tab282, tab283, tab284, tab285, tab286, tab287, tab288, tab289 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete", "🔥 Teleriscaldamento vs caldaia", "🌿 Clean spread (con CO₂)", "🇮🇹 PUN da prezzi zonali", "❄️ Pompa di calore vs caldaia", "🏢 PUE & costo data center", "🔌 Gruppo elettrogeno vs blackout", "🚗 Flotta aziendale: TCO diesel vs elettrico", "📜 Garanzie di origine: costo del 100% rinnovabile", "♻️ Fine vita FV: revamping vs dismissione", "🌾️ Agrivoltaico: doppio reddito", "🟢 Biometano: business case", "🌬️ Eolico onshore: business case", "🌊 Idroelettrico run-of-river: business case", "🔥 Geotermia profonda: business case", "☀️ Solare termodinamico (CSP): business case", "🌬️ Eolico offshore: business case", "☀️ Fotovoltaico utility-scale: business case", "⚛️ Nucleare SMR: business case", "📊 Posizione vs limiti di rischio", "💧 Cash flow at risk (CFaR)", "⚡ Aste MI: scostamenti vs MGP", "🌡️ Stress climatico: domanda e prezzo", "🌪️ Derivati meteo: pricing HDD/CDD", "🚢 LNG vs gasdotto: costo delivered", "🛢️ Crack spread: margine raffinazione 3-2-1", "🧪 Margine petrolchimico: nafta → etilene", "🛢️ Carry petrolio: contango & stoccaggio fisico", "🏭 Unit commitment CCGT: accendere o no?", "🛛️ Differenziali greggio: sweet vs sour", "⛽ Basis gas TTF–PSV", "🚢⚡ Rigassificazione GNL: margine terminale", "⚡🔥 Clean spark spread: margine centrale a gas", "⚫🔥 Clean dark spread: margine centrale a carbone"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -66319,6 +66520,117 @@ elif workspace == _('ws8'):
                                mime="text/csv", key="css288_csv",
                                help="Margine centrale al variare del prezzo power.")
         st.caption("Nota: il fattore di emissione 0,201 tCO2/MWh termico vale per gas naturale; l'efficienza netta include gli autoconsumi. Il costo CO2 usa il prezzo EUA spot: per il margine forward usare i prezzi dei futures power/gas/EUA della stessa maturity.")
+
+    with tab289:
+        titolo289 = edu("Clean dark spread: margine centrale a carbone", "Il dark spread misura il margine lordo di una centrale a carbone: prezzo dell'energia meno costo del carbone (quotato in $/t, convertito in €/MWh con PCI e cambio) rapportato all'efficienza. Il clean dark spread sottrae anche il costo della CO2 (prezzo EUA x fattore di emissione / efficienza). Con ore di funzionamento, capacita' e costi fissi si ottengono margine orario, P&L annuo, break-even del carbone e del power, e sensibilita' al prezzo del carbone.")
+        st.markdown(f"<h1>⚫🔥 {titolo289}</h1>", unsafe_allow_html=True)
+        st.caption("Margine della centrale a carbone: il dark copre carbone e CO2? Clean dark, break-even del carbone, P&L e sensibilita'.")
+        a1_289, a2_289, a3_289 = st.columns(3)
+        with a1_289:
+            power_289 = st.number_input("Prezzo energia (€/MWh)", min_value=0.0,
+                                        value=105.0, step=1.0, format="%.2f",
+                                        key="cds289_power")
+            coal_289 = st.number_input("Prezzo carbone ($/t, API2)",
+                                       min_value=0.0, value=115.0, step=1.0,
+                                       format="%.2f", key="cds289_coal")
+            cambio_289 = st.number_input("Cambio USD/EUR", min_value=0.01,
+                                         value=1.08, step=0.01, format="%.2f",
+                                         key="cds289_cambio")
+        with a2_289:
+            pci_289 = st.number_input("PCI carbone (MWh/t)", min_value=0.1,
+                                      value=6.8, step=0.1, format="%.2f",
+                                      key="cds289_pci")
+            eff_289 = st.number_input("Efficienza netta centrale (%)",
+                                      min_value=1.0, max_value=100.0,
+                                      value=42.0, step=0.5, format="%.1f",
+                                      key="cds289_eff")
+            co2p_289 = st.number_input("Prezzo CO2 (€/t)", min_value=0.0,
+                                       value=85.0, step=1.0, format="%.2f",
+                                       key="cds289_co2p")
+        with a3_289:
+            co2f_289 = st.number_input("Fattore emissione (tCO2/MWh termico)",
+                                       min_value=0.0, max_value=1.0,
+                                       value=0.341, step=0.001, format="%.3f",
+                                       key="cds289_co2f")
+            ore_289 = st.number_input("Ore di funzionamento/anno",
+                                      min_value=1.0, value=7000.0, step=100.0,
+                                      format="%.0f", key="cds289_ore")
+            cap_289 = st.number_input("Capacita' (MW)", min_value=1.0,
+                                      value=750.0, step=10.0, format="%.0f",
+                                      key="cds289_cap")
+        b1_289, b2_289 = st.columns(2)
+        with b1_289:
+            fissi_289 = st.number_input("Costi fissi (€/anno)", min_value=0.0,
+                                        value=25000000.0, step=500000.0,
+                                        format="%.0f", key="cds289_fissi")
+        with b2_289:
+            soglia_289 = st.number_input("Soglia margine profittevole (€/MWh)",
+                                         min_value=0.0, value=5.0, step=0.5,
+                                         format="%.2f", key="cds289_soglia")
+        efff_289 = eff_289 / 100.0
+        coalterm289 = cds289_carbone_mwh(coal_289, cambio_289, pci_289)
+        coale289 = cds289_costo_carbone_el(coalterm289, efff_289)
+        dark289 = cds289_dark(power_289, coale289)
+        co2c289 = cds289_costo_co2(co2p_289,
+                                   cds289_emissioni(co2f_289, efff_289))
+        clean289 = cds289_clean_dark(power_289, coal_289, cambio_289, pci_289,
+                                     efff_289, co2p_289, co2f_289)
+        fu289 = cds289_fissi_unitari(fissi_289, ore_289, cap_289)
+        marg289 = cds289_margine_ora(clean289, fu289)
+        pnl289 = cds289_pnl(clean289, ore_289, cap_289, fissi_289)
+        bepow289 = cds289_be_power(coal_289, cambio_289, pci_289, efff_289,
+                                   co2p_289, co2f_289, fu289)
+        becoal289 = cds289_be_carbone(power_289, cambio_289, pci_289,
+                                       efff_289, co2p_289, co2f_289, fu289)
+        verd289 = cds289_verdetto(marg289, soglia_289)
+        k1_289, k2_289, k3_289, k4_289, k5_289, k6_289 = st.columns(6)
+        k1_289.metric("Clean dark", f"{clean289:+,.2f} €/MWh")
+        k2_289.metric("Dark spread", f"{dark289:+,.2f} €/MWh")
+        becoal_txt = f"{becoal289:,.1f} $/t" if becoal289 is not None else "N/D"
+        k3_289.metric("Carbone break-even", becoal_txt)
+        k4_289.metric("P&L anno", f"{pnl289:+,.0f} €")
+        k5_289.metric("Costo CO2", f"{co2c289:,.2f} €/MWh")
+        k6_289.metric("Verdetto", verd289["verdetto"].replace("_", " ").upper())
+        if marg289 < 0:
+            st.error(f"Margine orario {marg289:+,.2f} €/MWh in perdita: con power a {power_289:,.2f} €/MWh il carbone ({coale289:,.2f} €/MWh) piu' la CO2 ({co2c289:,.2f} €/MWh) non lasciano margine.")
+        elif marg289 < soglia_289:
+            st.warning(f"Margine orario {marg289:+,.2f} €/MWh sotto la soglia di {soglia_289:,.2f} €/MWh: la centrale copre i costi ma non la redditivita' attesa.")
+        else:
+            st.success(f"Margine orario {marg289:+,.2f} €/MWh sopra la soglia: la centrale e' profittevole.")
+        brk289 = cds289_breakdown(power_289, coale289, co2c289, fu289,
+                                  marg289)
+        figb289 = px.bar(x=list(brk289.keys()), y=list(brk289.values()),
+                         labels={"x": "voce", "y": "€/MWh"},
+                         title="Scomposizione clean dark e margine")
+        st.plotly_chart(figb289, use_container_width=True)
+        sens289 = cds289_sensibilita_carbone(coal_289, cambio_289, pci_289,
+                                             efff_289, co2p_289, co2f_289,
+                                             power_289, fu289)
+        figl289 = px.line(x=[r["coal_usd_t"] for r in sens289],
+                          y=[r["margine"] for r in sens289],
+                          labels={"x": "carbone ($/t)",
+                                  "y": "margine (€/MWh)"},
+                          title="Margine orario al variare del prezzo carbone")
+        figl289.add_hline(y=0.0, line_dash="dash", line_color="red",
+                          annotation_text="Margine zero")
+        if becoal289 is not None:
+            figl289.add_vline(x=becoal289, line_dash="dot", line_color="green",
+                              annotation_text="Break-even carbone")
+        st.plotly_chart(figl289, use_container_width=True)
+        with st.expander("Dettaglio sensibilita' ed export CSV"):
+            dft289 = pd.DataFrame([{"coal_usd_t": round(r["coal_usd_t"], 2),
+                                    "dark_eur_mwh": round(r["dark"], 2),
+                                    "clean_dark_eur_mwh": round(r["clean_dark"], 2),
+                                    "margine_eur_mwh": round(r["margine"], 2)}
+                                   for r in sens289])
+            st.dataframe(dft289, use_container_width=True, hide_index=True)
+            st.caption(f"Con power a {power_289:,.2f} €/MWh, carbone a {coal_289:,.2f} $/t (PCI {pci_289:.2f} MWh/t, cambio {cambio_289:.2f}) ed efficienza {eff_289:.1f}%, il costo carbone e' {coale289:,.2f} €/MWh e la CO2 {co2c289:,.2f} €/MWh ({co2p_289:,.0f} €/t x {co2f_289:.3f}/{efff_289:.2f}). Clean dark {clean289:+,.2f} €/MWh, margine orario dopo quota fissa {fu289:,.2f} €/MWh: {marg289:+,.2f} €/MWh. P&L su {ore_289:,.0f} ore a {cap_289:,.0f} MW: {pnl289:+,.0f} €/anno. Break-even power {bepow289:,.2f} €/MWh, break-even carbone {becoal_txt}.")
+            st.download_button("⬇️ Export CSV sensibilita'",
+                               data=dft289.to_csv(index=False, sep=";").encode("utf-8"),
+                               file_name="clean_dark_sensibilita.csv",
+                               mime="text/csv", key="cds289_csv",
+                               help="Margine centrale al variare del prezzo carbone.")
+        st.caption("Nota: il PCI di 6,8 MWh/t vale per carbone bituminoso (~24,5 GJ/t); il fattore di emissione 0,341 tCO2/MWh termico vale per carbone. API2 e' quotato in $/t CIF ARA: per carbone FOB o con nolo separato usare il prezzo delivered equivalente.")
 
 # Footer
 

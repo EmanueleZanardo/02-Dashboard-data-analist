@@ -33,6 +33,7 @@ APP = Path(__file__).parent.parent / "app.py"
 
 TITLE287 = "🚢⚡ Rigassificazione GNL: margine terminale"
 TITLE288 = "⚡🔥 Clean spark spread: margine centrale a gas"
+TITLE289 = "⚫🔥 Clean dark spread: margine centrale a carbone"
 TITLE286 = "⛽ Basis gas TTF–PSV"
 TITLE285 = "\U0001F6DB\uFE0F Differenziali greggio: sweet vs sour"
 TITLE284 = "\U0001F3ED Unit commitment CCGT: accendere o no?"
@@ -59,12 +60,12 @@ def _registry():
 class TestRegistryTab287:
     def test_tab287_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 288
+        assert len(titoli) == len(dvars) == len(withs) == 289
         assert TITLE287 in titoli
         assert "tab287" in dvars
         assert "tab287" in withs
         assert titoli[dvars.index("tab287")] == TITLE287
-        assert titoli[-1] == TITLE288
+        assert titoli[-1] == TITLE289
         keys = re.findall(r'key="(rg287_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
