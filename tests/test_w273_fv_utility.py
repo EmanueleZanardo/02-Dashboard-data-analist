@@ -53,6 +53,7 @@ TITLE287 = "🚢⚡ Rigassificazione GNL: margine terminale"
 TITLE288 = "⚡🔥 Clean spark spread: margine centrale a gas"
 TITLE289 = "⚫🔥 Clean dark spread: margine centrale a carbone"
 TITLE290 = "🔀💰 PTR transfrontaliero: vale il prezzo d'asta?"
+TITLE291 = "📊💹 Sharpe & Sortino: la strategia rende davvero?"
 TITLE272 = "🌬️ Eolico offshore: business case"
 TITLE271 = "☀️ Solare termodinamico (CSP): business case"
 
@@ -84,12 +85,12 @@ def _registry():
 class TestRegistryTab273:
     def test_tab273_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 290
+        assert len(titoli) == len(dvars) == len(withs) == 291
         assert TITLE273 in titoli
         assert "tab273" in dvars
         assert "tab273" in withs
         assert titoli[dvars.index("tab273")] == TITLE273
-        assert titoli[-1] == TITLE290
+        assert titoli[-1] == TITLE291
         keys = re.findall(r'key="(fv273_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

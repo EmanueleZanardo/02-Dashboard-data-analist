@@ -39548,6 +39548,210 @@ def ptr290_verdetto(premio, soglia):
         v = "sovrapprezzato"
     return {"verdetto": v, "premio": p, "soglia": s}
 
+
+
+def ss291_num(x, nome):
+    """Valida uno scalare numerico: no bool, no NaN/inf."""
+    import math
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        raise ValueError(f"{nome}: deve essere un numero")
+    if math.isnan(x) or math.isinf(x):
+        raise ValueError(f"{nome}: NaN/inf non ammessi")
+    return float(x)
+
+
+def ss291_pos(x, nome):
+    """Valida un numero > 0."""
+    v = ss291_num(x, nome)
+    if v <= 0:
+        raise ValueError(f"{nome}: deve essere > 0")
+    return v
+
+
+def ss291_parse_serie(testo):
+    """Parsa un'equity curve da testo: un valore (EUR) per riga.
+    Righe vuote e righe che iniziano con '#' ignorate. Minimo 2 punti."""
+    righe = []
+    for ln in str(testo).split("\n"):
+        s = ln.strip()
+        if not s or s.startswith("#"):
+            continue
+        try:
+            righe.append(float(s.replace(",", ".")))
+        except ValueError:
+            raise ValueError(f"riga non numerica: {ln.strip()!r}")
+    if len(righe) < 2:
+        raise ValueError("servono almeno 2 punti di equity")
+    import math
+    for v in righe:
+        if math.isnan(v) or math.isinf(v):
+            raise ValueError("NaN/inf non ammessi nella serie")
+    return righe
+
+
+def ss291_serie_demo(seed, n_giorni, capitale, drift_g, vol_g):
+    """Equity curve demo deterministica (seed fissato): random walk con
+    drift giornaliero e volatilita' giornaliera. Utile per provare la tab
+    senza incollare dati reali."""
+    import random
+    if isinstance(seed, bool) or not isinstance(seed, int):
+        raise ValueError("seed: deve essere un intero")
+    if isinstance(n_giorni, bool) or not isinstance(n_giorni, int) \
+            or n_giorni < 2:
+        raise ValueError("n_giorni: deve essere un intero >= 2")
+    cap = ss291_pos(capitale, "capitale")
+    d = ss291_num(drift_g, "drift_g")
+    v = ss291_num(vol_g, "vol_g")
+    rng = random.Random(seed)
+    eq = [cap]
+    for _ in range(n_giorni - 1):
+        eq.append(eq[-1] * (1.0 + d + v * rng.gauss(0.0, 1.0)))
+    return eq
+
+
+def ss291_rendimenti(equity):
+    """Rendimenti semplici giornalieri r_i = E_i/E_{i-1} - 1.
+    L'equity deve restare > 0 (conto trading)."""
+    eq = [ss291_num(v, "equity") for v in equity]
+    if len(eq) < 2:
+        raise ValueError("servono almeno 2 punti di equity")
+    if any(v <= 0 for v in eq):
+        raise ValueError("equity: deve restare > 0")
+    return [eq[i] / eq[i - 1] - 1.0 for i in range(1, len(eq))]
+
+
+def ss291_rendimento_annuo(equity, giorni_anno=252):
+    """Rendimento annualizzato composto: (E_n/E_0)^(252/n) - 1."""
+    eq = [ss291_num(v, "equity") for v in equity]
+    if len(eq) < 2:
+        raise ValueError("servono almeno 2 punti di equity")
+    if eq[0] <= 0:
+        raise ValueError("equity iniziale: deve essere > 0")
+    ga = ss291_pos(giorni_anno, "giorni_anno")
+    return (eq[-1] / eq[0]) ** (ga / (len(eq) - 1)) - 1.0
+
+
+def ss291_volatilita_annua(equity, giorni_anno=252):
+    """Volatilita' annualizzata: std campionaria dei rendimenti * sqrt(252)."""
+    import math
+    import statistics
+    r = ss291_rendimenti(equity)
+    ga = ss291_pos(giorni_anno, "giorni_anno")
+    if len(r) < 2:
+        raise ValueError("servono almeno 3 punti di equity")
+    return statistics.stdev(r) * math.sqrt(ga)
+
+
+def _ss291_ratio(media_ann, dev_ann):
+    import math
+    if dev_ann == 0:
+        if media_ann > 0:
+            return math.inf
+        if media_ann < 0:
+            return -math.inf
+        return 0.0
+    return media_ann / dev_ann
+
+
+def ss291_sharpe(equity, rf_annuo=0.0, giorni_anno=252):
+    """Sharpe = (rend_ann - rf) / vol_ann. inf/-inf se vol nulla."""
+    import statistics
+    r = ss291_rendimenti(equity)
+    ga = ss291_pos(giorni_anno, "giorni_anno")
+    rf = ss291_num(rf_annuo, "rf_annuo")
+    if len(r) < 2:
+        raise ValueError("servono almeno 3 punti di equity")
+    import math
+    media_ann = statistics.mean(r) * ga - rf
+    dev_ann = statistics.stdev(r) * math.sqrt(ga)
+    return _ss291_ratio(media_ann, dev_ann)
+
+
+def ss291_sortino(equity, mar_annuo=0.0, giorni_anno=252):
+    """Sortino = (rend_ann - MAR) / downside_deviation_annua.
+    La downside deviation usa solo i rendimenti sotto il MAR giornaliero
+    (scarti quadratici, media su tutti i periodi)."""
+    import math
+    r = ss291_rendimenti(equity)
+    ga = ss291_pos(giorni_anno, "giorni_anno")
+    mar = ss291_num(mar_annuo, "mar_annuo")
+    if len(r) < 1:
+        raise ValueError("servono almeno 2 punti di equity")
+    mar_g = (1.0 + mar) ** (1.0 / ga) - 1.0
+    media_ann = sum(r) / len(r) * ga - mar
+    dd2 = sum(min(0.0, x - mar_g) ** 2 for x in r) / len(r)
+    return _ss291_ratio(media_ann, math.sqrt(dd2) * math.sqrt(ga))
+
+
+def ss291_drawdown_serie(equity):
+    """Serie del drawdown giornaliero (frazione negativa o 0):
+    (E_i - max_{j<=i} E_j) / max_{j<=i} E_j."""
+    eq = [ss291_num(v, "equity") for v in equity]
+    if len(eq) < 2:
+        raise ValueError("servono almeno 2 punti di equity")
+    if any(v <= 0 for v in eq):
+        raise ValueError("equity: deve restare > 0")
+    picco = eq[0]
+    out = []
+    for v in eq:
+        picco = max(picco, v)
+        out.append((v - picco) / picco)
+    return out
+
+
+def ss291_max_drawdown(equity):
+    """Massimo drawdown: dict {max_dd (frazione positiva), picco_idx,
+    valle_idx}."""
+    dd = ss291_drawdown_serie(equity)
+    valle = min(range(len(dd)), key=lambda i: dd[i])
+    picco = max(range(valle + 1), key=lambda i: equity[i])
+    return {"max_dd": -dd[valle], "picco_idx": picco,
+            "valle_idx": valle}
+
+
+def ss291_calmar(equity, giorni_anno=252):
+    """Calmar = rendimento_annuo / max_drawdown. inf se drawdown nullo."""
+    import math
+    ra = ss291_rendimento_annuo(equity, giorni_anno)
+    dd = ss291_max_drawdown(equity)["max_dd"]
+    if dd == 0:
+        return math.inf if ra > 0 else (0.0 if ra == 0 else -math.inf)
+    return ra / dd
+
+
+def ss291_statistiche(equity, rf_annuo=0.0, mar_annuo=0.0, giorni_anno=252):
+    """Sintesi completa in un dict per KPI e tabella."""
+    eq = [ss291_num(v, "equity") for v in equity]
+    r = ss291_rendimenti(eq)
+    dd = ss291_max_drawdown(eq)
+    return {
+        "n_giorni": len(eq) - 1,
+        "capitale_iniziale": eq[0],
+        "equity_finale": eq[-1],
+        "pnl": eq[-1] - eq[0],
+        "rendimento_annuo": ss291_rendimento_annuo(eq, giorni_anno),
+        "volatilita_annua": ss291_volatilita_annua(eq, giorni_anno),
+        "sharpe": ss291_sharpe(eq, rf_annuo, giorni_anno),
+        "sortino": ss291_sortino(eq, mar_annuo, giorni_anno),
+        "max_drawdown": dd["max_dd"],
+        "calmar": ss291_calmar(eq, giorni_anno),
+        "win_rate": sum(1 for x in r if x > 0) / len(r),
+    }
+
+
+def ss291_verdetto(sharpe, soglia):
+    """Verdetto sulla strategia: 'eccellente' (sharpe >= 2*soglia),
+    'accettabile' (sharpe >= soglia), 'insufficiente' (sotto)."""
+    s = ss291_num(sharpe, "sharpe")
+    t = ss291_pos(soglia, "soglia")
+    if s >= 2.0 * t:
+        v = "eccellente"
+    elif s >= t:
+        v = "accettabile"
+    else:
+        v = "insufficiente"
+    return {"verdetto": v, "sharpe": s, "soglia": t}
+
 if workspace == _('ws1'):
     st.markdown(f"<h1>{_('ws1')}</h1>", unsafe_allow_html=True)
     banner_demo("simulatore strategico: margini, centrali e curve simulate")
@@ -40189,7 +40393,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256, tab257, tab258, tab259, tab260, tab261, tab262, tab263, tab264, tab265, tab266, tab267, tab268, tab269, tab270, tab271, tab272, tab273, tab274, tab275, tab276, tab277, tab278, tab279, tab280, tab281, tab282, tab283, tab284, tab285, tab286, tab287, tab288, tab289, tab290 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete", "🔥 Teleriscaldamento vs caldaia", "🌿 Clean spread (con CO₂)", "🇮🇹 PUN da prezzi zonali", "❄️ Pompa di calore vs caldaia", "🏢 PUE & costo data center", "🔌 Gruppo elettrogeno vs blackout", "🚗 Flotta aziendale: TCO diesel vs elettrico", "📜 Garanzie di origine: costo del 100% rinnovabile", "♻️ Fine vita FV: revamping vs dismissione", "🌾️ Agrivoltaico: doppio reddito", "🟢 Biometano: business case", "🌬️ Eolico onshore: business case", "🌊 Idroelettrico run-of-river: business case", "🔥 Geotermia profonda: business case", "☀️ Solare termodinamico (CSP): business case", "🌬️ Eolico offshore: business case", "☀️ Fotovoltaico utility-scale: business case", "⚛️ Nucleare SMR: business case", "📊 Posizione vs limiti di rischio", "💧 Cash flow at risk (CFaR)", "⚡ Aste MI: scostamenti vs MGP", "🌡️ Stress climatico: domanda e prezzo", "🌪️ Derivati meteo: pricing HDD/CDD", "🚢 LNG vs gasdotto: costo delivered", "🛢️ Crack spread: margine raffinazione 3-2-1", "🧪 Margine petrolchimico: nafta → etilene", "🛢️ Carry petrolio: contango & stoccaggio fisico", "🏭 Unit commitment CCGT: accendere o no?", "🛛️ Differenziali greggio: sweet vs sour", "⛽ Basis gas TTF–PSV", "🚢⚡ Rigassificazione GNL: margine terminale", "⚡🔥 Clean spark spread: margine centrale a gas", "⚫🔥 Clean dark spread: margine centrale a carbone", "🔀💰 PTR transfrontaliero: vale il prezzo d'asta?"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256, tab257, tab258, tab259, tab260, tab261, tab262, tab263, tab264, tab265, tab266, tab267, tab268, tab269, tab270, tab271, tab272, tab273, tab274, tab275, tab276, tab277, tab278, tab279, tab280, tab281, tab282, tab283, tab284, tab285, tab286, tab287, tab288, tab289, tab290, tab291 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete", "🔥 Teleriscaldamento vs caldaia", "🌿 Clean spread (con CO₂)", "🇮🇹 PUN da prezzi zonali", "❄️ Pompa di calore vs caldaia", "🏢 PUE & costo data center", "🔌 Gruppo elettrogeno vs blackout", "🚗 Flotta aziendale: TCO diesel vs elettrico", "📜 Garanzie di origine: costo del 100% rinnovabile", "♻️ Fine vita FV: revamping vs dismissione", "🌾️ Agrivoltaico: doppio reddito", "🟢 Biometano: business case", "🌬️ Eolico onshore: business case", "🌊 Idroelettrico run-of-river: business case", "🔥 Geotermia profonda: business case", "☀️ Solare termodinamico (CSP): business case", "🌬️ Eolico offshore: business case", "☀️ Fotovoltaico utility-scale: business case", "⚛️ Nucleare SMR: business case", "📊 Posizione vs limiti di rischio", "💧 Cash flow at risk (CFaR)", "⚡ Aste MI: scostamenti vs MGP", "🌡️ Stress climatico: domanda e prezzo", "🌪️ Derivati meteo: pricing HDD/CDD", "🚢 LNG vs gasdotto: costo delivered", "🛢️ Crack spread: margine raffinazione 3-2-1", "🧪 Margine petrolchimico: nafta → etilene", "🛢️ Carry petrolio: contango & stoccaggio fisico", "🏭 Unit commitment CCGT: accendere o no?", "🛛️ Differenziali greggio: sweet vs sour", "⛽ Basis gas TTF–PSV", "🚢⚡ Rigassificazione GNL: margine terminale", "⚡🔥 Clean spark spread: margine centrale a gas", "⚫🔥 Clean dark spread: margine centrale a carbone", "🔀💰 PTR transfrontaliero: vale il prezzo d'asta?", "📊💹 Sharpe & Sortino: la strategia rende davvero?"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -66843,6 +67047,82 @@ elif workspace == _('ws8'):
                                mime="text/csv", key="ptr290_csv",
                                help="Valore PTR al variare della volatilita'.")
         st.caption("Nota: modello di Bachelier (sottostante normale) perche' lo spread zonale puo' essere negativo; la volatilita' e' annualizzata sullo spread. Il PTR vale max(spread,0) come un'opzione, l'FTR obbligo vale il forward spread. UIQ non incluso: il valore e' solo la componente opzionaria.")
+
+    with tab291:
+        titolo291 = edu("Sharpe & Sortino: la strategia rende davvero?", "Il rendimento da solo non dice nulla: uno Sharpe alto significa che il guadagno non e' comprato con rischio eccessivo. Lo Sharpe usa la volatilita' totale, il Sortino penalizza solo il rischio di ribasso (quello che fa davvero male al conto), il Calmar rapporta il rendimento al peggior drawdown. Incolla l'equity giornaliera del tuo desk/strategia, oppure genera una serie demo dai parametri.")
+        st.markdown(f"<h1>📊💹 {titolo291}</h1>", unsafe_allow_html=True)
+        st.caption("Metriche risk-adjusted di una strategia di trading energetico: Sharpe, Sortino, Calmar e max drawdown dall'equity giornaliera.")
+        s1_291, s2_291, s3_291 = st.columns(3)
+        with s1_291:
+            cap_291 = st.number_input("Capitale iniziale (€)", min_value=1.0,
+                                      value=1000000.0, step=50000.0,
+                                      format="%.0f", key="ss291_cap")
+            giorni_291 = st.number_input("Giorni di track record",
+                                         min_value=2, value=252, step=1,
+                                         key="ss291_giorni")
+            seed_291 = st.number_input("Seed serie demo", min_value=0,
+                                       value=7, step=1, key="ss291_seed")
+        with s2_291:
+            drift_291 = st.number_input("Drift giornaliero demo (%)",
+                                        value=0.08, step=0.01, format="%.3f",
+                                        key="ss291_drift",
+                                        help="Rendimento medio giornaliero atteso della serie demo.")
+            vol_291 = st.number_input("Volatilita' giornaliera demo (%)",
+                                      min_value=0.0, value=1.20, step=0.05,
+                                      format="%.2f", key="ss291_vol")
+        with s3_291:
+            rf_291 = st.number_input("Risk-free annuo (%)", value=2.0,
+                                     step=0.1, format="%.2f", key="ss291_rf")
+            mar_291 = st.number_input("MAR annuo per Sortino (%)", value=0.0,
+                                      step=0.5, format="%.2f", key="ss291_mar")
+            soglia_291 = st.number_input("Soglia Sharpe 'accettabile'",
+                                         min_value=0.1, value=1.0, step=0.1,
+                                         format="%.1f", key="ss291_soglia")
+        incolla_291 = st.text_area("oppure incolla la tua equity (€, un valore per riga)",
+                                   value="", key="ss291_paste",
+                                   help="Se compilato, sostituisce la serie demo.")
+        if incolla_291.strip():
+            eq291 = ss291_parse_serie(incolla_291)
+        else:
+            eq291 = ss291_serie_demo(seed_291, giorni_291, cap_291,
+                                     drift_291 / 100.0, vol_291 / 100.0)
+        ga291 = 252
+        stat291 = ss291_statistiche(eq291, rf_291 / 100.0, mar_291 / 100.0, ga291)
+        verd291 = ss291_verdetto(stat291["sharpe"], soglia_291)
+        k1_291, k2_291, k3_291, k4_291, k5_291, k6_291 = st.columns(6)
+        k1_291.metric("Rendimento annuo", f"{stat291['rendimento_annuo']:+.1%}")
+        k2_291.metric("Volatilita' annua", f"{stat291['volatilita_annua']:.1%}")
+        k3_291.metric("Sharpe", f"{stat291['sharpe']:+.2f}")
+        k4_291.metric("Sortino", f"{stat291['sortino']:+.2f}")
+        k5_291.metric("Max drawdown", f"-{stat291['max_drawdown']:.1%}")
+        k6_291.metric("Calmar", f"{stat291['calmar']:+.2f}")
+        if verd291["verdetto"] == "eccellente":
+            st.success(f"Sharpe {stat291['sharpe']:+.2f} oltre il doppio della soglia {soglia_291:.1f}: strategia eccellente su base risk-adjusted.")
+        elif verd291["verdetto"] == "accettabile":
+            st.warning(f"Sharpe {stat291['sharpe']:+.2f} sopra la soglia {soglia_291:.1f} ma sotto {2.0 * soglia_291:.1f}: strategia accettabile, margine di miglioramento.")
+        else:
+            st.error(f"Sharpe {stat291['sharpe']:+.2f} sotto la soglia {soglia_291:.1f}: il rendimento non compensa il rischio preso.")
+        dd291 = ss291_drawdown_serie(eq291)
+        figl291 = px.line(y=eq291,
+                          labels={"x": "giorno", "y": "equity (€)"},
+                          title="Equity curve")
+        st.plotly_chart(figl291, use_container_width=True)
+        figa291 = px.area(y=[-d for d in dd291],
+                          labels={"x": "giorno", "y": "drawdown"},
+                          title="Drawdown nel tempo")
+        st.plotly_chart(figa291, use_container_width=True)
+        with st.expander("Dettaglio statistiche ed export CSV"):
+            dft291 = pd.DataFrame({"giorno": list(range(len(eq291))),
+                                   "equity_eur": [round(v, 2) for v in eq291],
+                                   "drawdown": [round(d, 4) for d in dd291]})
+            st.dataframe(dft291, use_container_width=True, hide_index=True)
+            st.caption(f"Su {stat291['n_giorni']} giorni: P&L {stat291['pnl']:+,.0f} €, rendimento annuo {stat291['rendimento_annuo']:+.1%}, volatilita' {stat291['volatilita_annua']:.1%}, Sharpe {stat291['sharpe']:+.2f} (rf {rf_291:.2f}%), Sortino {stat291['sortino']:+.2f} (MAR {mar_291:.2f}%), max drawdown -{stat291['max_drawdown']:.1%}, Calmar {stat291['calmar']:+.2f}, win rate {stat291['win_rate']:.1%}. Verdetto: {verd291['verdetto'].upper()}.")
+            st.download_button("⬇️ Export CSV equity/drawdown",
+                               data=dft291.to_csv(index=False, sep=";").encode("utf-8"),
+                               file_name="sharpe_sortino_equity.csv",
+                               mime="text/csv", key="ss291_csv",
+                               help="Equity giornaliera e drawdown.")
+        st.caption("Nota: Sharpe e Sortino annualizzati su 252 giorni; il Sortino penalizza solo la volatilita' negativa rispetto al MAR. Serie demo = random walk con seed fissato, solo per provare la tab: i numeri veri vanno incollati.")
 
 # Footer
 
