@@ -130,7 +130,13 @@
 
 # STATUS.md — 02-Dashboard-data-analist (Singularity Quant ETRM)
 
-**Ultimo aggiornamento: 06/10/2026 ~02:05 CEST**
+**Ultimo aggiornamento: 07/10/2026 ~02:10 CEST**
+
+## 07/10/2026 ~02:10 CEST — aggiornamento documentale giornaliero
+- **Commit `80cacd84` (06/10 23:32 UTC = 07/10 01:32 CEST):** "QA 07/10 00:40 - tab274 retry".
+- **Ciclo QA 07/10 00:40:** tab274 "Nucleare SMR: business case" (14 helper sm274_*: produzione, quota capex, LCOE, ricavi/margine, VAN, payback, confronto LCOE vs prezzo energia, sensibilità margine, CO₂ evitata; UI 10 input + 11 key, 6 KPI, barre LCOE vs prezzo, export CSV). 75 file test bumpati registry 273→274 (anti-decimali verificati), nuovo tests/test_w274_nucleare_smr.py (39 test verdi subito); suite completa era in background al momento del run. Push via Git Data API atomico (79 file).
+- **Ciclo 23:40 (ieri):** tab273 "Fotovoltaico utility-scale: business case" (commit a0788734) — bug produzione ×1000 catturato da 3 test prima del push.
+- Blocchi: vecchia chiave ENTSO-E resta nella storia git (da ruotare); condivisione app Streamlit non più pubblica — serve suo gesto su share.streamlit.io (Settings → Sharing → Public).
 
 ## 06/10/2026 ~02:05 CEST — aggiornamento documentale giornaliero
 - **Commit `0a9f8fb` (05/10 22:58 UTC):** QA ciclo — tab250 "Capitale circolante" (ciclo di cassa DSO+DPO+DIO).
