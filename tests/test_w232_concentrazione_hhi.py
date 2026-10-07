@@ -26,13 +26,13 @@ class TestRegistryTab232:
         src = Path(__file__).parent.parent.joinpath("app.py").read_text(encoding="utf-8")
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
-        assert len(titoli) == 296
+        assert len(titoli) == 297
         assert "🧮 Concentrazione temporale (HHI)" in titoli
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         assert "tab232" in dvars
         withs = re.findall(r"    with (tab\d+):", src)
         assert "tab232" in withs
-        assert len(withs) == len(dvars) == 296
+        assert len(withs) == len(dvars) == 297
         keys = re.findall(r'key="(t232_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 10
 

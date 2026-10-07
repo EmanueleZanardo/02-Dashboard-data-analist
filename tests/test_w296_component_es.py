@@ -25,6 +25,7 @@ ce296_verdetto = _F["ce296_verdetto"]
 APP = Path(__file__).parent.parent / "app.py"
 
 TITLE296 = "🪓🛡 Component ES: chi contribuisce alla coda?"
+TITLE297 = "➕📊 Marginal VaR: quanto rischio aggiunge il nuovo trade?"
 TITLE295 = "🧪🛡 Backtest dell'ES: la coda e' sottostimata?"
 TITLE294 = "🧪📉 Backtest del VaR: il modello tiene?"
 
@@ -103,12 +104,12 @@ def _registry():
 class TestRegistryTab296:
     def test_tab296_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 296
+        assert len(titoli) == len(dvars) == len(withs) == 297
         assert TITLE296 in titoli
         assert "tab296" in dvars
         assert "tab296" in withs
         assert titoli[dvars.index("tab296")] == TITLE296
-        assert titoli[-1] == TITLE296
+        assert titoli[-1] == TITLE297
         keys = re.findall(r'key="(ce296_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
