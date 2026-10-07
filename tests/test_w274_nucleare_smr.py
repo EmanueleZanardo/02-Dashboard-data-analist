@@ -38,6 +38,7 @@ TITLE274 = "⚛️ Nucleare SMR: business case"
 TITLE275 = "📊 Posizione vs limiti di rischio"
 TITLE276 = "💧 Cash flow at risk (CFaR)"
 TITLE277 = "⚡ Aste MI: scostamenti vs MGP"
+TITLE278 = "🌡️ Stress climatico: domanda e prezzo"
 TITLE273 = "☀️ Fotovoltaico utility-scale: business case"
 TITLE272 = "🌬️ Eolico offshore: business case"
 
@@ -67,12 +68,12 @@ def _registry():
 class TestRegistryTab274:
     def test_tab274_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 277
+        assert len(titoli) == len(dvars) == len(withs) == 278
         assert TITLE274 in titoli
         assert "tab274" in dvars
         assert "tab274" in withs
         assert titoli[dvars.index("tab274")] == TITLE274
-        assert titoli[-1] == TITLE277
+        assert titoli[-1] == TITLE278
         keys = re.findall(r'key="(sm274_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
@@ -84,6 +85,7 @@ class TestRegistryTab274:
         assert titoli[dvars.index("tab275")] == TITLE275
         assert titoli[dvars.index("tab276")] == TITLE276
         assert titoli[dvars.index("tab277")] == TITLE277
+        assert titoli[dvars.index("tab278")] == TITLE278
 
 
 class TestSm274Num:

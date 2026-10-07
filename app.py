@@ -37677,6 +37677,150 @@ def mi277_sintesi(analisi):
                                           if r["segnale"] == "acquisto_conveniente")}
 
 
+def sc278_num(x, nome):
+    """Validatore numerico stretto: bool/str/None/NaN/inf rifiutati."""
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        raise ValueError(f"{nome}: deve essere un numero")
+    f = float(x)
+    if f != f or f in (float("inf"), float("-inf")):
+        raise ValueError(f"{nome}: non puo' essere NaN o infinito")
+    return f
+
+
+def sc278_domanda_mw(domanda_base_mw, delta_temp_c, coeff_mw_per_c):
+    """Domanda stimata (MW) sotto shock termico: base + deltaT * coeff.
+
+    Convenzione: deltaT e' la magnitudo dello shock (sempre >= 0) e coeff
+    i MW in piu' per °C (coeff caldo per il caldo, coeff freddo per il freddo).
+    """
+    base = sc278_num(domanda_base_mw, "domanda_base_mw")
+    dt = sc278_num(delta_temp_c, "delta_temp_c")
+    c = sc278_num(coeff_mw_per_c, "coeff_mw_per_c")
+    if base <= 0:
+        raise ValueError("domanda_base_mw: deve essere > 0")
+    if c < 0:
+        raise ValueError("coeff_mw_per_c: non puo' essere negativo")
+    domanda = base + dt * c
+    if domanda <= 0:
+        raise ValueError("domanda stimata non positiva: ridurre lo shock")
+    return domanda
+
+
+def sc278_prezzo_shock(prezzo_base, domanda_base_mw, domanda_shock_mw,
+                       elasticita):
+    """Prezzo stressato: p * (1 + elasticita * shock_domanda_%).
+
+    elasticita >= 0: di quanto (in frazione) sale il prezzo per ogni
+    punto % di domanda in piu'.
+    """
+    p = sc278_num(prezzo_base, "prezzo_base")
+    base = sc278_num(domanda_base_mw, "domanda_base_mw")
+    shock = sc278_num(domanda_shock_mw, "domanda_shock_mw")
+    e = sc278_num(elasticita, "elasticita")
+    if p < 0:
+        raise ValueError("prezzo_base: non puo' essere negativo")
+    if base <= 0:
+        raise ValueError("domanda_base_mw: deve essere > 0")
+    if shock <= 0:
+        raise ValueError("domanda_shock_mw: deve essere > 0")
+    if e < 0:
+        raise ValueError("elasticita: non puo' essere negativa")
+    shock_pct = (shock - base) / base
+    return p * (1.0 + e * shock_pct)
+
+
+def sc278_energia_mwh(domanda_mw, ore):
+    """Energia del periodo: MW * ore."""
+    d = sc278_num(domanda_mw, "domanda_mw")
+    h = sc278_num(ore, "ore")
+    if d < 0:
+        raise ValueError("domanda_mw: non puo' essere negativa")
+    if h <= 0:
+        raise ValueError("ore: devono essere > 0")
+    return d * h
+
+
+def sc278_costo(energia_mwh, prezzo_eur_mwh):
+    """Costo € = MWh * €/MWh."""
+    e = sc278_num(energia_mwh, "energia_mwh")
+    p = sc278_num(prezzo_eur_mwh, "prezzo_eur_mwh")
+    if e < 0:
+        raise ValueError("energia_mwh: non puo' essere negativa")
+    if p < 0:
+        raise ValueError("prezzo_eur_mwh: non puo' essere negativo")
+    return e * p
+
+
+def sc278_scenario(nome, domanda_base_mw, prezzo_base, delta_temp_c,
+                   coeff_mw_per_c, elasticita, ore):
+    """Scenario completo: domanda, prezzo e costo sotto shock termico."""
+    domanda = sc278_domanda_mw(domanda_base_mw, delta_temp_c, coeff_mw_per_c)
+    prezzo = sc278_prezzo_shock(prezzo_base, domanda_base_mw, domanda,
+                                elasticita)
+    energia = sc278_energia_mwh(domanda, ore)
+    costo = sc278_costo(energia, prezzo)
+    return {"scenario": nome, "delta_temp_c": float(sc278_num(delta_temp_c, "delta_temp_c")),
+            "domanda_mw": domanda, "prezzo_eur_mwh": prezzo,
+            "energia_mwh": energia, "costo_eur": costo}
+
+
+def sc278_confronto(domanda_base_mw, prezzo_base, delta_caldo_c,
+                    delta_freddo_c, coeff_caldo, coeff_freddo,
+                    elasticita, giorni):
+    """Tre scenari: base, ondata di calore, ondata di freddo.
+
+    delta_caldo_c / delta_freddo_c sono magnitudo positive (°C di scostamento
+    dalla norma); i coefficienti sono MW di domanda in piu' per °C.
+    """
+    ore = sc278_num(giorni, "giorni") * 24.0
+    if ore <= 0:
+        raise ValueError("giorni: devono essere > 0")
+    base = sc278_scenario("base", domanda_base_mw, prezzo_base, 0.0,
+                          0.0, elasticita, ore)
+    caldo = sc278_scenario("ondata di calore", domanda_base_mw, prezzo_base,
+                           abs(sc278_num(delta_caldo_c, "delta_caldo_c")),
+                           coeff_caldo, elasticita, ore)
+    freddo = sc278_scenario("ondata di freddo", domanda_base_mw, prezzo_base,
+                            abs(sc278_num(delta_freddo_c, "delta_freddo_c")),
+                            coeff_freddo, elasticita, ore)
+    return [base, caldo, freddo]
+
+
+def sc278_extra(scenario, base):
+    """Costo extra dello scenario vs base (€ e %)."""
+    c = sc278_num(scenario["costo_eur"], "costo scenario")
+    b = sc278_num(base["costo_eur"], "costo base")
+    if b <= 0:
+        raise ValueError("costo base: deve essere > 0")
+    diff = c - b
+    return {"extra_eur": diff, "extra_pct": diff / b * 100.0}
+
+
+def sc278_sensibilita_temp(domanda_base_mw, prezzo_base, coeff_mw_per_c,
+                           elasticita, ore, delta_max_c, passo_c):
+    """Costo extra al variare del delta termico (0..delta_max)."""
+    dmax = sc278_num(delta_max_c, "delta_max_c")
+    passo = sc278_num(passo_c, "passo_c")
+    if dmax <= 0:
+        raise ValueError("delta_max_c: deve essere > 0")
+    if passo <= 0:
+        raise ValueError("passo_c: deve essere > 0")
+    base = sc278_scenario("base", domanda_base_mw, prezzo_base, 0.0,
+                          0.0, elasticita, ore)
+    righe = []
+    dt = 0.0
+    while dt <= dmax + 1e-9:
+        s = sc278_scenario("shock", domanda_base_mw, prezzo_base, dt,
+                           coeff_mw_per_c, elasticita, ore)
+        ex = sc278_extra(s, base)
+        righe.append({"delta_temp_c": round(dt, 2),
+                      "domanda_mw": round(s["domanda_mw"], 1),
+                      "prezzo_eur_mwh": round(s["prezzo_eur_mwh"], 2),
+                      "extra_eur": round(ex["extra_eur"], 0)})
+        dt += passo
+    return righe
+
+
 if workspace == _('ws1'):
     st.markdown(f"<h1>{_('ws1')}</h1>", unsafe_allow_html=True)
     banner_demo("simulatore strategico: margini, centrali e curve simulate")
@@ -38318,7 +38462,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256, tab257, tab258, tab259, tab260, tab261, tab262, tab263, tab264, tab265, tab266, tab267, tab268, tab269, tab270, tab271, tab272, tab273, tab274, tab275, tab276, tab277 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete", "🔥 Teleriscaldamento vs caldaia", "🌿 Clean spread (con CO₂)", "🇮🇹 PUN da prezzi zonali", "❄️ Pompa di calore vs caldaia", "🏢 PUE & costo data center", "🔌 Gruppo elettrogeno vs blackout", "🚗 Flotta aziendale: TCO diesel vs elettrico", "📜 Garanzie di origine: costo del 100% rinnovabile", "♻️ Fine vita FV: revamping vs dismissione", "🌾️ Agrivoltaico: doppio reddito", "🟢 Biometano: business case", "🌬️ Eolico onshore: business case", "🌊 Idroelettrico run-of-river: business case", "🔥 Geotermia profonda: business case", "☀️ Solare termodinamico (CSP): business case", "🌬️ Eolico offshore: business case", "☀️ Fotovoltaico utility-scale: business case", "⚛️ Nucleare SMR: business case", "📊 Posizione vs limiti di rischio", "💧 Cash flow at risk (CFaR)", "⚡ Aste MI: scostamenti vs MGP"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256, tab257, tab258, tab259, tab260, tab261, tab262, tab263, tab264, tab265, tab266, tab267, tab268, tab269, tab270, tab271, tab272, tab273, tab274, tab275, tab276, tab277, tab278 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete", "🔥 Teleriscaldamento vs caldaia", "🌿 Clean spread (con CO₂)", "🇮🇹 PUN da prezzi zonali", "❄️ Pompa di calore vs caldaia", "🏢 PUE & costo data center", "🔌 Gruppo elettrogeno vs blackout", "🚗 Flotta aziendale: TCO diesel vs elettrico", "📜 Garanzie di origine: costo del 100% rinnovabile", "♻️ Fine vita FV: revamping vs dismissione", "🌾️ Agrivoltaico: doppio reddito", "🟢 Biometano: business case", "🌬️ Eolico onshore: business case", "🌊 Idroelettrico run-of-river: business case", "🔥 Geotermia profonda: business case", "☀️ Solare termodinamico (CSP): business case", "🌬️ Eolico offshore: business case", "☀️ Fotovoltaico utility-scale: business case", "⚛️ Nucleare SMR: business case", "📊 Posizione vs limiti di rischio", "💧 Cash flow at risk (CFaR)", "⚡ Aste MI: scostamenti vs MGP", "🌡️ Stress climatico: domanda e prezzo"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -63595,6 +63739,106 @@ elif workspace == _('ws8'):
                                key="mi277_csv",
                                help="Spread e segnali per le 7 aste MI vs MGP.")
         st.caption("Nota: i prezzi MI reali variano per zona e per ora; questa tab lavora su un prezzo unico per asta (es. medio giornaliero). Per l'operativita' reale confrontare i prezzi orari zona per zona e i volumi scambiati in ogni asta.")
+
+    with tab278:
+        titolo278 = edu("Stress climatico: domanda e prezzo", "Le ondate di calore e di freddo spostano la DOMANDA elettrica (condizionatori d'estate, riscaldamento elettrico d'inverno) e, quando la domanda sale molto, anche il PREZZO: l'elasticita' prezzo-domanda misura di quanto sale il prezzo per ogni punto % di domanda in piu'. Questa tab simula tre scenari — base, ondata di calore, ondata di freddo — e calcola domanda di picco, prezzo stressato, energia e costo totale del periodo, con il costo extra rispetto allo scenario base e una sensibilita' al delta termico.")
+        st.markdown(f"<h1>🌡️ {titolo278}</h1>", unsafe_allow_html=True)
+        st.caption("Ondate di calore e freddo: quanto domanda in piu', quanto prezzo in piu', quanto costo extra. Shock termico → domanda → prezzo → costo.")
+        banner_demo("parametri inseriti a mano e scenari calcolati (dati dimostrativi)")
+        a1_278, a2_278, a3_278, a4_278 = st.columns(4)
+        db278 = a1_278.number_input("Domanda base (MW)", min_value=1.0,
+                                   value=1000.0, step=50.0, format="%.0f",
+                                   key="sc278_domanda",
+                                   help="Domanda media di riferimento del perimetro analizzato, in MW.")
+        pb278 = a2_278.number_input("Prezzo base (€/MWh)", min_value=0.0,
+                                    value=100.0, step=5.0, format="%.1f",
+                                    key="sc278_prezzo",
+                                    help="Prezzo medio atteso senza shock climatico.")
+        cc278 = a3_278.number_input("Coeff. caldo (MW/°C)", min_value=0.0,
+                                    value=40.0, step=5.0, format="%.0f",
+                                    key="sc278_coeff_caldo",
+                                    help="MW di domanda in piu' per ogni °C sopra la norma (climatizzazione).")
+        cf278 = a4_278.number_input("Coeff. freddo (MW/°C)", min_value=0.0,
+                                    value=60.0, step=5.0, format="%.0f",
+                                    key="sc278_coeff_freddo",
+                                    help="MW di domanda in piu' per ogni °C sotto la norma (riscaldamento elettrico).")
+        b1_278, b2_278, b3_278, b4_278 = st.columns(4)
+        el278 = b1_278.number_input("Elasticita' prezzo-domanda", min_value=0.0, max_value=5.0,
+                                    value=0.5, step=0.1, format="%.1f",
+                                    key="sc278_elasticita",
+                                    help="Frazione di aumento del prezzo per ogni punto % di domanda in piu' (0.5 = +10% di domanda → +5% di prezzo).")
+        gg278 = b2_278.number_input("Durata ondata (giorni)", min_value=1, max_value=30,
+                                    value=3, step=1, key="sc278_giorni")
+        dc278 = b3_278.number_input("Delta T caldo (°C)", min_value=0.0, max_value=15.0,
+                                    value=5.0, step=0.5, format="%.1f",
+                                    key="sc278_delta_caldo",
+                                    help="Gradi sopra la norma durante l'ondata di calore.")
+        df278 = b4_278.number_input("Delta T freddo (°C)", min_value=0.0, max_value=20.0,
+                                    value=8.0, step=0.5, format="%.1f",
+                                    key="sc278_delta_freddo",
+                                    help="Gradi sotto la norma durante l'ondata di freddo.")
+        try:
+            ore278 = float(gg278) * 24.0
+            sce278 = sc278_confronto(db278, pb278, dc278, df278, cc278, cf278,
+                                     el278, gg278)
+            base278, caldo278, freddo278 = sce278
+            ex_caldo278 = sc278_extra(caldo278, base278)
+            ex_freddo278 = sc278_extra(freddo278, base278)
+            sen278 = sc278_sensibilita_temp(db278, pb278, cc278, el278, ore278,
+                                            max(dc278, df278, 1.0),
+                                            max(dc278, df278, 1.0) / 10.0)
+        except ValueError as e278:
+            st.error(f"Dati non validi: {e278}")
+            st.stop()
+        k1_278, k2_278, k3_278, k4_278, k5_278, k6_278 = st.columns(6)
+        render_kpi("Domanda picco caldo (MW)", f"{caldo278['domanda_mw']:,.0f}", k1_278)
+        render_kpi("Prezzo stressato caldo (€)", f"{caldo278['prezzo_eur_mwh']:.1f}", k2_278)
+        render_kpi("Extra caldo (€)", f"{ex_caldo278['extra_eur']:,.0f}", k3_278)
+        render_kpi("Extra freddo (€)", f"{ex_freddo278['extra_eur']:,.0f}", k4_278)
+        peg278 = max(ex_caldo278, ex_freddo278, key=lambda d: d["extra_eur"])
+        render_kpi("Extra peggiore (%)", f"{peg278['extra_pct']:+.1f}%", k5_278)
+        render_kpi("Costo base periodo (€)", f"{base278['costo_eur']:,.0f}", k6_278)
+        if peg278["extra_pct"] > 20.0:
+            st.error(f"🚨 Stress severo: lo scenario peggiore costa {peg278['extra_eur']:,.0f} € in piu' ({peg278['extra_pct']:+.1f}%) su {gg278} giorni. Coprire il rischio con acquisti a termine o opzioni sul prezzo.")
+        elif peg278["extra_pct"] > 5.0:
+            st.warning(f"⚠️ Lo scenario peggiore aggiunge {peg278['extra_eur']:,.0f} € ({peg278['extra_pct']:+.1f}%) al costo del periodo: valutare una copertura parziale.")
+        else:
+            st.success(f"✅ Impatto contenuto: lo scenario peggiore aggiunge {peg278['extra_eur']:,.0f} € ({peg278['extra_pct']:+.1f}%) su {gg278} giorni.")
+        st.markdown("**Costo totale del periodo per scenario (€)**")
+        dgc278 = pd.DataFrame([{"scenario": s["scenario"],
+                                "costo_eur": round(s["costo_eur"], 0)}
+                               for s in sce278])
+        figc278 = px.bar(dgc278, x="scenario", y="costo_eur",
+                         title="Costo del periodo per scenario (€)",
+                         labels={"scenario": "Scenario", "costo_eur": "Costo (€)"},
+                         color="scenario",
+                         color_discrete_map={"base": "#9ca3af",
+                                             "ondata di calore": "#ef4444",
+                                             "ondata di freddo": "#3b82f6"})
+        st.plotly_chart(figc278, use_container_width=True)
+        st.markdown("**Costo extra al variare del delta termico (€)**")
+        dss278 = pd.DataFrame(sen278)
+        figs278 = px.line(dss278, x="delta_temp_c", y="extra_eur",
+                          title="Costo extra vs intensita' dello shock termico (€)",
+                          labels={"delta_temp_c": "Delta termico (°C)",
+                                  "extra_eur": "Costo extra (€)"})
+        st.plotly_chart(figs278, use_container_width=True)
+        with st.expander("Dettaglio scenari ed export CSV"):
+            dft278 = pd.DataFrame([{"scenario": s["scenario"],
+                                    "delta_temp_c": s["delta_temp_c"],
+                                    "domanda_mw": round(s["domanda_mw"], 0),
+                                    "prezzo_eur_mwh": round(s["prezzo_eur_mwh"], 2),
+                                    "energia_mwh": round(s["energia_mwh"], 0),
+                                    "costo_eur": round(s["costo_eur"], 0)}
+                                   for s in sce278])
+            st.dataframe(dft278, use_container_width=True, hide_index=True)
+            st.caption(f"Extra ondata di calore: {ex_caldo278['extra_eur']:,.0f} € ({ex_caldo278['extra_pct']:+.1f}%); extra ondata di freddo: {ex_freddo278['extra_eur']:,.0f} € ({ex_freddo278['extra_pct']:+.1f}%) su {ore278:.0f} ore.")
+            st.download_button("⬇️ Export CSV scenari",
+                               data=dft278.to_csv(index=False, sep=";").encode("utf-8"),
+                               file_name="stress_climatico_scenari.csv", mime="text/csv",
+                               key="sc278_csv",
+                               help="Domanda, prezzo, energia e costo per scenario.")
+        st.caption("Nota: il modello e' lineare (domanda = base + deltaT x coeff; prezzo = base x (1 + elasticita' x shock%)). Nella realta' oltre certe soglie gli effetti sono piu' che proporzionali (picchi di prezzo estremi): usare coefficienti prudenziali per gli stress severi.")
 
 # Footer
 
