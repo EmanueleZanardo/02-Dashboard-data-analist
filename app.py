@@ -39419,6 +39419,135 @@ def cds289_verdetto(margine_ora, soglia):
     return {"verdetto": v, "margine_ora": m, "soglia": s}
 
 
+
+def ptr290_num(x, nome):
+    """Valida uno scalare numerico: no bool, no NaN/inf."""
+    import math
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        raise ValueError(f"{nome}: deve essere un numero")
+    if math.isnan(x) or math.isinf(x):
+        raise ValueError(f"{nome}: NaN/inf non ammessi")
+    return float(x)
+
+
+def ptr290_pos(x, nome):
+    """Valida un numero >= 0."""
+    v = ptr290_num(x, nome)
+    if v < 0:
+        raise ValueError(f"{nome}: non puo' essere negativo")
+    return v
+
+
+def ptr290_norm_cdf(x):
+    """CDF normale standard via erf (niente dipendenze extra)."""
+    import math
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+def ptr290_norm_pdf(x):
+    """PDF normale standard."""
+    import math
+    return math.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
+
+
+def ptr290_bachelier_call(F, K, sigma, T):
+    """Call europea su spread col modello di Bachelier (normale):
+    C = (F-K)*N(d) + sigma*sqrt(T)*n(d), d = (F-K)/(sigma*sqrt(T)).
+    Lo spread puo' essere negativo: niente lognormalita'. Con sigma=0
+    vale il payoff intrinseco max(F-K, 0)."""
+    f = ptr290_num(F, "F")
+    k = ptr290_num(K, "K")
+    s = ptr290_pos(sigma, "sigma")
+    t = ptr290_num(T, "T")
+    if t <= 0:
+        raise ValueError("T: deve essere > 0")
+    vol = s * t ** 0.5
+    if vol == 0:
+        return max(f - k, 0.0)
+    d = (f - k) / vol
+    return (f - k) * ptr290_norm_cdf(d) + vol * ptr290_norm_pdf(d)
+
+
+def ptr290_valore_ptr(spread_forward, sigma, T):
+    """Valore di un PTR (diritto fisico, payoff max(spread,0)): call
+    di Bachelier con strike 0 sul forward spread B-A (EUR/MWh)."""
+    return ptr290_bachelier_call(spread_forward, 0.0, sigma, T)
+
+
+def ptr290_valore_ftr(spread_forward):
+    """Valore di un FTR obbligo (payoff = spread, anche negativo):
+    il forward spread stesso."""
+    return ptr290_num(spread_forward, "spread_forward")
+
+
+def ptr290_premio(valore_modello, prezzo_asta):
+    """Mispricing (EUR/MWh): valore modello meno prezzo d'asta. > 0:
+    l'asta sottoprezza il diritto."""
+    return (ptr290_num(valore_modello, "valore_modello") -
+            ptr290_num(prezzo_asta, "prezzo_asta"))
+
+
+def ptr290_be_asta(valore_modello):
+    """Prezzo d'asta di break-even (EUR/MWh): il prezzo che azzera il premio."""
+    return ptr290_num(valore_modello, "valore_modello")
+
+
+def ptr290_pnl(premio, mw, ore):
+    """P&L atteso (EUR): premio unitario x MW x ore del prodotto."""
+    p = ptr290_num(premio, "premio")
+    m = ptr290_pos(mw, "mw")
+    h = ptr290_pos(ore, "ore")
+    return p * m * h
+
+
+def ptr290_sensibilita_vol(spread_forward, sigma, T, prezzo_asta,
+                           n_punti=9, ampiezza=0.5):
+    """Valore PTR e premio al variare della volatilita'
+    (sigma*(1 +/- ampiezza))."""
+    f = ptr290_num(spread_forward, "spread_forward")
+    s0 = ptr290_pos(sigma, "sigma")
+    t = ptr290_num(T, "T")
+    if t <= 0:
+        raise ValueError("T: deve essere > 0")
+    a = ptr290_num(prezzo_asta, "prezzo_asta")
+    if isinstance(n_punti, bool) or not isinstance(n_punti, int) \
+            or n_punti < 3:
+        raise ValueError("n_punti: deve essere un intero >= 3")
+    amp = ptr290_num(ampiezza, "ampiezza")
+    if amp <= 0:
+        raise ValueError("ampiezza: deve essere > 0")
+    righe = []
+    for j in range(n_punti):
+        mult = 1.0 - amp + 2.0 * amp * j / (n_punti - 1)
+        s = s0 * mult
+        v = ptr290_bachelier_call(f, 0.0, s, t)
+        righe.append({"sigma": s, "valore_ptr": v,
+                      "premio": v - a})
+    return righe
+
+
+def ptr290_breakdown(valore_modello, prezzo_asta):
+    """Scomposizione valore/premio (dict) per il grafico a barre."""
+    v = ptr290_num(valore_modello, "valore_modello")
+    a = ptr290_num(prezzo_asta, "prezzo_asta")
+    return {"valore_modello": v, "prezzo_asta": a, "premio": v - a}
+
+
+def ptr290_verdetto(premio, soglia):
+    """Verdetto: 'sottoprezzato' (premio >= soglia), 'equo'
+    (0 <= premio < soglia), 'sovrapprezzato' (premio < 0)."""
+    p = ptr290_num(premio, "premio")
+    s = ptr290_num(soglia, "soglia")
+    if s < 0:
+        raise ValueError("soglia: non puo' essere negativa")
+    if p >= s:
+        v = "sottoprezzato"
+    elif p >= 0:
+        v = "equo"
+    else:
+        v = "sovrapprezzato"
+    return {"verdetto": v, "premio": p, "soglia": s}
+
 if workspace == _('ws1'):
     st.markdown(f"<h1>{_('ws1')}</h1>", unsafe_allow_html=True)
     banner_demo("simulatore strategico: margini, centrali e curve simulate")
@@ -40060,7 +40189,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256, tab257, tab258, tab259, tab260, tab261, tab262, tab263, tab264, tab265, tab266, tab267, tab268, tab269, tab270, tab271, tab272, tab273, tab274, tab275, tab276, tab277, tab278, tab279, tab280, tab281, tab282, tab283, tab284, tab285, tab286, tab287, tab288, tab289 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete", "🔥 Teleriscaldamento vs caldaia", "🌿 Clean spread (con CO₂)", "🇮🇹 PUN da prezzi zonali", "❄️ Pompa di calore vs caldaia", "🏢 PUE & costo data center", "🔌 Gruppo elettrogeno vs blackout", "🚗 Flotta aziendale: TCO diesel vs elettrico", "📜 Garanzie di origine: costo del 100% rinnovabile", "♻️ Fine vita FV: revamping vs dismissione", "🌾️ Agrivoltaico: doppio reddito", "🟢 Biometano: business case", "🌬️ Eolico onshore: business case", "🌊 Idroelettrico run-of-river: business case", "🔥 Geotermia profonda: business case", "☀️ Solare termodinamico (CSP): business case", "🌬️ Eolico offshore: business case", "☀️ Fotovoltaico utility-scale: business case", "⚛️ Nucleare SMR: business case", "📊 Posizione vs limiti di rischio", "💧 Cash flow at risk (CFaR)", "⚡ Aste MI: scostamenti vs MGP", "🌡️ Stress climatico: domanda e prezzo", "🌪️ Derivati meteo: pricing HDD/CDD", "🚢 LNG vs gasdotto: costo delivered", "🛢️ Crack spread: margine raffinazione 3-2-1", "🧪 Margine petrolchimico: nafta → etilene", "🛢️ Carry petrolio: contango & stoccaggio fisico", "🏭 Unit commitment CCGT: accendere o no?", "🛛️ Differenziali greggio: sweet vs sour", "⛽ Basis gas TTF–PSV", "🚢⚡ Rigassificazione GNL: margine terminale", "⚡🔥 Clean spark spread: margine centrale a gas", "⚫🔥 Clean dark spread: margine centrale a carbone"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256, tab257, tab258, tab259, tab260, tab261, tab262, tab263, tab264, tab265, tab266, tab267, tab268, tab269, tab270, tab271, tab272, tab273, tab274, tab275, tab276, tab277, tab278, tab279, tab280, tab281, tab282, tab283, tab284, tab285, tab286, tab287, tab288, tab289, tab290 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete", "🔥 Teleriscaldamento vs caldaia", "🌿 Clean spread (con CO₂)", "🇮🇹 PUN da prezzi zonali", "❄️ Pompa di calore vs caldaia", "🏢 PUE & costo data center", "🔌 Gruppo elettrogeno vs blackout", "🚗 Flotta aziendale: TCO diesel vs elettrico", "📜 Garanzie di origine: costo del 100% rinnovabile", "♻️ Fine vita FV: revamping vs dismissione", "🌾️ Agrivoltaico: doppio reddito", "🟢 Biometano: business case", "🌬️ Eolico onshore: business case", "🌊 Idroelettrico run-of-river: business case", "🔥 Geotermia profonda: business case", "☀️ Solare termodinamico (CSP): business case", "🌬️ Eolico offshore: business case", "☀️ Fotovoltaico utility-scale: business case", "⚛️ Nucleare SMR: business case", "📊 Posizione vs limiti di rischio", "💧 Cash flow at risk (CFaR)", "⚡ Aste MI: scostamenti vs MGP", "🌡️ Stress climatico: domanda e prezzo", "🌪️ Derivati meteo: pricing HDD/CDD", "🚢 LNG vs gasdotto: costo delivered", "🛢️ Crack spread: margine raffinazione 3-2-1", "🧪 Margine petrolchimico: nafta → etilene", "🛢️ Carry petrolio: contango & stoccaggio fisico", "🏭 Unit commitment CCGT: accendere o no?", "🛛️ Differenziali greggio: sweet vs sour", "⛽ Basis gas TTF–PSV", "🚢⚡ Rigassificazione GNL: margine terminale", "⚡🔥 Clean spark spread: margine centrale a gas", "⚫🔥 Clean dark spread: margine centrale a carbone", "🔀💰 PTR transfrontaliero: vale il prezzo d'asta?"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -66631,6 +66760,89 @@ elif workspace == _('ws8'):
                                mime="text/csv", key="cds289_csv",
                                help="Margine centrale al variare del prezzo carbone.")
         st.caption("Nota: il PCI di 6,8 MWh/t vale per carbone bituminoso (~24,5 GJ/t); il fattore di emissione 0,341 tCO2/MWh termico vale per carbone. API2 e' quotato in $/t CIF ARA: per carbone FOB o con nolo separato usare il prezzo delivered equivalente.")
+
+    with tab290:
+        titolo290 = edu("PTR transfrontaliero: vale il prezzo d'asta?", "Un PTR (Physical Transmission Right, es. aste JAO) e' il diritto - non l'obbligo - di usare la capacita' transfrontaliera: il payoff e' max(spread, 0), dove spread = prezzo zona B - prezzo zona A. Vale quindi come una call sullo spread, prezzata col modello di Bachelier (normale, perche' lo spread puo' andare negativo). Un FTR obbligo invece paga lo spread in pieno, anche se negativo. Se il valore modello supera il prezzo d'asta, il diritto e' sottoprezzato: conviene fare bid.")
+        st.markdown(f"<h1>🔀💰 {titolo290}</h1>", unsafe_allow_html=True)
+        st.caption("Valutazione diritti di trasmissione transfrontaliera (aste tipo JAO): il modello di Bachelier dice se il prezzo d'asta e' equo.")
+        a1_290, a2_290, a3_290 = st.columns(3)
+        with a1_290:
+            spread_290 = st.number_input("Spread forward atteso B-A (€/MWh)",
+                                         value=4.0, step=0.5, format="%.2f",
+                                         key="ptr290_spread")
+            vol_290 = st.number_input("Volatilita' spread annualizzata (€/MWh)",
+                                      min_value=0.0, value=12.0, step=0.5,
+                                      format="%.2f", key="ptr290_vol")
+            mesi_290 = st.number_input("Tenor (mesi)",
+                                       min_value=1, value=12, step=1,
+                                       key="ptr290_mesi")
+        with a2_290:
+            asta_290 = st.number_input("Prezzo d'asta (€/MWh)",
+                                      min_value=0.0, value=3.0, step=0.1,
+                                      format="%.2f", key="ptr290_asta")
+            mw_290 = st.number_input("Volume (MW)", min_value=0.0,
+                                     value=100.0, step=10.0, format="%.0f",
+                                     key="ptr290_mw")
+            ore_290 = st.number_input("Ore del prodotto", min_value=1.0,
+                                      value=8760.0, step=24.0, format="%.0f",
+                                      key="ptr290_ore")
+        with a3_290:
+            tipo_290 = st.selectbox("Tipo di diritto",
+                                    ["PTR (opzione: max(spread,0))",
+                                     "FTR obbligo (payoff = spread)"],
+                                    key="ptr290_tipo")
+            soglia_290 = st.number_input("Soglia premio 'sottoprezzato' (€/MWh)",
+                                         min_value=0.0, value=0.50, step=0.05,
+                                         format="%.2f", key="ptr290_soglia")
+        t_290 = mesi_290 / 12.0
+        if tipo_290.startswith("PTR"):
+            val290 = ptr290_valore_ptr(spread_290, vol_290, t_290)
+        else:
+            val290 = ptr290_valore_ftr(spread_290)
+        prem290 = ptr290_premio(val290, asta_290)
+        pnl290 = ptr290_pnl(prem290, mw_290, ore_290)
+        be290 = ptr290_be_asta(val290)
+        verd290 = ptr290_verdetto(prem290, soglia_290)
+        k1_290, k2_290, k3_290, k4_290, k5_290, k6_290 = st.columns(6)
+        k1_290.metric("Valore modello", f"{val290:+,.2f} €/MWh")
+        k2_290.metric("Prezzo asta", f"{asta_290:,.2f} €/MWh")
+        k3_290.metric("Premio", f"{prem290:+,.2f} €/MWh")
+        k4_290.metric("P&L atteso", f"{pnl290:+,.0f} €")
+        k5_290.metric("Asta break-even", f"{be290:,.2f} €/MWh")
+        k6_290.metric("Verdetto", verd290["verdetto"].upper())
+        if verd290["verdetto"] == "sottoprezzato":
+            st.success(f"Premio {prem290:+,.2f} €/MWh sopra la soglia di {soglia_290:,.2f} €/MWh: il diritto e' sottoprezzato all'asta, il bid fino a {be290:,.2f} €/MWh resta profittevole.")
+        elif verd290["verdetto"] == "equo":
+            st.warning(f"Premio {prem290:+,.2f} €/MWh positivo ma sotto la soglia di {soglia_290:,.2f} €/MWh: prezzo d'asta sostanzialmente equo, margine sottile.")
+        else:
+            st.error(f"Premio {prem290:+,.2f} €/MWh negativo: il prezzo d'asta {asta_290:,.2f} €/MWh supera il valore modello {val290:,.2f} €/MWh, non fare bid.")
+        brk290 = ptr290_breakdown(val290, asta_290)
+        figb290 = px.bar(x=list(brk290.keys()), y=list(brk290.values()),
+                         labels={"x": "voce", "y": "€/MWh"},
+                         title="Valore modello vs prezzo d'asta vs premio")
+        st.plotly_chart(figb290, use_container_width=True)
+        sens290 = ptr290_sensibilita_vol(spread_290, vol_290, t_290, asta_290)
+        figl290 = px.line(x=[r["sigma"] for r in sens290],
+                          y=[r["valore_ptr"] for r in sens290],
+                          labels={"x": "volatilita' spread (€/MWh)",
+                                  "y": "valore PTR (€/MWh)"},
+                          title="Valore PTR al variare della volatilita'")
+        figl290.add_hline(y=asta_290, line_dash="dash", line_color="red",
+                          annotation_text="Prezzo d'asta")
+        st.plotly_chart(figl290, use_container_width=True)
+        with st.expander("Dettaglio sensibilita' ed export CSV"):
+            dft290 = pd.DataFrame([{"sigma_eur_mwh": round(r["sigma"], 2),
+                                    "valore_ptr_eur_mwh": round(r["valore_ptr"], 2),
+                                    "premio_eur_mwh": round(r["premio"], 2)}
+                                   for r in sens290])
+            st.dataframe(dft290, use_container_width=True, hide_index=True)
+            st.caption(f"Con spread forward di {spread_290:+,.2f} €/MWh, volatilita' {vol_290:,.2f} €/MWh e tenor {mesi_290} mesi, il {tipo_290.split(' ')[0]} vale {val290:,.2f} €/MWh contro un prezzo d'asta di {asta_290:,.2f} €/MWh: premio {prem290:+,.2f} €/MWh, P&L atteso su {mw_290:,.0f} MW x {ore_290:,.0f} ore di {pnl290:+,.0f} €. Asta di break-even {be290:,.2f} €/MWh.")
+            st.download_button("⬇️ Export CSV sensibilita'",
+                               data=dft290.to_csv(index=False, sep=";").encode("utf-8"),
+                               file_name="ptr_sensibilita_vol.csv",
+                               mime="text/csv", key="ptr290_csv",
+                               help="Valore PTR al variare della volatilita'.")
+        st.caption("Nota: modello di Bachelier (sottostante normale) perche' lo spread zonale puo' essere negativo; la volatilita' e' annualizzata sullo spread. Il PTR vale max(spread,0) come un'opzione, l'FTR obbligo vale il forward spread. UIQ non incluso: il valore e' solo la componente opzionaria.")
 
 # Footer
 

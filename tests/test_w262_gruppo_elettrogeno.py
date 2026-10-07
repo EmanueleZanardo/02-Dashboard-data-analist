@@ -56,6 +56,7 @@ TITLE286 = "⛽ Basis gas TTF–PSV"
 TITLE287 = "🚢⚡ Rigassificazione GNL: margine terminale"
 TITLE288 = "⚡🔥 Clean spark spread: margine centrale a gas"
 TITLE289 = "⚫🔥 Clean dark spread: margine centrale a carbone"
+TITLE290 = "🔀💰 PTR transfrontaliero: vale il prezzo d'asta?"
 TITLE261 = "🏢 PUE & costo data center"
 
 # Parametri di riferimento usati nei test
@@ -78,12 +79,12 @@ def _registry():
 class TestRegistryTab262:
     def test_tab262_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 289
+        assert len(titoli) == len(dvars) == len(withs) == 290
         assert TITLE262 in titoli
         assert "tab262" in dvars
         assert "tab262" in withs
         assert titoli[dvars.index("tab262")] == TITLE262
-        assert titoli[-1] == TITLE289
+        assert titoli[-1] == TITLE290
         keys = re.findall(r'key="(gen262_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 10
 

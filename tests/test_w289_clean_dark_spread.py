@@ -39,6 +39,7 @@ cds289_verdetto = _F["cds289_verdetto"]
 APP = Path(__file__).parent.parent / "app.py"
 
 TITLE289 = "⚫🔥 Clean dark spread: margine centrale a carbone"
+TITLE290 = "🔀💰 PTR transfrontaliero: vale il prezzo d'asta?"
 TITLE288 = "⚡🔥 Clean spark spread: margine centrale a gas"
 TITLE287 = "🚢⚡ Rigassificazione GNL: margine terminale"
 TITLE286 = "⛽ Basis gas TTF–PSV"
@@ -72,12 +73,12 @@ def _registry():
 class TestRegistryTab289:
     def test_tab289_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 289
+        assert len(titoli) == len(dvars) == len(withs) == 290
         assert TITLE289 in titoli
         assert "tab289" in dvars
         assert "tab289" in withs
         assert titoli[dvars.index("tab289")] == TITLE289
-        assert titoli[-1] == TITLE289
+        assert titoli[-1] == TITLE290
         keys = re.findall(r'key="(cds289_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
