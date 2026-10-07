@@ -37,12 +37,12 @@ def _registry():
 class TestRegistryTab251:
     def test_tab251_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 285
+        assert len(titoli) == len(dvars) == len(withs) == 286
         assert "⚡ Energia reattiva & penali cosφ" in titoli
         assert "tab251" in dvars
         assert "tab251" in withs
         assert titoli[dvars.index("tab251")] == "⚡ Energia reattiva & penali cosφ"
-        assert titoli[-1] == "🛛️ Differenziali greggio: sweet vs sour"
+        assert titoli[-1] == "⛽ Basis gas TTF–PSV"
         keys = re.findall(r'key="(r251_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 10
 

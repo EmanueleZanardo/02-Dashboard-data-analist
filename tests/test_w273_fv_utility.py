@@ -48,6 +48,7 @@ TITLE282 = "🧪 Margine petrolchimico: nafta → etilene"
 TITLE283 = "🛢️ Carry petrolio: contango & stoccaggio fisico"
 TITLE284 = "🏭 Unit commitment CCGT: accendere o no?"
 TITLE285 = "🛛️ Differenziali greggio: sweet vs sour"
+TITLE286 = "⛽ Basis gas TTF–PSV"
 TITLE272 = "🌬️ Eolico offshore: business case"
 TITLE271 = "☀️ Solare termodinamico (CSP): business case"
 
@@ -79,12 +80,12 @@ def _registry():
 class TestRegistryTab273:
     def test_tab273_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 285
+        assert len(titoli) == len(dvars) == len(withs) == 286
         assert TITLE273 in titoli
         assert "tab273" in dvars
         assert "tab273" in withs
         assert titoli[dvars.index("tab273")] == TITLE273
-        assert titoli[-1] == TITLE285
+        assert titoli[-1] == TITLE286
         keys = re.findall(r'key="(fv273_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
