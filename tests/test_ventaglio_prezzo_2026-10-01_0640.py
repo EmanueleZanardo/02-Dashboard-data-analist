@@ -124,3 +124,12 @@ check("8 serie vuota -> KPI None", r["prezzo_partenza"] is None)
 
 print()
 print("FAILURES:", len(fails), fails if fails else "")
+
+
+def test_standalone_checks_verdi():
+    """Espone a pytest i check standalone (eseguiti all'import del modulo).
+
+    Prima di questa funzione i check giravano silenziosamente in fase di
+    collection: un FAIL non faceva fallire la suite.
+    """
+    assert not fails, f"{len(fails)} check falliti: {fails[:8]}"

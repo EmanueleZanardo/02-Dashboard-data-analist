@@ -8,8 +8,19 @@ con `python3 tests/run_all.py`.
 """
 
 from pathlib import Path
+import os
 
 _DIR = Path(__file__).parent
+_REPO_ROOT = _DIR.parent
+
+# Robustezza: 34 file di test aprono "app.py" con path relativo alla cwd.
+# Se pytest viene lanciato da una directory diversa dalla root del repo,
+# la collection fallirebbe con FileNotFoundError. Forziamo la cwd sulla
+# root del repo all'import di conftest (no-op se gia' corretta).
+try:
+    os.chdir(_REPO_ROOT)
+except OSError:
+    pass
 
 
 def _is_legacy_standalone(path: Path) -> bool:

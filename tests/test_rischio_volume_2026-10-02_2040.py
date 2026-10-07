@@ -148,3 +148,12 @@ check("registry: nessuna chiave widget rv161 duplicata",
       len(re.findall(r'key="rv161_[a-z]+"', src)) == len(set(re.findall(r'key="rv161_[a-z]+"', src))))
 
 print("checks: %d, fails: %d" % (_nchecks[0], len(fails)))
+
+
+def test_standalone_checks_verdi():
+    """Espone a pytest i check standalone (eseguiti all'import del modulo).
+
+    Prima di questa funzione i check giravano silenziosamente in fase di
+    collection: un FAIL non faceva fallire la suite.
+    """
+    assert not fails, f"{len(fails)} check falliti: {fails[:8]}"

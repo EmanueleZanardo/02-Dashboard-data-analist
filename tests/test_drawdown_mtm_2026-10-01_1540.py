@@ -7,11 +7,12 @@ Uso: python3 tests/test_drawdown_mtm_2026-10-01_1540.py
 """
 import ast
 import os
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-APP = os.path.expanduser("~/workspace/dashboard-qa/app.py")
+APP = str(Path(__file__).resolve().parent.parent / "app.py")
 
 tree = ast.parse(open(APP, encoding="utf-8").read())
 
@@ -125,3 +126,12 @@ check("nan droppati", d["valido"] and abs(d["max_drawdown"] - (-5.0)) < 1e-9,
 print(f"checks: {checks}, fails: {len(fails)}")
 for f in fails:
     print("FAIL:", f)
+
+
+def test_standalone_checks_verdi():
+    """Espone a pytest i check standalone (eseguiti all'import del modulo).
+
+    Prima di questa funzione i check giravano silenziosamente in fase di
+    collection: un FAIL non faceva fallire la suite.
+    """
+    assert not fails, f"{len(fails)} check falliti: {fails[:8]}"
