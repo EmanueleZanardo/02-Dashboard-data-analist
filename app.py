@@ -37372,6 +37372,166 @@ def pl275_riepilogo(checks, posizioni):
             "esposizione_netta_mwh": netta}
 
 
+def cf276_num(x, nome):
+    """Validatore numerico stretto: bool/str/None/NaN/inf rifiutati."""
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        raise ValueError(f"{nome}: deve essere un numero")
+    f = float(x)
+    if f != f or f in (float("inf"), float("-inf")):
+        raise ValueError(f"{nome}: non puo' essere NaN o infinito")
+    return f
+
+
+def cf276_int(n, nome, minimo=1):
+    """Intero stretto >= minimo (per n. simulazioni / seed)."""
+    if isinstance(n, bool):
+        raise ValueError(f"{nome}: deve essere un intero")
+    if isinstance(n, float):
+        if not n.is_integer():
+            raise ValueError(f"{nome}: deve essere un intero")
+        n = int(n)
+    if not isinstance(n, int) or n < minimo:
+        raise ValueError(f"{nome}: deve essere un intero >= {minimo}")
+    return n
+
+
+def cf276_parse_flussi(testo):
+    """Parsa CSV 'etichetta,flusso_eur' -> lista dict. Header opzionale."""
+    if not isinstance(testo, str) or not testo.strip():
+        raise ValueError("flussi: incollare almeno una riga CSV")
+    righe = []
+    for i, raw in enumerate(testo.strip().splitlines(), 1):
+        if not raw.strip():
+            continue
+        parti = [p.strip() for p in raw.split(",")]
+        if len(parti) != 2:
+            raise ValueError(f"riga {i}: servono 2 colonne (etichetta,flusso_eur)")
+        etichetta, sflusso = parti
+        if not etichetta:
+            raise ValueError(f"riga {i}: etichetta vuota")
+        try:
+            flusso = float(sflusso)
+        except (ValueError, TypeError):
+            if i == 1:
+                continue  # header
+            raise ValueError(f"riga {i}: flusso_eur '{sflusso}' non numerico")
+        flusso = cf276_num(flusso, f"riga {i} flusso_eur")
+        righe.append({"etichetta": etichetta, "flusso_eur": flusso})
+    if not righe:
+        raise ValueError("flussi: nessuna riga valida trovata")
+    if len(righe) > 60:
+        raise ValueError("flussi: massimo 60 righe (5 anni mensili)")
+    etichette = [r["etichetta"] for r in righe]
+    if len(set(etichette)) != len(etichette):
+        raise ValueError("flussi: etichette duplicate")
+    return righe
+
+
+def cf276_simula(flussi, vol_pct, n_sim, seed):
+    """Monte Carlo sui flussi: ogni periodo ~ flusso*(1+vol*Z), Z~N(0,1).
+
+    Ritorna lista di liste (n_sim x n_periodi). Seed per riproducibilita'.
+    """
+    import numpy as np
+    base = [cf276_num(f, "flusso") for f in flussi]
+    if not base:
+        raise ValueError("flussi: lista vuota")
+    vol = cf276_num(vol_pct, "vol_pct")
+    if vol < 0 or vol > 200:
+        raise ValueError("vol_pct: deve stare tra 0 e 200")
+    n = cf276_int(n_sim, "n_sim", minimo=100)
+    s = cf276_int(seed, "seed", minimo=0)
+    rng = np.random.RandomState(s)
+    z = rng.standard_normal((n, len(base)))
+    sims = np.asarray(base, dtype=float)[None, :] * (1.0 + (vol / 100.0) * z)
+    return sims.tolist()
+
+
+def cf276_totali_annui(simulazioni):
+    """Somma per simulazione -> lista dei totali annui."""
+    if not simulazioni:
+        raise ValueError("simulazioni: lista vuota")
+    return [float(sum(riga)) for riga in simulazioni]
+
+
+def cf276_percentile(valori, pct):
+    """Percentile con interpolazione lineare. pct in (0,100)."""
+    if not valori:
+        raise ValueError("valori: lista vuota")
+    p = cf276_num(pct, "pct")
+    if not 0 < p < 100:
+        raise ValueError("pct: deve stare tra 0 e 100 (esclusi)")
+    vs = sorted(float(cf276_num(v, "valore")) for v in valori)
+    if len(vs) == 1:
+        return vs[0]
+    pos = (p / 100.0) * (len(vs) - 1)
+    lo = int(pos)
+    fraz = pos - lo
+    return vs[lo] + fraz * (vs[min(lo + 1, len(vs) - 1)] - vs[lo])
+
+
+def cf276_cfar(totali, conf_pct=95.0):
+    """CFaR = flusso atteso (media) - percentile(100-conf).
+
+    Ritorna dict {atteso, percentile_basso, cfar_eur}.
+    """
+    if not totali:
+        raise ValueError("totali: lista vuota")
+    c = cf276_num(conf_pct, "conf_pct")
+    if not 50.0 < c < 100.0:
+        raise ValueError("conf_pct: deve stare tra 50 e 100 (esclusi)")
+    vals = [float(cf276_num(v, "totale")) for v in totali]
+    atteso = sum(vals) / len(vals)
+    pb = cf276_percentile(vals, 100.0 - c)
+    return {"atteso_eur": atteso, "percentile_basso_eur": pb,
+            "cfar_eur": atteso - pb}
+
+
+def cf276_prob_negativo(totali):
+    """Quota di simulazioni con totale annuo < 0."""
+    if not totali:
+        raise ValueError("totali: lista vuota")
+    vals = [float(cf276_num(v, "totale")) for v in totali]
+    return sum(1 for v in vals if v < 0) / len(vals)
+
+
+def cf276_sintesi(totali):
+    """Statistiche di sintesi della distribuzione dei totali."""
+    if not totali:
+        raise ValueError("totali: lista vuota")
+    vals = [float(cf276_num(v, "totale")) for v in totali]
+    return {"n": len(vals),
+            "min_eur": min(vals),
+            "p5_eur": cf276_percentile(vals, 5.0),
+            "p25_eur": cf276_percentile(vals, 25.0),
+            "mediana_eur": cf276_percentile(vals, 50.0),
+            "media_eur": sum(vals) / len(vals),
+            "p75_eur": cf276_percentile(vals, 75.0),
+            "p95_eur": cf276_percentile(vals, 95.0),
+            "max_eur": max(vals),
+            "prob_negativa": cf276_prob_negativo(vals)}
+
+
+def cf276_gap_budget(atteso_eur, budget_eur, tolleranza_pct=2.0):
+    """Confronto atteso vs budget: diff e verdetto."""
+    atteso = cf276_num(atteso_eur, "atteso_eur")
+    budget = cf276_num(budget_eur, "budget_eur")
+    tol = cf276_num(tolleranza_pct, "tolleranza_pct")
+    if tol < 0:
+        raise ValueError("tolleranza_pct: non puo' essere negativa")
+    diff = atteso - budget
+    diff_pct = (diff / abs(budget) * 100.0) if budget != 0 else None
+    if diff_pct is None:
+        verdetto = "sopra_budget" if diff > 0 else ("sotto_budget" if diff < 0 else "in_linea")
+    elif abs(diff_pct) <= tol:
+        verdetto = "in_linea"
+    elif diff > 0:
+        verdetto = "sopra_budget"
+    else:
+        verdetto = "sotto_budget"
+    return {"diff_eur": diff, "diff_pct": diff_pct, "verdetto": verdetto}
+
+
 if workspace == _('ws1'):
     st.markdown(f"<h1>{_('ws1')}</h1>", unsafe_allow_html=True)
     banner_demo("simulatore strategico: margini, centrali e curve simulate")
@@ -38013,7 +38173,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256, tab257, tab258, tab259, tab260, tab261, tab262, tab263, tab264, tab265, tab266, tab267, tab268, tab269, tab270, tab271, tab272, tab273, tab274, tab275 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete", "🔥 Teleriscaldamento vs caldaia", "🌿 Clean spread (con CO₂)", "🇮🇹 PUN da prezzi zonali", "❄️ Pompa di calore vs caldaia", "🏢 PUE & costo data center", "🔌 Gruppo elettrogeno vs blackout", "🚗 Flotta aziendale: TCO diesel vs elettrico", "📜 Garanzie di origine: costo del 100% rinnovabile", "♻️ Fine vita FV: revamping vs dismissione", "🌾️ Agrivoltaico: doppio reddito", "🟢 Biometano: business case", "🌬️ Eolico onshore: business case", "🌊 Idroelettrico run-of-river: business case", "🔥 Geotermia profonda: business case", "☀️ Solare termodinamico (CSP): business case", "🌬️ Eolico offshore: business case", "☀️ Fotovoltaico utility-scale: business case", "⚛️ Nucleare SMR: business case", "📊 Posizione vs limiti di rischio"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256, tab257, tab258, tab259, tab260, tab261, tab262, tab263, tab264, tab265, tab266, tab267, tab268, tab269, tab270, tab271, tab272, tab273, tab274, tab275, tab276 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete", "🔥 Teleriscaldamento vs caldaia", "🌿 Clean spread (con CO₂)", "🇮🇹 PUN da prezzi zonali", "❄️ Pompa di calore vs caldaia", "🏢 PUE & costo data center", "🔌 Gruppo elettrogeno vs blackout", "🚗 Flotta aziendale: TCO diesel vs elettrico", "📜 Garanzie di origine: costo del 100% rinnovabile", "♻️ Fine vita FV: revamping vs dismissione", "🌾️ Agrivoltaico: doppio reddito", "🟢 Biometano: business case", "🌬️ Eolico onshore: business case", "🌊 Idroelettrico run-of-river: business case", "🔥 Geotermia profonda: business case", "☀️ Solare termodinamico (CSP): business case", "🌬️ Eolico offshore: business case", "☀️ Fotovoltaico utility-scale: business case", "⚛️ Nucleare SMR: business case", "📊 Posizione vs limiti di rischio", "💧 Cash flow at risk (CFaR)"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -63123,6 +63283,95 @@ elif workspace == _('ws8'):
                                key="pl275_csv",
                                help="Tabella prodotto × utilizzo limite con semafori.")
         st.caption("Nota: i limiti qui sono in quantita' (MWh). Un monitoraggio completo affianca limiti in nozionale, per controparte e per scadenza: usare questa tab come primo controllo giornaliero, non come unico presidio.")
+
+    with tab276:
+        titolo276 = edu("Cash flow at risk (CFaR)", "Il CASH FLOW AT RISK misura quanto puo' mancare all'appello, nel peggiore dei casi 'ragionevoli', rispetto al flusso di cassa atteso: e' la distanza tra la media e un percentile basso (es. 5°) della distribuzione dei flussi futuri. Questa tab prende i flussi di cassa attesi per periodo, li perturba con una simulazione Monte Carlo (volatilita' percentuale) e calcola CFaR, probabilita' di cassa negativa e scostamento dal budget. Utile per dimensionare linee di credito e riserve di liquidita'.")
+        st.markdown(f"<h1>💧 {titolo276}</h1>", unsafe_allow_html=True)
+        st.caption("Flussi di cassa attesi + Monte Carlo: CFaR, probabilita' di cassa negativa e confronto con il budget.")
+        banner_demo("flussi inseriti a mano e simulazione Monte Carlo (dati dimostrativi)")
+        flu276 = st.text_area("Flussi attesi (CSV: etichetta,flusso_eur)",
+                             value=("mese,flusso_eur\n"
+                                    "Gen,185000\nFeb,170000\nMar,140000\n"
+                                    "Apr,95000\nMag,70000\nGiu,85000\n"
+                                    "Lug,110000\nAgo,105000\nSet,90000\n"
+                                    "Ott,120000\nNov,155000\nDic,195000"),
+                             height=170, key="cf276_flussi",
+                             help="Flusso di cassa atteso per periodo in € (positivo = incasso netto). La prima riga puo' essere l'header.")
+        p1_276, p2_276, p3_276 = st.columns(3)
+        vol276 = p1_276.slider("Volatilita' dei flussi (%/periodo)", min_value=0.0, max_value=60.0,
+                               value=15.0, step=1.0, format="%.0f",
+                               key="cf276_vol",
+                               help="Deviazione standard percentuale applicata a ogni periodo nella simulazione.")
+        nsim276 = p2_276.slider("N. simulazioni", min_value=500, max_value=20000,
+                                value=2000, step=500, format="%d",
+                                key="cf276_nsim",
+                                help="Piu' simulazioni = stima piu' stabile dei percentili.")
+        conf276 = p3_276.selectbox("Confidenza CFaR", options=[90.0, 95.0, 99.0],
+                                   index=1, format_func=lambda v: f"{v:.0f}%",
+                                   key="cf276_conf",
+                                   help="Il CFaR usa il percentile (100 - confidenza).")
+        q1_276, q2_276 = st.columns(2)
+        seed276 = q1_276.number_input("Seed (riproducibilita')", min_value=0, max_value=999999,
+                                     value=42, step=1, key="cf276_seed")
+        bud276 = q2_276.number_input("Budget annuo (€)", value=1400000.0, step=50000.0,
+                                    format="%.0f", key="cf276_budget",
+                                    help="Obiettivo di cassa annuo da confrontare con la distribuzione simulata.")
+        try:
+            fr276 = cf276_parse_flussi(flu276)
+            base276 = [r["flusso_eur"] for r in fr276]
+            sim276 = cf276_simula(base276, vol276, nsim276, seed276)
+            tot276 = cf276_totali_annui(sim276)
+            cfr276 = cf276_cfar(tot276, conf276)
+            snt276 = cf276_sintesi(tot276)
+            gap276 = cf276_gap_budget(cfr276["atteso_eur"], bud276)
+        except ValueError as e276:
+            st.error(f"Dati non validi: {e276}")
+            st.stop()
+        k1_276, k2_276, k3_276, k4_276, k5_276, k6_276 = st.columns(6)
+        render_kpi("Flusso atteso (€)", f"{cfr276['atteso_eur']:,.0f}", k1_276)
+        render_kpi(f"CFaR {conf276:.0f}% (€)", f"{cfr276['cfar_eur']:,.0f}", k2_276)
+        render_kpi("P5 (€)", f"{snt276['p5_eur']:,.0f}", k3_276)
+        render_kpi("P95 (€)", f"{snt276['p95_eur']:,.0f}", k4_276)
+        render_kpi("Prob. negativa", f"{snt276['prob_negativa'] * 100:.1f}%", k5_276)
+        dg276 = gap276["diff_eur"]
+        render_kpi("Gap vs budget (€)", f"{dg276:+,.0f}", k6_276)
+        if snt276["prob_negativa"] > 0.05:
+            st.error(f"🚨 Rischio liquidita': il {snt276['prob_negativa'] * 100:.1f}% delle simulazioni chiude l'anno in cassa negativa. Servono riserve o una linea di credito capiente.")
+        elif gap276["verdetto"] == "sotto_budget":
+            st.warning(f"⚠️ Flusso atteso {cfr276['atteso_eur']:,.0f} € sotto il budget di {abs(dg276):,.0f} € ({gap276['diff_pct']:+.1f}%). CFaR {conf276:.0f}%: {cfr276['cfar_eur']:,.0f} € a rischio rispetto all'atteso.")
+        else:
+            st.success(f"✅ Flusso atteso {cfr276['atteso_eur']:,.0f} € in linea o sopra il budget. CFaR {conf276:.0f}%: nel {100 - conf276:.0f}% peggiore dei casi mancano {cfr276['cfar_eur']:,.0f} € rispetto all'atteso.")
+        st.markdown("**Distribuzione del flusso di cassa annuo (€)**")
+        dfi276 = pd.DataFrame({"flusso_annuo_eur": tot276})
+        figh276 = px.histogram(dfi276, x="flusso_annuo_eur", nbins=40,
+                               title="Distribuzione Monte Carlo del flusso annuo (€)",
+                               labels={"flusso_annuo_eur": "Flusso annuo (€)"})
+        figh276.add_vline(x=cfr276["atteso_eur"], line_dash="solid", line_color="green",
+                          annotation_text="Atteso")
+        figh276.add_vline(x=snt276["p5_eur"], line_dash="dot", line_color="#9ca3af",
+                          annotation_text="P5")
+        figh276.add_vline(x=bud276, line_dash="dash", line_color="red",
+                          annotation_text="Budget")
+        st.plotly_chart(figh276, use_container_width=True)
+        with st.expander("Percentili ed export CSV"):
+            dft276 = pd.DataFrame([{"statistica": k,
+                                    "flusso_annuo_eur": round(v, 0)}
+                                   for k, v in [("min", snt276["min_eur"]),
+                                                ("P5", snt276["p5_eur"]),
+                                                ("P25", snt276["p25_eur"]),
+                                                ("mediana", snt276["mediana_eur"]),
+                                                ("media (atteso)", snt276["media_eur"]),
+                                                ("P75", snt276["p75_eur"]),
+                                                ("P95", snt276["p95_eur"]),
+                                                ("max", snt276["max_eur"])]])
+            st.dataframe(dft276, use_container_width=True, hide_index=True)
+            st.caption(f"CFaR {conf276:.0f}% = atteso − P{100 - conf276:.0f} = {cfr276['cfar_eur']:,.0f} € su {nsim276} simulazioni (seed {seed276}, volatilita' {vol276:.0f}%/periodo).")
+            st.download_button("⬇️ Export CSV percentili",
+                               data=dft276.to_csv(index=False, sep=";").encode("utf-8"),
+                               file_name="cfar_percentili.csv", mime="text/csv",
+                               key="cf276_csv",
+                               help="Percentili della distribuzione del flusso annuo.")
+        st.caption("Nota: la simulazione perturba ogni periodo in modo indipendente (niente correlazione tra mesi). Se i flussi sono correlati (es. inverno rigido = piu' ricavi ma anche piu' costi), il CFaR vero e' piu' alto: usare una volatilita' prudenziale.")
 
 # Footer
 
