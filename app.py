@@ -38342,6 +38342,136 @@ def pc282_verdetto(margine, soglia):
     return {"verdetto": v, "margine": m, "soglia": sg}
 
 
+def po283_num(x, nome):
+    """Valida uno scalare numerico: no bool, no NaN/inf."""
+    import math
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        raise ValueError(f"{nome}: deve essere un numero")
+    if math.isnan(x) or math.isinf(x):
+        raise ValueError(f"{nome}: NaN/inf non ammessi")
+    return float(x)
+
+
+def po283_pos(x, nome):
+    """Valida un numero >= 0."""
+    v = po283_num(x, nome)
+    if v < 0:
+        raise ValueError(f"{nome}: non puo' essere negativo")
+    return v
+
+
+def po283_spread(prezzo_m1, prezzo_m2):
+    """Contango M1->M2 ($/bbl): prezzo del secondo front month meno il primo.
+
+    Positivo = contango (premia lo stoccaggio), negativo = backwardation."""
+    m1 = po283_pos(prezzo_m1, "prezzo_m1")
+    m2 = po283_pos(prezzo_m2, "prezzo_m2")
+    return m2 - m1
+
+
+def po283_costo_carry(spot, tasso_annuo_perc, mesi, stoccaggio_bbl_mese,
+                      assicurazione_bbl_mese):
+    """Costo del carry ($/bbl): finanziamento + stoccaggio fisico + assicurazione.
+
+    finanziamento = spot x tasso% x mesi/12; stoccaggio e assicurazione sono
+    in $ per barile per mese."""
+    s = po283_pos(spot, "spot")
+    t = po283_pos(tasso_annuo_perc, "tasso_annuo_perc")
+    m = po283_num(mesi, "mesi")
+    if m <= 0:
+        raise ValueError("mesi: deve essere > 0")
+    st = po283_pos(stoccaggio_bbl_mese, "stoccaggio_bbl_mese")
+    a = po283_pos(assicurazione_bbl_mese, "assicurazione_bbl_mese")
+    return s * (t / 100.0) * (m / 12.0) + (st + a) * m
+
+
+def po283_margine_carry(spread, costo_carry):
+    """Margine del carry trade ($/bbl): contango incassato meno costo del carry."""
+    sp = po283_num(spread, "spread")
+    cc = po283_pos(costo_carry, "costo_carry")
+    return sp - cc
+
+
+def po283_breakdown(spread, costo_finanziamento, costo_stoccaggio,
+                    costo_assicurazione):
+    """Scomposizione del margine carry ($/bbl): spread positivo, componenti
+    di costo negative, margine = somma."""
+    sp = po283_num(spread, "spread")
+    f = po283_pos(costo_finanziamento, "costo_finanziamento")
+    st = po283_pos(costo_stoccaggio, "costo_stoccaggio")
+    a = po283_pos(costo_assicurazione, "costo_assicurazione")
+    comp = {"spread_contango": sp, "finanziamento": -f,
+            "stoccaggio": -st, "assicurazione": -a}
+    comp["margine"] = comp["spread_contango"] + comp["finanziamento"] + \
+        comp["stoccaggio"] + comp["assicurazione"]
+    return comp
+
+
+def po283_be_tasso(spot, spread, mesi, stoccaggio_bbl_mese,
+                   assicurazione_bbl_mese):
+    """Tasso di finanziamento di break-even (% annuo): il tasso al quale il
+    margine del carry si azzera. Puo' essere negativo: significa che il
+    contango non copre nemmeno i costi fisici (carry mai profittevole)."""
+    s = po283_pos(spot, "spot")
+    if s <= 0:
+        raise ValueError("spot: deve essere > 0")
+    sp = po283_num(spread, "spread")
+    m = po283_num(mesi, "mesi")
+    if m <= 0:
+        raise ValueError("mesi: deve essere > 0")
+    st = po283_pos(stoccaggio_bbl_mese, "stoccaggio_bbl_mese")
+    a = po283_pos(assicurazione_bbl_mese, "assicurazione_bbl_mese")
+    costi_fisici = (st + a) * m
+    return (sp - costi_fisici) / (s * (m / 12.0)) * 100.0
+
+
+def po283_sensibilita_tasso(tasso_base, spot, spread, mesi, stoccaggio_bbl_mese,
+                            assicurazione_bbl_mese, n_punti=9):
+    """Margine carry al variare del tasso di finanziamento (da 0 al 2x del base)."""
+    tb = po283_pos(tasso_base, "tasso_base")
+    s = po283_pos(spot, "spot")
+    if s <= 0:
+        raise ValueError("spot: deve essere > 0")
+    sp = po283_num(spread, "spread")
+    m = po283_num(mesi, "mesi")
+    if m <= 0:
+        raise ValueError("mesi: deve essere > 0")
+    st = po283_pos(stoccaggio_bbl_mese, "stoccaggio_bbl_mese")
+    a = po283_pos(assicurazione_bbl_mese, "assicurazione_bbl_mese")
+    if isinstance(n_punti, bool) or not isinstance(n_punti, int) or n_punti < 3:
+        raise ValueError("n_punti: deve essere un intero >= 3")
+    hi = 2.0 * tb if tb > 0 else 10.0
+    righe = []
+    for j in range(n_punti):
+        t = hi * j / (n_punti - 1)
+        righe.append({"tasso": t,
+                      "margine": sp - po283_costo_carry(s, t, m, st, a)})
+    return righe
+
+
+def po283_pnl_ciclo_mln(margine_bbl, barili):
+    """P&L del ciclo di stoccaggio in M$: margine ($/bbl) x barili / 1e6."""
+    m = po283_num(margine_bbl, "margine_bbl")
+    b = po283_pos(barili, "barili")
+    return m * b / 1e6
+
+
+def po283_verdetto(margine, soglia):
+    """Verdetto: 'positivo' / 'in_linea' / 'negativo' rispetto alla soglia
+    di indifferenza ($/bbl)."""
+    m = po283_num(margine, "margine")
+    sg = po283_num(soglia, "soglia")
+    if sg < 0:
+        raise ValueError("soglia: non puo' essere negativa")
+    if abs(m) <= sg:
+        v = "in_linea"
+    elif m > 0:
+        v = "positivo"
+    else:
+        v = "negativo"
+    return {"verdetto": v, "margine": m, "soglia": sg}
+
+
 
 
 if workspace == _('ws1'):
@@ -38985,7 +39115,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256, tab257, tab258, tab259, tab260, tab261, tab262, tab263, tab264, tab265, tab266, tab267, tab268, tab269, tab270, tab271, tab272, tab273, tab274, tab275, tab276, tab277, tab278, tab279, tab280, tab281, tab282 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete", "🔥 Teleriscaldamento vs caldaia", "🌿 Clean spread (con CO₂)", "🇮🇹 PUN da prezzi zonali", "❄️ Pompa di calore vs caldaia", "🏢 PUE & costo data center", "🔌 Gruppo elettrogeno vs blackout", "🚗 Flotta aziendale: TCO diesel vs elettrico", "📜 Garanzie di origine: costo del 100% rinnovabile", "♻️ Fine vita FV: revamping vs dismissione", "🌾️ Agrivoltaico: doppio reddito", "🟢 Biometano: business case", "🌬️ Eolico onshore: business case", "🌊 Idroelettrico run-of-river: business case", "🔥 Geotermia profonda: business case", "☀️ Solare termodinamico (CSP): business case", "🌬️ Eolico offshore: business case", "☀️ Fotovoltaico utility-scale: business case", "⚛️ Nucleare SMR: business case", "📊 Posizione vs limiti di rischio", "💧 Cash flow at risk (CFaR)", "⚡ Aste MI: scostamenti vs MGP", "🌡️ Stress climatico: domanda e prezzo", "🌪️ Derivati meteo: pricing HDD/CDD", "🚢 LNG vs gasdotto: costo delivered", "🛢️ Crack spread: margine raffinazione 3-2-1", "🧪 Margine petrolchimico: nafta → etilene"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256, tab257, tab258, tab259, tab260, tab261, tab262, tab263, tab264, tab265, tab266, tab267, tab268, tab269, tab270, tab271, tab272, tab273, tab274, tab275, tab276, tab277, tab278, tab279, tab280, tab281, tab282, tab283 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete", "🔥 Teleriscaldamento vs caldaia", "🌿 Clean spread (con CO₂)", "🇮🇹 PUN da prezzi zonali", "❄️ Pompa di calore vs caldaia", "🏢 PUE & costo data center", "🔌 Gruppo elettrogeno vs blackout", "🚗 Flotta aziendale: TCO diesel vs elettrico", "📜 Garanzie di origine: costo del 100% rinnovabile", "♻️ Fine vita FV: revamping vs dismissione", "🌾️ Agrivoltaico: doppio reddito", "🟢 Biometano: business case", "🌬️ Eolico onshore: business case", "🌊 Idroelettrico run-of-river: business case", "🔥 Geotermia profonda: business case", "☀️ Solare termodinamico (CSP): business case", "🌬️ Eolico offshore: business case", "☀️ Fotovoltaico utility-scale: business case", "⚛️ Nucleare SMR: business case", "📊 Posizione vs limiti di rischio", "💧 Cash flow at risk (CFaR)", "⚡ Aste MI: scostamenti vs MGP", "🌡️ Stress climatico: domanda e prezzo", "🌪️ Derivati meteo: pricing HDD/CDD", "🚢 LNG vs gasdotto: costo delivered", "🛢️ Crack spread: margine raffinazione 3-2-1", "🧪 Margine petrolchimico: nafta → etilene", "🛢️ Carry petrolio: contango & stoccaggio fisico"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -64773,6 +64903,113 @@ elif workspace == _('ws8'):
                                mime="text/csv", key="pc282_csv",
                                help="Margine steam cracker al variare del prezzo della nafta.")
         st.caption("Nota: margine cash prima di costi fissi, ammortamenti e CO2. Resa nafta tipica 3,1-3,4 t/t per steam cracker a nafta; i coprodotti (propilene ~0,5 t/t, butadiene ~0,14 t/t, pygas/aromatici) valgono tipicamente il 40-60% del margine lordo.")
+    with tab283:
+        titolo283 = edu("Carry petrolio: contango & stoccaggio fisico", "Il carry trade sul greggio: si compra il front month, si immagazzina e si vende il mese successivo incassando il contango. La convenienza dipende dal costo del carry: finanziamento del capitale immobilizzato piu' stoccaggio fisico e assicurazione. Questa tab calcola contango M1->M2, costo del carry scomposto nelle tre componenti, margine del carry, tasso di finanziamento di break-even, sensibilita' al tasso e P&L del ciclo di stoccaggio.")
+        st.markdown(f"<h1>🛢️ {titolo283}</h1>", unsafe_allow_html=True)
+        st.caption("Carry trade sul greggio: il contango copre il costo di finanziamento + stoccaggio? Margine in $/bbl, tasso di break-even e P&L del ciclo.")
+        a1_283, a2_283, a3_283 = st.columns(3)
+        m1_283 = a1_283.number_input("Prezzo M1 ($/bbl)", min_value=0.0,
+                                     value=75.0, step=0.5, format="%.2f",
+                                     key="po283_m1",
+                                     help="Prezzo del front month (primo future sul greggio).")
+        m2_283 = a2_283.number_input("Prezzo M2 ($/bbl)", min_value=0.0,
+                                     value=76.20, step=0.5, format="%.2f",
+                                     key="po283_m2",
+                                     help="Prezzo del secondo front month. M2 > M1 = contango.")
+        spot_283 = a3_283.number_input("Spot per finanziamento ($/bbl)",
+                                       min_value=0.0, value=75.0, step=0.5,
+                                       format="%.2f", key="po283_spot",
+                                       help="Prezzo spot su cui si calcola il costo di finanziamento (di solito ~M1).")
+        b1_283, b2_283, b3_283 = st.columns(3)
+        mesi_283 = b1_283.number_input("Durata stoccaggio (mesi)", min_value=0.5,
+                                       value=1.0, step=0.5, format="%.1f",
+                                       key="po283_mesi",
+                                       help="Mesi tra acquisto M1 e vendita M2.")
+        tasso_283 = b2_283.number_input("Tasso finanziamento (%/anno)",
+                                        min_value=0.0, value=4.5, step=0.25,
+                                        format="%.2f", key="po283_tasso",
+                                        help="Costo del capitale annuo sul valore immobilizzato.")
+        stocc_283 = b3_283.number_input("Stoccaggio ($/bbl/mese)", min_value=0.0,
+                                        value=0.35, step=0.05, format="%.2f",
+                                        key="po283_stocc",
+                                        help="Costo fisico del serbatoio per barile e mese.")
+        c1_283, c2_283, c3_283 = st.columns(3)
+        assic_283 = c1_283.number_input("Assicurazione ($/bbl/mese)",
+                                        min_value=0.0, value=0.05, step=0.01,
+                                        format="%.2f", key="po283_assic",
+                                        help="Assicurazione del greggio stoccato per barile e mese.")
+        barili_283 = c2_283.number_input("Posizione (barili)", min_value=0.0,
+                                         value=500000.0, step=10000.0,
+                                         format="%.0f", key="po283_barili",
+                                         help="Dimensione della posizione stoccata in barili.")
+        soglia_283 = c3_283.number_input("Soglia indifferenza ($/bbl)",
+                                         min_value=0.0, value=0.10, step=0.05,
+                                         format="%.2f", key="po283_soglia",
+                                         help="Margine entro cui il carry e' considerato in linea (ne' positivo ne' negativo).")
+        try:
+            spr283 = po283_spread(m1_283, m2_283)
+            fin283 = spot_283 * (tasso_283 / 100.0) * (mesi_283 / 12.0)
+            stoc283 = stocc_283 * mesi_283
+            assi283 = assic_283 * mesi_283
+            cc283 = po283_costo_carry(spot_283, tasso_283, mesi_283, stocc_283, assic_283)
+            marg283 = po283_margine_carry(spr283, cc283)
+            brkd283 = po283_breakdown(spr283, fin283, stoc283, assi283)
+            be283 = po283_be_tasso(spot_283, spr283, mesi_283, stocc_283, assic_283)
+            pnl283 = po283_pnl_ciclo_mln(marg283, barili_283)
+            verd283 = po283_verdetto(marg283, soglia_283)
+            sens283 = po283_sensibilita_tasso(tasso_283, spot_283, spr283,
+                                              mesi_283, stocc_283, assic_283)
+        except ValueError as e283:
+            st.error(f"Dati non validi: {e283}")
+            st.stop()
+        k1_283, k2_283, k3_283, k4_283, k5_283, k6_283 = st.columns(6)
+        render_kpi("Contango M2-M1 ($/bbl)", f"{spr283:+,.2f}", k1_283)
+        render_kpi("Costo carry ($/bbl)", f"{cc283:,.2f}", k2_283)
+        render_kpi("Margine carry ($/bbl)", f"{marg283:+,.2f}", k3_283)
+        render_kpi("Break-even tasso (%/a)", f"{be283:,.2f}", k4_283)
+        render_kpi("P&L ciclo (M$)", f"{pnl283:+,.2f}", k5_283)
+        render_kpi("Verdetto", verd283["verdetto"], k6_283)
+        if verd283["verdetto"] == "positivo":
+            st.success(f"Carry profittevole: margine {marg283:+,.2f} $/bbl (contango {spr283:+,.2f} $/bbl contro costo carry {cc283:,.2f} $/bbl). Su {barili_283:,.0f} barili il ciclo rende {pnl283:+,.2f} M$.")
+        elif verd283["verdetto"] == "in_linea":
+            st.info(f"Carry in linea: margine {marg283:+,.2f} $/bbl entro la soglia di {soglia_283:,.2f} $/bbl. Lo stoccaggio copre appena i costi: eseguire o meno e' indifferente.")
+        else:
+            st.warning(f"Carry in perdita: margine {marg283:+,.2f} $/bbl. Il carry torna profittevole solo con tasso sotto {be283:,.2f} %/anno (break-even).")
+        st.markdown("**Scomposizione margine carry ($/bbl)**")
+        dfb283 = pd.DataFrame([
+            {"componente": "Spread contango", "usd_bbl": brkd283["spread_contango"]},
+            {"componente": "Finanziamento", "usd_bbl": brkd283["finanziamento"]},
+            {"componente": "Stoccaggio", "usd_bbl": brkd283["stoccaggio"]},
+            {"componente": "Assicurazione", "usd_bbl": brkd283["assicurazione"]},
+            {"componente": "Margine", "usd_bbl": brkd283["margine"]},
+        ])
+        figb283 = px.bar(dfb283, x="componente", y="usd_bbl", color="componente",
+                         title="Scomposizione margine carry ($/bbl)",
+                         labels={"componente": "Componente", "usd_bbl": "$/bbl"})
+        st.plotly_chart(figb283, use_container_width=True)
+        st.markdown("**Margine al variare del tasso di finanziamento ($/bbl)**")
+        dss283 = pd.DataFrame(sens283)
+        figl283 = px.line(dss283, x="tasso", y="margine",
+                          title="Margine carry vs tasso (%/anno)",
+                          labels={"tasso": "Tasso (%/anno)",
+                                  "margine": "Margine ($/bbl)"})
+        figl283.add_hline(y=0, line_dash="dash", line_color="gray",
+                          annotation_text="Margine zero")
+        figl283.add_vline(x=be283, line_dash="dot", line_color="red",
+                          annotation_text="Break-even tasso")
+        st.plotly_chart(figl283, use_container_width=True)
+        with st.expander("Dettaglio sensibilita' ed export CSV"):
+            dft283 = pd.DataFrame([{"tasso_perc_annuo": round(r["tasso"], 2),
+                                    "margine_usd_bbl": round(r["margine"], 2)}
+                                   for r in sens283])
+            st.dataframe(dft283, use_container_width=True, hide_index=True)
+            st.caption(f"Con contango {spr283:+,.2f} $/bbl e costo carry {cc283:,.2f} $/bbl (finanziamento {fin283:,.2f} + stoccaggio {stoc283:,.2f} + assicurazione {assi283:,.2f}) il margine e' {marg283:+,.2f} $/bbl; tasso di break-even {be283:,.2f} %/anno. P&L del ciclo su {barili_283:,.0f} barili: {pnl283:+,.2f} M$.")
+            st.download_button("⬇️ Export CSV sensibilita'",
+                               data=dft283.to_csv(index=False, sep=";").encode("utf-8"),
+                               file_name="carry_petrolio_sensibilita.csv",
+                               mime="text/csv", key="po283_csv",
+                               help="Margine del carry trade al variare del tasso di finanziamento.")
+        st.caption("Nota: margine teorico prima di costi di transazione, slippage e rischio di controparte. La backwardation (M2 < M1) rende il carry strutturalmente in perdita: in quel caso la curva premia la vendita immediata, non lo stoccaggio.")
 
 # Footer
 

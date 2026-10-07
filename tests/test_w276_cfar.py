@@ -35,6 +35,7 @@ TITLE279 = "🌪️ Derivati meteo: pricing HDD/CDD"
 TITLE280 = "🚢 LNG vs gasdotto: costo delivered"
 TITLE281 = "🛢️ Crack spread: margine raffinazione 3-2-1"
 TITLE282 = "🧪 Margine petrolchimico: nafta → etilene"
+TITLE283 = "🛢️ Carry petrolio: contango & stoccaggio fisico"
 TITLE275 = "📊 Posizione vs limiti di rischio"
 
 CSV_FLUSSI = ("mese,flusso_eur\n"
@@ -53,12 +54,12 @@ def _registry():
 class TestRegistryTab276:
     def test_tab276_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 282
+        assert len(titoli) == len(dvars) == len(withs) == 283
         assert TITLE276 in titoli
         assert "tab276" in dvars
         assert "tab276" in withs
         assert titoli[dvars.index("tab276")] == TITLE276
-        assert titoli[-1] == TITLE282
+        assert titoli[-1] == TITLE283
         keys = re.findall(r'key="(cf276_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
@@ -72,6 +73,7 @@ class TestRegistryTab276:
         assert titoli[dvars.index("tab280")] == TITLE280
         assert titoli[dvars.index("tab281")] == TITLE281
         assert titoli[dvars.index("tab282")] == TITLE282
+        assert titoli[dvars.index("tab283")] == TITLE283
 
     def test_helper_definiti_prima_della_ui(self):
         src = APP.read_text(encoding="utf-8")

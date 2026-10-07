@@ -54,27 +54,27 @@ def _serie_piatta(prezzo, giorni, inizio="2026-01-05"):
 class TestRegistryScoperte:
     def test_tab133_dichiarata(self):
         titoli = _titoli()
-        assert len(titoli) == 282
+        assert len(titoli) == 283
         assert titoli[132] == "🔀 Regimi di prezzo"
 
     def test_tab134_dichiarata(self):
         titoli = _titoli()
-        assert len(titoli) == 282
+        assert len(titoli) == 283
         assert titoli[133] == "📑 Report di periodo"
 
     def test_tab175_dichiarata(self):
         titoli = _titoli()
-        assert len(titoli) == 282
+        assert len(titoli) == 283
         assert titoli[174] == "🎯 Matrice costo giorno×ora"
 
     def test_tab229_dichiarata(self):
         titoli = _titoli()
-        assert len(titoli) == 282
+        assert len(titoli) == 283
         assert titoli[228] == "💡 Valore del forecast"
 
     def test_tab230_dichiarata(self):
         titoli = _titoli()
-        assert len(titoli) == 282
+        assert len(titoli) == 283
         assert titoli[229] == "🧮 Budget di rischio"
 
 

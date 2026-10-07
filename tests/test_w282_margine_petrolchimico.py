@@ -29,6 +29,7 @@ pc282_verdetto = _F["pc282_verdetto"]
 APP = Path(__file__).parent.parent / "app.py"
 
 TITLE282 = "🧪 Margine petrolchimico: nafta \u2192 etilene"
+TITLE283 = "🛢️ Carry petrolio: contango & stoccaggio fisico"
 TITLE281 = "🛢️ Crack spread: margine raffinazione 3-2-1"
 TITLE280 = "🚢 LNG vs gasdotto: costo delivered"
 
@@ -52,12 +53,12 @@ def _registry():
 class TestRegistryTab282:
     def test_tab282_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 282
+        assert len(titoli) == len(dvars) == len(withs) == 283
         assert TITLE282 in titoli
         assert "tab282" in dvars
         assert "tab282" in withs
         assert titoli[dvars.index("tab282")] == TITLE282
-        assert titoli[-1] == TITLE282
+        assert titoli[-1] == TITLE283
         keys = re.findall(r'key="(pc282_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
@@ -66,6 +67,7 @@ class TestRegistryTab282:
         assert titoli[dvars.index("tab280")] == TITLE280
         assert titoli[dvars.index("tab281")] == TITLE281
         assert titoli[dvars.index("tab282")] == TITLE282
+        assert titoli[dvars.index("tab283")] == TITLE283
 
 
 class TestPc282Validatori:

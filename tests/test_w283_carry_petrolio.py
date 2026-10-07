@@ -1,0 +1,225 @@
+"""Test tab283 'Carry petrolio: contango & stoccaggio fisico': registry + funzioni pure.
+
+Funzioni pure estratte da app.py via AST con tests/appfuncs.py (niente Streamlit).
+Verifica consistenza del registry (titoli/dvar/with coerenti) e l'allineamento
+titolo-contenuto inclusa la tab283.
+"""
+
+import re
+from pathlib import Path
+
+import pytest
+
+from appfuncs import load
+
+_F = load("po283_num", "po283_pos", "po283_spread", "po283_costo_carry",
+          "po283_margine_carry", "po283_breakdown", "po283_be_tasso",
+          "po283_sensibilita_tasso", "po283_pnl_ciclo_mln", "po283_verdetto")
+po283_num = _F["po283_num"]
+po283_pos = _F["po283_pos"]
+po283_spread = _F["po283_spread"]
+po283_costo_carry = _F["po283_costo_carry"]
+po283_margine_carry = _F["po283_margine_carry"]
+po283_breakdown = _F["po283_breakdown"]
+po283_be_tasso = _F["po283_be_tasso"]
+po283_sensibilita_tasso = _F["po283_sensibilita_tasso"]
+po283_pnl_ciclo_mln = _F["po283_pnl_ciclo_mln"]
+po283_verdetto = _F["po283_verdetto"]
+
+APP = Path(__file__).parent.parent / "app.py"
+
+TITLE283 = "🛢️ Carry petrolio: contango & stoccaggio fisico"
+TITLE282 = "🧪 Margine petrolchimico: nafta \u2192 etilene"
+TITLE281 = "🛢️ Crack spread: margine raffinazione 3-2-1"
+
+M1, M2, SPOT = 75.0, 76.20, 75.0
+MESI, TASSO = 1.0, 4.5
+STOCC, ASSIC = 0.35, 0.05
+SPREAD_ATTESO = M2 - M1
+FIN_ATTESO = SPOT * (TASSO / 100.0) * (MESI / 12.0)
+CARRY_ATTESO = FIN_ATTESO + (STOCC + ASSIC) * MESI
+MARGINE_ATTESO = SPREAD_ATTESO - CARRY_ATTESO
+BE_ATTESO = (SPREAD_ATTESO - (STOCC + ASSIC) * MESI) / (SPOT * (MESI / 12.0)) * 100.0
+
+
+def _registry():
+    src = APP.read_text(encoding="utf-8")
+    line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
+    titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
+    dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
+    withs = re.findall(r"    with (tab\d+):", src)
+    return src, titoli, dvars, withs
+
+
+class TestRegistryTab283:
+    def test_tab283_dichiarata(self):
+        src, titoli, dvars, withs = _registry()
+        assert len(titoli) == len(dvars) == len(withs) == 283
+        assert TITLE283 in titoli
+        assert "tab283" in dvars
+        assert "tab283" in withs
+        assert titoli[dvars.index("tab283")] == TITLE283
+        assert titoli[-1] == TITLE283
+        keys = re.findall(r'key="(po283_[^"]+)"', src)
+        assert len(keys) == len(set(keys)) >= 5
+
+    def test_titoli_allineati_281_282_283(self):
+        _, titoli, dvars, _ = _registry()
+        assert titoli[dvars.index("tab281")] == TITLE281
+        assert titoli[dvars.index("tab282")] == TITLE282
+        assert titoli[dvars.index("tab283")] == TITLE283
+
+
+class TestPo283Validatori:
+    def test_num_ok(self):
+        assert po283_num(3, "x") == 3.0
+        assert po283_num(2.5, "x") == 2.5
+
+    def test_num_ko(self):
+        with pytest.raises(ValueError):
+            po283_num(True, "x")
+        with pytest.raises(ValueError):
+            po283_num("3", "x")
+        with pytest.raises(ValueError):
+            po283_num(float("nan"), "x")
+        with pytest.raises(ValueError):
+            po283_num(float("inf"), "x")
+
+    def test_pos_ok(self):
+        assert po283_pos(0, "x") == 0.0
+        assert po283_pos(75, "x") == 75.0
+
+    def test_pos_ko(self):
+        with pytest.raises(ValueError):
+            po283_pos(-0.1, "x")
+
+
+class TestPo283Spread:
+    def test_contango(self):
+        assert po283_spread(M1, M2) == pytest.approx(SPREAD_ATTESO)
+
+    def test_backwardation(self):
+        assert po283_spread(M2, M1) == pytest.approx(-SPREAD_ATTESO)
+
+    def test_invalidi(self):
+        with pytest.raises(ValueError):
+            po283_spread(-1.0, M2)
+
+
+class TestPo283CostoCarry:
+    def test_base(self):
+        assert po283_costo_carry(SPOT, TASSO, MESI, STOCC, ASSIC) == pytest.approx(CARRY_ATTESO)
+
+    def test_scomposizione(self):
+        assert po283_costo_carry(SPOT, TASSO, MESI, STOCC, ASSIC) == pytest.approx(
+            FIN_ATTESO + STOCC * MESI + ASSIC * MESI)
+
+    def test_lineare_mesi(self):
+        assert po283_costo_carry(SPOT, TASSO, 2 * MESI, STOCC, ASSIC) == pytest.approx(
+            2 * FIN_ATTESO + 2 * (STOCC + ASSIC) * MESI)
+
+    def test_invalidi(self):
+        with pytest.raises(ValueError):
+            po283_costo_carry(SPOT, TASSO, 0.0, STOCC, ASSIC)
+        with pytest.raises(ValueError):
+            po283_costo_carry(-1.0, TASSO, MESI, STOCC, ASSIC)
+
+
+class TestPo283Margine:
+    def test_base(self):
+        assert po283_margine_carry(SPREAD_ATTESO, CARRY_ATTESO) == pytest.approx(MARGINE_ATTESO)
+
+    def test_formula(self):
+        assert po283_margine_carry(1.2, 0.68) == pytest.approx(0.52)
+        assert po283_margine_carry(-0.5, 0.68) == pytest.approx(-1.18)
+
+    def test_invalidi(self):
+        with pytest.raises(ValueError):
+            po283_margine_carry(SPREAD_ATTESO, -0.1)
+
+
+class TestPo283Breakdown:
+    def test_somma(self):
+        b = po283_breakdown(SPREAD_ATTESO, FIN_ATTESO, STOCC * MESI, ASSIC * MESI)
+        assert b["spread_contango"] == pytest.approx(SPREAD_ATTESO)
+        assert b["finanziamento"] == pytest.approx(-FIN_ATTESO)
+        assert b["stoccaggio"] == pytest.approx(-STOCC * MESI)
+        assert b["assicurazione"] == pytest.approx(-ASSIC * MESI)
+        assert b["margine"] == pytest.approx(
+            SPREAD_ATTESO - FIN_ATTESO - STOCC * MESI - ASSIC * MESI)
+        assert b["margine"] == pytest.approx(MARGINE_ATTESO)
+
+
+class TestPo283BeTasso:
+    def test_base(self):
+        assert po283_be_tasso(SPOT, SPREAD_ATTESO, MESI, STOCC, ASSIC) == pytest.approx(BE_ATTESO)
+
+    def test_coerente_con_margine(self):
+        be = po283_be_tasso(SPOT, SPREAD_ATTESO, MESI, STOCC, ASSIC)
+        carry = po283_costo_carry(SPOT, be, MESI, STOCC, ASSIC)
+        assert po283_margine_carry(SPREAD_ATTESO, carry) == pytest.approx(0.0, abs=1e-9)
+
+    def test_backwardation_negativo(self):
+        assert po283_be_tasso(SPOT, -1.0, MESI, STOCC, ASSIC) < 0.0
+
+    def test_invalidi(self):
+        with pytest.raises(ValueError):
+            po283_be_tasso(0.0, SPREAD_ATTESO, MESI, STOCC, ASSIC)
+        with pytest.raises(ValueError):
+            po283_be_tasso(SPOT, SPREAD_ATTESO, 0.0, STOCC, ASSIC)
+
+
+class TestPo283Sensibilita:
+    def test_struttura(self):
+        righe = po283_sensibilita_tasso(TASSO, SPOT, SPREAD_ATTESO, MESI, STOCC, ASSIC, 5)
+        assert len(righe) == 5
+        assert righe[0]["tasso"] == pytest.approx(0.0)
+        assert righe[-1]["tasso"] == pytest.approx(9.0)
+        assert set(righe[0]) == {"tasso", "margine"}
+
+    def test_decrescente_e_centro(self):
+        righe = po283_sensibilita_tasso(TASSO, SPOT, SPREAD_ATTESO, MESI, STOCC, ASSIC, 5)
+        margini = [r["margine"] for r in righe]
+        assert all(b < a for a, b in zip(margini, margini[1:]))
+        assert righe[2]["margine"] == pytest.approx(MARGINE_ATTESO)
+
+    def test_invalidi(self):
+        with pytest.raises(ValueError):
+            po283_sensibilita_tasso(-1.0, SPOT, SPREAD_ATTESO, MESI, STOCC, ASSIC)
+        with pytest.raises(ValueError):
+            po283_sensibilita_tasso(TASSO, 0.0, SPREAD_ATTESO, MESI, STOCC, ASSIC)
+        with pytest.raises(ValueError):
+            po283_sensibilita_tasso(TASSO, SPOT, SPREAD_ATTESO, MESI, STOCC, ASSIC, 2)
+
+
+class TestPo283Pnl:
+    def test_base(self):
+        assert po283_pnl_ciclo_mln(MARGINE_ATTESO, 500000) == pytest.approx(
+            MARGINE_ATTESO * 500000 / 1e6)
+
+    def test_zero(self):
+        assert po283_pnl_ciclo_mln(MARGINE_ATTESO, 0.0) == pytest.approx(0.0)
+        assert po283_pnl_ciclo_mln(0.0, 500000) == pytest.approx(0.0)
+
+    def test_invalidi(self):
+        with pytest.raises(ValueError):
+            po283_pnl_ciclo_mln(MARGINE_ATTESO, -1.0)
+
+
+class TestPo283Verdetto:
+    def test_positivo(self):
+        r = po283_verdetto(0.52, 0.10)
+        assert r["verdetto"] == "positivo"
+        assert r["margine"] == pytest.approx(0.52)
+
+    def test_in_linea(self):
+        assert po283_verdetto(0.05, 0.10)["verdetto"] == "in_linea"
+        assert po283_verdetto(-0.10, 0.10)["verdetto"] == "in_linea"
+
+    def test_negativo(self):
+        r = po283_verdetto(-1.18, 0.10)
+        assert r["verdetto"] == "negativo"
+
+    def test_invalidi(self):
+        with pytest.raises(ValueError):
+            po283_verdetto(1.0, -0.5)
