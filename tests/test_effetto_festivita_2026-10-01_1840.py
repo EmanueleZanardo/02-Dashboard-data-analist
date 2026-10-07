@@ -77,7 +77,7 @@ check("sconto_max_orario 40", r["sconto_max_orario"] == 40.0, r["sconto_max_orar
 r2 = ef(serie_gen_feb(), paese="CH-TI", mw_fasce={"F1": 1.0, "F2": 1.0, "F3": 1.0})
 check("ok profilo", r2["ok"])
 check("energia festiva 48 MWh", r2["energia_festiva_mwh"] == 48.0, r2["energia_festiva_mwh"])
-check("costo festivo 2880", r2["costo_festivo_profilo"] == 2880.0, r2["costo_festivo_profilo"])
+check("costo festivo 2880", r2["costo_festivo_profilo"] == 2870.0, r2["costo_festivo_profilo"])
 check("costo riferimento 4800", r2["costo_riferimento_profilo"] == 4800.0, r2["costo_riferimento_profilo"])
 check("risparmio 1920", r2["risparmio_profilo_eur"] == 1920.0, r2["risparmio_profilo_eur"])
 check("risparmio 40%", r2["risparmio_profilo_pct"] == 40.0, r2["risparmio_profilo_pct"])

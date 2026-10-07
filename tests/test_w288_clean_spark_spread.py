@@ -1,0 +1,206 @@
+"""Test tab288 '⚡🔥 Clean spark spread: margine centrale a gas': registry + funzioni pure.
+
+Funzioni pure estratte da app.py via AST con tests/appfuncs.py (niente Streamlit).
+Verifica consistenza del registry (titoli/dvar/with coerenti) e l'allineamento
+titolo-contenuto inclusa la tab288.
+"""
+
+import re
+from pathlib import Path
+
+import pytest
+
+from appfuncs import load
+
+_F = load("css288_num", "css288_pos", "css288_frac", "css288_spark",
+          "css288_emissioni", "css288_costo_co2", "css288_clean_spark",
+          "css288_margine_ora", "css288_fissi_unitari", "css288_pnl",
+          "css288_be_power", "css288_breakdown", "css288_sensibilita_power",
+          "css288_verdetto")
+css288_num = _F["css288_num"]
+css288_pos = _F["css288_pos"]
+css288_frac = _F["css288_frac"]
+css288_spark = _F["css288_spark"]
+css288_emissioni = _F["css288_emissioni"]
+css288_costo_co2 = _F["css288_costo_co2"]
+css288_clean_spark = _F["css288_clean_spark"]
+css288_margine_ora = _F["css288_margine_ora"]
+css288_fissi_unitari = _F["css288_fissi_unitari"]
+css288_pnl = _F["css288_pnl"]
+css288_be_power = _F["css288_be_power"]
+css288_breakdown = _F["css288_breakdown"]
+css288_sensibilita_power = _F["css288_sensibilita_power"]
+css288_verdetto = _F["css288_verdetto"]
+
+APP = Path(__file__).parent.parent / "app.py"
+
+TITLE288 = "⚡🔥 Clean spark spread: margine centrale a gas"
+TITLE287 = "🚢⚡ Rigassificazione GNL: margine terminale"
+TITLE286 = "⛽ Basis gas TTF–PSV"
+TITLE285 = "\U0001F6DB\uFE0F Differenziali greggio: sweet vs sour"
+
+POWER, GAS, EFF, CO2P, CO2F = 110.0, 38.0, 0.58, 85.0, 0.201
+ORE, CAP, FISSI, SOGLIA = 6000.0, 450.0, 12000000.0, 5.0
+
+SPARK_ATT = POWER - GAS / EFF
+EMIS_ATT = CO2F / EFF
+CO2C_ATT = CO2P * EMIS_ATT
+CLEAN_ATT = SPARK_ATT - CO2C_ATT
+FU_ATT = FISSI / (ORE * CAP)
+MARG_ATT = CLEAN_ATT - FU_ATT
+PNL_ATT = CLEAN_ATT * ORE * CAP - FISSI
+BE_ATT = GAS / EFF + CO2P * CO2F / EFF + FU_ATT
+
+
+def _registry():
+    src = APP.read_text(encoding="utf-8")
+    line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
+    titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
+    dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
+    withs = re.findall(r"    with (tab\d+):", src)
+    return src, titoli, dvars, withs
+
+
+class TestRegistryTab288:
+    def test_tab288_dichiarata(self):
+        src, titoli, dvars, withs = _registry()
+        assert len(titoli) == len(dvars) == len(withs) == 288
+        assert TITLE288 in titoli
+        assert "tab288" in dvars
+        assert "tab288" in withs
+        assert titoli[dvars.index("tab288")] == TITLE288
+        assert titoli[-1] == TITLE288
+        keys = re.findall(r'key="(css288_[^"]+)"', src)
+        assert len(keys) == len(set(keys)) >= 5
+
+    def test_titoli_allineati_286_287_288(self):
+        _, titoli, dvars, _ = _registry()
+        assert titoli[dvars.index("tab286")] == TITLE286
+        assert titoli[dvars.index("tab287")] == TITLE287
+        assert titoli[dvars.index("tab288")] == TITLE288
+
+
+class TestCss288Validatori:
+    def test_num_ok(self):
+        assert css288_num(1.5, "x") == 1.5
+
+    def test_num_bool_ko(self):
+        with pytest.raises(ValueError):
+            css288_num(True, "x")
+
+    def test_num_nan_ko(self):
+        with pytest.raises(ValueError):
+            css288_num(float("nan"), "x")
+
+    def test_pos_negativo_ko(self):
+        with pytest.raises(ValueError):
+            css288_pos(-0.1, "x")
+
+    def test_frac_ok(self):
+        assert css288_frac(0.58, "e") == pytest.approx(0.58)
+
+    def test_frac_zero_ko(self):
+        with pytest.raises(ValueError):
+            css288_frac(0.0, "e")
+
+    def test_frac_sopra_uno_ko(self):
+        with pytest.raises(ValueError):
+            css288_frac(1.2, "e")
+
+
+class TestCss288Spark:
+    def test_spark(self):
+        assert css288_spark(POWER, GAS, EFF) == pytest.approx(SPARK_ATT)
+
+    def test_spark_gas_gratis(self):
+        assert css288_spark(80.0, 0.0, 0.5) == pytest.approx(80.0)
+
+    def test_emissioni(self):
+        assert css288_emissioni(CO2F, EFF) == pytest.approx(EMIS_ATT)
+
+    def test_costo_co2(self):
+        assert css288_costo_co2(CO2P, EMIS_ATT) == pytest.approx(CO2C_ATT)
+
+    def test_clean_spark(self):
+        assert css288_clean_spark(POWER, GAS, EFF, CO2P,
+                                  CO2F) == pytest.approx(CLEAN_ATT)
+
+    def test_clean_spark_coerenza(self):
+        assert css288_clean_spark(POWER, GAS, EFF, CO2P, CO2F) == pytest.approx(
+            css288_spark(POWER, GAS, EFF) -
+            css288_costo_co2(CO2P, css288_emissioni(CO2F, EFF)))
+
+
+class TestCss288MarginePnl:
+    def test_fissi_unitari(self):
+        assert css288_fissi_unitari(FISSI, ORE, CAP) == pytest.approx(FU_ATT)
+
+    def test_fissi_unitari_ore_zero_ko(self):
+        with pytest.raises(ValueError):
+            css288_fissi_unitari(FISSI, 0.0, CAP)
+
+    def test_margine_ora(self):
+        assert css288_margine_ora(CLEAN_ATT, FU_ATT) == pytest.approx(MARG_ATT)
+
+    def test_pnl(self):
+        assert css288_pnl(CLEAN_ATT, ORE, CAP,
+                         FISSI) == pytest.approx(PNL_ATT)
+
+    def test_be_power(self):
+        assert css288_be_power(GAS, EFF, CO2P, CO2F,
+                               FU_ATT) == pytest.approx(BE_ATT)
+
+    def test_be_power_annulla_margine(self):
+        assert css288_margine_ora(
+            css288_clean_spark(BE_ATT, GAS, EFF, CO2P, CO2F),
+            FU_ATT) == pytest.approx(0.0)
+
+
+class TestCss288Breakdown:
+    def test_chiavi_e_somma(self):
+        b = css288_breakdown(POWER, GAS / EFF, CO2C_ATT, FU_ATT, MARG_ATT)
+        assert set(b) == {"prezzo_power", "costo_gas", "costo_co2",
+                          "quota_fissa", "margine_ora"}
+        assert b["prezzo_power"] - b["costo_gas"] - b["costo_co2"] - \
+            b["quota_fissa"] == pytest.approx(b["margine_ora"])
+
+    def test_breakdown_costo_negativo_ko(self):
+        with pytest.raises(ValueError):
+            css288_breakdown(POWER, -1.0, CO2C_ATT, FU_ATT, MARG_ATT)
+
+
+class TestCss288Sensibilita:
+    def test_struttura(self):
+        righe = css288_sensibilita_power(POWER, GAS, EFF, CO2P, CO2F, FU_ATT)
+        assert len(righe) == 9
+        assert righe[4]["power"] == pytest.approx(POWER)
+        assert righe[4]["margine"] == pytest.approx(MARG_ATT)
+        assert righe[0]["power"] == pytest.approx(POWER * 0.85)
+        assert righe[-1]["power"] == pytest.approx(POWER * 1.15)
+        for r in righe:
+            assert r["margine"] == pytest.approx(r["clean_spark"] - FU_ATT)
+
+    def test_n_punti_ko(self):
+        with pytest.raises(ValueError):
+            css288_sensibilita_power(POWER, GAS, EFF, CO2P, CO2F, FU_ATT,
+                                     n_punti=2)
+
+    def test_ampiezza_ko(self):
+        with pytest.raises(ValueError):
+            css288_sensibilita_power(POWER, GAS, EFF, CO2P, CO2F, FU_ATT,
+                                     ampiezza=0.0)
+
+
+class TestCss288Verdetto:
+    def test_profittevole(self):
+        assert css288_verdetto(8.0, SOGLIA)["verdetto"] == "profittevole"
+
+    def test_copre_i_costi(self):
+        assert css288_verdetto(2.0, SOGLIA)["verdetto"] == "copre_i_costi"
+
+    def test_in_perdita(self):
+        assert css288_verdetto(-0.5, SOGLIA)["verdetto"] == "in_perdita"
+
+    def test_soglia_negativa_ko(self):
+        with pytest.raises(ValueError):
+            css288_verdetto(2.0, -1.0)
