@@ -28478,6 +28478,7 @@ def calcola_budget_rischio(nomi, esposizioni_eur, volatilita_annua_pct,
     (1/n), numero effettivo di scommesse (ENB = 1/sum(c_i^2)), posizione
     dominante e verdetto sulla concentrazione.
     """
+    import math
     def _err(msg):
         return {"valido": False, "errore": msg}
 
