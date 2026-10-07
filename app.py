@@ -37532,6 +37532,151 @@ def cf276_gap_budget(atteso_eur, budget_eur, tolleranza_pct=2.0):
     return {"diff_eur": diff, "diff_pct": diff_pct, "verdetto": verdetto}
 
 
+def mi277_sessioni():
+    """Le 7 aste infragiornaliere del mercato italiano, in ordine."""
+    return ("MI1", "MI2", "MI3", "MI4", "MI5", "MI6", "MI7")
+
+
+def mi277_num(x, nome):
+    """Validatore numerico stretto: bool/str/None/NaN/inf rifiutati."""
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        raise ValueError(f"{nome}: deve essere un numero")
+    f = float(x)
+    if f != f or f in (float("inf"), float("-inf")):
+        raise ValueError(f"{nome}: non puo' essere NaN o infinito")
+    return f
+
+
+def mi277_valida_sessione(nome):
+    """Normalizza 'mi1'/'MI 2' -> 'MI1'..'MI7', solleva se sconosciuta."""
+    if not isinstance(nome, str):
+        raise ValueError("sessione: deve essere testo (MI1..MI7)")
+    s = nome.strip().upper().replace(" ", "")
+    if s not in mi277_sessioni():
+        raise ValueError(f"sessione: '{nome}' non valida (usare MI1..MI7)")
+    return s
+
+
+def mi277_parse_prezzi(testo):
+    """Parsa CSV 'sessione,prezzo_eur_mwh' -> dict MI1..MI7 -> prezzo."""
+    if not isinstance(testo, str) or not testo.strip():
+        raise ValueError("prezzi: incollare almeno una riga CSV")
+    prezzi = {}
+    for i, raw in enumerate(testo.strip().splitlines(), 1):
+        if not raw.strip():
+            continue
+        parti = [p.strip() for p in raw.split(",")]
+        if len(parti) != 2:
+            raise ValueError(f"riga {i}: servono 2 colonne (sessione,prezzo_eur_mwh)")
+        sess, sprez = parti
+        try:
+            prezzo = float(sprez)
+        except (ValueError, TypeError):
+            if i == 1:
+                continue  # header
+            raise ValueError(f"riga {i}: prezzo '{sprez}' non numerico")
+        sess = mi277_valida_sessione(sess)
+        prezzo = mi277_num(prezzo, f"riga {i} prezzo_eur_mwh")
+        if prezzo < 0:
+            raise ValueError(f"riga {i}: prezzo non puo' essere negativo")
+        if sess in prezzi:
+            raise ValueError(f"riga {i}: sessione {sess} duplicata")
+        prezzi[sess] = prezzo
+    if not prezzi:
+        raise ValueError("prezzi: nessuna riga valida trovata")
+    return prezzi
+
+
+def mi277_spread(prezzo_mi, prezzo_mgp):
+    """Scostamento MI - MGP (€/MWh)."""
+    return mi277_num(prezzo_mi, "prezzo_mi") - mi277_num(prezzo_mgp, "prezzo_mgp")
+
+
+def mi277_spread_pct(spread, prezzo_mgp):
+    """Scostamento in % su MGP. None se MGP = 0."""
+    s = mi277_num(spread, "spread")
+    mgp = mi277_num(prezzo_mgp, "prezzo_mgp")
+    if mgp == 0:
+        return None
+    return s / mgp * 100.0
+
+
+def mi277_segnale(spread, tolleranza=1.0):
+    """Segnale operativo: acquisto/vendita conveniente su MI vs MGP."""
+    s = mi277_num(spread, "spread")
+    t = mi277_num(tolleranza, "tolleranza")
+    if t < 0:
+        raise ValueError("tolleranza: non puo' essere negativa")
+    if s < -t:
+        return "acquisto_conveniente"
+    if s > t:
+        return "vendita_conveniente"
+    return "allineata"
+
+
+def mi277_analizza(prezzi_mi, prezzo_mgp, tolleranza=1.0):
+    """Per ogni sessione: prezzo, spread, spread %, segnale. Ordine MI1..MI7."""
+    mgp = mi277_num(prezzo_mgp, "prezzo_mgp")
+    if mgp < 0:
+        raise ValueError("prezzo_mgp: non puo' essere negativo")
+    out = []
+    for sess in mi277_sessioni():
+        if sess not in prezzi_mi:
+            continue
+        p = mi277_num(prezzi_mi[sess], f"prezzo {sess}")
+        s = mi277_spread(p, mgp)
+        out.append({"sessione": sess, "prezzo_mi": p, "prezzo_mgp": mgp,
+                    "spread_eur_mwh": s,
+                    "spread_pct": mi277_spread_pct(s, mgp),
+                    "segnale": mi277_segnale(s, tolleranza)})
+    if not out:
+        raise ValueError("prezzi_mi: nessuna sessione valida")
+    return out
+
+
+def mi277_statistiche(spreads):
+    """Statistiche descrittive di una lista di spread."""
+    if not spreads:
+        raise ValueError("spreads: lista vuota")
+    vs = [float(mi277_num(v, "spread")) for v in spreads]
+    n = len(vs)
+    media = sum(vs) / n
+    ordinati = sorted(vs)
+    mediana = (ordinati[n // 2] if n % 2
+               else (ordinati[n // 2 - 1] + ordinati[n // 2]) / 2.0)
+    var = sum((v - media) ** 2 for v in vs) / (n - 1) if n > 1 else 0.0
+    return {"n": n, "media": media, "mediana": mediana,
+            "min": min(vs), "max": max(vs), "dev_std": var ** 0.5,
+            "quota_positive": sum(1 for v in vs if v > 0) / n}
+
+
+def mi277_classifica(analisi):
+    """Sessioni ordinate per spread decrescente (migliore vendita prima)."""
+    return sorted(analisi, key=lambda r: r["spread_eur_mwh"], reverse=True)
+
+
+def mi277_sintesi(analisi):
+    """KPI di sintesi: migliore vendita/acquisto, spread medio, conteggi."""
+    if not analisi:
+        raise ValueError("analisi: lista vuota")
+    spreads = [r["spread_eur_mwh"] for r in analisi]
+    stat = mi277_statistiche(spreads)
+    vend = max(analisi, key=lambda r: r["spread_eur_mwh"])
+    acq = min(analisi, key=lambda r: r["spread_eur_mwh"])
+    return {"n_sessioni": len(analisi),
+            "spread_medio": stat["media"],
+            "spread_max": stat["max"],
+            "spread_min": stat["min"],
+            "migliore_vendita": vend["sessione"],
+            "migliore_vendita_spread": vend["spread_eur_mwh"],
+            "migliore_acquisto": acq["sessione"],
+            "migliore_acquisto_spread": acq["spread_eur_mwh"],
+            "n_vendita_conveniente": sum(1 for r in analisi
+                                         if r["segnale"] == "vendita_conveniente"),
+            "n_acquisto_conveniente": sum(1 for r in analisi
+                                          if r["segnale"] == "acquisto_conveniente")}
+
+
 if workspace == _('ws1'):
     st.markdown(f"<h1>{_('ws1')}</h1>", unsafe_allow_html=True)
     banner_demo("simulatore strategico: margini, centrali e curve simulate")
@@ -38173,7 +38318,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256, tab257, tab258, tab259, tab260, tab261, tab262, tab263, tab264, tab265, tab266, tab267, tab268, tab269, tab270, tab271, tab272, tab273, tab274, tab275, tab276 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete", "🔥 Teleriscaldamento vs caldaia", "🌿 Clean spread (con CO₂)", "🇮🇹 PUN da prezzi zonali", "❄️ Pompa di calore vs caldaia", "🏢 PUE & costo data center", "🔌 Gruppo elettrogeno vs blackout", "🚗 Flotta aziendale: TCO diesel vs elettrico", "📜 Garanzie di origine: costo del 100% rinnovabile", "♻️ Fine vita FV: revamping vs dismissione", "🌾️ Agrivoltaico: doppio reddito", "🟢 Biometano: business case", "🌬️ Eolico onshore: business case", "🌊 Idroelettrico run-of-river: business case", "🔥 Geotermia profonda: business case", "☀️ Solare termodinamico (CSP): business case", "🌬️ Eolico offshore: business case", "☀️ Fotovoltaico utility-scale: business case", "⚛️ Nucleare SMR: business case", "📊 Posizione vs limiti di rischio", "💧 Cash flow at risk (CFaR)"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256, tab257, tab258, tab259, tab260, tab261, tab262, tab263, tab264, tab265, tab266, tab267, tab268, tab269, tab270, tab271, tab272, tab273, tab274, tab275, tab276, tab277 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete", "🔥 Teleriscaldamento vs caldaia", "🌿 Clean spread (con CO₂)", "🇮🇹 PUN da prezzi zonali", "❄️ Pompa di calore vs caldaia", "🏢 PUE & costo data center", "🔌 Gruppo elettrogeno vs blackout", "🚗 Flotta aziendale: TCO diesel vs elettrico", "📜 Garanzie di origine: costo del 100% rinnovabile", "♻️ Fine vita FV: revamping vs dismissione", "🌾️ Agrivoltaico: doppio reddito", "🟢 Biometano: business case", "🌬️ Eolico onshore: business case", "🌊 Idroelettrico run-of-river: business case", "🔥 Geotermia profonda: business case", "☀️ Solare termodinamico (CSP): business case", "🌬️ Eolico offshore: business case", "☀️ Fotovoltaico utility-scale: business case", "⚛️ Nucleare SMR: business case", "📊 Posizione vs limiti di rischio", "💧 Cash flow at risk (CFaR)", "⚡ Aste MI: scostamenti vs MGP"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -63372,6 +63517,84 @@ elif workspace == _('ws8'):
                                key="cf276_csv",
                                help="Percentili della distribuzione del flusso annuo.")
         st.caption("Nota: la simulazione perturba ogni periodo in modo indipendente (niente correlazione tra mesi). Se i flussi sono correlati (es. inverno rigido = piu' ricavi ma anche piu' costi), il CFaR vero e' piu' alto: usare una volatilita' prudenziale.")
+
+    with tab277:
+        titolo277 = edu("Aste MI: scostamenti vs MGP", "Il mercato elettrico italiano ha un mercato del giorno prima (MGP) e sette aste infragiornaliere (MI1..MI7) dove si aggiusta la posizione man mano che ci si avvicina al tempo reale. Lo SCOSTAMENTO (spread) tra il prezzo MI e il prezzo MGP dice dove conviene comprare o vendere: se un'asta MI quota sotto l'MGP, comprare li' costa meno; se quota sopra, vendere li' rende di piu'. Questa tab confronta i prezzi delle 7 aste con il riferimento MGP, calcola spread e spread %, emette un segnale operativo per asta e indica la migliore asta per acquisto e per vendita.")
+        st.markdown(f"<h1>⚡ {titolo277}</h1>", unsafe_allow_html=True)
+        st.caption("Prezzi delle 7 aste infragiornaliere contro il riferimento MGP: spread, segnali operativi, migliore asta per comprare/vendere.")
+        banner_demo("prezzi inseriti a mano (dati dimostrativi)")
+        mgp277 = st.number_input("Prezzo MGP di riferimento (€/MWh)", min_value=0.0,
+                                value=100.0, step=1.0, format="%.1f",
+                                key="mi277_mgp",
+                                help="Prezzo del mercato del giorno prima usato come riferimento.")
+        r1_277 = st.columns(4)
+        r2_277 = st.columns(4)
+        mi1_277 = r1_277[0].number_input("MI1 (€/MWh)", min_value=0.0, value=102.5, step=0.5, format="%.1f", key="mi277_mi1")
+        mi2_277 = r1_277[1].number_input("MI2 (€/MWh)", min_value=0.0, value=98.0, step=0.5, format="%.1f", key="mi277_mi2")
+        mi3_277 = r1_277[2].number_input("MI3 (€/MWh)", min_value=0.0, value=101.0, step=0.5, format="%.1f", key="mi277_mi3")
+        mi4_277 = r1_277[3].number_input("MI4 (€/MWh)", min_value=0.0, value=99.5, step=0.5, format="%.1f", key="mi277_mi4")
+        mi5_277 = r2_277[0].number_input("MI5 (€/MWh)", min_value=0.0, value=103.0, step=0.5, format="%.1f", key="mi277_mi5")
+        mi6_277 = r2_277[1].number_input("MI6 (€/MWh)", min_value=0.0, value=97.5, step=0.5, format="%.1f", key="mi277_mi6")
+        mi7_277 = r2_277[2].number_input("MI7 (€/MWh)", min_value=0.0, value=100.5, step=0.5, format="%.1f", key="mi277_mi7")
+        tol277 = r2_277[3].slider("Tolleranza (€/MWh)", min_value=0.0, max_value=10.0,
+                                  value=1.0, step=0.5, format="%.1f",
+                                  key="mi277_tol",
+                                  help="Scostamenti entro la tolleranza sono 'allineati' (nessun segnale).")
+        try:
+            prz277 = {"MI1": mi1_277, "MI2": mi2_277, "MI3": mi3_277, "MI4": mi4_277,
+                      "MI5": mi5_277, "MI6": mi6_277, "MI7": mi7_277}
+            ana277 = mi277_analizza(prz277, mgp277, tol277)
+            snt277 = mi277_sintesi(ana277)
+            cla277 = mi277_classifica(ana277)
+        except ValueError as e277:
+            st.error(f"Dati non validi: {e277}")
+            st.stop()
+        k1_277, k2_277, k3_277, k4_277, k5_277, k6_277 = st.columns(6)
+        render_kpi("MGP (€/MWh)", f"{mgp277:.1f}", k1_277)
+        render_kpi("Spread medio (€)", f"{snt277['spread_medio']:+.2f}", k2_277)
+        render_kpi("Spread max (€)", f"{snt277['spread_max']:+.2f}", k3_277)
+        render_kpi("Spread min (€)", f"{snt277['spread_min']:+.2f}", k4_277)
+        render_kpi("Migliore vendita", f"{snt277['migliore_vendita']} ({snt277['migliore_vendita_spread']:+.1f})", k5_277)
+        render_kpi("Migliore acquisto", f"{snt277['migliore_acquisto']} ({snt277['migliore_acquisto_spread']:+.1f})", k6_277)
+        nv277 = snt277["n_vendita_conveniente"]
+        na277 = snt277["n_acquisto_conveniente"]
+        if nv277 and na277:
+            st.info(f"ℹ️ {nv277} asta/e con vendita conveniente su MI vs MGP e {na277} con acquisto conveniente: chiudere il saldo dove il segno e' favorevole, tenendo conto dei volumi disponibili in ogni asta.")
+        elif nv277:
+            st.success(f"✅ Le aste MI quotano sopra l'MGP: vendere su {snt277['migliore_vendita']} rende {snt277['migliore_vendita_spread']:+.2f} €/MWh in piu' rispetto al riferimento.")
+        elif na277:
+            st.success(f"✅ Le aste MI quotano sotto l'MGP: comprare su {snt277['migliore_acquisto']} costa {abs(snt277['migliore_acquisto_spread']):.2f} €/MWh in meno rispetto al riferimento.")
+        else:
+            st.info("ℹ️ Tutte le aste sono allineate all'MGP entro la tolleranza: nessun segnale operativo.")
+        st.markdown("**Spread MI − MGP per asta (€/MWh)**")
+        dgb277 = pd.DataFrame([{"sessione": r["sessione"],
+                                "spread_eur_mwh": round(r["spread_eur_mwh"], 2),
+                                "segnale": r["segnale"]} for r in ana277])
+        figb277 = px.bar(dgb277, x="sessione", y="spread_eur_mwh", color="segnale",
+                         title="Scostamento aste MI vs MGP (€/MWh)",
+                         labels={"sessione": "Asta", "spread_eur_mwh": "Spread (€/MWh)", "segnale": "Segnale"},
+                         color_discrete_map={"vendita_conveniente": "#22c55e",
+                                             "acquisto_conveniente": "#3b82f6",
+                                             "allineata": "#9ca3af"})
+        figb277.add_hline(y=0.0, line_dash="solid", line_color="#4b5563",
+                          annotation_text="MGP")
+        st.plotly_chart(figb277, use_container_width=True)
+        with st.expander("Dettaglio per asta ed export CSV"):
+            dft277 = pd.DataFrame([{"sessione": r["sessione"],
+                                    "prezzo_mi_eur_mwh": round(r["prezzo_mi"], 2),
+                                    "prezzo_mgp_eur_mwh": round(r["prezzo_mgp"], 2),
+                                    "spread_eur_mwh": round(r["spread_eur_mwh"], 2),
+                                    "spread_pct": (round(r["spread_pct"], 2)
+                                                   if r["spread_pct"] is not None else "—"),
+                                    "segnale": r["segnale"]} for r in cla277])
+            st.dataframe(dft277, use_container_width=True, hide_index=True)
+            st.caption(f"Spread medio {snt277['spread_medio']:+.2f} €/MWh su {snt277['n_sessioni']} aste (tolleranza {tol277:.1f} €/MWh). Segnale 'vendita_conveniente' = MI sopra MGP oltre la tolleranza; 'acquisto_conveniente' = MI sotto MGP oltre la tolleranza.")
+            st.download_button("⬇️ Export CSV analisi",
+                               data=dft277.to_csv(index=False, sep=";").encode("utf-8"),
+                               file_name="aste_mi_scostamenti.csv", mime="text/csv",
+                               key="mi277_csv",
+                               help="Spread e segnali per le 7 aste MI vs MGP.")
+        st.caption("Nota: i prezzi MI reali variano per zona e per ora; questa tab lavora su un prezzo unico per asta (es. medio giornaliero). Per l'operativita' reale confrontare i prezzi orari zona per zona e i volumi scambiati in ogni asta.")
 
 # Footer
 

@@ -1,0 +1,201 @@
+"""Test tab277 'Aste MI: scostamenti vs MGP': registry + funzioni pure.
+
+Funzioni pure estratte da app.py via AST con tests/appfuncs.py (niente Streamlit).
+Verifica consistenza del registry (titoli/dvar/with coerenti) e l'allineamento
+titolo-contenuto inclusa la tab277.
+"""
+
+import re
+from pathlib import Path
+
+import pytest
+
+from appfuncs import load
+
+_F = load("mi277_sessioni", "mi277_num", "mi277_valida_sessione", "mi277_parse_prezzi",
+          "mi277_spread", "mi277_spread_pct", "mi277_segnale",
+          "mi277_analizza", "mi277_statistiche", "mi277_classifica",
+          "mi277_sintesi")
+mi277_sessioni = _F["mi277_sessioni"]
+mi277_num = _F["mi277_num"]
+mi277_valida_sessione = _F["mi277_valida_sessione"]
+mi277_parse_prezzi = _F["mi277_parse_prezzi"]
+mi277_spread = _F["mi277_spread"]
+mi277_spread_pct = _F["mi277_spread_pct"]
+mi277_segnale = _F["mi277_segnale"]
+mi277_analizza = _F["mi277_analizza"]
+mi277_statistiche = _F["mi277_statistiche"]
+mi277_classifica = _F["mi277_classifica"]
+mi277_sintesi = _F["mi277_sintesi"]
+
+APP = Path(__file__).parent.parent / "app.py"
+
+TITLE277 = "⚡ Aste MI: scostamenti vs MGP"
+TITLE276 = "💧 Cash flow at risk (CFaR)"
+
+CSV_PREZZI = "sessione,prezzo_eur_mwh\nMI1,102.5\nMI2,98.0\nMI7,105.0\n"
+
+
+def _registry():
+    src = APP.read_text(encoding="utf-8")
+    line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
+    titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
+    dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
+    withs = re.findall(r"    with (tab\d+):", src)
+    return src, titoli, dvars, withs
+
+
+class TestRegistryTab277:
+    def test_tab277_dichiarata(self):
+        src, titoli, dvars, withs = _registry()
+        assert len(titoli) == len(dvars) == len(withs) == 277
+        assert TITLE277 in titoli
+        assert "tab277" in dvars
+        assert "tab277" in withs
+        assert titoli[dvars.index("tab277")] == TITLE277
+        assert titoli[-1] == TITLE277
+        keys = re.findall(r'key="(mi277_[^"]+)"', src)
+        assert len(keys) == len(set(keys)) >= 5
+
+    def test_titoli_allineati_276_277(self):
+        _, titoli, dvars, _ = _registry()
+        assert titoli[dvars.index("tab276")] == TITLE276
+        assert titoli[dvars.index("tab277")] == TITLE277
+
+    def test_helper_definiti_prima_della_ui(self):
+        src = APP.read_text(encoding="utf-8")
+        i_ws = src.index("if workspace ==")
+        for fn in ("mi277_sessioni", "mi277_num", "mi277_valida_sessione", "mi277_parse_prezzi",
+                   "mi277_spread", "mi277_spread_pct", "mi277_segnale",
+                   "mi277_analizza", "mi277_statistiche", "mi277_classifica",
+                   "mi277_sintesi"):
+            assert src.index(f"def {fn}(") < i_ws
+            assert src.index("    with tab277:") > i_ws
+
+
+class TestMi277NumSessione:
+    def test_sessioni(self):
+        assert mi277_sessioni() == ("MI1", "MI2", "MI3", "MI4", "MI5", "MI6", "MI7")
+
+    def test_num_ok(self):
+        assert mi277_num(100, "x") == 100.0
+        assert mi277_num(98.5, "x") == 98.5
+
+    def test_num_invalidi(self):
+        import math
+        for bad in (True, math.nan, "100", None):
+            with pytest.raises(ValueError):
+                mi277_num(bad, "x")
+
+    def test_sessione_ok(self):
+        assert mi277_valida_sessione("mi1") == "MI1"
+        assert mi277_valida_sessione(" MI 7 ") == "MI7"
+
+    def test_sessione_invalidi(self):
+        for bad in ("MI8", "MGP", "", None, 3):
+            with pytest.raises(ValueError):
+                mi277_valida_sessione(bad)
+
+
+class TestMi277ParsePrezzi:
+    def test_base(self):
+        pr = mi277_parse_prezzi(CSV_PREZZI)
+        assert pr == {"MI1": 102.5, "MI2": 98.0, "MI7": 105.0}
+
+    def test_senza_header(self):
+        assert mi277_parse_prezzi("MI3,101.0") == {"MI3": 101.0}
+
+    def test_invalidi(self):
+        for bad in ("", "sessione\n", "MI1,xx", "MI9,100",
+                    "MI1,-5", "MI1,100\nMI1,101", "MI1,100,extra"):
+            with pytest.raises(ValueError):
+                mi277_parse_prezzi(bad)
+
+
+class TestMi277SpreadSegnale:
+    def test_spread(self):
+        assert mi277_spread(102.5, 100.0) == pytest.approx(2.5)
+        assert mi277_spread(98.0, 100.0) == pytest.approx(-2.0)
+
+    def test_spread_pct(self):
+        assert mi277_spread_pct(2.5, 100.0) == pytest.approx(2.5)
+        assert mi277_spread_pct(-2.0, 100.0) == pytest.approx(-2.0)
+        assert mi277_spread_pct(2.5, 0.0) is None
+
+    def test_segnale(self):
+        assert mi277_segnale(2.5, 1.0) == "vendita_conveniente"
+        assert mi277_segnale(-2.5, 1.0) == "acquisto_conveniente"
+        assert mi277_segnale(0.5, 1.0) == "allineata"
+        assert mi277_segnale(-0.5, 1.0) == "allineata"
+        assert mi277_segnale(1.0, 1.0) == "allineata"
+
+    def test_segnale_invalido(self):
+        with pytest.raises(ValueError):
+            mi277_segnale(1.0, -1.0)
+
+
+class TestMi277Analizza:
+    def test_base(self):
+        pr = mi277_parse_prezzi(CSV_PREZZI)
+        ana = mi277_analizza(pr, 100.0, tolleranza=1.0)
+        assert [r["sessione"] for r in ana] == ["MI1", "MI2", "MI7"]
+        assert ana[0]["spread_eur_mwh"] == pytest.approx(2.5)
+        assert ana[0]["spread_pct"] == pytest.approx(2.5)
+        assert ana[0]["segnale"] == "vendita_conveniente"
+        assert ana[1]["segnale"] == "acquisto_conveniente"
+        assert ana[2]["prezzo_mgp"] == 100.0
+
+    def test_ordine_sessioni(self):
+        pr = {"MI7": 100.0, "MI1": 100.0}
+        ana = mi277_analizza(pr, 100.0)
+        assert [r["sessione"] for r in ana] == ["MI1", "MI7"]
+
+    def test_invalidi(self):
+        with pytest.raises(ValueError):
+            mi277_analizza({}, 100.0)
+        with pytest.raises(ValueError):
+            mi277_analizza({"MI1": 100.0}, -5.0)
+
+
+class TestMi277StatisticheSintesi:
+    def test_statistiche(self):
+        s = mi277_statistiche([2.5, -2.0, 5.0])
+        assert s["n"] == 3
+        assert s["media"] == pytest.approx(5.5 / 3)
+        assert s["mediana"] == pytest.approx(2.5)
+        assert s["min"] == pytest.approx(-2.0)
+        assert s["max"] == pytest.approx(5.0)
+        assert s["dev_std"] > 0
+        assert s["quota_positive"] == pytest.approx(2 / 3)
+
+    def test_statistiche_singolo(self):
+        s = mi277_statistiche([3.0])
+        assert s["dev_std"] == pytest.approx(0.0)
+        assert s["mediana"] == pytest.approx(3.0)
+
+    def test_statistiche_vuote(self):
+        with pytest.raises(ValueError):
+            mi277_statistiche([])
+
+    def test_classifica(self):
+        pr = mi277_parse_prezzi(CSV_PREZZI)
+        ana = mi277_analizza(pr, 100.0)
+        cla = mi277_classifica(ana)
+        assert [r["sessione"] for r in cla] == ["MI7", "MI1", "MI2"]
+
+    def test_sintesi(self):
+        pr = mi277_parse_prezzi(CSV_PREZZI)
+        ana = mi277_analizza(pr, 100.0, tolleranza=1.0)
+        s = mi277_sintesi(ana)
+        assert s["n_sessioni"] == 3
+        assert s["migliore_vendita"] == "MI7"
+        assert s["migliore_vendita_spread"] == pytest.approx(5.0)
+        assert s["migliore_acquisto"] == "MI2"
+        assert s["migliore_acquisto_spread"] == pytest.approx(-2.0)
+        assert s["spread_medio"] == pytest.approx((2.5 - 2.0 + 5.0) / 3)
+        assert s["n_vendita_conveniente"] == 2
+        assert s["n_acquisto_conveniente"] == 1
+
+    def test_sintesi_vuota(self):
+        with pytest.raises(ValueError):
+            mi277_sintesi([])
