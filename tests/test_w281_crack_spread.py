@@ -28,6 +28,7 @@ cs281_verdetto = _F["cs281_verdetto"]
 APP = Path(__file__).parent.parent / "app.py"
 
 TITLE281 = "🛢️ Crack spread: margine raffinazione 3-2-1"
+TITLE282 = "🧪 Margine petrolchimico: nafta → etilene"
 TITLE280 = "🚢 LNG vs gasdotto: costo delivered"
 TITLE279 = "🌪️ Derivati meteo: pricing HDD/CDD"
 
@@ -48,12 +49,12 @@ def _registry():
 class TestRegistryTab281:
     def test_tab281_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 281
+        assert len(titoli) == len(dvars) == len(withs) == 282
         assert TITLE281 in titoli
         assert "tab281" in dvars
         assert "tab281" in withs
         assert titoli[dvars.index("tab281")] == TITLE281
-        assert titoli[-1] == TITLE281
+        assert titoli[-1] == TITLE282
         keys = re.findall(r'key="(cs281_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
@@ -62,6 +63,7 @@ class TestRegistryTab281:
         assert titoli[dvars.index("tab279")] == TITLE279
         assert titoli[dvars.index("tab280")] == TITLE280
         assert titoli[dvars.index("tab281")] == TITLE281
+        assert titoli[dvars.index("tab282")] == TITLE282
 
 
 class TestCs281Validatori:

@@ -29,6 +29,7 @@ APP = Path(__file__).parent.parent / "app.py"
 
 TITLE280 = "🚢 LNG vs gasdotto: costo delivered"
 TITLE281 = "🛢️ Crack spread: margine raffinazione 3-2-1"
+TITLE282 = "🧪 Margine petrolchimico: nafta → etilene"
 TITLE279 = "🌪️ Derivati meteo: pricing HDD/CDD"
 TITLE278 = "🌡️ Stress climatico: domanda e prezzo"
 
@@ -50,12 +51,12 @@ def _registry():
 class TestRegistryTab280:
     def test_tab280_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 281
+        assert len(titoli) == len(dvars) == len(withs) == 282
         assert TITLE280 in titoli
         assert "tab280" in dvars
         assert "tab280" in withs
         assert titoli[dvars.index("tab280")] == TITLE280
-        assert titoli[-1] == TITLE281
+        assert titoli[-1] == TITLE282
         keys = re.findall(r'key="(lg280_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
@@ -65,6 +66,7 @@ class TestRegistryTab280:
         assert titoli[dvars.index("tab279")] == TITLE279
         assert titoli[dvars.index("tab280")] == TITLE280
         assert titoli[dvars.index("tab281")] == TITLE281
+        assert titoli[dvars.index("tab282")] == TITLE282
 
 
 class TestLg280Validatori:
