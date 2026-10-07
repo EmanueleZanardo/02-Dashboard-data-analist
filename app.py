@@ -40413,6 +40413,131 @@ def es295_verdetto(p1, p2, N):
         v = "coda sottostimata: ricalibrare il modello ES"
     return {"verdetto": v, "pmin": pm}
 
+
+def ce296_num(x, nome):
+    """Valida uno scalare numerico: no bool, no NaN/inf."""
+    import math
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        raise ValueError(f"{nome}: deve essere un numero")
+    if math.isnan(x) or math.isinf(x):
+        raise ValueError(f"{nome}: NaN/inf non ammessi")
+    return float(x)
+
+
+def ce296_conf(c):
+    """Valida una confidenza strettamente tra 0 e 1."""
+    v = ce296_num(c, "conf")
+    if not 0.0 < v < 1.0:
+        raise ValueError("conf: deve essere strettamente tra 0 e 1")
+    return v
+
+
+def ce296_parse_matrice(testo):
+    """Parsa una matrice di P&L: una riga per giorno, colonne separate da ';'.
+
+    Colonne = posizioni (perdite positive = -P&L gia' convertite dal chiamante
+    se serve; qui i valori sono perdite con segno: positivo = perdita).
+    Righe vuote e righe che iniziano con '#' ignorate. Virgola decimale
+    ammessa. Servono almeno 2 posizioni e 20 giorni."""
+    righe = []
+    for ln in str(testo).split("\n"):
+        s = ln.strip()
+        if not s or s.startswith("#"):
+            continue
+        celle = [c.strip() for c in s.split(";")]
+        try:
+            vals = [float(c.replace(",", ".")) for c in celle]
+        except ValueError:
+            raise ValueError(f"valore non numerico nella riga: {s!r}")
+        righe.append([ce296_num(v, "pnl") for v in vals])
+    if not righe:
+        raise ValueError("matrice vuota")
+    m = len(righe[0])
+    if m < 2:
+        raise ValueError("servono almeno 2 posizioni (colonne)")
+    for i, r in enumerate(righe):
+        if len(r) != m:
+            raise ValueError(f"riga {i + 1}: {len(r)} colonne, attese {m}")
+    if len(righe) < 20:
+        raise ValueError("servono almeno 20 giorni (righe)")
+    return righe
+
+
+def ce296_quantile(vals, q):
+    """Quantile storico con interpolazione lineare (metodo type-7, numpy)."""
+    import math
+    s = sorted(ce296_num(v, "v") for v in vals)
+    if not s:
+        raise ValueError("vals: lista vuota")
+    qq = ce296_num(q, "q")
+    if not 0.0 <= qq <= 1.0:
+        raise ValueError("q: deve essere in [0, 1]")
+    n = len(s)
+    if n == 1:
+        return s[0]
+    pos = qq * (n - 1)
+    lo = math.floor(pos)
+    hi = math.ceil(pos)
+    if lo == hi:
+        return s[lo]
+    return s[lo] + (s[hi] - s[lo]) * (pos - lo)
+
+
+def ce296_componenti(matrice, conf):
+    """Allocazione di Eulero dell'ES di portafoglio sulle posizioni.
+
+    L_tot,t = somma_i L_i,t; VaR = quantile(L_tot, conf);
+    ES = media(L_tot | L_tot > VaR);
+    CES_i = media(L_i | L_tot > VaR)  -> somma_i CES_i = ES.
+    ES standalone_i = ES della sola posizione i (0.0 se la posizione da sola
+    non supera mai il proprio VaR: non contribuisce alla coda).
+    diversificazione = somma standalone - ES (>= 0 a meno di rumore)."""
+    c = ce296_conf(conf)
+    righe = [[ce296_num(v, "pnl") for v in r] for r in matrice]
+    if not righe:
+        raise ValueError("matrice vuota")
+    m = len(righe[0])
+    if any(len(r) != m for r in righe):
+        raise ValueError("matrice: righe di lunghezza diversa")
+    totali = [sum(r) for r in righe]
+    var = ce296_quantile(totali, c)
+    exc = [i for i, t in enumerate(totali) if t > var]
+    if not exc:
+        raise ValueError("nessun superamento del VaR: ES non calcolabile")
+    nes = [totali[i] for i in exc]
+    es = sum(nes) / len(nes)
+    componenti = [sum(righe[i][j] for i in exc) / len(exc)
+                  for j in range(m)]
+    quote = [comp / es if es > 0.0 else 0.0 for comp in componenti]
+    standalone = []
+    for j in range(m):
+        col = [righe[i][j] for i in range(len(righe))]
+        vj = ce296_quantile(col, c)
+        sup = [v for v in col if v > vj]
+        standalone.append(sum(sup) / len(sup) if sup else 0.0)
+    return {
+        "n": len(righe), "m": m, "var": var, "es": es,
+        "superamenti": len(exc),
+        "componenti": componenti, "quote": quote,
+        "standalone": standalone,
+        "somma_standalone": sum(standalone),
+        "diversificazione": sum(standalone) - es,
+    }
+
+
+def ce296_verdetto(quota_max):
+    """Verdetto di concentrazione dalla quota massima di Component ES:
+    'coda diversificata' (quota < 50%), 'concentrazione elevata' (50-70%),
+    'concentrazione critica' (>= 70%: una sola posizione domina la coda)."""
+    q = ce296_num(quota_max, "quota_max")
+    if not 0.0 <= q <= 1.0:
+        raise ValueError("quota_max: deve essere in [0, 1]")
+    if q >= 0.70:
+        return "concentrazione critica: una sola posizione domina la coda"
+    if q >= 0.50:
+        return "concentrazione elevata: la coda dipende da poche posizioni"
+    return "coda diversificata: nessuna posizione domina"
+
 if workspace == _('ws1'):
     st.markdown(f"<h1>{_('ws1')}</h1>", unsafe_allow_html=True)
     banner_demo("simulatore strategico: margini, centrali e curve simulate")
@@ -41054,7 +41179,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256, tab257, tab258, tab259, tab260, tab261, tab262, tab263, tab264, tab265, tab266, tab267, tab268, tab269, tab270, tab271, tab272, tab273, tab274, tab275, tab276, tab277, tab278, tab279, tab280, tab281, tab282, tab283, tab284, tab285, tab286, tab287, tab288, tab289, tab290, tab291, tab292, tab293, tab294, tab295 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete", "🔥 Teleriscaldamento vs caldaia", "🌿 Clean spread (con CO₂)", "🇮🇹 PUN da prezzi zonali", "❄️ Pompa di calore vs caldaia", "🏢 PUE & costo data center", "🔌 Gruppo elettrogeno vs blackout", "🚗 Flotta aziendale: TCO diesel vs elettrico", "📜 Garanzie di origine: costo del 100% rinnovabile", "♻️ Fine vita FV: revamping vs dismissione", "🌾️ Agrivoltaico: doppio reddito", "🟢 Biometano: business case", "🌬️ Eolico onshore: business case", "🌊 Idroelettrico run-of-river: business case", "🔥 Geotermia profonda: business case", "☀️ Solare termodinamico (CSP): business case", "🌬️ Eolico offshore: business case", "☀️ Fotovoltaico utility-scale: business case", "⚛️ Nucleare SMR: business case", "📊 Posizione vs limiti di rischio", "💧 Cash flow at risk (CFaR)", "⚡ Aste MI: scostamenti vs MGP", "🌡️ Stress climatico: domanda e prezzo", "🌪️ Derivati meteo: pricing HDD/CDD", "🚢 LNG vs gasdotto: costo delivered", "🛢️ Crack spread: margine raffinazione 3-2-1", "🧪 Margine petrolchimico: nafta → etilene", "🛢️ Carry petrolio: contango & stoccaggio fisico", "🏭 Unit commitment CCGT: accendere o no?", "🛛️ Differenziali greggio: sweet vs sour", "⛽ Basis gas TTF–PSV", "🚢⚡ Rigassificazione GNL: margine terminale", "⚡🔥 Clean spark spread: margine centrale a gas", "⚫🔥 Clean dark spread: margine centrale a carbone", "🔀💰 PTR transfrontaliero: vale il prezzo d'asta?", "📊💹 Sharpe & Sortino: la strategia rende davvero?", "🪓📊 Component VaR: quale posizione tagliare per prima?", "🛡📉 Hedge ratio ottimale: quanto coprire con i futures?", "🧪📉 Backtest del VaR: il modello tiene?", "🧪🛡 Backtest dell'ES: la coda e' sottostimata?"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256, tab257, tab258, tab259, tab260, tab261, tab262, tab263, tab264, tab265, tab266, tab267, tab268, tab269, tab270, tab271, tab272, tab273, tab274, tab275, tab276, tab277, tab278, tab279, tab280, tab281, tab282, tab283, tab284, tab285, tab286, tab287, tab288, tab289, tab290, tab291, tab292, tab293, tab294, tab295, tab296 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete", "🔥 Teleriscaldamento vs caldaia", "🌿 Clean spread (con CO₂)", "🇮🇹 PUN da prezzi zonali", "❄️ Pompa di calore vs caldaia", "🏢 PUE & costo data center", "🔌 Gruppo elettrogeno vs blackout", "🚗 Flotta aziendale: TCO diesel vs elettrico", "📜 Garanzie di origine: costo del 100% rinnovabile", "♻️ Fine vita FV: revamping vs dismissione", "🌾️ Agrivoltaico: doppio reddito", "🟢 Biometano: business case", "🌬️ Eolico onshore: business case", "🌊 Idroelettrico run-of-river: business case", "🔥 Geotermia profonda: business case", "☀️ Solare termodinamico (CSP): business case", "🌬️ Eolico offshore: business case", "☀️ Fotovoltaico utility-scale: business case", "⚛️ Nucleare SMR: business case", "📊 Posizione vs limiti di rischio", "💧 Cash flow at risk (CFaR)", "⚡ Aste MI: scostamenti vs MGP", "🌡️ Stress climatico: domanda e prezzo", "🌪️ Derivati meteo: pricing HDD/CDD", "🚢 LNG vs gasdotto: costo delivered", "🛢️ Crack spread: margine raffinazione 3-2-1", "🧪 Margine petrolchimico: nafta → etilene", "🛢️ Carry petrolio: contango & stoccaggio fisico", "🏭 Unit commitment CCGT: accendere o no?", "🛛️ Differenziali greggio: sweet vs sour", "⛽ Basis gas TTF–PSV", "🚢⚡ Rigassificazione GNL: margine terminale", "⚡🔥 Clean spark spread: margine centrale a gas", "⚫🔥 Clean dark spread: margine centrale a carbone", "🔀💰 PTR transfrontaliero: vale il prezzo d'asta?", "📊💹 Sharpe & Sortino: la strategia rende davvero?", "🪓📊 Component VaR: quale posizione tagliare per prima?", "🛡📉 Hedge ratio ottimale: quanto coprire con i futures?", "🧪📉 Backtest del VaR: il modello tiene?", "🧪🛡 Backtest dell'ES: la coda e' sottostimata?", "🪓🛡 Component ES: chi contribuisce alla coda?"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -68142,6 +68267,96 @@ elif workspace == _('ws8'):
                                mime="text/csv", key="es295_csv",
                                help="Risultati del backtest di Acerbi-Szekely sull'ES.")
         st.caption("Nota: p-value asintotici unilaterali via CLT (z = sqrt(n)*stat/s); Z1 testa frequenza+severita', Z2 la sola severita' condizionata ai superamenti. La versione regolamentare usa valori critici simulati sotto H0. Serie demo a scopo illustrativo.")
+
+    with tab296:
+        titolo296 = edu("Component ES: chi contribuisce alla coda?", "L'Expected Shortfall del portafoglio si puo' scomporre per posizione con l'allocazione di Eulero: la Component ES di ciascuna posizione e' la perdita media di quella posizione nei giorni in cui il portafoglio supera il VaR. La somma delle componenti ricostruisce l'ES; la differenza con la somma degli ES standalone misura il beneficio di diversificazione.")
+        st.markdown(f"<h1>🪓🛡 {titolo296}</h1>", unsafe_allow_html=True)
+        st.caption("Allocazione di Eulero dell'ES: quanta coda viene da gas, power e CO2 — e quanto diversifica il portafoglio.")
+        demo_296 = "88,66;-126,32;-68,09\n-144,61;527,22;539,76\n148,57;-134,88;74,99\n722,39;-148,75;-149,99\n-96,02;-97,44;89,49\n1674,31;-60,09;638,81\n70,4;-96,72;134,4\n-137,05;663,18;-144,07\n621,44;451,64;-148,11\n-145,41;-100,42;152,36\n2504,37;154,86;-131,85\n-135,66;473,31;126,38\n-148,49;-140,71;-120,04\n-149,79;-70,31;-7,06\n146,15;-149,13;-110,02\n1145,85;42,18;-76,79\n-126,57;-67,55;732,16\n-147,98;-13,51;-79,43\n79,45;-124,92;1715,81\n321,97;-148,72;-149,68\n-54,55;-121,78;-78,18\n-131,57;494,93;-149,84\n-149,88;-134,73;-124,72\n538,52;643,16;933,61\n-81,8;-102,37;-101,25\n-149,97;-148,77;69,25\n-81,25;-129,89;269,72\n130,37;440,08;366,81\n-135,35;-149,92;2644,91\n-115,64;667,79;-109,58\n-137,47;334,22;-117,0\n-146,6;-110,21;-142,05\n-104,15;521,38;-115,29\n286,64;-149,99;-58,32\n-150,0;-90,23;-111,37\n-145,6;266,98;144,33\n-105,25;-15,57;-148,86\n-108,49;-141,35;-143,56\n330,32;-149,5;16,01\n25,11;-149,66;521,29\n-149,84;464,71;187,2\n-47,73;-86,08;-98,97\n-149,72;-48,82;-123,74\n181,61;-53,74;348,51\n564,28;-139,33;153,81\n-149,94;52,52;-141,82\n344,07;-112,8;559,82\n-137,48;-51,73;80,06"
+        mat296 = st.text_area("Matrice P&L (perdite € con segno: positivo = perdita; una riga per giorno, colonne separate da ';')",
+                              value=demo_296, key="ce296_matrice",
+                              help="Ordine colonne della demo: Gas; Power; CO2. Incolla la tua matrice con lo stesso formato (minimo 2 colonne, 20 righe).")
+        c1_296, c2_296, c3_296 = st.columns(3)
+        with c1_296:
+            conf296 = st.number_input("Confidenza VaR/ES (%)", min_value=50.0,
+                                      max_value=99.99, value=97.50, step=0.5,
+                                      format="%.2f", key="ce296_conf",
+                                      help="Livello di confidenza per VaR ed ES.")
+        with c2_296:
+            vista296 = st.radio("Vista grafico", ["Componenti (€)", "Quote (%)"],
+                                key="ce296_vista",
+                                help="Barre in euro di Component ES oppure in quota percentuale sull'ES.")
+        with c3_296:
+            st.write("")
+            st.write("")
+            mostra_sa296 = st.checkbox("Mostra ES standalone", value=True,
+                                       key="ce296_mostra_standalone",
+                                       help="Confronta ogni Component ES con l'ES della posizione presa da sola.")
+        confq_296 = conf296 / 100.0
+        m296 = ce296_parse_matrice(mat296)
+        r296 = ce296_componenti(m296, confq_296)
+        nomi296 = ["Gas", "Power", "CO2"] if r296["m"] == 3 else \
+            [f"Pos {i + 1}" for i in range(r296["m"])]
+        qmax_296 = max(r296["quote"]) if r296["quote"] else 0.0
+        top296 = nomi296[r296["quote"].index(qmax_296)] if r296["quote"] else "-"
+        verd296 = ce296_verdetto(qmax_296)
+        k1_296, k2_296, k3_296, k4_296, k5_296, k6_296 = st.columns(6)
+        k1_296.metric("Posizioni", f"{r296['m']}")
+        k2_296.metric("Superamenti", f"{r296['superamenti']}")
+        k3_296.metric("VaR portafoglio", f"{r296['var']:,.0f} €")
+        k4_296.metric("ES portafoglio", f"{r296['es']:,.0f} €")
+        k5_296.metric("Diversificazione", f"{r296['diversificazione']:,.0f} €")
+        k6_296.metric("Top contributor", f"{top296} {qmax_296:.0%}")
+        if verd296.startswith("concentrazione critica"):
+            st.error(f"{verd296} ({top296} pesa il {qmax_296:.1%} dell'ES): ridurre l'esposizione o coprire la posizione dominante.")
+        elif verd296.startswith("concentrazione elevata"):
+            st.warning(f"{verd296} ({top296} pesa il {qmax_296:.1%} dell'ES): valutare una copertura mirata sulla posizione dominante.")
+        else:
+            st.success(f"{verd296}: il contributor maggiore ({top296}) pesa solo il {qmax_296:.1%} dell'ES di {r296['es']:,.0f} €.")
+        if vista296 == "Quote (%)":
+            dfc_296 = pd.DataFrame({"posizione": nomi296,
+                                    "valore": [100.0 * q for q in r296["quote"]]})
+            ylab_296 = "Quota sull'ES (%)"
+        else:
+            dfc_296 = pd.DataFrame({"posizione": nomi296,
+                                    "valore": r296["componenti"]})
+            ylab_296 = "Component ES (€)"
+        figc_296 = px.bar(dfc_296, x="posizione", y="valore",
+                          title="Component ES per posizione (allocazione di Eulero)",
+                          labels={"posizione": "Posizione", "valore": ylab_296},
+                          text_auto=".2s")
+        st.plotly_chart(figc_296, use_container_width=True)
+        with st.expander("Dettagli ed export CSV"):
+            righe_296 = []
+            for j, nm in enumerate(nomi296):
+                righe_296.append({
+                    "posizione": nm,
+                    "component_es_eur": round(r296["componenti"][j], 2),
+                    "quota_es_pct": round(100.0 * r296["quote"][j], 2),
+                    "es_standalone_eur": round(r296["standalone"][j], 2),
+                })
+            dfv_296 = pd.DataFrame(righe_296)
+            st.dataframe(dfv_296, use_container_width=True, hide_index=True)
+            if mostra_sa296:
+                dfc2_296 = pd.DataFrame({
+                    "posizione": nomi296 + nomi296,
+                    "serie": (["Component ES"] * r296["m"] +
+                              ["ES standalone"] * r296["m"]),
+                    "valore": r296["componenti"] + r296["standalone"],
+                })
+                figc2_296 = px.bar(dfc2_296, x="posizione", y="valore",
+                                   color="serie", barmode="group",
+                                   title="Component ES vs ES standalone",
+                                   labels={"posizione": "Posizione",
+                                           "valore": "€", "serie": "Serie"})
+                st.plotly_chart(figc2_296, use_container_width=True)
+            st.caption(f"Allocazione di Eulero dell'ES su {r296['n']} giorni e {r296['m']} posizioni al {conf296:.2f}%: ES portafoglio {r296['es']:,.0f} € = somma componenti; somma ES standalone {r296['somma_standalone']:,.0f} € -> diversificazione {r296['diversificazione']:,.0f} €. {verd296}.")
+            st.download_button("⬇️ Export CSV componenti",
+                               data=dfv_296.to_csv(index=False, sep=";").encode("utf-8"),
+                               file_name="component_es.csv",
+                               mime="text/csv", key="ce296_csv",
+                               help="Component ES per posizione con quote e ES standalone.")
+        st.caption("Nota: CES_i = media delle perdite della posizione i nei giorni in cui il portafoglio supera il VaR storico; per costruzione la somma delle componenti ricostruisce l'ES. Matrice demo a scopo illustrativo.")
 
 # Footer
 

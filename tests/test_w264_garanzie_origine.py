@@ -57,6 +57,7 @@ TITLE292 = "🪓📊 Component VaR: quale posizione tagliare per prima?"
 TITLE293 = "🛡📉 Hedge ratio ottimale: quanto coprire con i futures?"
 TITLE294 = "🧪📉 Backtest del VaR: il modello tiene?"
 TITLE295 = "🧪🛡 Backtest dell'ES: la coda e' sottostimata?"
+TITLE296 = "🪓🛡 Component ES: chi contribuisce alla coda?"
 TITLE263 = "\U0001F697 Flotta aziendale: TCO diesel vs elettrico"
 
 CONSUMI_TXT = "85\n78\n82\n75\n70\n65\n60\n62\n68\n75\n82\n90"
@@ -75,12 +76,12 @@ def _registry():
 class TestRegistryTab264:
     def test_tab264_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 295
+        assert len(titoli) == len(dvars) == len(withs) == 296
         assert TITLE264 in titoli
         assert "tab264" in dvars
         assert "tab264" in withs
         assert titoli[dvars.index("tab264")] == TITLE264
-        assert titoli[-1] == TITLE295
+        assert titoli[-1] == TITLE296
         keys = re.findall(r'key="(go264_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

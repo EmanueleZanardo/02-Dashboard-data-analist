@@ -41,6 +41,7 @@ TITLE292 = "🪓📊 Component VaR: quale posizione tagliare per prima?"
 TITLE293 = "🛡📉 Hedge ratio ottimale: quanto coprire con i futures?"
 TITLE294 = "🧪📉 Backtest del VaR: il modello tiene?"
 TITLE295 = "🧪🛡 Backtest dell'ES: la coda e' sottostimata?"
+TITLE296 = "🪓🛡 Component ES: chi contribuisce alla coda?"
 TITLE290 = "🔀💰 PTR transfrontaliero: vale il prezzo d'asta?"
 TITLE289 = "⚫🔥 Clean dark spread: margine centrale a carbone"
 TITLE288 = "⚡🔥 Clean spark spread: margine centrale a gas"
@@ -61,12 +62,12 @@ def _registry():
 class TestRegistryTab291:
     def test_tab291_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 295
+        assert len(titoli) == len(dvars) == len(withs) == 296
         assert TITLE291 in titoli
         assert "tab291" in dvars
         assert "tab291" in withs
         assert titoli[dvars.index("tab291")] == TITLE291
-        assert titoli[-1] == TITLE295
+        assert titoli[-1] == TITLE296
         keys = re.findall(r'key="(ss291_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
