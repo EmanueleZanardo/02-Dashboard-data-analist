@@ -34,6 +34,7 @@ TITLE281 = "🛢️ Crack spread: margine raffinazione 3-2-1"
 TITLE282 = "🧪 Margine petrolchimico: nafta → etilene"
 TITLE283 = "🛢️ Carry petrolio: contango & stoccaggio fisico"
 TITLE284 = "🏭 Unit commitment CCGT: accendere o no?"
+TITLE285 = "🛛️ Differenziali greggio: sweet vs sour"
 TITLE277 = "⚡ Aste MI: scostamenti vs MGP"
 
 
@@ -49,12 +50,12 @@ def _registry():
 class TestRegistryTab278:
     def test_tab278_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 284
+        assert len(titoli) == len(dvars) == len(withs) == 285
         assert TITLE278 in titoli
         assert "tab278" in dvars
         assert "tab278" in withs
         assert titoli[dvars.index("tab278")] == TITLE278
-        assert titoli[-1] == TITLE284
+        assert titoli[-1] == TITLE285
         keys = re.findall(r'key="(sc278_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
@@ -68,6 +69,7 @@ class TestRegistryTab278:
         assert titoli[dvars.index("tab282")] == TITLE282
         assert titoli[dvars.index("tab283")] == TITLE283
         assert titoli[dvars.index("tab284")] == TITLE284
+        assert titoli[dvars.index("tab285")] == TITLE285
 
     def test_helper_definiti_prima_della_ui(self):
         src = APP.read_text(encoding="utf-8")

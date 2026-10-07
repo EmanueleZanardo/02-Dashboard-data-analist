@@ -50,6 +50,7 @@ TITLE281 = "🛢️ Crack spread: margine raffinazione 3-2-1"
 TITLE282 = "🧪 Margine petrolchimico: nafta → etilene"
 TITLE283 = "🛢️ Carry petrolio: contango & stoccaggio fisico"
 TITLE284 = "🏭 Unit commitment CCGT: accendere o no?"
+TITLE285 = "🛛️ Differenziali greggio: sweet vs sour"
 TITLE267 = "🟢 Biometano: business case"
 
 POT = 10.0
@@ -78,12 +79,12 @@ def _registry():
 class TestRegistryTab268:
     def test_tab268_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 284
+        assert len(titoli) == len(dvars) == len(withs) == 285
         assert TITLE268 in titoli
         assert "tab268" in dvars
         assert "tab268" in withs
         assert titoli[dvars.index("tab268")] == TITLE268
-        assert titoli[-1] == TITLE284
+        assert titoli[-1] == TITLE285
         keys = re.findall(r'key="(eo268_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
@@ -107,6 +108,7 @@ class TestRegistryTab268:
         assert titoli[dvars.index("tab282")] == TITLE282
         assert titoli[dvars.index("tab283")] == TITLE283
         assert titoli[dvars.index("tab284")] == TITLE284
+        assert titoli[dvars.index("tab285")] == TITLE285
 
 
 class TestEo268Num:

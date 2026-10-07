@@ -38608,6 +38608,161 @@ def uc284_sensibilita_prezzo(power_base, costo_marginale, costo_avv_tot,
     return righe
 
 
+def gd285_num(x, nome):
+    """Valida uno scalare numerico: no bool, no NaN/inf."""
+    import math
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        raise ValueError(f"{nome}: deve essere un numero")
+    if math.isnan(x) or math.isinf(x):
+        raise ValueError(f"{nome}: NaN/inf non ammessi")
+    return float(x)
+
+
+def gd285_pos(x, nome):
+    """Valida un numero >= 0."""
+    v = gd285_num(x, nome)
+    if v < 0:
+        raise ValueError(f"{nome}: non puo' essere negativo")
+    return v
+
+
+def gd285_frazioni(yields, nome="yields"):
+    """Valida 4 frazioni di resa in [0, 1] con somma <= 1."""
+    if not isinstance(yields, (list, tuple)) or len(yields) != 4:
+        raise ValueError(f"{nome}: servono esattamente 4 frazioni")
+    vs = [gd285_pos(y, f"{nome}[{i}]") for i, y in enumerate(yields)]
+    for i, v in enumerate(vs):
+        if v > 1:
+            raise ValueError(f"{nome}[{i}]: frazione > 1")
+    if sum(vs) > 1.0 + 1e-9:
+        raise ValueError(f"{nome}: la somma delle frazioni supera 1")
+    return vs
+
+
+def gd285_costo_delivered(brent, differenziale, nolo, assicurazione):
+    """Costo del greggio delivered in raffineria ($/bbl).
+
+    = benchmark (Brent) + differenziale (negativo = sconto per greggio
+    sour/pesante) + nolo + assicurazione."""
+    b = gd285_pos(brent, "brent")
+    d = gd285_num(differenziale, "differenziale")
+    n = gd285_pos(nolo, "nolo")
+    a = gd285_pos(assicurazione, "assicurazione")
+    return b + d + n + a
+
+
+def gd285_valore_prodotti(yields, prezzi):
+    """Valore dei prodotti per bbl di greggio ($/bbl).
+
+    yields/prezzi: 4 voci (benzina, diesel, jet, fuel oil). Il residuo
+    (1 - somma rese) e' valorizzato al prezzo del fuel oil (ultima voce)."""
+    ys = gd285_frazioni(yields)
+    if not isinstance(prezzi, (list, tuple)) or len(prezzi) != 4:
+        raise ValueError("prezzi: servono esattamente 4 prezzi")
+    ps = [gd285_pos(p, f"prezzi[{i}]") for i, p in enumerate(prezzi)]
+    residuo = 1.0 - sum(ys)
+    return sum(y * p for y, p in zip(ys, ps)) + residuo * ps[3]
+
+
+def gd285_penalita_zolfo(zolfo_perc, penalita_per_punto):
+    """Penalita' zolfo ($/bbl): % zolfo x $/bbl per punto percentuale."""
+    z = gd285_pos(zolfo_perc, "zolfo_perc")
+    pp = gd285_pos(penalita_per_punto, "penalita_per_punto")
+    return z * pp
+
+
+def gd285_margine_netto(valore_prodotti, costo_delivered, costo_raff,
+                        penalita_zolfo):
+    """Margine netto di raffinazione ($/bbl): valore prodotti meno costo
+    delivered meno costo di raffinazione meno penalita' zolfo."""
+    v = gd285_pos(valore_prodotti, "valore_prodotti")
+    c = gd285_num(costo_delivered, "costo_delivered")
+    r = gd285_pos(costo_raff, "costo_raff")
+    p = gd285_pos(penalita_zolfo, "penalita_zolfo")
+    return v - c - r - p
+
+
+def gd285_margine_tonnellata(margine_bbl, bbl_per_t=7.33):
+    """Converte il margine da $/bbl a $/t (default 7.33 bbl/t)."""
+    m = gd285_num(margine_bbl, "margine_bbl")
+    f = gd285_num(bbl_per_t, "bbl_per_t")
+    if f <= 0:
+        raise ValueError("bbl_per_t: deve essere > 0")
+    return m * f
+
+
+def gd285_breakeven_differenziale(valore_prodotti, nolo, assicurazione,
+                                  costo_raff, penalita_zolfo, brent,
+                                  margine_rif):
+    """Differenziale di break-even ($/bbl): il differenziale (meno negativo
+    = sconto minore) al quale il margine del greggio eguaglia esattamente il
+    margine di riferimento. Sotto questo sconto il greggio non conviene."""
+    v = gd285_pos(valore_prodotti, "valore_prodotti")
+    n = gd285_pos(nolo, "nolo")
+    a = gd285_pos(assicurazione, "assicurazione")
+    r = gd285_pos(costo_raff, "costo_raff")
+    p = gd285_pos(penalita_zolfo, "penalita_zolfo")
+    b = gd285_pos(brent, "brent")
+    mr = gd285_num(margine_rif, "margine_rif")
+    return v - n - a - r - p - b - mr
+
+
+def gd285_confronto(margine, margine_rif):
+    """Confronto con il greggio di riferimento: 'meglio' / 'pari' / 'peggio'."""
+    m = gd285_num(margine, "margine")
+    r = gd285_num(margine_rif, "margine_rif")
+    delta = m - r
+    if delta > 0:
+        esito = "meglio"
+    elif delta < 0:
+        esito = "peggio"
+    else:
+        esito = "pari"
+    return {"esito": esito, "delta": delta, "margine": m,
+            "margine_rif": r}
+
+
+def gd285_sensibilita_differenziale(valore_prodotti, brent, nolo,
+                                    assicurazione, costo_raff,
+                                    penalita_zolfo, diff_base, n_punti=9,
+                                    ampiezza=5.0):
+    """Margine netto al variare del differenziale (diff_base +/- ampiezza)."""
+    v = gd285_pos(valore_prodotti, "valore_prodotti")
+    b = gd285_pos(brent, "brent")
+    n = gd285_pos(nolo, "nolo")
+    a = gd285_pos(assicurazione, "assicurazione")
+    r = gd285_pos(costo_raff, "costo_raff")
+    p = gd285_pos(penalita_zolfo, "penalita_zolfo")
+    d0 = gd285_num(diff_base, "diff_base")
+    if isinstance(n_punti, bool) or not isinstance(n_punti, int) or n_punti < 3:
+        raise ValueError("n_punti: deve essere un intero >= 3")
+    amp = gd285_num(ampiezza, "ampiezza")
+    if amp <= 0:
+        raise ValueError("ampiezza: deve essere > 0")
+    righe = []
+    for j in range(n_punti):
+        d = d0 - amp + 2.0 * amp * j / (n_punti - 1)
+        margine = v - (b + d + n + a) - r - p
+        righe.append({"differenziale": d, "margine": margine})
+    return righe
+
+
+def gd285_verdetto(margine, soglia):
+    """Verdetto: 'conveniente' (margine >= soglia), 'marginale'
+    (0 <= margine < soglia), 'non_conveniente' (margine < 0)."""
+    m = gd285_num(margine, "margine")
+    s = gd285_num(soglia, "soglia")
+    if s < 0:
+        raise ValueError("soglia: non puo' essere negativa")
+    if m >= s:
+        v = "conveniente"
+    elif m >= 0:
+        v = "marginale"
+    else:
+        v = "non_conveniente"
+    return {"verdetto": v, "margine": m, "soglia": s}
+
+
 
 
 if workspace == _('ws1'):
@@ -39251,7 +39406,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256, tab257, tab258, tab259, tab260, tab261, tab262, tab263, tab264, tab265, tab266, tab267, tab268, tab269, tab270, tab271, tab272, tab273, tab274, tab275, tab276, tab277, tab278, tab279, tab280, tab281, tab282, tab283, tab284 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete", "🔥 Teleriscaldamento vs caldaia", "🌿 Clean spread (con CO₂)", "🇮🇹 PUN da prezzi zonali", "❄️ Pompa di calore vs caldaia", "🏢 PUE & costo data center", "🔌 Gruppo elettrogeno vs blackout", "🚗 Flotta aziendale: TCO diesel vs elettrico", "📜 Garanzie di origine: costo del 100% rinnovabile", "♻️ Fine vita FV: revamping vs dismissione", "🌾️ Agrivoltaico: doppio reddito", "🟢 Biometano: business case", "🌬️ Eolico onshore: business case", "🌊 Idroelettrico run-of-river: business case", "🔥 Geotermia profonda: business case", "☀️ Solare termodinamico (CSP): business case", "🌬️ Eolico offshore: business case", "☀️ Fotovoltaico utility-scale: business case", "⚛️ Nucleare SMR: business case", "📊 Posizione vs limiti di rischio", "💧 Cash flow at risk (CFaR)", "⚡ Aste MI: scostamenti vs MGP", "🌡️ Stress climatico: domanda e prezzo", "🌪️ Derivati meteo: pricing HDD/CDD", "🚢 LNG vs gasdotto: costo delivered", "🛢️ Crack spread: margine raffinazione 3-2-1", "🧪 Margine petrolchimico: nafta → etilene", "🛢️ Carry petrolio: contango & stoccaggio fisico", "🏭 Unit commitment CCGT: accendere o no?"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256, tab257, tab258, tab259, tab260, tab261, tab262, tab263, tab264, tab265, tab266, tab267, tab268, tab269, tab270, tab271, tab272, tab273, tab274, tab275, tab276, tab277, tab278, tab279, tab280, tab281, tab282, tab283, tab284, tab285 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete", "🔥 Teleriscaldamento vs caldaia", "🌿 Clean spread (con CO₂)", "🇮🇹 PUN da prezzi zonali", "❄️ Pompa di calore vs caldaia", "🏢 PUE & costo data center", "🔌 Gruppo elettrogeno vs blackout", "🚗 Flotta aziendale: TCO diesel vs elettrico", "📜 Garanzie di origine: costo del 100% rinnovabile", "♻️ Fine vita FV: revamping vs dismissione", "🌾️ Agrivoltaico: doppio reddito", "🟢 Biometano: business case", "🌬️ Eolico onshore: business case", "🌊 Idroelettrico run-of-river: business case", "🔥 Geotermia profonda: business case", "☀️ Solare termodinamico (CSP): business case", "🌬️ Eolico offshore: business case", "☀️ Fotovoltaico utility-scale: business case", "⚛️ Nucleare SMR: business case", "📊 Posizione vs limiti di rischio", "💧 Cash flow at risk (CFaR)", "⚡ Aste MI: scostamenti vs MGP", "🌡️ Stress climatico: domanda e prezzo", "🌪️ Derivati meteo: pricing HDD/CDD", "🚢 LNG vs gasdotto: costo delivered", "🛢️ Crack spread: margine raffinazione 3-2-1", "🧪 Margine petrolchimico: nafta → etilene", "🛢️ Carry petrolio: contango & stoccaggio fisico", "🏭 Unit commitment CCGT: accendere o no?", "🛛️ Differenziali greggio: sweet vs sour"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -65257,6 +65412,156 @@ elif workspace == _('ws8'):
                                mime="text/csv", key="uc284_csv",
                                help="P&L del ciclo di marcia al variare del prezzo power.")
         st.caption("Nota: margine teorico a carico base costante, senza costi di minimo tecnico, rampe e penalita' di sbilanciamento. Con spark negativo o nullo l'ore break-even e' infinita: l'impianto resta spento.")
+    with tab285:
+        titolo285 = edu("Differenziali greggio: sweet vs sour", "Non tutto il petrolio vale Brent: un greggio acido (sour) o pesante quota a sconto sul benchmark, ma costa anche di piu' da lavorare. Questa tab calcola il netback in raffineria — valore dei prodotti meno costo delivered meno raffinazione meno penalita' zolfo — il differenziale di break-even contro il greggio di riferimento e la sensibilita' del margine allo sconto.")
+        st.markdown(f"<h1>\U0001F6DB\uFE0F {titolo285}</h1>", unsafe_allow_html=True)
+        st.caption("Netback di un greggio in raffineria: sconto sul Brent, nolo, penalita' zolfo e margine contro il greggio di riferimento.")
+        a1_285, a2_285, a3_285, a4_285 = st.columns(4)
+        brent_285 = a1_285.number_input("Brent ($/bbl)", min_value=0.0,
+                                        value=82.0, step=0.5, format="%.2f",
+                                        key="gd285_brent",
+                                        help="Benchmark di prezzo del greggio ($/bbl).")
+        diff_285 = a2_285.number_input("Differenziale vs Brent ($/bbl)",
+                                       min_value=-50.0, max_value=50.0,
+                                       value=-3.5, step=0.25, format="%.2f",
+                                       key="gd285_diff",
+                                       help="Sconto (negativo) o premio (positivo) del greggio sul Brent: qualita', zolfo, logistica.")
+        nolo_285 = a3_285.number_input("Nolo ($/bbl)", min_value=0.0,
+                                       value=2.2, step=0.1, format="%.2f",
+                                       key="gd285_nolo",
+                                       help="Costo di trasporto fino alla raffineria ($/bbl).")
+        assic_285 = a4_285.number_input("Assicurazione ($/bbl)", min_value=0.0,
+                                        value=0.15, step=0.05, format="%.2f",
+                                        key="gd285_assic",
+                                        help="Assicurazione sul carico ($/bbl).")
+        b1_285, b2_285, b3_285, b4_285 = st.columns(4)
+        zolfo_285 = b1_285.number_input("Zolfo (% peso)", min_value=0.0,
+                                        max_value=10.0, value=1.8, step=0.1,
+                                        format="%.2f", key="gd285_zolfo",
+                                        help="Tenore di zolfo del greggio (% in peso).")
+        penz_285 = b2_285.number_input("Penalita' zolfo ($/bbl per punto)",
+                                       min_value=0.0, value=0.9, step=0.1,
+                                       format="%.2f", key="gd285_penzolfo",
+                                       help="Penalita' economica per punto percentuale di zolfo ($/bbl).")
+        raff_285 = b3_285.number_input("Costo raffinazione ($/bbl)",
+                                       min_value=0.0, value=4.5, step=0.25,
+                                       format="%.2f", key="gd285_raff",
+                                       help="Costo variabile di raffinazione ($/bbl).")
+        margrif_285 = b4_285.number_input("Margine riferimento ($/bbl)",
+                                          value=6.0, step=0.5, format="%.2f",
+                                          key="gd285_margrif",
+                                          help="Margine netto del greggio attualmente in lavorazione ($/bbl): termine di paragone.")
+        st.markdown("**Rese di raffinazione (frazioni, somma <= 1)**")
+        c1_285, c2_285, c3_285, c4_285 = st.columns(4)
+        ybenz_285 = c1_285.number_input("Resa benzina", min_value=0.0,
+                                        max_value=1.0, value=0.22, step=0.01,
+                                        format="%.2f", key="gd285_y_benz")
+        ydies_285 = c2_285.number_input("Resa diesel", min_value=0.0,
+                                        max_value=1.0, value=0.34, step=0.01,
+                                        format="%.2f", key="gd285_y_diesel")
+        yjet_285 = c3_285.number_input("Resa jet fuel", min_value=0.0,
+                                       max_value=1.0, value=0.12, step=0.01,
+                                       format="%.2f", key="gd285_y_jet")
+        yfo_285 = c4_285.number_input("Resa fuel oil", min_value=0.0,
+                                      max_value=1.0, value=0.18, step=0.01,
+                                      format="%.2f", key="gd285_y_fo")
+        st.markdown("**Prezzi prodotti ($/bbl)**")
+        d1_285, d2_285, d3_285, d4_285 = st.columns(4)
+        pbenz_285 = d1_285.number_input("Prezzo benzina ($/bbl)",
+                                        min_value=0.0, value=105.0, step=1.0,
+                                        format="%.2f", key="gd285_p_benz")
+        pdies_285 = d2_285.number_input("Prezzo diesel ($/bbl)",
+                                        min_value=0.0, value=98.0, step=1.0,
+                                        format="%.2f", key="gd285_p_diesel")
+        pjet_285 = d3_285.number_input("Prezzo jet ($/bbl)", min_value=0.0,
+                                       value=100.0, step=1.0, format="%.2f",
+                                       key="gd285_p_jet")
+        pfo_285 = d4_285.number_input("Prezzo fuel oil ($/bbl)",
+                                      min_value=0.0, value=62.0, step=1.0,
+                                      format="%.2f", key="gd285_p_fo")
+        e1_285, _, _, _ = st.columns(4)
+        soglia_285 = e1_285.number_input("Soglia verdetto ($/bbl)",
+                                         min_value=0.0, value=2.0, step=0.5,
+                                         format="%.2f", key="gd285_soglia",
+                                         help="Margine sopra cui il greggio e' 'conveniente'.")
+        try:
+            yields285 = [ybenz_285, ydies_285, yjet_285, yfo_285]
+            prezzi285 = [pbenz_285, pdies_285, pjet_285, pfo_285]
+            deliv285 = gd285_costo_delivered(brent_285, diff_285, nolo_285,
+                                             assic_285)
+            valore285 = gd285_valore_prodotti(yields285, prezzi285)
+            pen285 = gd285_penalita_zolfo(zolfo_285, penz_285)
+            marg285 = gd285_margine_netto(valore285, deliv285, raff_285,
+                                          pen285)
+            margt285 = gd285_margine_tonnellata(marg285)
+            be285 = gd285_breakeven_differenziale(valore285, nolo_285,
+                                                  assic_285, raff_285, pen285,
+                                                  brent_285, margrif_285)
+            conf285 = gd285_confronto(marg285, margrif_285)
+            verd285 = gd285_verdetto(marg285, soglia_285)
+            sens285 = gd285_sensibilita_differenziale(valore285, brent_285,
+                                                      nolo_285, assic_285,
+                                                      raff_285, pen285,
+                                                      diff_285)
+        except ValueError as e285:
+            st.error(f"Dati non validi: {e285}")
+            st.stop()
+        k1_285, k2_285, k3_285, k4_285, k5_285, k6_285 = st.columns(6)
+        render_kpi("Delivered ($/bbl)", f"{deliv285:,.2f}", k1_285)
+        render_kpi("Valore prodotti ($/bbl)", f"{valore285:,.2f}", k2_285)
+        render_kpi("Margine netto ($/bbl)", f"{marg285:+,.2f}", k3_285)
+        render_kpi("Margine ($/t)", f"{margt285:+,.2f}", k4_285)
+        render_kpi("Break-even diff. ($/bbl)", f"{be285:+,.2f}", k5_285)
+        render_kpi("Vs riferimento", conf285["esito"], k6_285)
+        if conf285["esito"] == "meglio":
+            st.success(f"Conviene cambiare: margine {marg285:+,.2f} $/bbl contro {margrif_285:+,.2f} $/bbl del riferimento (delta {conf285['delta']:+,.2f} $/bbl).")
+        elif conf285["esito"] == "pari":
+            st.info(f"Indifferente: margine {marg285:+,.2f} $/bbl uguale al riferimento.")
+        else:
+            st.warning(f"Resta sul riferimento: margine {marg285:+,.2f} $/bbl contro {margrif_285:+,.2f} $/bbl (delta {conf285['delta']:+,.2f} $/bbl). Il greggio diventerebbe competitivo con un differenziale di almeno {be285:+,.2f} $/bbl.")
+        if verd285["verdetto"] == "conveniente":
+            st.success(f"Verdetto: conveniente — margine {marg285:+,.2f} $/bbl sopra la soglia di {soglia_285:,.2f} $/bbl.")
+        elif verd285["verdetto"] == "marginale":
+            st.info(f"Verdetto: marginale — margine {marg285:+,.2f} $/bbl sotto la soglia di {soglia_285:,.2f} $/bbl ma non negativo.")
+        else:
+            st.error(f"Verdetto: non conveniente — margine negativo {marg285:+,.2f} $/bbl.")
+        st.markdown("**Scomposizione del margine ($/bbl)**")
+        dfb285 = pd.DataFrame([
+            {"componente": "Valore prodotti", "usd_bbl": valore285},
+            {"componente": "Costo delivered", "usd_bbl": -deliv285},
+            {"componente": "Raffinazione", "usd_bbl": -raff_285},
+            {"componente": "Penalita' zolfo", "usd_bbl": -pen285},
+            {"componente": "Margine netto", "usd_bbl": marg285},
+        ])
+        figb285 = px.bar(dfb285, x="componente", y="usd_bbl", color="componente",
+                         title="Scomposizione margine netto ($/bbl)",
+                         labels={"componente": "Componente", "usd_bbl": "$/bbl"})
+        st.plotly_chart(figb285, use_container_width=True)
+        st.markdown("**Margine netto al variare del differenziale ($/bbl)**")
+        dss285 = pd.DataFrame(sens285)
+        figl285 = px.line(dss285, x="differenziale", y="margine",
+                          title="Margine netto vs differenziale vs Brent",
+                          labels={"differenziale": "Differenziale ($/bbl)",
+                                  "margine": "Margine netto ($/bbl)"})
+        figl285.add_hline(y=margrif_285, line_dash="dash", line_color="gray",
+                          annotation_text="Margine riferimento")
+        figl285.add_hline(y=0, line_dash="dot", line_color="red",
+                          annotation_text="Margine zero")
+        figl285.add_vline(x=be285, line_dash="dot", line_color="green",
+                          annotation_text="Break-even differenziale")
+        st.plotly_chart(figl285, use_container_width=True)
+        with st.expander("Dettaglio sensibilita' ed export CSV"):
+            dft285 = pd.DataFrame([{"differenziale_usd_bbl": round(r["differenziale"], 2),
+                                    "margine_usd_bbl": round(r["margine"], 2)}
+                                   for r in sens285])
+            st.dataframe(dft285, use_container_width=True, hide_index=True)
+            st.caption(f"Con Brent a {brent_285:,.2f} $/bbl e differenziale {diff_285:+,.2f} $/bbl, il delivered e' {deliv285:,.2f} $/bbl; il valore prodotti e' {valore285:,.2f} $/bbl e il margine netto {marg285:+,.2f} $/bbl ({margt285:+,.2f} $/t). Break-even contro il riferimento: differenziale {be285:+,.2f} $/bbl.")
+            st.download_button("⬇️ Export CSV sensibilita'",
+                               data=dft285.to_csv(index=False, sep=";").encode("utf-8"),
+                               file_name="differenziali_greggio_sensibilita.csv",
+                               mime="text/csv", key="gd285_csv",
+                               help="Margine netto al variare del differenziale vs Brent.")
+        st.caption("Nota: rese e prezzi prodotti stilizzati su 4 tagli; il residuo e' valorizzato al prezzo del fuel oil. Penalita' zolfo lineare: in raffineria reale dipende da configurazione (complessita' Nelson) e vincoli ambientali.")
 
 # Footer
 
