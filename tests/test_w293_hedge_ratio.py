@@ -36,6 +36,7 @@ hr293_verdetto = _F["hr293_verdetto"]
 APP = Path(__file__).parent.parent / "app.py"
 
 TITLE293 = "\U0001F6E1\U0001F4C9 Hedge ratio ottimale: quanto coprire con i futures?"
+TITLE294 = "🧪📉 Backtest del VaR: il modello tiene?"
 TITLE292 = "🪓📊 Component VaR: quale posizione tagliare per prima?"
 TITLE291 = "📊💹 Sharpe & Sortino: la strategia rende davvero?"
 
@@ -56,12 +57,12 @@ def _registry():
 class TestRegistryTab293:
     def test_tab293_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 293
+        assert len(titoli) == len(dvars) == len(withs) == 294
         assert TITLE293 in titoli
         assert "tab293" in dvars
         assert "tab293" in withs
         assert titoli[dvars.index("tab293")] == TITLE293
-        assert titoli[-1] == TITLE293
+        assert titoli[-1] == TITLE294
         keys = re.findall(r'key="(hr293_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
