@@ -44,6 +44,7 @@ TITLE277 = "⚡ Aste MI: scostamenti vs MGP"
 TITLE278 = "🌡️ Stress climatico: domanda e prezzo"
 TITLE279 = "🌪️ Derivati meteo: pricing HDD/CDD"
 TITLE280 = "🚢 LNG vs gasdotto: costo delivered"
+TITLE281 = "🛢️ Crack spread: margine raffinazione 3-2-1"
 TITLE270 = "🔥 Geotermia profonda: business case"
 TITLE269 = "🌊 Idroelettrico run-of-river: business case"
 
@@ -72,12 +73,12 @@ def _registry():
 class TestRegistryTab271:
     def test_tab271_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 280
+        assert len(titoli) == len(dvars) == len(withs) == 281
         assert TITLE271 in titoli
         assert "tab271" in dvars
         assert "tab271" in withs
         assert titoli[dvars.index("tab271")] == TITLE271
-        assert titoli[-1] == TITLE280
+        assert titoli[-1] == TITLE281
         keys = re.findall(r'key="(cs271_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
@@ -95,6 +96,7 @@ class TestRegistryTab271:
         assert titoli[dvars.index("tab278")] == TITLE278
         assert titoli[dvars.index("tab279")] == TITLE279
         assert titoli[dvars.index("tab280")] == TITLE280
+        assert titoli[dvars.index("tab281")] == TITLE281
 
 
 class TestCs271Num:

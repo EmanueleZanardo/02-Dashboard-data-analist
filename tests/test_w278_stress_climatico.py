@@ -30,6 +30,7 @@ APP = Path(__file__).parent.parent / "app.py"
 TITLE278 = "🌡️ Stress climatico: domanda e prezzo"
 TITLE279 = "🌪️ Derivati meteo: pricing HDD/CDD"
 TITLE280 = "🚢 LNG vs gasdotto: costo delivered"
+TITLE281 = "🛢️ Crack spread: margine raffinazione 3-2-1"
 TITLE277 = "⚡ Aste MI: scostamenti vs MGP"
 
 
@@ -45,12 +46,12 @@ def _registry():
 class TestRegistryTab278:
     def test_tab278_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 280
+        assert len(titoli) == len(dvars) == len(withs) == 281
         assert TITLE278 in titoli
         assert "tab278" in dvars
         assert "tab278" in withs
         assert titoli[dvars.index("tab278")] == TITLE278
-        assert titoli[-1] == TITLE280
+        assert titoli[-1] == TITLE281
         keys = re.findall(r'key="(sc278_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
@@ -60,6 +61,7 @@ class TestRegistryTab278:
         assert titoli[dvars.index("tab278")] == TITLE278
         assert titoli[dvars.index("tab279")] == TITLE279
         assert titoli[dvars.index("tab280")] == TITLE280
+        assert titoli[dvars.index("tab281")] == TITLE281
 
     def test_helper_definiti_prima_della_ui(self):
         src = APP.read_text(encoding="utf-8")
