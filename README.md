@@ -15,7 +15,7 @@ Dashboard Streamlit per analisi quantitativa del mercato elettrico svizzero
 5. 📈 Exotics & Structuring
 6. 🏛️ Enterprise Risk & XVA
 7. 📈 Metodo STAR & Ottimizzazione
-8. 📊 Price Analytics (Swissix) — 283 tab analitiche
+8. 📊 Price Analytics (Swissix) — 284 tab analitiche
 
 ### Price Analytics (Swissix)
 
@@ -315,6 +315,7 @@ stoccaggio gas, PPA, idroelettrico, power-to-heat.
 281. 🛢️ Crack spread: margine raffinazione 3-2-1
 282. 🧪 Margine petrolchimico: nafta → etilene
 283. 🛢️ Carry petrolio: contango & stoccaggio fisico
+284. 🏭 Unit commitment CCGT: accendere o no?
 </details>
 
 ## Avvio locale
