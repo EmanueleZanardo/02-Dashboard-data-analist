@@ -40229,6 +40229,190 @@ def bv294_verdetto(pval):
         v = "modello respinto"
     return {"verdetto": v, "pvalue": p}
 
+
+def es295_num(x, nome):
+    """Valida uno scalare numerico: no bool, no NaN/inf."""
+    import math
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        raise ValueError(f"{nome}: deve essere un numero")
+    if math.isnan(x) or math.isinf(x):
+        raise ValueError(f"{nome}: NaN/inf non ammessi")
+    return float(x)
+
+
+def es295_pos(x, nome):
+    """Valida un numero > 0."""
+    v = es295_num(x, nome)
+    if v <= 0:
+        raise ValueError(f"{nome}: deve essere > 0")
+    return v
+
+
+def es295_conf(c):
+    """Valida una confidenza strettamente tra 0 e 1."""
+    v = es295_num(c, "conf")
+    if not 0.0 < v < 1.0:
+        raise ValueError("conf: deve essere strettamente tra 0 e 1")
+    return v
+
+
+def es295_parse_pnl(testo):
+    """Parsa una serie di P&L giornalieri: un valore per riga.
+    Righe vuote e righe che iniziano con '#' ignorate. Virgola decimale
+    ammessa. Servono almeno 20 osservazioni per un backtest sensato."""
+    vals = []
+    for ln in str(testo).split("\n"):
+        s = ln.strip()
+        if not s or s.startswith("#"):
+            continue
+        try:
+            v = float(s.replace(",", "."))
+        except ValueError:
+            raise ValueError(f"valore non numerico nella riga: {ln.strip()!r}")
+        vals.append(es295_num(v, "pnl"))
+    if len(vals) < 20:
+        raise ValueError("servono almeno 20 osservazioni giornaliere")
+    return vals
+
+
+def es295_perdite(pnl):
+    """Converte P&L in perdite positive: L_t = -P&L_t."""
+    vals = [es295_num(v, "pnl") for v in pnl]
+    if not vals:
+        raise ValueError("pnl: lista vuota")
+    return [-v for v in vals]
+
+
+def es295_parametri(var_eur, es_eur, conf):
+    """Valida e impacchetta i parametri del modello: VaR, ES, confidenza.
+    L'ES e' per definizione >= VaR: se es < var i parametri sono incoerenti."""
+    var = es295_pos(var_eur, "var_eur")
+    es = es295_pos(es_eur, "es_eur")
+    c = es295_conf(conf)
+    if es < var:
+        raise ValueError("es_eur: l'ES deve essere >= al VaR")
+    return {"var": var, "es": es, "conf": c, "atteso": 1.0 - c}
+
+
+def es295_superamenti(perdite, var_eur):
+    """Conta i superamenti del VaR: giorni con perdita L_t > VaR.
+    Ritorna dict con n, N, tasso e indici dei superamenti."""
+    vals = [es295_num(v, "perdita") for v in perdite]
+    if not vals:
+        raise ValueError("perdite: lista vuota")
+    var = es295_pos(var_eur, "var_eur")
+    idx = [i for i, v in enumerate(vals) if v > var]
+    n = len(vals)
+    return {"n": n, "N": len(idx), "tasso": len(idx) / n, "indici": idx}
+
+
+def es295_z1(perdite, var_eur, es_eur, conf):
+    """Statistica Z1 di Acerbi-Szekely (2014) per il backtest dell'ES.
+
+    Y_t = L_t * 1{L_t > VaR} / ((1-conf) * ES);  Z1 = media(Y) - 1.
+    Sotto H0 (modello corretto) E[L*1{L>VaR}] = (1-conf)*ES, quindi
+    E[Z1] = 0. Z1 > 0 indica coda piu' pesante del modello (testa sia la
+    frequenza dei superamenti sia la loro severita')."""
+    import math
+    vals = [es295_num(v, "perdita") for v in perdite]
+    if not vals:
+        raise ValueError("perdite: lista vuota")
+    var = es295_pos(var_eur, "var_eur")
+    es = es295_pos(es_eur, "es_eur")
+    c = es295_conf(conf)
+    if es < var:
+        raise ValueError("es_eur: l'ES deve essere >= al VaR")
+    n = len(vals)
+    k = (1.0 - c) * es
+    ys = [v / k if v > var else 0.0 for v in vals]
+    media = sum(ys) / n
+    if n < 2:
+        s = 0.0
+    else:
+        s = math.sqrt(sum((y - media) ** 2 for y in ys) / (n - 1))
+    N = sum(1 for v in vals if v > var)
+    return {"n": n, "N": N, "z1": media - 1.0, "media_y": media, "s_y": s}
+
+
+def es295_z2(perdite, var_eur, es_eur):
+    """Statistica Z2 di Acerbi-Szekely (2014): severita' condizionata.
+
+    W_i = L_i / ES sui soli superamenti;  Z2 = media(W) - 1.
+    Sotto H0 E[L/ES | L > VaR] = 1, quindi E[Z2] = 0. Isola la severita'
+    della coda dalla frequenza dei superamenti (gia' testata dal VaR)."""
+    import math
+    vals = [es295_num(v, "perdita") for v in perdite]
+    if not vals:
+        raise ValueError("perdite: lista vuota")
+    var = es295_pos(var_eur, "var_eur")
+    es = es295_pos(es_eur, "es_eur")
+    if es < var:
+        raise ValueError("es_eur: l'ES deve essere >= al VaR")
+    ws = [v / es for v in vals if v > var]
+    N = len(ws)
+    if N == 0:
+        raise ValueError("nessun superamento del VaR: Z2 non calcolabile")
+    media = sum(ws) / N
+    if N < 2:
+        s = 0.0
+    else:
+        s = math.sqrt(sum((w - media) ** 2 for w in ws) / (N - 1))
+    return {"N": N, "z2": media - 1.0, "media_w": media, "s_w": s}
+
+
+def es295_norm_cdf(x):
+    """CDF della normale standard: Phi(x) = 0.5 * erfc(-x/sqrt(2))."""
+    import math
+    v = es295_num(x, "x")
+    return 0.5 * math.erfc(-v / math.sqrt(2.0))
+
+
+def es295_pvalue_asintotico(stat, n_eff, s):
+    """p-value unilaterale via CLT: z = sqrt(n_eff)*stat/s, p = 1-Phi(z).
+
+    Test asintotico: sotto H0 gli addendi sono i.i.d. a media nota, quindi
+    z e' approssimativamente N(0,1). Rifiuta per z grande (coda pesante).
+    Richiede n_eff >= 2 e s > 0, altrimenti il test non e' calcolabile."""
+    import math
+    z0 = es295_num(stat, "stat")
+    nn = int(n_eff)
+    if nn < 2:
+        raise ValueError("n_eff: servono almeno 2 osservazioni effettive")
+    ss = es295_num(s, "s")
+    if ss <= 0.0:
+        raise ValueError("s: deviazione standard nulla, test non calcolabile")
+    z = math.sqrt(nn) * z0 / ss
+    return {"z": z, "p": 1.0 - es295_norm_cdf(z)}
+
+
+def es295_verdetto(p1, p2, N):
+    """Verdetto del backtest ES dal p-value minimo (Z1/Z2):
+    'coda coerente col modello' (pmin >= 0.05),
+    'zona gialla: coda piu' pesante del modello' (0.01 <= pmin < 0.05),
+    'coda sottostimata: ricalibrare il modello ES' (pmin < 0.01).
+    Con N == 0 superamenti il modello e' conservativo e il test non si applica."""
+    nn = int(N)
+    if nn < 0:
+        raise ValueError("N: non negativo")
+    if nn == 0:
+        return {"verdetto": "nessun superamento: modello conservativo",
+                "pmin": None}
+    cand = [p for p in (p1, p2) if p is not None]
+    if not cand:
+        return {"verdetto": "dati insufficienti per il test", "pmin": None}
+    for p in cand:
+        q = es295_num(p, "p")
+        if not 0.0 <= q <= 1.0:
+            raise ValueError("p: deve essere in [0, 1]")
+    pm = min(cand)
+    if pm >= 0.05:
+        v = "coda coerente col modello"
+    elif pm >= 0.01:
+        v = "zona gialla: coda piu' pesante del modello"
+    else:
+        v = "coda sottostimata: ricalibrare il modello ES"
+    return {"verdetto": v, "pmin": pm}
+
 if workspace == _('ws1'):
     st.markdown(f"<h1>{_('ws1')}</h1>", unsafe_allow_html=True)
     banner_demo("simulatore strategico: margini, centrali e curve simulate")
@@ -40870,7 +41054,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256, tab257, tab258, tab259, tab260, tab261, tab262, tab263, tab264, tab265, tab266, tab267, tab268, tab269, tab270, tab271, tab272, tab273, tab274, tab275, tab276, tab277, tab278, tab279, tab280, tab281, tab282, tab283, tab284, tab285, tab286, tab287, tab288, tab289, tab290, tab291, tab292, tab293, tab294 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete", "🔥 Teleriscaldamento vs caldaia", "🌿 Clean spread (con CO₂)", "🇮🇹 PUN da prezzi zonali", "❄️ Pompa di calore vs caldaia", "🏢 PUE & costo data center", "🔌 Gruppo elettrogeno vs blackout", "🚗 Flotta aziendale: TCO diesel vs elettrico", "📜 Garanzie di origine: costo del 100% rinnovabile", "♻️ Fine vita FV: revamping vs dismissione", "🌾️ Agrivoltaico: doppio reddito", "🟢 Biometano: business case", "🌬️ Eolico onshore: business case", "🌊 Idroelettrico run-of-river: business case", "🔥 Geotermia profonda: business case", "☀️ Solare termodinamico (CSP): business case", "🌬️ Eolico offshore: business case", "☀️ Fotovoltaico utility-scale: business case", "⚛️ Nucleare SMR: business case", "📊 Posizione vs limiti di rischio", "💧 Cash flow at risk (CFaR)", "⚡ Aste MI: scostamenti vs MGP", "🌡️ Stress climatico: domanda e prezzo", "🌪️ Derivati meteo: pricing HDD/CDD", "🚢 LNG vs gasdotto: costo delivered", "🛢️ Crack spread: margine raffinazione 3-2-1", "🧪 Margine petrolchimico: nafta → etilene", "🛢️ Carry petrolio: contango & stoccaggio fisico", "🏭 Unit commitment CCGT: accendere o no?", "🛛️ Differenziali greggio: sweet vs sour", "⛽ Basis gas TTF–PSV", "🚢⚡ Rigassificazione GNL: margine terminale", "⚡🔥 Clean spark spread: margine centrale a gas", "⚫🔥 Clean dark spread: margine centrale a carbone", "🔀💰 PTR transfrontaliero: vale il prezzo d'asta?", "📊💹 Sharpe & Sortino: la strategia rende davvero?", "🪓📊 Component VaR: quale posizione tagliare per prima?", "🛡📉 Hedge ratio ottimale: quanto coprire con i futures?", "🧪📉 Backtest del VaR: il modello tiene?"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256, tab257, tab258, tab259, tab260, tab261, tab262, tab263, tab264, tab265, tab266, tab267, tab268, tab269, tab270, tab271, tab272, tab273, tab274, tab275, tab276, tab277, tab278, tab279, tab280, tab281, tab282, tab283, tab284, tab285, tab286, tab287, tab288, tab289, tab290, tab291, tab292, tab293, tab294, tab295 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete", "🔥 Teleriscaldamento vs caldaia", "🌿 Clean spread (con CO₂)", "🇮🇹 PUN da prezzi zonali", "❄️ Pompa di calore vs caldaia", "🏢 PUE & costo data center", "🔌 Gruppo elettrogeno vs blackout", "🚗 Flotta aziendale: TCO diesel vs elettrico", "📜 Garanzie di origine: costo del 100% rinnovabile", "♻️ Fine vita FV: revamping vs dismissione", "🌾️ Agrivoltaico: doppio reddito", "🟢 Biometano: business case", "🌬️ Eolico onshore: business case", "🌊 Idroelettrico run-of-river: business case", "🔥 Geotermia profonda: business case", "☀️ Solare termodinamico (CSP): business case", "🌬️ Eolico offshore: business case", "☀️ Fotovoltaico utility-scale: business case", "⚛️ Nucleare SMR: business case", "📊 Posizione vs limiti di rischio", "💧 Cash flow at risk (CFaR)", "⚡ Aste MI: scostamenti vs MGP", "🌡️ Stress climatico: domanda e prezzo", "🌪️ Derivati meteo: pricing HDD/CDD", "🚢 LNG vs gasdotto: costo delivered", "🛢️ Crack spread: margine raffinazione 3-2-1", "🧪 Margine petrolchimico: nafta → etilene", "🛢️ Carry petrolio: contango & stoccaggio fisico", "🏭 Unit commitment CCGT: accendere o no?", "🛛️ Differenziali greggio: sweet vs sour", "⛽ Basis gas TTF–PSV", "🚢⚡ Rigassificazione GNL: margine terminale", "⚡🔥 Clean spark spread: margine centrale a gas", "⚫🔥 Clean dark spread: margine centrale a carbone", "🔀💰 PTR transfrontaliero: vale il prezzo d'asta?", "📊💹 Sharpe & Sortino: la strategia rende davvero?", "🪓📊 Component VaR: quale posizione tagliare per prima?", "🛡📉 Hedge ratio ottimale: quanto coprire con i futures?", "🧪📉 Backtest del VaR: il modello tiene?", "🧪🛡 Backtest dell'ES: la coda e' sottostimata?"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -67849,6 +68033,115 @@ elif workspace == _('ws8'):
                                mime="text/csv", key="bv294_csv",
                                help="Risultati del backtest di Kupiec sul VaR.")
         st.caption("Nota: il test POF verifica solo la frequenza delle violazioni, non la loro indipendenza nel tempo (serve anche il test di indipendenza di Christoffersen). Serie demo a scopo illustrativo.")
+
+    with tab295:
+        titolo295 = edu("Backtest dell'ES: la coda e' sottostimata?", "Il VaR conta i superamenti, l'Expected Shortfall misura quanto si perde quando succedono. Il backtest di Acerbi-Szekely verifica con le statistiche Z1 (frequenza+severita') e Z2 (severita' condizionata ai superamenti) se la coda del modello regge: p-value unilaterale via CLT, semaforo verde/giallo/rosso.")
+        st.markdown(f"<h1>🧪🛡 {titolo295}</h1>", unsafe_allow_html=True)
+        st.caption("Backtest di Acerbi-Szekely sull'Expected Shortfall: da Z1 e Z2 al p-value asintotico, con semaforo sulla coda del modello.")
+        demo_295 = "320\n-150\n480\n-600\n210\n-90\n540\n-2600\n130\n-320\n410\n-180\n95\n-730\n260\n-410\n380\n-120\n510\n-3100\n-240\n170\n-520\n290\n-140\n660\n-2800\n120\n-390\n440\n-210\n180\n-640\n350\n-260\n720\n-4100\n90\n-330\n260\n-180\n470\n-290\n130\n-540\n390\n-2700\n220\n-160\n510\n-350\n140\n-230\n690\n-2600\n110\n-420\n380\n-190\n-3300"
+        serie_295 = st.text_area("P&L giornalieri (€, un valore per riga)",
+                                 value=demo_295, key="es295_serie",
+                                 help="Serie storica dei profitti/perdite giornalieri: le perdite sono -P&L. Incolla i tuoi dati per un backtest reale (minimo 20 osservazioni).")
+        c1_295, c2_295, c3_295 = st.columns(3)
+        with c1_295:
+            var295 = st.number_input("VaR giornaliero (€)", min_value=1.0,
+                                     value=2000.0, step=100.0, format="%.0f",
+                                     key="es295_var",
+                                     help="Soglia di perdita del modello: superamento se perdita > VaR.")
+        with c2_295:
+            es295 = st.number_input("Expected Shortfall (€)", min_value=1.0,
+                                    value=3200.0, step=100.0, format="%.0f",
+                                    key="es295_es",
+                                    help="Perdita media attesa oltre il VaR secondo il modello (deve essere >= VaR).")
+        with c3_295:
+            conf295 = st.number_input("Confidenza VaR/ES (%)", min_value=50.0,
+                                      max_value=99.99, value=97.50, step=0.5,
+                                      format="%.2f", key="es295_conf")
+        confq_295 = conf295 / 100.0
+        par295 = es295_parametri(var295, es295, confq_295)
+        pnl295 = es295_parse_pnl(serie_295)
+        perd295 = es295_perdite(pnl295)
+        sup295 = es295_superamenti(perd295, var295)
+        n295 = sup295["n"]
+        N295 = sup295["N"]
+        z1_295 = es295_z1(perd295, var295, es295, confq_295)
+        p1_295 = None
+        r1_295 = None
+        if N295 > 0 and z1_295["s_y"] > 0.0:
+            r1_295 = es295_pvalue_asintotico(z1_295["z1"], n295, z1_295["s_y"])
+            p1_295 = r1_295["p"]
+        z2_295 = None
+        p2_295 = None
+        r2_295 = None
+        try:
+            z2_295 = es295_z2(perd295, var295, es295)
+            if z2_295["N"] >= 5 and z2_295["s_w"] > 0.0:
+                r2_295 = es295_pvalue_asintotico(z2_295["z2"], z2_295["N"],
+                                                z2_295["s_w"])
+                p2_295 = r2_295["p"]
+        except ValueError:
+            z2_295 = None
+        verd295 = es295_verdetto(p1_295, p2_295, N295)
+        k1_295, k2_295, k3_295, k4_295, k5_295, k6_295 = st.columns(6)
+        k1_295.metric("Osservazioni", f"{n295}")
+        k2_295.metric("Superamenti", f"{N295}")
+        k3_295.metric("Tasso osservato", f"{sup295['tasso']:.2%}")
+        k4_295.metric("Tasso atteso", f"{par295['atteso']:.2%}")
+        k5_295.metric("Z1 Acerbi-Szekely", f"{z1_295['z1']:.4f}")
+        k6_295.metric("Z2 Acerbi-Szekely",
+                      f"{z2_295['z2']:.4f}" if z2_295 else "n.d.")
+        if verd295["verdetto"] == "coda coerente col modello":
+            st.success(f"Coda coerente: p-value minimo {verd295['pmin']:.4f} >= 0,05 su {N295} superamenti. La severita' della coda osservata e' compatibile con un ES di {es295:,.0f} € al {conf295:.2f}%.")
+        elif verd295["verdetto"].startswith("zona gialla"):
+            st.warning(f"Zona gialla: p-value minimo {verd295['pmin']:.4f} tra 0,01 e 0,05. La coda osservata appare piu' pesante del modello (Z1 {z1_295['z1']:.3f}): rivedere la calibrazione dell'ES prima di usarlo per i limiti.")
+        elif verd295["verdetto"].startswith("coda sottostimata"):
+            st.error(f"Coda sottostimata: p-value minimo {verd295['pmin']:.4f} < 0,01. Il modello sottostima le perdite di coda (Z1 {z1_295['z1']:.3f}): ricalibrare subito l'ES.")
+        else:
+            st.info(f"{verd295['verdetto']}: con {N295} superamenti del VaR su {n295} giorni il test non e' applicabile.")
+        dfl_295 = pd.DataFrame({"giorno": range(1, n295 + 1), "perdita": perd295})
+        figl_295 = px.line(dfl_295, x="giorno", y="perdita",
+                           title="Perdite giornaliere vs VaR ed ES",
+                           labels={"giorno": "Giorno", "perdita": "Perdita (€)"})
+        figl_295.add_hline(y=var295, line_dash="dash", line_color="orange",
+                           annotation_text=f"VaR {var295:,.0f} €")
+        figl_295.add_hline(y=es295, line_dash="dash", line_color="red",
+                           annotation_text=f"ES {es295:,.0f} €")
+        idx295 = sup295["indici"]
+        if idx295:
+            figl_295.add_scatter(x=[i + 1 for i in idx295],
+                                y=[perd295[i] for i in idx295],
+                                mode="markers",
+                                marker=dict(color="red", size=9),
+                                name="Superamenti")
+        st.plotly_chart(figl_295, use_container_width=True)
+        with st.expander("Dettagli ed export CSV"):
+            dfv_295 = pd.DataFrame({
+                "voce": ["Osservazioni", "Superamenti VaR",
+                         "Tasso osservato", "Tasso atteso (1-conf)",
+                         "Z1 Acerbi-Szekely", "z-score Z1 (CLT)",
+                         "p-value Z1",
+                         "Z2 Acerbi-Szekely", "z-score Z2 (CLT)",
+                         "p-value Z2", "p-value minimo", "Verdetto"],
+                "valore": [n295, N295, round(sup295["tasso"], 4),
+                           round(par295["atteso"], 4),
+                           round(z1_295["z1"], 4),
+                           round(r1_295["z"], 4) if r1_295 else "n.d.",
+                           round(p1_295, 6) if p1_295 is not None else "n.d.",
+                           round(z2_295["z2"], 4) if z2_295 else "n.d.",
+                           round(r2_295["z"], 4) if r2_295 else "n.d.",
+                           round(p2_295, 6) if p2_295 is not None else "n.d.",
+                           round(verd295["pmin"], 6)
+                           if verd295["pmin"] is not None else "n.d.",
+                           verd295["verdetto"]],
+            })
+            st.dataframe(dfv_295, use_container_width=True, hide_index=True)
+            st.caption(f"Backtest di Acerbi-Szekely su {n295} P&L giornalieri con VaR {var295:,.0f} € ed ES {es295:,.0f} € al {conf295:.2f}%: {N295} superamenti, Z1 {z1_295['z1']:.4f}" + (f", Z2 {z2_295['z2']:.4f}" if z2_295 else ", Z2 n.d.") + f" -> {verd295['verdetto']}.")
+            st.download_button("⬇️ Export CSV backtest",
+                               data=dfv_295.to_csv(index=False, sep=";").encode("utf-8"),
+                               file_name="backtest_es.csv",
+                               mime="text/csv", key="es295_csv",
+                               help="Risultati del backtest di Acerbi-Szekely sull'ES.")
+        st.caption("Nota: p-value asintotici unilaterali via CLT (z = sqrt(n)*stat/s); Z1 testa frequenza+severita', Z2 la sola severita' condizionata ai superamenti. La versione regolamentare usa valori critici simulati sotto H0. Serie demo a scopo illustrativo.")
 
 # Footer
 

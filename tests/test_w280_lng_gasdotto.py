@@ -42,6 +42,7 @@ TITLE291 = "📊💹 Sharpe & Sortino: la strategia rende davvero?"
 TITLE292 = "🪓📊 Component VaR: quale posizione tagliare per prima?"
 TITLE293 = "🛡📉 Hedge ratio ottimale: quanto coprire con i futures?"
 TITLE294 = "🧪📉 Backtest del VaR: il modello tiene?"
+TITLE295 = "🧪🛡 Backtest dell'ES: la coda e' sottostimata?"
 TITLE279 = "🌪️ Derivati meteo: pricing HDD/CDD"
 TITLE278 = "🌡️ Stress climatico: domanda e prezzo"
 
@@ -63,12 +64,12 @@ def _registry():
 class TestRegistryTab280:
     def test_tab280_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 294
+        assert len(titoli) == len(dvars) == len(withs) == 295
         assert TITLE280 in titoli
         assert "tab280" in dvars
         assert "tab280" in withs
         assert titoli[dvars.index("tab280")] == TITLE280
-        assert titoli[-1] == TITLE294
+        assert titoli[-1] == TITLE295
         keys = re.findall(r'key="(lg280_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
