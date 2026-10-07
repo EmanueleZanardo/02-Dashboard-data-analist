@@ -1,0 +1,224 @@
+"""Test tab287 '🚢⚡ Rigassificazione GNL: margine terminale': registry + funzioni pure.
+
+Funzioni pure estratte da app.py via AST con tests/appfuncs.py (niente Streamlit).
+Verifica consistenza del registry (titoli/dvar/with coerenti) e l'allineamento
+titolo-contenuto inclusa la tab287.
+"""
+
+import re
+from pathlib import Path
+
+import pytest
+
+from appfuncs import load
+
+_F = load("rg287_num", "rg287_pos", "rg287_costo_rigass",
+          "rg287_costo_sendout", "rg287_margine_mwh", "rg287_pnl_ciclo",
+          "rg287_be_des", "rg287_be_hub", "rg287_utilizzo",
+          "rg287_breakdown", "rg287_sensibilita_hub", "rg287_verdetto")
+rg287_num = _F["rg287_num"]
+rg287_pos = _F["rg287_pos"]
+rg287_costo_rigass = _F["rg287_costo_rigass"]
+rg287_costo_sendout = _F["rg287_costo_sendout"]
+rg287_margine_mwh = _F["rg287_margine_mwh"]
+rg287_pnl_ciclo = _F["rg287_pnl_ciclo"]
+rg287_be_des = _F["rg287_be_des"]
+rg287_be_hub = _F["rg287_be_hub"]
+rg287_utilizzo = _F["rg287_utilizzo"]
+rg287_breakdown = _F["rg287_breakdown"]
+rg287_sensibilita_hub = _F["rg287_sensibilita_hub"]
+rg287_verdetto = _F["rg287_verdetto"]
+
+APP = Path(__file__).parent.parent / "app.py"
+
+TITLE287 = "🚢⚡ Rigassificazione GNL: margine terminale"
+TITLE286 = "⛽ Basis gas TTF–PSV"
+TITLE285 = "\U0001F6DB\uFE0F Differenziali greggio: sweet vs sour"
+TITLE284 = "\U0001F3ED Unit commitment CCGT: accendere o no?"
+
+DES, HUB, TAR_CAP, TAR_COMM, PERD, EXTRA = 30.0, 38.0, 0.45, 0.25, 1.2, 0.20
+RIG_ATT = TAR_CAP + TAR_COMM + HUB * PERD / 100.0                 # 1.156
+SEND_ATT = DES + RIG_ATT + EXTRA                                 # 31.356
+VOL, FISSI, SOGLIA = 900000.0, 250000.0, 0.50
+MARG_ATT = HUB - SEND_ATT - FISSI / VOL                          # ~6.3662
+PNL_ATT = (HUB - SEND_ATT) * VOL - FISSI                         # ~5729600
+BE_DES_ATT = HUB - RIG_ATT - EXTRA - FISSI / VOL                 # ~36.3662
+BE_HUB_ATT = (DES + TAR_CAP + TAR_COMM + EXTRA + FISSI / VOL) / 0.988
+
+
+def _registry():
+    src = APP.read_text(encoding="utf-8")
+    line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
+    titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
+    dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
+    withs = re.findall(r"    with (tab\d+):", src)
+    return src, titoli, dvars, withs
+
+
+class TestRegistryTab287:
+    def test_tab287_dichiarata(self):
+        src, titoli, dvars, withs = _registry()
+        assert len(titoli) == len(dvars) == len(withs) == 287
+        assert TITLE287 in titoli
+        assert "tab287" in dvars
+        assert "tab287" in withs
+        assert titoli[dvars.index("tab287")] == TITLE287
+        assert titoli[-1] == TITLE287
+        keys = re.findall(r'key="(rg287_[^"]+)"', src)
+        assert len(keys) == len(set(keys)) >= 5
+
+    def test_titoli_allineati_285_286_287(self):
+        _, titoli, dvars, _ = _registry()
+        assert titoli[dvars.index("tab285")] == TITLE285
+        assert titoli[dvars.index("tab286")] == TITLE286
+        assert titoli[dvars.index("tab287")] == TITLE287
+
+
+class TestRg287Validatori:
+    def test_num_ok(self):
+        assert rg287_num(1.5, "x") == 1.5
+
+    def test_num_ko(self):
+        with pytest.raises(ValueError):
+            rg287_num(True, "x")
+        with pytest.raises(ValueError):
+            rg287_num(float("nan"), "x")
+
+    def test_pos_ko(self):
+        with pytest.raises(ValueError):
+            rg287_pos(-0.1, "x")
+
+    def test_pos_zero_ok(self):
+        assert rg287_pos(0.0, "x") == 0.0
+
+
+class TestRg287CostoRigass:
+    def test_base(self):
+        assert rg287_costo_rigass(TAR_CAP, TAR_COMM, PERD, HUB) == \
+            pytest.approx(RIG_ATT)
+
+    def test_zero_perdite(self):
+        assert rg287_costo_rigass(0.5, 0.2, 0.0, 40.0) == pytest.approx(0.7)
+
+    def test_perdite_scalano_con_hub(self):
+        c1 = rg287_costo_rigass(0.0, 0.0, 1.0, 40.0)
+        c2 = rg287_costo_rigass(0.0, 0.0, 1.0, 80.0)
+        assert c2 == pytest.approx(2.0 * c1)
+
+
+class TestRg287SendoutMargine:
+    def test_sendout(self):
+        assert rg287_costo_sendout(DES, RIG_ATT, EXTRA) == \
+            pytest.approx(SEND_ATT)
+
+    def test_margine(self):
+        assert rg287_margine_mwh(HUB, SEND_ATT, FISSI, VOL) == \
+            pytest.approx(MARG_ATT)
+
+    def test_margine_volume_zero_ko(self):
+        with pytest.raises(ValueError):
+            rg287_margine_mwh(HUB, SEND_ATT, FISSI, 0.0)
+
+    def test_margine_pesante_con_fissi(self):
+        # con fissi enormi il margine diventa negativo
+        assert rg287_margine_mwh(HUB, SEND_ATT, 1e9, VOL) < 0
+
+    def test_pnl(self):
+        assert rg287_pnl_ciclo(HUB, SEND_ATT, VOL, FISSI) == \
+            pytest.approx(PNL_ATT, rel=1e-9)
+
+    def test_pnl_coerente_margine(self):
+        m = rg287_margine_mwh(HUB, SEND_ATT, FISSI, VOL)
+        p = rg287_pnl_ciclo(HUB, SEND_ATT, VOL, FISSI)
+        assert p == pytest.approx(m * VOL)
+
+
+class TestRg287BreakEven:
+    def test_be_des(self):
+        assert rg287_be_des(HUB, RIG_ATT, EXTRA, FISSI, VOL) == \
+            pytest.approx(BE_DES_ATT)
+
+    def test_be_des_azzera_margine(self):
+        bd = rg287_be_des(HUB, RIG_ATT, EXTRA, FISSI, VOL)
+        send = rg287_costo_sendout(bd, RIG_ATT, EXTRA)
+        assert rg287_margine_mwh(HUB, send, FISSI, VOL) == pytest.approx(0.0)
+
+    def test_be_hub(self):
+        assert rg287_be_hub(DES, TAR_CAP, TAR_COMM, PERD, EXTRA,
+                            FISSI, VOL) == pytest.approx(BE_HUB_ATT)
+
+    def test_be_hub_azzera_margine(self):
+        bh = rg287_be_hub(DES, TAR_CAP, TAR_COMM, PERD, EXTRA,
+                          FISSI, VOL)
+        rig = rg287_costo_rigass(TAR_CAP, TAR_COMM, PERD, bh)
+        send = rg287_costo_sendout(DES, rig, EXTRA)
+        assert rg287_margine_mwh(bh, send, FISSI, VOL) == pytest.approx(0.0)
+
+
+class TestRg287Utilizzo:
+    def test_pieno(self):
+        assert rg287_utilizzo(900000.0, 900000.0) == pytest.approx(1.0)
+
+    def test_meta(self):
+        assert rg287_utilizzo(450000.0, 900000.0) == pytest.approx(0.5)
+
+    def test_capacita_zero_ko(self):
+        with pytest.raises(ValueError):
+            rg287_utilizzo(100.0, 0.0)
+
+
+class TestRg287BreakdownSensibilita:
+    def test_breakdown_chiavi(self):
+        b = rg287_breakdown(DES, TAR_CAP, TAR_COMM, HUB * PERD / 100.0, EXTRA,
+                            RIG_ATT, SEND_ATT, MARG_ATT)
+        assert set(b) == {"des", "tariffa_capacita", "tariffa_commodity",
+                          "perdite", "oneri_extra", "costo_rigassificazione",
+                          "costo_sendout", "margine_mwh"}
+        assert b["des"] == pytest.approx(DES)
+        assert b["margine_mwh"] == pytest.approx(MARG_ATT)
+
+    def test_sensibilita_shape(self):
+        r = rg287_sensibilita_hub(HUB, DES, TAR_CAP, TAR_COMM, PERD, EXTRA,
+                                  FISSI, VOL)
+        assert len(r) == 9
+        assert r[0]["hub"] < HUB < r[-1]["hub"]
+        marg = [x["margine"] for x in r]
+        assert marg == sorted(marg)
+
+    def test_sensibilita_trascurabile(self):
+        r = rg287_sensibilita_hub(0.0, DES, TAR_CAP, TAR_COMM, PERD, EXTRA,
+                                  FISSI, VOL)
+        assert all(x["hub"] == 0.0 for x in r)
+        assert all(x["margine"] < 0 for x in r)
+
+    def test_sensibilita_n_punti_ko(self):
+        with pytest.raises(ValueError):
+            rg287_sensibilita_hub(HUB, DES, TAR_CAP, TAR_COMM, PERD, EXTRA,
+                                  FISSI, VOL, n_punti=2)
+
+
+class TestRg287Verdetto:
+    def test_positivo(self):
+        assert rg287_verdetto(1.2, 0.5)["verdetto"] == "positivo"
+
+    def test_in_linea(self):
+        assert rg287_verdetto(0.2, 0.5)["verdetto"] == "in_linea"
+
+    def test_negativo(self):
+        assert rg287_verdetto(-0.1, 0.5)["verdetto"] == "negativo"
+
+    def test_soglia_negativa_ko(self):
+        with pytest.raises(ValueError):
+            rg287_verdetto(0.2, -0.5)
+
+
+class TestRg287BeHubEdge:
+    def test_perdite_100_ko(self):
+        import pytest
+        with pytest.raises(ValueError):
+            rg287_be_hub(DES, TAR_CAP, TAR_COMM, 100.0, EXTRA, FISSI, VOL)
+
+    def test_perdite_zero(self):
+        assert rg287_be_hub(DES, TAR_CAP, TAR_COMM, 0.0, EXTRA, FISSI,
+                            VOL) == pytest.approx(DES + TAR_CAP + TAR_COMM +
+                                                  EXTRA + FISSI / VOL)

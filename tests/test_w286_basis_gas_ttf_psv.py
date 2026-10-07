@@ -32,6 +32,7 @@ bn286_verdetto = _F["bn286_verdetto"]
 APP = Path(__file__).parent.parent / "app.py"
 
 TITLE286 = "⛽ Basis gas TTF–PSV"
+TITLE287 = "🚢⚡ Rigassificazione GNL: margine terminale"
 TITLE285 = "\U0001F6DB\uFE0F Differenziali greggio: sweet vs sour"
 TITLE284 = "\U0001F3ED Unit commitment CCGT: accendere o no?"
 TITLE283 = "\U0001F6E2\uFE0F Carry petrolio: contango & stoccaggio fisico"
@@ -59,12 +60,12 @@ def _registry():
 class TestRegistryTab286:
     def test_tab286_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 286
+        assert len(titoli) == len(dvars) == len(withs) == 287
         assert TITLE286 in titoli
         assert "tab286" in dvars
         assert "tab286" in withs
         assert titoli[dvars.index("tab286")] == TITLE286
-        assert titoli[-1] == TITLE286
+        assert titoli[-1] == TITLE287
         keys = re.findall(r'key="(bn286_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
