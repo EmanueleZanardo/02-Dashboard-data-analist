@@ -37181,6 +37181,197 @@ def sm274_co2_evitata(mwh_annui, fattore_kg_mwh):
     return m * f / 1000.0
 
 
+def pl275_num(x, nome):
+    """Validatore numerico stretto: bool/str/None/NaN/inf rifiutati."""
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        raise ValueError(f"{nome}: deve essere un numero")
+    f = float(x)
+    if f != f or f in (float("inf"), float("-inf")):
+        raise ValueError(f"{nome}: non puo' essere NaN o infinito")
+    return f
+
+
+def pl275_segno(direzione):
+    """+1.0 per long (acquisto), -1.0 per short (vendita)."""
+    if not isinstance(direzione, str):
+        raise ValueError("direzione: deve essere testo ('long' o 'short')")
+    d = direzione.strip().lower()
+    if d in ("long", "l", "acquisto", "buy", "+"):
+        return 1.0
+    if d in ("short", "s", "vendita", "sell", "-"):
+        return -1.0
+    raise ValueError(f"direzione: '{direzione}' non riconosciuta (usare long/short)")
+
+
+def pl275_parse_posizioni(testo):
+    """Parsa CSV 'prodotto,qta_mwh,direzione,prezzo_eur_mwh' -> lista dict.
+
+    Prima riga saltata se e' un header (qta non numerica). Righe vuote ignorate.
+    """
+    if not isinstance(testo, str) or not testo.strip():
+        raise ValueError("posizioni: incollare almeno una riga CSV")
+    righe = []
+    for i, raw in enumerate(testo.strip().splitlines(), 1):
+        if not raw.strip():
+            continue
+        parti = [p.strip() for p in raw.split(",")]
+        if len(parti) != 4:
+            raise ValueError(
+                f"riga {i}: servono 4 colonne (prodotto,qta_mwh,direzione,prezzo_eur_mwh)")
+        prod, sqta, sdir, sprez = parti
+        if not prod:
+            raise ValueError(f"riga {i}: prodotto vuoto")
+        try:
+            qta = float(sqta)
+        except (ValueError, TypeError):
+            if i == 1:
+                continue  # header
+            raise ValueError(f"riga {i}: qta_mwh '{sqta}' non numerica")
+        try:
+            prezzo = float(sprez)
+        except (ValueError, TypeError):
+            raise ValueError(f"riga {i}: prezzo_eur_mwh '{sprez}' non numerico")
+        qta = pl275_num(qta, f"riga {i} qta_mwh")
+        prezzo = pl275_num(prezzo, f"riga {i} prezzo_eur_mwh")
+        if qta <= 0:
+            raise ValueError(f"riga {i}: qta_mwh deve essere > 0")
+        if prezzo < 0:
+            raise ValueError(f"riga {i}: prezzo_eur_mwh non puo' essere negativo")
+        segno = pl275_segno(sdir)  # solleva se non valida
+        righe.append({"prodotto": prod, "qta_mwh": qta,
+                      "direzione": "long" if segno > 0 else "short",
+                      "prezzo_eur_mwh": prezzo,
+                      "qta_firmata_mwh": segno * qta})
+    if not righe:
+        raise ValueError("posizioni: nessuna riga valida trovata")
+    return righe
+
+
+def pl275_parse_limiti(testo):
+    """Parsa CSV 'prodotto,limite_mwh' -> dict prodotto -> limite (>0)."""
+    if not isinstance(testo, str) or not testo.strip():
+        raise ValueError("limiti: incollare almeno una riga CSV")
+    limiti = {}
+    for i, raw in enumerate(testo.strip().splitlines(), 1):
+        if not raw.strip():
+            continue
+        parti = [p.strip() for p in raw.split(",")]
+        if len(parti) != 2:
+            raise ValueError(f"riga {i}: servono 2 colonne (prodotto,limite_mwh)")
+        prod, slim = parti
+        if not prod:
+            raise ValueError(f"riga {i}: prodotto vuoto")
+        try:
+            lim = float(slim)
+        except (ValueError, TypeError):
+            if i == 1:
+                continue  # header
+            raise ValueError(f"riga {i}: limite_mwh '{slim}' non numerico")
+        lim = pl275_num(lim, f"riga {i} limite_mwh")
+        if lim <= 0:
+            raise ValueError(f"riga {i}: limite_mwh deve essere > 0")
+        limiti[prod] = lim
+    if not limiti:
+        raise ValueError("limiti: nessuna riga valida trovata")
+    return limiti
+
+
+def pl275_utilizzo_pct(qta_mwh, limite_mwh):
+    """Utilizzo % del limite in valore assoluto. None se limite non valido."""
+    q = abs(pl275_num(qta_mwh, "qta_mwh"))
+    lim = pl275_num(limite_mwh, "limite_mwh")
+    if lim <= 0:
+        return None
+    return q / lim * 100.0
+
+
+def pl275_stato(utilizzo_pct, soglia_att=70.0, soglia_crit=90.0):
+    """Semaforo: ok / attenzione / critico / breach / senza_limite."""
+    if utilizzo_pct is None:
+        return "senza_limite"
+    u = pl275_num(utilizzo_pct, "utilizzo_pct")
+    sa = pl275_num(soglia_att, "soglia_att")
+    sc = pl275_num(soglia_crit, "soglia_crit")
+    if not (0 <= sa < sc):
+        raise ValueError("soglie: serve 0 <= attenzione < critica")
+    if u < 0:
+        raise ValueError("utilizzo_pct: non puo' essere negativo")
+    if u < sa:
+        return "ok"
+    if u < sc:
+        return "attenzione"
+    if u <= 100.0:
+        return "critico"
+    return "breach"
+
+
+def pl275_nozionale(qta_mwh, prezzo_eur_mwh):
+    """Controvalore nozionale € in valore assoluto."""
+    q = abs(pl275_num(qta_mwh, "qta_mwh"))
+    p = pl275_num(prezzo_eur_mwh, "prezzo_eur_mwh")
+    if p < 0:
+        raise ValueError("prezzo_eur_mwh: non puo' essere negativo")
+    return q * p
+
+
+def pl275_aggrega(posizioni):
+    """Aggrega per prodotto: qta lorda/netta, n. posizioni, prezzo medio, nozionale."""
+    agg = {}
+    for r in posizioni:
+        p = r["prodotto"]
+        e = agg.setdefault(p, {"prodotto": p, "qta_lorda_mwh": 0.0,
+                               "qta_netta_mwh": 0.0, "n_posizioni": 0,
+                               "nozionale_eur": 0.0, "_pq": 0.0})
+        e["qta_lorda_mwh"] += abs(r["qta_mwh"])
+        e["qta_netta_mwh"] += r["qta_firmata_mwh"]
+        e["n_posizioni"] += 1
+        e["nozionale_eur"] += pl275_nozionale(r["qta_mwh"], r["prezzo_eur_mwh"])
+        e["_pq"] += r["qta_mwh"] * r["prezzo_eur_mwh"]
+    out = []
+    for p, e in agg.items():
+        prezzo_medio = e["_pq"] / e["qta_lorda_mwh"] if e["qta_lorda_mwh"] else 0.0
+        out.append({"prodotto": p, "qta_lorda_mwh": e["qta_lorda_mwh"],
+                    "qta_netta_mwh": e["qta_netta_mwh"],
+                    "n_posizioni": e["n_posizioni"],
+                    "prezzo_medio_eur_mwh": prezzo_medio,
+                    "nozionale_eur": e["nozionale_eur"]})
+    return sorted(out, key=lambda d: d["qta_lorda_mwh"], reverse=True)
+
+
+def pl275_check_limiti(posizioni, limiti, soglia_att=70.0, soglia_crit=90.0):
+    """Unisce aggregato e limiti -> lista dict con utilizzo_pct e stato."""
+    agg = pl275_aggrega(posizioni)
+    out = []
+    for e in agg:
+        lim = limiti.get(e["prodotto"])
+        u = pl275_utilizzo_pct(e["qta_lorda_mwh"], lim) if lim is not None else None
+        out.append({"prodotto": e["prodotto"],
+                    "qta_lorda_mwh": e["qta_lorda_mwh"],
+                    "qta_netta_mwh": e["qta_netta_mwh"],
+                    "limite_mwh": lim,
+                    "utilizzo_pct": u,
+                    "stato": pl275_stato(u, soglia_att, soglia_crit)})
+    return sorted(out, key=lambda d: (d["utilizzo_pct"] is None,
+                                      -(d["utilizzo_pct"] or 0.0)))
+
+
+def pl275_riepilogo(checks, posizioni):
+    """KPI di sintesi del monitoraggio."""
+    n_breach = sum(1 for c in checks if c["stato"] == "breach")
+    n_critici = sum(1 for c in checks if c["stato"] == "critico")
+    utils = [c["utilizzo_pct"] for c in checks if c["utilizzo_pct"] is not None]
+    nozionale = sum(pl275_nozionale(r["qta_mwh"], r["prezzo_eur_mwh"])
+                    for r in posizioni)
+    netta = sum(r["qta_firmata_mwh"] for r in posizioni)
+    return {"n_posizioni": len(posizioni),
+            "n_prodotti": len(checks),
+            "n_breach": n_breach,
+            "n_critici": n_critici,
+            "utilizzo_max_pct": max(utils) if utils else None,
+            "nozionale_tot_eur": nozionale,
+            "esposizione_netta_mwh": netta}
+
+
 if workspace == _('ws1'):
     st.markdown(f"<h1>{_('ws1')}</h1>", unsafe_allow_html=True)
     banner_demo("simulatore strategico: margini, centrali e curve simulate")
@@ -37822,7 +38013,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256, tab257, tab258, tab259, tab260, tab261, tab262, tab263, tab264, tab265, tab266, tab267, tab268, tab269, tab270, tab271, tab272, tab273, tab274 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete", "🔥 Teleriscaldamento vs caldaia", "🌿 Clean spread (con CO₂)", "🇮🇹 PUN da prezzi zonali", "❄️ Pompa di calore vs caldaia", "🏢 PUE & costo data center", "🔌 Gruppo elettrogeno vs blackout", "🚗 Flotta aziendale: TCO diesel vs elettrico", "📜 Garanzie di origine: costo del 100% rinnovabile", "♻️ Fine vita FV: revamping vs dismissione", "🌾️ Agrivoltaico: doppio reddito", "🟢 Biometano: business case", "🌬️ Eolico onshore: business case", "🌊 Idroelettrico run-of-river: business case", "🔥 Geotermia profonda: business case", "☀️ Solare termodinamico (CSP): business case", "🌬️ Eolico offshore: business case", "☀️ Fotovoltaico utility-scale: business case", "⚛️ Nucleare SMR: business case"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256, tab257, tab258, tab259, tab260, tab261, tab262, tab263, tab264, tab265, tab266, tab267, tab268, tab269, tab270, tab271, tab272, tab273, tab274, tab275 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete", "🔥 Teleriscaldamento vs caldaia", "🌿 Clean spread (con CO₂)", "🇮🇹 PUN da prezzi zonali", "❄️ Pompa di calore vs caldaia", "🏢 PUE & costo data center", "🔌 Gruppo elettrogeno vs blackout", "🚗 Flotta aziendale: TCO diesel vs elettrico", "📜 Garanzie di origine: costo del 100% rinnovabile", "♻️ Fine vita FV: revamping vs dismissione", "🌾️ Agrivoltaico: doppio reddito", "🟢 Biometano: business case", "🌬️ Eolico onshore: business case", "🌊 Idroelettrico run-of-river: business case", "🔥 Geotermia profonda: business case", "☀️ Solare termodinamico (CSP): business case", "🌬️ Eolico offshore: business case", "☀️ Fotovoltaico utility-scale: business case", "⚛️ Nucleare SMR: business case", "📊 Posizione vs limiti di rischio"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -62839,6 +63030,99 @@ elif workspace == _('ws8'):
                                key="sm274_csv",
                                help="Margine annuo e VAN al variare del prezzo dell'energia.")
         st.caption("Nota: il capex first-of-a-kind (FOAK) degli SMR e' molto piu' alto di quello Nth-of-a-kind (NOAK): il business case dipende dai costi reali di costruzione, dai tempi di licensing e dalla gestione delle scorie. Il combustibile HALEU (uranio ad alto arricchimento) puo' costare piu' dell'uranio convenzionale.")
+
+    with tab275:
+        titolo275 = edu("Posizione vs limiti di rischio", "Un desk energia ha POSIZIONI aperte (contratti long/acquisto o short/vendita per prodotto e scadenza) e LIMITI di rischio (massima quantita' detenibile per prodotto). Questa tab incrocia le due cose: calcola l'utilizzo % di ogni limite in valore assoluto, accende un semaforo (ok / attenzione / critico / breach oltre il 100%) e mostra esposizione netta e nozionale. I dati si incollano come CSV: nessuna connessione esterna, nessun dato reale.")
+        st.markdown(f"<h1>📊 {titolo275}</h1>", unsafe_allow_html=True)
+        st.caption("Posizioni aperte contro limiti di rischio: utilizzo %, semafori, breach, esposizione netta e nozionale. Incolla i CSV, imposta le soglie.")
+        banner_demo("posizioni e limiti inseriti a mano (dati dimostrativi)")
+        pos275 = st.text_area("Posizioni (CSV: prodotto,qta_mwh,direzione,prezzo_eur_mwh)",
+                             value=("prodotto,qta_mwh,direzione,prezzo_eur_mwh\n"
+                                    "Power CAL-27 Baseload,5000,long,98.5\n"
+                                    "Power Q2-27 Peak,2500,short,112.0\n"
+                                    "Gas TTF CAL-27,8000,long,38.2\n"
+                                    "CO2 EUA Dec-27,15000,long,72.0"),
+                             height=150, key="pl275_pos",
+                             help="Una riga per posizione. direzione: long (acquisto) o short (vendita). La prima riga puo' essere l'header.")
+        lim275 = st.text_area("Limiti di rischio (CSV: prodotto,limite_mwh)",
+                             value=("prodotto,limite_mwh\n"
+                                    "Power CAL-27 Baseload,10000\n"
+                                    "Power Q2-27 Peak,2000\n"
+                                    "Gas TTF CAL-27,10000\n"
+                                    "CO2 EUA Dec-27,20000"),
+                             height=130, key="pl275_lim",
+                             help="Limite massimo detenibile per prodotto, in MWh (valore assoluto). I prodotti senza riga qui risultano 'senza limite'.")
+        s1_275, s2_275 = st.columns(2)
+        satt275 = s1_275.slider("Soglia attenzione (% utilizzo)", min_value=10.0, max_value=95.0,
+                                value=70.0, step=5.0, format="%.0f",
+                                key="pl275_soglia_att",
+                                help="Sopra questa soglia il semaforo diventa giallo.")
+        scrit275 = s2_275.slider("Soglia critica (% utilizzo)", min_value=50.0, max_value=100.0,
+                                 value=90.0, step=5.0, format="%.0f",
+                                 key="pl275_soglia_crit",
+                                 help="Sopra questa soglia il semaforo diventa rosso. Oltre il 100% e' breach.")
+        try:
+            if scrit275 <= satt275:
+                raise ValueError("soglie: la soglia critica deve superare quella di attenzione")
+            pr275 = pl275_parse_posizioni(pos275)
+            lm275 = pl275_parse_limiti(lim275)
+            ck275 = pl275_check_limiti(pr275, lm275, satt275, scrit275)
+            rp275 = pl275_riepilogo(ck275, pr275)
+        except ValueError as e275:
+            st.error(f"Dati non validi: {e275}")
+            st.stop()
+        k1_275, k2_275, k3_275, k4_275, k5_275, k6_275 = st.columns(6)
+        render_kpi("Posizioni", f"{rp275['n_posizioni']}", k1_275)
+        render_kpi("Prodotti", f"{rp275['n_prodotti']}", k2_275)
+        render_kpi("Breach", f"{rp275['n_breach']}", k3_275)
+        render_kpi("Critici", f"{rp275['n_critici']}", k4_275)
+        umax275 = rp275["utilizzo_max_pct"]
+        render_kpi("Utilizzo max", f"{umax275:.1f}%" if umax275 is not None else "—", k5_275)
+        render_kpi("Nozionale (€)", f"{rp275['nozionale_tot_eur']:,.0f}", k6_275)
+        br275 = [c["prodotto"] for c in ck275 if c["stato"] == "breach"]
+        cr275 = [c["prodotto"] for c in ck275 if c["stato"] == "critico"]
+        sl275 = [c["prodotto"] for c in ck275 if c["stato"] == "senza_limite"]
+        if br275:
+            st.error(f"🚨 BREACH su {len(br275)} prodotto/i oltre il limite: {', '.join(br275)}. Ridurre la posizione o chiedere aumento del limite prima di operare ancora.")
+        elif cr275:
+            st.warning(f"⚠️ {len(cr275)} prodotto/i in zona critica (≥{scrit275:.0f}% del limite): {', '.join(cr275)}. Nessuna nuova posizione long/short su questi prodotti senza approvazione.")
+        else:
+            st.success(f"✅ Nessun breach e nessun prodotto in zona critica. Esposizione netta di portafoglio: {rp275['esposizione_netta_mwh']:,.0f} MWh.")
+        if sl275:
+            st.info(f"ℹ️ {len(sl275)} prodotto/i senza limite impostato: {', '.join(sl275)} — aggiungere una riga nei limiti per monitorarli.")
+        graf275 = [c for c in ck275 if c["utilizzo_pct"] is not None]
+        if graf275:
+            st.markdown("**Utilizzo % dei limiti per prodotto**")
+            dgu275 = pd.DataFrame([{"prodotto": c["prodotto"],
+                                    "utilizzo_pct": round(c["utilizzo_pct"], 1),
+                                    "stato": c["stato"]} for c in graf275])
+            figu275 = px.bar(dgu275, x="prodotto", y="utilizzo_pct", color="stato",
+                             title="Utilizzo dei limiti di rischio (%)",
+                             labels={"prodotto": "Prodotto", "utilizzo_pct": "Utilizzo (%)", "stato": "Stato"},
+                             color_discrete_map={"ok": "#22c55e", "attenzione": "#eab308",
+                                                 "critico": "#ef4444", "breach": "#7f1d1d"})
+            figu275.add_hline(y=100.0, line_dash="solid", line_color="red",
+                              annotation_text="Limite (100%)")
+            figu275.add_hline(y=scrit275, line_dash="dot", line_color="#9ca3af",
+                              annotation_text="Soglia critica")
+            st.plotly_chart(figu275, use_container_width=True)
+        with st.expander("Dettaglio posizioni/limiti ed export CSV"):
+            dft275 = pd.DataFrame([{"prodotto": c["prodotto"],
+                                    "qta_lorda_mwh": round(c["qta_lorda_mwh"], 0),
+                                    "qta_netta_mwh": round(c["qta_netta_mwh"], 0),
+                                    "limite_mwh": (round(c["limite_mwh"], 0)
+                                                   if c["limite_mwh"] is not None else "—"),
+                                    "utilizzo_pct": (round(c["utilizzo_pct"], 1)
+                                                     if c["utilizzo_pct"] is not None else "—"),
+                                    "stato": c["stato"]} for c in ck275])
+            st.dataframe(dft275, use_container_width=True, hide_index=True)
+            st.caption(f"Esposizione netta di portafoglio: {rp275['esposizione_netta_mwh']:,.0f} MWh (long positive, short negative). Nozionale totale: {rp275['nozionale_tot_eur']:,.0f} €.")
+            st.download_button("⬇️ Export CSV monitoraggio",
+                               data=dft275.to_csv(index=False, sep=";").encode("utf-8"),
+                               file_name="posizione_vs_limiti.csv", mime="text/csv",
+                               key="pl275_csv",
+                               help="Tabella prodotto × utilizzo limite con semafori.")
+        st.caption("Nota: i limiti qui sono in quantita' (MWh). Un monitoraggio completo affianca limiti in nozionale, per controparte e per scadenza: usare questa tab come primo controllo giornaliero, non come unico presidio.")
 
 # Footer
 

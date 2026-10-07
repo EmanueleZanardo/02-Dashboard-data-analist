@@ -40,6 +40,7 @@ TITLE271 = "☀️ Solare termodinamico (CSP): business case"
 TITLE272 = "🌬️ Eolico offshore: business case"
 TITLE273 = "☀️ Fotovoltaico utility-scale: business case"
 TITLE274 = "⚛️ Nucleare SMR: business case"
+TITLE275 = "📊 Posizione vs limiti di rischio"
 TITLE267 = "🟢 Biometano: business case"
 
 POT = 10.0
@@ -68,12 +69,12 @@ def _registry():
 class TestRegistryTab268:
     def test_tab268_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 274
+        assert len(titoli) == len(dvars) == len(withs) == 275
         assert TITLE268 in titoli
         assert "tab268" in dvars
         assert "tab268" in withs
         assert titoli[dvars.index("tab268")] == TITLE268
-        assert titoli[-1] == TITLE274
+        assert titoli[-1] == TITLE275
         keys = re.findall(r'key="(eo268_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
@@ -87,6 +88,7 @@ class TestRegistryTab268:
         assert titoli[dvars.index("tab272")] == TITLE272
         assert titoli[dvars.index("tab273")] == TITLE273
         assert titoli[dvars.index("tab274")] == TITLE274
+        assert titoli[dvars.index("tab275")] == TITLE275
 
 
 class TestEo268Num:
