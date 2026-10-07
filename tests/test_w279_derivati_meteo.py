@@ -46,6 +46,7 @@ TITLE289 = "⚫🔥 Clean dark spread: margine centrale a carbone"
 TITLE290 = "🔀💰 PTR transfrontaliero: vale il prezzo d'asta?"
 TITLE291 = "📊💹 Sharpe & Sortino: la strategia rende davvero?"
 TITLE292 = "🪓📊 Component VaR: quale posizione tagliare per prima?"
+TITLE293 = "🛡📉 Hedge ratio ottimale: quanto coprire con i futures?"
 TITLE278 = "\U0001f321\ufe0f Stress climatico: domanda e prezzo"
 TITLE277 = "\u26a1 Aste MI: scostamenti vs MGP"
 
@@ -66,12 +67,12 @@ def _registry():
 class TestRegistryTab279:
     def test_tab279_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 292
+        assert len(titoli) == len(dvars) == len(withs) == 293
         assert TITLE279 in titoli
         assert "tab279" in dvars
         assert "tab279" in withs
         assert titoli[dvars.index("tab279")] == TITLE279
-        assert titoli[-1] == TITLE292
+        assert titoli[-1] == TITLE293
         keys = re.findall(r'key="(wd279_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

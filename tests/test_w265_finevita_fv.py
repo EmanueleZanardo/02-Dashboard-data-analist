@@ -56,6 +56,7 @@ TITLE289 = "⚫🔥 Clean dark spread: margine centrale a carbone"
 TITLE290 = "🔀💰 PTR transfrontaliero: vale il prezzo d'asta?"
 TITLE291 = "📊💹 Sharpe & Sortino: la strategia rende davvero?"
 TITLE292 = "🪓📊 Component VaR: quale posizione tagliare per prima?"
+TITLE293 = "🛡📉 Hedge ratio ottimale: quanto coprire con i futures?"
 TITLE264 = "\U0001F4DC Garanzie di origine: costo del 100% rinnovabile"
 
 PROD0 = 100000.0
@@ -78,12 +79,12 @@ def _registry():
 class TestRegistryTab265:
     def test_tab265_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 292
+        assert len(titoli) == len(dvars) == len(withs) == 293
         assert TITLE265 in titoli
         assert "tab265" in dvars
         assert "tab265" in withs
         assert titoli[dvars.index("tab265")] == TITLE265
-        assert titoli[-1] == TITLE292
+        assert titoli[-1] == TITLE293
         keys = re.findall(r'key="(fv265_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
