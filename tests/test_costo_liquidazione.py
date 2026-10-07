@@ -176,14 +176,14 @@ class TestRegistry:
                                 and node.value.args and hasattr(node.value.args[0], "elts")):
                 titoli = [t.value for t in node.value.args[0].elts]
         assert titoli is not None
-        assert len(titoli) == 291
-        assert titoli[-1] == "📊💹 Sharpe & Sortino: la strategia rende davvero?"
+        assert len(titoli) == 292
+        assert titoli[-1] == "🪓📊 Component VaR: quale posizione tagliare per prima?"
         # variabili tabN: devono essere 204 e tab203 presente (non più ultima)
         import re as _re
         m = _re.search(r"((?:tab\d+, )+tab\d+) = st.tabs\(\[", src)
         assert m is not None
         vars_tab = [v.strip() for v in m.group(1).split(",")]
-        assert len(vars_tab) == 291
+        assert len(vars_tab) == 292
         assert "tab203" in vars_tab
         # key widget uniche
         keys = _re.findall(r'key="(liq203_[^"]+)"', src)

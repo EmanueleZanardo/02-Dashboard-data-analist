@@ -1,0 +1,237 @@
+"""Test tab292 '🪓📊 Component VaR: quale posizione tagliare per prima?': registry + funzioni pure.
+
+Funzioni pure estratte da app.py via AST con tests/appfuncs.py (niente Streamlit).
+Verifica consistenza del registry (titoli/dvar/with coerenti) e l'allineamento
+titolo-contenuto inclusa la tab292.
+"""
+
+import math
+import re
+from pathlib import Path
+
+import pytest
+
+from appfuncs import load
+
+_F = load("cv292_num", "cv292_pos", "cv292_conf", "cv292_norm_cdf",
+          "cv292_norm_ppf", "cv292_z", "cv292_parse_posizioni",
+          "cv292_sigma_portafoglio", "cv292_var_standalone",
+          "cv292_var_portafoglio", "cv292_component_var",
+          "cv292_beneficio_diversificazione", "cv292_ranking_taglio",
+          "cv292_verdetto")
+cv292_num = _F["cv292_num"]
+cv292_pos = _F["cv292_pos"]
+cv292_conf = _F["cv292_conf"]
+cv292_norm_cdf = _F["cv292_norm_cdf"]
+cv292_norm_ppf = _F["cv292_norm_ppf"]
+cv292_z = _F["cv292_z"]
+cv292_parse_posizioni = _F["cv292_parse_posizioni"]
+cv292_sigma_portafoglio = _F["cv292_sigma_portafoglio"]
+cv292_var_standalone = _F["cv292_var_standalone"]
+cv292_var_portafoglio = _F["cv292_var_portafoglio"]
+cv292_component_var = _F["cv292_component_var"]
+cv292_beneficio_diversificazione = _F["cv292_beneficio_diversificazione"]
+cv292_ranking_taglio = _F["cv292_ranking_taglio"]
+cv292_verdetto = _F["cv292_verdetto"]
+
+APP = Path(__file__).parent.parent / "app.py"
+
+TITLE292 = "🪓📊 Component VaR: quale posizione tagliare per prima?"
+TITLE291 = "📊💹 Sharpe & Sortino: la strategia rende davvero?"
+TITLE290 = "🔀💰 PTR transfrontaliero: vale il prezzo d'asta?"
+
+POS = [{"nome": "TTF", "valore": 2500000.0, "vol": 0.018},
+       {"nome": "PSV", "valore": -1200000.0, "vol": 0.021},
+       {"nome": "PowerDE", "valore": 1800000.0, "vol": 0.024}]
+
+
+def _registry():
+    src = APP.read_text(encoding="utf-8")
+    line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
+    titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
+    dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
+    withs = re.findall(r"    with (tab\d+):", src)
+    return src, titoli, dvars, withs
+
+
+class TestRegistryTab292:
+    def test_tab292_dichiarata(self):
+        src, titoli, dvars, withs = _registry()
+        assert len(titoli) == len(dvars) == len(withs) == 292
+        assert TITLE292 in titoli
+        assert "tab292" in dvars
+        assert "tab292" in withs
+        assert titoli[dvars.index("tab292")] == TITLE292
+        assert titoli[-1] == TITLE292
+        keys = re.findall(r'key="(cv292_[^"]+)"', src)
+        assert len(keys) == len(set(keys)) >= 5
+
+    def test_titoli_allineati_290_291_292(self):
+        _, titoli, dvars, _ = _registry()
+        assert titoli[dvars.index("tab290")] == TITLE290
+        assert titoli[dvars.index("tab291")] == TITLE291
+        assert titoli[dvars.index("tab292")] == TITLE292
+
+
+class TestCv292Validatori:
+    def test_num_ok(self):
+        assert cv292_num(1.5, "x") == 1.5
+
+    def test_num_bool_ko(self):
+        with pytest.raises(ValueError):
+            cv292_num(True, "x")
+
+    def test_num_nan_ko(self):
+        with pytest.raises(ValueError):
+            cv292_num(float("nan"), "x")
+
+    def test_pos_zero_ko(self):
+        with pytest.raises(ValueError):
+            cv292_pos(0.0, "x")
+
+    def test_conf_ok(self):
+        assert cv292_conf(0.95) == 0.95
+
+    def test_conf_bordi_ko(self):
+        with pytest.raises(ValueError):
+            cv292_conf(0.0)
+        with pytest.raises(ValueError):
+            cv292_conf(1.0)
+
+
+class TestCv292Normale:
+    def test_cdf_zero(self):
+        assert cv292_norm_cdf(0.0) == pytest.approx(0.5)
+
+    def test_cdf_196(self):
+        assert cv292_norm_cdf(1.96) == pytest.approx(0.975, abs=1e-3)
+
+    def test_ppf_median(self):
+        assert cv292_norm_ppf(0.5) == pytest.approx(0.0, abs=1e-9)
+
+    def test_ppf_975(self):
+        assert cv292_norm_ppf(0.975) == pytest.approx(1.95996398, rel=1e-6)
+
+    def test_ppf_99(self):
+        assert cv292_norm_ppf(0.99) == pytest.approx(2.32634787, rel=1e-6)
+
+    def test_ppf_simmetria(self):
+        assert cv292_norm_ppf(0.025) == pytest.approx(-1.95996398, rel=1e-6)
+
+    def test_ppf_roundtrip(self):
+        for x in (-1.5, -0.2, 0.7, 1.5, 2.5):
+            assert cv292_norm_ppf(cv292_norm_cdf(x)) == pytest.approx(x,
+                                                                     rel=1e-6)
+
+    def test_ppf_bordi_ko(self):
+        with pytest.raises(ValueError):
+            cv292_norm_ppf(0.0)
+        with pytest.raises(ValueError):
+            cv292_norm_ppf(1.0)
+
+    def test_z_95(self):
+        assert cv292_z(0.95) == pytest.approx(1.64485362, rel=1e-6)
+
+
+class TestCv292Parse:
+    def test_ok(self):
+        p = cv292_parse_posizioni("TTF;2500000;1,8\n# cmt\n\nPSV;-1200000;2.1")
+        assert [x["nome"] for x in p] == ["TTF", "PSV"]
+        assert [x["valore"] for x in p] == [2500000.0, -1200000.0]
+        assert [x["vol"] for x in p] == pytest.approx([0.018, 0.021])
+
+    def test_riga_malformata_ko(self):
+        with pytest.raises(ValueError):
+            cv292_parse_posizioni("TTF;2500000")
+
+    def test_valore_zero_ko(self):
+        with pytest.raises(ValueError):
+            cv292_parse_posizioni("TTF;0;1.8")
+
+    def test_vol_negativa_ko(self):
+        with pytest.raises(ValueError):
+            cv292_parse_posizioni("TTF;1000;-1.8")
+
+    def test_nomi_duplicati_ko(self):
+        with pytest.raises(ValueError):
+            cv292_parse_posizioni("TTF;1000;1.0\nTTF;2000;1.0")
+
+    def test_vuoto_ko(self):
+        with pytest.raises(ValueError):
+            cv292_parse_posizioni("# solo commenti\n")
+
+
+class TestCv292Sigma:
+    def test_singola(self):
+        assert cv292_sigma_portafoglio([100.0], 0.3) == pytest.approx(100.0)
+
+    def test_rho_uno(self):
+        assert cv292_sigma_portafoglio([100.0, 50.0], 1.0) == \
+            pytest.approx(150.0)
+
+    def test_rho_zero(self):
+        assert cv292_sigma_portafoglio([100.0, 100.0], 0.0) == \
+            pytest.approx(math.sqrt(2.0) * 100.0)
+
+    def test_rho_fuori_range_ko(self):
+        with pytest.raises(ValueError):
+            cv292_sigma_portafoglio([100.0, 50.0], 1.5)
+
+
+class TestCv292Var:
+    def test_standalone_formula(self):
+        att = 1_000_000.0 * 0.02 * math.sqrt(10.0) * 1.64485362
+        assert cv292_var_standalone(1_000_000.0, 0.02, 10, 0.95) == \
+            pytest.approx(att, rel=1e-6)
+
+    def test_standalone_short_usa_abs(self):
+        assert cv292_var_standalone(-500.0, 0.01, 5, 0.9) == \
+            pytest.approx(cv292_var_standalone(500.0, 0.01, 5, 0.9))
+
+    def test_portafoglio_singolo_uguale_standalone(self):
+        p = [{"nome": "A", "valore": 1e6, "vol": 0.02}]
+        assert cv292_var_portafoglio(p, 0.3, 10, 0.95) == pytest.approx(
+            cv292_var_standalone(1e6, 0.02, 10, 0.95))
+
+    def test_portafoglio_rho_uno_uguale_somma(self):
+        v = cv292_var_portafoglio(POS, 1.0, 10, 0.95)
+        s = sum(cv292_var_standalone(p["valore"], p["vol"], 10, 0.95)
+                for p in POS)
+        assert v == pytest.approx(s)
+
+    def test_diversificazione_positiva(self):
+        b = cv292_beneficio_diversificazione(POS, 0.3, 10, 0.95)
+        assert b["beneficio"] > 0
+        assert b["somma_standalone"] == pytest.approx(
+            b["var_portafoglio"] + b["beneficio"])
+
+    def test_componenti_sommano_a_totale(self):
+        comp = cv292_component_var(POS, 0.3, 10, 0.95)
+        tot = cv292_var_portafoglio(POS, 0.3, 10, 0.95)
+        assert sum(c["componente"] for c in comp) == pytest.approx(tot)
+
+    def test_componente_singola_uguale_standalone(self):
+        p = [{"nome": "A", "valore": 1e6, "vol": 0.02}]
+        comp = cv292_component_var(p, 0.3, 10, 0.95)
+        assert comp[0]["componente"] == pytest.approx(
+            cv292_var_standalone(1e6, 0.02, 10, 0.95))
+
+    def test_ranking_prima_max(self):
+        rank = cv292_ranking_taglio(POS, 0.3, 10, 0.95)
+        comp = [c["componente"] for c in
+                cv292_component_var(POS, 0.3, 10, 0.95)]
+        assert rank[0]["componente"] == pytest.approx(max(comp))
+        assert [r["nome"] for r in rank] == sorted(
+            [r["nome"] for r in rank],
+            key=lambda n: next(c["componente"] for c in rank
+                               if c["nome"] == n), reverse=True)
+
+    def test_verdetto(self):
+        assert cv292_verdetto(100.0, 200.0)["verdetto"] == "dentro limite"
+        assert cv292_verdetto(300.0, 200.0)["verdetto"] == "fuori limite"
+        assert cv292_verdetto(100.0, 200.0)["uso_limite"] == \
+            pytest.approx(0.5)
+
+    def test_verdetto_limite_non_positivo_ko(self):
+        with pytest.raises(ValueError):
+            cv292_verdetto(100.0, 0.0)
