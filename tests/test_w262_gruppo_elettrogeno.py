@@ -45,6 +45,8 @@ TITLE275 = "📊 Posizione vs limiti di rischio"
 TITLE276 = "💧 Cash flow at risk (CFaR)"
 TITLE277 = "⚡ Aste MI: scostamenti vs MGP"
 TITLE278 = "🌡️ Stress climatico: domanda e prezzo"
+TITLE279 = "🌪️ Derivati meteo: pricing HDD/CDD"
+TITLE280 = "🚢 LNG vs gasdotto: costo delivered"
 TITLE261 = "🏢 PUE & costo data center"
 
 # Parametri di riferimento usati nei test
@@ -67,12 +69,12 @@ def _registry():
 class TestRegistryTab262:
     def test_tab262_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 278
+        assert len(titoli) == len(dvars) == len(withs) == 280
         assert TITLE262 in titoli
         assert "tab262" in dvars
         assert "tab262" in withs
         assert titoli[dvars.index("tab262")] == TITLE262
-        assert titoli[-1] == TITLE278
+        assert titoli[-1] == TITLE280
         keys = re.findall(r'key="(gen262_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 10
 
@@ -96,6 +98,8 @@ class TestRegistryTab262:
         assert titoli[dvars.index("tab276")] == TITLE276
         assert titoli[dvars.index("tab277")] == TITLE277
         assert titoli[dvars.index("tab278")] == TITLE278
+        assert titoli[dvars.index("tab279")] == TITLE279
+        assert titoli[dvars.index("tab280")] == TITLE280
 
 
 class TestGen262Num:

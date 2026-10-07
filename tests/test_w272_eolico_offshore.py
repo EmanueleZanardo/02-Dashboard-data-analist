@@ -42,6 +42,8 @@ TITLE275 = "📊 Posizione vs limiti di rischio"
 TITLE276 = "💧 Cash flow at risk (CFaR)"
 TITLE277 = "⚡ Aste MI: scostamenti vs MGP"
 TITLE278 = "🌡️ Stress climatico: domanda e prezzo"
+TITLE279 = "🌪️ Derivati meteo: pricing HDD/CDD"
+TITLE280 = "🚢 LNG vs gasdotto: costo delivered"
 TITLE271 = "☀️ Solare termodinamico (CSP): business case"
 TITLE270 = "🔥 Geotermia profonda: business case"
 
@@ -73,12 +75,12 @@ def _registry():
 class TestRegistryTab272:
     def test_tab272_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 278
+        assert len(titoli) == len(dvars) == len(withs) == 280
         assert TITLE272 in titoli
         assert "tab272" in dvars
         assert "tab272" in withs
         assert titoli[dvars.index("tab272")] == TITLE272
-        assert titoli[-1] == TITLE278
+        assert titoli[-1] == TITLE280
         keys = re.findall(r'key="(eo272_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
@@ -93,6 +95,8 @@ class TestRegistryTab272:
         assert titoli[dvars.index("tab276")] == TITLE276
         assert titoli[dvars.index("tab277")] == TITLE277
         assert titoli[dvars.index("tab278")] == TITLE278
+        assert titoli[dvars.index("tab279")] == TITLE279
+        assert titoli[dvars.index("tab280")] == TITLE280
 
 
 class TestEo272Num:

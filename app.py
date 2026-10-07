@@ -37822,6 +37822,300 @@ def sc278_sensibilita_temp(domanda_base_mw, prezzo_base, coeff_mw_per_c,
     return righe
 
 
+def wd279_num(x, nome):
+    """Valida uno scalare numerico: no bool, no NaN/inf."""
+    import math
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        raise ValueError(f"{nome}: deve essere un numero")
+    if math.isnan(x) or math.isinf(x):
+        raise ValueError(f"{nome}: NaN/inf non ammessi")
+    return float(x)
+
+
+def wd279_tipo_indice(t):
+    """Valida il tipo di indice: 'HDD' o 'CDD' (case-insensitive)."""
+    if not isinstance(t, str):
+        raise ValueError("tipo: deve essere 'HDD' o 'CDD'")
+    u = t.strip().upper()
+    if u not in ("HDD", "CDD"):
+        raise ValueError("tipo: deve essere 'HDD' o 'CDD'")
+    return u
+
+
+def wd279_lato(l):
+    """Valida il lato dell'opzione: 'call' o 'put' (case-insensitive)."""
+    if not isinstance(l, str):
+        raise ValueError("lato: deve essere 'call' o 'put'")
+    u = l.strip().lower()
+    if u not in ("call", "put"):
+        raise ValueError("lato: deve essere 'call' o 'put'")
+    return u
+
+
+def wd279_gradi_giorno(temp_c, base_c, tipo):
+    """Gradi giorno giornalieri: HDD = max(0, base - t), CDD = max(0, t - base)."""
+    t = wd279_num(temp_c, "temp_c")
+    b = wd279_num(base_c, "base_c")
+    k = wd279_tipo_indice(tipo)
+    if k == "HDD":
+        return max(0.0, b - t)
+    return max(0.0, t - b)
+
+
+def wd279_indice_periodo(temps, base_c, tipo):
+    """Indice cumulato su un periodo: somma dei gradi giorno giornalieri."""
+    if temps is None:
+        raise ValueError("temps: serie mancante")
+    vals = list(temps)
+    if not vals:
+        raise ValueError("temps: la serie non puo' essere vuota")
+    k = wd279_tipo_indice(tipo)
+    b = wd279_num(base_c, "base_c")
+    return sum(wd279_gradi_giorno(v, b, k) for v in vals)
+
+
+def wd279_payoff(indice, strike, tick, lato):
+    """Payoff dell'opzione meteo: call = max(0, indice-strike)*tick,
+    put = max(0, strike-indice)*tick."""
+    i = wd279_num(indice, "indice")
+    s = wd279_num(strike, "strike")
+    tk = wd279_num(tick, "tick")
+    u = wd279_lato(lato)
+    if i < 0:
+        raise ValueError("indice: non puo' essere negativo")
+    if s < 0:
+        raise ValueError("strike: non puo' essere negativo")
+    if tk <= 0:
+        raise ValueError("tick: deve essere > 0")
+    if u == "call":
+        return max(0.0, i - s) * tk
+    return max(0.0, s - i) * tk
+
+
+def wd279_burn(indici, strike, tick, lato):
+    """Burn analysis: premio equo = payoff medio sugli indici storici annuali."""
+    import statistics
+    if indici is None:
+        raise ValueError("indici: serie mancante")
+    vals = [wd279_num(v, "indice_storico") for v in indici]
+    if not vals:
+        raise ValueError("indici: la serie non puo' essere vuota")
+    if any(v < 0 for v in vals):
+        raise ValueError("indici: valori negativi non ammessi")
+    pay = [wd279_payoff(v, strike, tick, lato) for v in vals]
+    n = len(pay)
+    media = sum(pay) / n
+    return {"n_anni": n,
+            "premio": media,
+            "dev_std": statistics.pstdev(pay) if n > 1 else 0.0,
+            "payoff_min": min(pay),
+            "payoff_max": max(pay),
+            "payoff_anni": pay}
+
+
+def wd279_intervallo_confidenza(premio, dev_std, n):
+    """IC 95% del premio burn: premio +/- 1.96*sd/sqrt(n), estremo inf. a 0."""
+    import math
+    p = wd279_num(premio, "premio")
+    sd = wd279_num(dev_std, "dev_std")
+    if p < 0:
+        raise ValueError("premio: non puo' essere negativo")
+    if sd < 0:
+        raise ValueError("dev_std: non puo' essere negativa")
+    if not isinstance(n, int) or isinstance(n, bool) or n < 1:
+        raise ValueError("n: deve essere un intero >= 1")
+    m = 1.96 * sd / math.sqrt(n)
+    return {"inf": max(0.0, p - m), "sup": p + m}
+
+
+def wd279_prob_in_the_money(indici, strike, tick, lato):
+    """Frazione di anni storici con payoff > 0 (probabilita' empirica ITM)."""
+    b = wd279_burn(indici, strike, tick, lato)
+    pay = b["payoff_anni"]
+    return sum(1 for v in pay if v > 0.0) / len(pay)
+
+
+def wd279_sensibilita_strike(indici, strike_base, tick, lato, n_punti=9):
+    """Premio burn al variare dello strike (da 0.2x a 1.8x dello strike base)."""
+    sb = wd279_num(strike_base, "strike_base")
+    if sb <= 0:
+        raise ValueError("strike_base: deve essere > 0")
+    if isinstance(n_punti, bool) or not isinstance(n_punti, int) or n_punti < 3:
+        raise ValueError("n_punti: deve essere un intero >= 3")
+    lo, hi = 0.2 * sb, 1.8 * sb
+    righe = []
+    for j in range(n_punti):
+        s = lo + (hi - lo) * j / (n_punti - 1)
+        b = wd279_burn(indici, s, tick, lato)
+        righe.append({"strike": s, "premio": b["premio"]})
+    return righe
+
+
+def wd279_verdetto(premio, budget):
+    """Confronto premio burn vs budget: conveniente / in_linea / sopra_budget."""
+    p = wd279_num(premio, "premio")
+    bd = wd279_num(budget, "budget")
+    if p < 0:
+        raise ValueError("premio: non puo' essere negativo")
+    if bd <= 0:
+        raise ValueError("budget: deve essere > 0")
+    rapporto = p / bd
+    if p <= bd:
+        v = "conveniente"
+    elif rapporto <= 1.10:
+        v = "in_linea"
+    else:
+        v = "sopra_budget"
+    return {"verdetto": v, "rapporto": rapporto,
+            "scostamento_eur": p - bd}
+
+
+def wd279_parse_serie(testo):
+    """Parsa una serie di numeri separati da virgole, punto e virgola o a capo."""
+    import re
+    if not isinstance(testo, str) or not testo.strip():
+        raise ValueError("serie: testo vuoto")
+    vals = []
+    for pezzo in re.split(r"[,;\n]", testo):
+        pezzo = pezzo.strip()
+        if not pezzo:
+            continue
+        try:
+            vals.append(float(pezzo))
+        except ValueError:
+            raise ValueError(f"serie: valore non numerico '{pezzo}'")
+    if not vals:
+        raise ValueError("serie: nessun valore valido")
+    return vals
+
+
+def lg280_num(x, nome):
+    """Valida uno scalare numerico: no bool, no NaN/inf."""
+    import math
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        raise ValueError(f"{nome}: deve essere un numero")
+    if math.isnan(x) or math.isinf(x):
+        raise ValueError(f"{nome}: NaN/inf non ammessi")
+    return float(x)
+
+
+def lg280_perc(x, nome):
+    """Valida una percentuale 0..100."""
+    v = lg280_num(x, nome)
+    if v < 0 or v > 100:
+        raise ValueError(f"{nome}: deve essere tra 0 e 100")
+    return v
+
+
+def lg280_costo_lng(fob, nolo, rigass, perdite_perc):
+    """Costo DES LNG (€/MWh): (FOB + nolo) / (1 - perdite) + rigassificazione."""
+    f = lg280_num(fob, "fob")
+    n = lg280_num(nolo, "nolo")
+    r = lg280_num(rigass, "rigass")
+    p = lg280_perc(perdite_perc, "perdite_perc") / 100.0
+    if f < 0:
+        raise ValueError("fob: non puo' essere negativo")
+    if n < 0:
+        raise ValueError("nolo: non puo' essere negativo")
+    if r < 0:
+        raise ValueError("rigass: non puo' essere negativo")
+    if p >= 1.0:
+        raise ValueError("perdite_perc: deve essere < 100")
+    return (f + n) / (1.0 - p) + r
+
+
+def lg280_costo_gasdotto(frontiera, trasporto, perdite_perc):
+    """Costo delivered gasdotto (€/MWh): frontiera / (1 - perdite) + trasporto."""
+    fr = lg280_num(frontiera, "frontiera")
+    tr = lg280_num(trasporto, "trasporto")
+    p = lg280_perc(perdite_perc, "perdite_perc") / 100.0
+    if fr < 0:
+        raise ValueError("frontiera: non puo' essere negativo")
+    if tr < 0:
+        raise ValueError("trasporto: non puo' essere negativo")
+    if p >= 1.0:
+        raise ValueError("perdite_perc: deve essere < 100")
+    return fr / (1.0 - p) + tr
+
+
+def lg280_confronto(fob, nolo, rigass, perd_lng, frontiera, trasporto, perd_gas):
+    """Confronto DES LNG vs delivered gasdotto: delta e fonte piu' economica."""
+    des = lg280_costo_lng(fob, nolo, rigass, perd_lng)
+    dgas = lg280_costo_gasdotto(frontiera, trasporto, perd_gas)
+    delta = des - dgas
+    if abs(delta) <= 0.005:
+        fonte = "pari"
+    elif delta < 0:
+        fonte = "LNG"
+    else:
+        fonte = "gasdotto"
+    return {"des_lng": des, "delivered_gasdotto": dgas,
+            "delta": delta, "fonte": fonte}
+
+
+def lg280_breakeven_fob(delivered_gasdotto, nolo, rigass, perdite_perc):
+    """FOB massimo (€/MWh) per cui il LNG resta competitivo:
+    (delivered_gasdotto - rigass) * (1 - perdite) - nolo."""
+    d = lg280_num(delivered_gasdotto, "delivered_gasdotto")
+    n = lg280_num(nolo, "nolo")
+    r = lg280_num(rigass, "rigass")
+    p = lg280_perc(perdite_perc, "perdite_perc") / 100.0
+    if d <= 0:
+        raise ValueError("delivered_gasdotto: deve essere > 0")
+    if n < 0:
+        raise ValueError("nolo: non puo' essere negativo")
+    if r < 0:
+        raise ValueError("rigass: non puo' essere negativo")
+    if p >= 1.0:
+        raise ValueError("perdite_perc: deve essere < 100")
+    return (d - r) * (1.0 - p) - n
+
+
+def lg280_sensibilita_fob(fob_base, nolo, rigass, perdite_perc, n_punti=9):
+    """DES LNG al variare del FOB (da 0.5x a 1.5x del FOB base)."""
+    fb = lg280_num(fob_base, "fob_base")
+    if fb <= 0:
+        raise ValueError("fob_base: deve essere > 0")
+    if isinstance(n_punti, bool) or not isinstance(n_punti, int) or n_punti < 3:
+        raise ValueError("n_punti: deve essere un intero >= 3")
+    lo, hi = 0.5 * fb, 1.5 * fb
+    righe = []
+    for j in range(n_punti):
+        f = lo + (hi - lo) * j / (n_punti - 1)
+        righe.append({"fob": f,
+                      "des": lg280_costo_lng(f, nolo, rigass, perdite_perc)})
+    return righe
+
+
+def lg280_verdetto(delta, soglia):
+    """Verdetto: 'lng' / 'in_linea' / 'gasdotto' rispetto alla soglia
+    di indifferenza (€/MWh)."""
+    dl = lg280_num(delta, "delta")
+    sg = lg280_num(soglia, "soglia")
+    if sg < 0:
+        raise ValueError("soglia: non puo' essere negativa")
+    if abs(dl) <= sg:
+        v = "in_linea"
+    elif dl < 0:
+        v = "lng"
+    else:
+        v = "gasdotto"
+    return {"verdetto": v, "delta": dl, "soglia": sg}
+
+
+def lg280_costo_annuo_mln(costo_mwh, volume_gwh):
+    """Costo annuo in milioni di €: €/MWh x GWh x 1000 / 1e6."""
+    c = lg280_num(costo_mwh, "costo_mwh")
+    v = lg280_num(volume_gwh, "volume_gwh")
+    if c < 0:
+        raise ValueError("costo_mwh: non puo' essere negativo")
+    if v < 0:
+        raise ValueError("volume_gwh: non puo' essere negativo")
+    return c * v * 1000.0 / 1e6
+
+
+
+
 if workspace == _('ws1'):
     st.markdown(f"<h1>{_('ws1')}</h1>", unsafe_allow_html=True)
     banner_demo("simulatore strategico: margini, centrali e curve simulate")
@@ -38463,7 +38757,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256, tab257, tab258, tab259, tab260, tab261, tab262, tab263, tab264, tab265, tab266, tab267, tab268, tab269, tab270, tab271, tab272, tab273, tab274, tab275, tab276, tab277, tab278 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete", "🔥 Teleriscaldamento vs caldaia", "🌿 Clean spread (con CO₂)", "🇮🇹 PUN da prezzi zonali", "❄️ Pompa di calore vs caldaia", "🏢 PUE & costo data center", "🔌 Gruppo elettrogeno vs blackout", "🚗 Flotta aziendale: TCO diesel vs elettrico", "📜 Garanzie di origine: costo del 100% rinnovabile", "♻️ Fine vita FV: revamping vs dismissione", "🌾️ Agrivoltaico: doppio reddito", "🟢 Biometano: business case", "🌬️ Eolico onshore: business case", "🌊 Idroelettrico run-of-river: business case", "🔥 Geotermia profonda: business case", "☀️ Solare termodinamico (CSP): business case", "🌬️ Eolico offshore: business case", "☀️ Fotovoltaico utility-scale: business case", "⚛️ Nucleare SMR: business case", "📊 Posizione vs limiti di rischio", "💧 Cash flow at risk (CFaR)", "⚡ Aste MI: scostamenti vs MGP", "🌡️ Stress climatico: domanda e prezzo"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256, tab257, tab258, tab259, tab260, tab261, tab262, tab263, tab264, tab265, tab266, tab267, tab268, tab269, tab270, tab271, tab272, tab273, tab274, tab275, tab276, tab277, tab278, tab279, tab280 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete", "🔥 Teleriscaldamento vs caldaia", "🌿 Clean spread (con CO₂)", "🇮🇹 PUN da prezzi zonali", "❄️ Pompa di calore vs caldaia", "🏢 PUE & costo data center", "🔌 Gruppo elettrogeno vs blackout", "🚗 Flotta aziendale: TCO diesel vs elettrico", "📜 Garanzie di origine: costo del 100% rinnovabile", "♻️ Fine vita FV: revamping vs dismissione", "🌾️ Agrivoltaico: doppio reddito", "🟢 Biometano: business case", "🌬️ Eolico onshore: business case", "🌊 Idroelettrico run-of-river: business case", "🔥 Geotermia profonda: business case", "☀️ Solare termodinamico (CSP): business case", "🌬️ Eolico offshore: business case", "☀️ Fotovoltaico utility-scale: business case", "⚛️ Nucleare SMR: business case", "📊 Posizione vs limiti di rischio", "💧 Cash flow at risk (CFaR)", "⚡ Aste MI: scostamenti vs MGP", "🌡️ Stress climatico: domanda e prezzo", "🌪️ Derivati meteo: pricing HDD/CDD", "🚢 LNG vs gasdotto: costo delivered"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -63840,6 +64134,215 @@ elif workspace == _('ws8'):
                                key="sc278_csv",
                                help="Domanda, prezzo, energia e costo per scenario.")
         st.caption("Nota: il modello e' lineare (domanda = base + deltaT x coeff; prezzo = base x (1 + elasticita' x shock%)). Nella realta' oltre certe soglie gli effetti sono piu' che proporzionali (picchi di prezzo estremi): usare coefficienti prudenziali per gli stress severi.")
+    with tab279:
+        titolo279 = edu("Derivati meteo: pricing HDD/CDD", "I derivati meteorologici coprono il rischio volume legato alla temperatura: una call su HDD paga quando l'inverno e' piu' freddo della norma (piu' gradi giorno di riscaldamento del previsto), una call su CDD quando l'estate e' piu' calda. Il premio equo si stima con la burn analysis, cioe' come payoff medio sugli indici storici annuali. Questa tab calcola l'indice di periodo dalle temperature giornaliere, il payoff call/put, il premio burn con intervallo di confidenza, la probabilita' empirica di finire in-the-money e la sensibilita' del premio al livello di strike.")
+        st.markdown(f"<h1>🌪️ {titolo279}</h1>", unsafe_allow_html=True)
+        st.caption("Derivati meteo: quanto vale la copertura contro un inverno freddo o un'estate calda? Indice HDD/CDD da temperature giornaliere, payoff call/put, premio equo con burn analysis e sensibilita' allo strike.")
+        a1_279, a2_279, a3_279 = st.columns(3)
+        tipo279 = a1_279.selectbox("Tipo di indice", ["HDD", "CDD"],
+                                    key="wd279_tipo",
+                                    help="HDD (Heating Degree Days): inverno freddo = indice alto. CDD (Cooling Degree Days): estate calda = indice alto.")
+        base279 = a2_279.number_input("Temperatura base (°C)", value=18.0, step=0.5,
+                                      format="%.1f", key="wd279_base",
+                                      help="Soglia di riferimento: 18 °C standard per HDD, 18-21 °C per CDD.")
+        lato279 = a3_279.selectbox("Lato dell'opzione", ["call", "put"],
+                                    key="wd279_lato",
+                                    help="Call: paga se l'indice supera lo strike (inverno piu' freddo / estate piu' calda del previsto). Put: paga se resta sotto.")
+        b1_279, b2_279, b3_279 = st.columns(3)
+        strike279 = b1_279.number_input("Strike (gradi giorno)", min_value=1.0,
+                                        value=280.0, step=10.0, format="%.0f",
+                                        key="wd279_strike",
+                                        help="Livello di attivazione del payoff, in gradi giorno cumulati sul periodo.")
+        tick279 = b2_279.number_input("Tick (€/grado giorno)", min_value=0.01,
+                                      value=25.0, step=1.0, format="%.2f",
+                                      key="wd279_tick",
+                                      help="Controvalore per ogni grado giorno oltre/sotto lo strike.")
+        budget279 = b3_279.number_input("Budget max premio (€)", min_value=1.0,
+                                        value=10000.0, step=500.0, format="%.0f",
+                                        key="wd279_budget",
+                                        help="Premio massimo accettabile: il verdetto confronta il premio burn con questo budget.")
+        c1_279, c2_279 = st.columns(2)
+        temp_txt279 = c1_279.text_area("Temperature giornaliere del periodo (°C, separate da virgole)",
+                                       value="8.2, 7.5, 9.1, 6.8, 7.9, 10.2, 8.8, 7.1, 6.5, 9.4, 8.0, 7.3, 11.0, 9.8, 8.5, 7.7, 6.9, 10.5, 9.0, 8.3, 7.6, 6.2, 8.9, 9.6, 7.8, 8.1, 10.0, 9.3, 7.0, 8.6",
+                                       key="wd279_temps",
+                                       help="Temperature medie giornaliere del periodo di osservazione (es. un mese invernale).")
+        stor_txt279 = c2_279.text_area("Indici storici annuali (gradi giorno/anno, uno per riga)",
+                                        value="310\n285\n395\n340\n295\n365\n325\n300\n350\n275",
+                                        key="wd279_storici",
+                                        help="Indice HDD/CDD cumulato di ogni anno passato: serve per la burn analysis del premio.")
+        try:
+            temps279 = wd279_parse_serie(temp_txt279)
+            stor279 = wd279_parse_serie(stor_txt279)
+            indice279 = wd279_indice_periodo(temps279, base279, tipo279)
+            payoff279 = wd279_payoff(indice279, strike279, tick279, lato279)
+            burn279 = wd279_burn(stor279, strike279, tick279, lato279)
+            ic279 = wd279_intervallo_confidenza(burn279["premio"], burn279["dev_std"],
+                                                burn279["n_anni"])
+            prob279 = wd279_prob_in_the_money(stor279, strike279, tick279, lato279)
+            verd279 = wd279_verdetto(burn279["premio"], budget279)
+            sens279 = wd279_sensibilita_strike(stor279, strike279, tick279, lato279)
+        except ValueError as e279:
+            st.error(f"Dati non validi: {e279}")
+            st.stop()
+        k1_279, k2_279, k3_279, k4_279, k5_279, k6_279 = st.columns(6)
+        render_kpi("Indice periodo (gg)", f"{indice279:,.0f}", k1_279)
+        render_kpi("Payoff periodo (€)", f"{payoff279:,.0f}", k2_279)
+        render_kpi("Premio burn (€)", f"{burn279['premio']:,.0f}", k3_279)
+        render_kpi("Prob. in-the-money", f"{prob279*100:.0f}%", k4_279)
+        render_kpi("Anni storici", f"{burn279['n_anni']}", k5_279)
+        render_kpi("IC 95% premio (€)", f"{ic279['inf']:,.0f}–{ic279['sup']:,.0f}", k6_279)
+        if verd279["verdetto"] == "conveniente":
+            st.success(f"Copertura conveniente: premio burn {burn279['premio']:,.0f} € entro il budget {budget279:,.0f} € (rapporto {verd279['rapporto']:.2f}). {prob279*100:.0f}% degli anni storici avrebbe pagato, payoff max {burn279['payoff_max']:,.0f} €.")
+        elif verd279["verdetto"] == "in_linea":
+            st.info(f"Premio in linea col budget: {burn279['premio']:,.0f} € contro {budget279:,.0f} € (rapporto {verd279['rapporto']:.2f}, entro il 10%). Valutare se alzare lo strike per ridurre il premio.")
+        else:
+            st.warning(f"Premio sopra budget: {burn279['premio']:,.0f} € contro {budget279:,.0f} € (rapporto {verd279['rapporto']:.2f}, +{verd279['scostamento_eur']:,.0f} €). Alzare lo strike o ridurre il tick abbassa il premio.")
+        st.markdown("**Payoff storico per anno (€)**")
+        dfp279 = pd.DataFrame([{"anno": f"A-{i+1}", "payoff_eur": v}
+                               for i, v in enumerate(burn279["payoff_anni"])])
+        figp279 = px.bar(dfp279, x="anno", y="payoff_eur",
+                         title=f"Payoff annuo storico ({tipo279} {lato279}, strike {strike279:,.0f})",
+                         labels={"anno": "Anno storico", "payoff_eur": "Payoff (€)"})
+        figp279.add_hline(y=burn279["premio"], line_dash="dash", line_color="red",
+                          annotation_text="Premio burn")
+        st.plotly_chart(figp279, use_container_width=True)
+        st.markdown("**Premio burn al variare dello strike (€)**")
+        dss279 = pd.DataFrame(sens279)
+        figs279 = px.line(dss279, x="strike", y="premio",
+                          title="Premio burn vs strike (€)",
+                          labels={"strike": "Strike (gradi giorno)", "premio": "Premio (€)"})
+        figs279.add_hline(y=budget279, line_dash="dot", line_color="green",
+                           annotation_text="Budget")
+        figs279.add_vline(x=strike279, line_dash="dash", line_color="red",
+                           annotation_text="Strike attuale")
+        st.plotly_chart(figs279, use_container_width=True)
+        with st.expander("Dettaglio sensibilita' ed export CSV"):
+            dft279 = pd.DataFrame([{"strike_gg": round(r["strike"], 1),
+                                    "premio_eur": round(r["premio"], 0)}
+                                   for r in sens279])
+            st.dataframe(dft279, use_container_width=True, hide_index=True)
+            st.caption(f"Burn su {burn279['n_anni']} anni: premio {burn279['premio']:,.0f} €, deviazione standard {burn279['dev_std']:,.0f} €, IC 95% {ic279['inf']:,.0f}–{ic279['sup']:,.0f} €, payoff min {burn279['payoff_min']:,.0f} € / max {burn279['payoff_max']:,.0f} €. L'indice del periodo in corso ({indice279:,.0f} gg) genera un payoff di {payoff279:,.0f} €.")
+            st.download_button("⬇️ Export CSV sensibilita'",
+                               data=dft279.to_csv(index=False, sep=";").encode("utf-8"),
+                               file_name="derivati_meteo_sensibilita.csv", mime="text/csv",
+                               key="wd279_csv",
+                               help="Premio burn al variare dello strike.")
+        st.caption("Nota: la burn analysis e' il metodo standard di pricing dei derivati meteo (payoff medio sugli anni storici, senza attualizzazione quando il premio si paga a inizio periodo). Con pochi anni storici l'IC 95% e' ampio: servono almeno 10 anni per un premio stabile. Il tick va calibrato sull'esposizione reale (€/grado giorno di margine perso).")
+    with tab280:
+        titolo280 = edu("LNG vs gasdotto: costo delivered", "Il confronto tra GNL e gas via gasdotto si gioca sul costo delivered in €/MWh: per il GNL il DES (Delivered Ex Ship) somma FOB + nolo/assicurazione + rigassificazione, con le perdite di boil-off che gonfiano il costo per MWh utile; per il gasdotto vale prezzo alla frontiera + trasporto nazionale, con le perdite di rete. Questa tab calcola i due costi delivered, il delta, la fonte piu' economica, il FOB di break-even (massimo FOB LNG ancora competitivo col gasdotto) e il costo annuo sul volume acquistato, con sensibilita' del DES al FOB.")
+        st.markdown(f"<h1>🚢 {titolo280}</h1>", unsafe_allow_html=True)
+        st.caption("LNG vs gasdotto: quanto costa davvero il gas delivered? DES del GNL contro frontiera + trasporto, delta, FOB di break-even e sensibilita'.")
+        a1_280, a2_280, a3_280 = st.columns(3)
+        fob280 = a1_280.number_input("FOB LNG (€/MWh)", min_value=0.0,
+                                     value=40.0, step=1.0, format="%.2f",
+                                     key="lg280_fob",
+                                     help="Prezzo Free On Board del GNL al terminale di liquefazione.")
+        nolo280 = a2_280.number_input("Nolo + assicurazione (€/MWh)", min_value=0.0,
+                                      value=8.0, step=0.5, format="%.2f",
+                                      key="lg280_nolo",
+                                      help="Costo di trasporto marittimo e assicurazione per MWh.")
+        rigass280 = a3_280.number_input("Rigassificazione (€/MWh)", min_value=0.0,
+                                        value=3.0, step=0.25, format="%.2f",
+                                        key="lg280_rigass",
+                                        help="Tariffa di rigassificazione al terminale (es. Panigaglia, Livorno, Ravenna).")
+        b1_280, b2_280, b3_280 = st.columns(3)
+        perd_lng280 = b1_280.number_input("Perdite LNG / boil-off (%)", min_value=0.0,
+                                          max_value=99.9, value=2.0, step=0.1,
+                                          format="%.1f", key="lg280_perd_lng",
+                                          help="Boil-off e autoconsumi in % sul volume: alzano il costo per MWh utile.")
+        front280 = b2_280.number_input("Prezzo frontiera gasdotto (€/MWh)",
+                                       min_value=0.0, value=45.0, step=1.0,
+                                       format="%.2f", key="lg280_frontiera",
+                                       help="Prezzo del gas al punto di consegna frontaliero (es. Passo Gries, Tarvisio).")
+        trasp280 = b3_280.number_input("Trasporto gasdotto (€/MWh)", min_value=0.0,
+                                       value=2.0, step=0.25, format="%.2f",
+                                       key="lg280_trasporto",
+                                       help="Tariffa di trasporto nazionale fino al punto di riconsegna.")
+        c1_280, c2_280, c3_280 = st.columns(3)
+        perd_gas280 = c1_280.number_input("Perdite gasdotto (%)", min_value=0.0,
+                                          max_value=99.9, value=1.0, step=0.1,
+                                          format="%.1f", key="lg280_perd_gas",
+                                          help="Perdite di rete e fuel gas in % sul volume.")
+        vol280 = c2_280.number_input("Volume annuo (GWh)", min_value=0.0,
+                                     value=100.0, step=10.0, format="%.0f",
+                                     key="lg280_volume",
+                                     help="Volume annuo acquistato: serve per il costo annuo in milioni di €.")
+        soglia280 = c3_280.number_input("Soglia indifferenza (€/MWh)", min_value=0.0,
+                                        value=1.0, step=0.25, format="%.2f",
+                                        key="lg280_soglia",
+                                        help="Delta entro cui le due fonti sono considerate equivalenti.")
+        try:
+            conf280 = lg280_confronto(fob280, nolo280, rigass280, perd_lng280,
+                                      front280, trasp280, perd_gas280)
+            be280 = lg280_breakeven_fob(conf280["delivered_gasdotto"], nolo280,
+                                        rigass280, perd_lng280)
+            verd280 = lg280_verdetto(conf280["delta"], soglia280)
+            annuo_lng280 = lg280_costo_annuo_mln(conf280["des_lng"], vol280)
+            annuo_gas280 = lg280_costo_annuo_mln(conf280["delivered_gasdotto"],
+                                                vol280)
+            sens280 = lg280_sensibilita_fob(fob280, nolo280, rigass280,
+                                            perd_lng280)
+        except ValueError as e280:
+            st.error(f"Dati non validi: {e280}")
+            st.stop()
+        k1_280, k2_280, k3_280, k4_280, k5_280, k6_280 = st.columns(6)
+        render_kpi("DES LNG (€/MWh)", f"{conf280['des_lng']:,.2f}", k1_280)
+        render_kpi("Delivered gasdotto (€/MWh)",
+                   f"{conf280['delivered_gasdotto']:,.2f}", k2_280)
+        render_kpi("Delta (€/MWh)", f"{conf280['delta']:+,.2f}", k3_280)
+        render_kpi("Fonte conveniente", conf280["fonte"], k4_280)
+        render_kpi("Costo annuo LNG (M€)", f"{annuo_lng280:,.2f}", k5_280)
+        render_kpi("Costo annuo gasdotto (M€)", f"{annuo_gas280:,.2f}", k6_280)
+        if verd280["verdetto"] == "lng":
+            st.success(f"Conviene il LNG: DES {conf280['des_lng']:,.2f} €/MWh contro {conf280['delivered_gasdotto']:,.2f} €/MWh del gasdotto (delta {conf280['delta']:+,.2f} €/MWh). Risparmio annuo su {vol280:,.0f} GWh: {annuo_gas280 - annuo_lng280:,.2f} M€.")
+        elif verd280["verdetto"] == "in_linea":
+            st.info(f"Fonti sostanzialmente equivalenti: delta {conf280['delta']:+,.2f} €/MWh entro la soglia di {soglia280:,.2f} €/MWh. La scelta puo' seguire criteri non di prezzo (flessibilita', diversificazione).")
+        else:
+            st.warning(f"Conviene il gasdotto: delivered {conf280['delivered_gasdotto']:,.2f} €/MWh contro DES LNG {conf280['des_lng']:,.2f} €/MWh (delta {conf280['delta']:+,.2f} €/MWh). Il LNG torna competitivo solo con FOB fino a {be280:,.2f} €/MWh.")
+        st.markdown("**Scomposizione costo delivered (€/MWh)**")
+        pl280 = perd_lng280 / 100.0
+        pg280 = perd_gas280 / 100.0
+        dfc280 = pd.DataFrame([
+            {"fonte": "LNG", "componente": "FOB",
+             "eur_mwh": fob280 / (1 - pl280)},
+            {"fonte": "LNG", "componente": "Nolo",
+             "eur_mwh": nolo280 / (1 - pl280)},
+            {"fonte": "LNG", "componente": "Rigassificazione",
+             "eur_mwh": rigass280},
+            {"fonte": "Gasdotto", "componente": "Frontiera",
+             "eur_mwh": front280 / (1 - pg280)},
+            {"fonte": "Gasdotto", "componente": "Trasporto",
+             "eur_mwh": trasp280},
+        ])
+        figc280 = px.bar(dfc280, x="fonte", y="eur_mwh", color="componente",
+                         title="Scomposizione costo delivered (€/MWh)",
+                         labels={"fonte": "Fonte", "eur_mwh": "€/MWh",
+                                 "componente": "Componente"})
+        st.plotly_chart(figc280, use_container_width=True)
+        st.markdown("**DES LNG al variare del FOB (€/MWh)**")
+        dss280 = pd.DataFrame(sens280)
+        figl280 = px.line(dss280, x="fob", y="des",
+                          title="DES LNG vs FOB (€/MWh)",
+                          labels={"fob": "FOB LNG (€/MWh)",
+                                  "des": "DES (€/MWh)"})
+        figl280.add_hline(y=conf280["delivered_gasdotto"], line_dash="dash",
+                          line_color="green",
+                          annotation_text="Delivered gasdotto")
+        figl280.add_vline(x=be280, line_dash="dot", line_color="red",
+                          annotation_text="Break-even FOB")
+        st.plotly_chart(figl280, use_container_width=True)
+        with st.expander("Dettaglio sensibilita' ed export CSV"):
+            dft280 = pd.DataFrame([{"fob_eur_mwh": round(r["fob"], 2),
+                                    "des_eur_mwh": round(r["des"], 2)}
+                                   for r in sens280])
+            st.dataframe(dft280, use_container_width=True, hide_index=True)
+            st.caption(f"Con FOB {fob280:,.2f} €/MWh il DES LNG e' {conf280['des_lng']:,.2f} €/MWh contro {conf280['delivered_gasdotto']:,.2f} €/MWh del gasdotto (delta {conf280['delta']:+,.2f} €/MWh). Break-even FOB: {be280:,.2f} €/MWh. Costo annuo su {vol280:,.0f} GWh: {annuo_lng280:,.2f} M€ (LNG) vs {annuo_gas280:,.2f} M€ (gasdotto).")
+            st.download_button("⬇️ Export CSV sensibilita'",
+                               data=dft280.to_csv(index=False, sep=";").encode("utf-8"),
+                               file_name="lng_vs_gasdotto_sensibilita.csv",
+                               mime="text/csv", key="lg280_csv",
+                               help="DES LNG al variare del FOB.")
+        st.caption("Nota: il DES e' il costo del GNL reso al terminale di rigassificazione, prima degli oneri di trasporto nazionale a valle (uguali per entrambe le fonti se il punto di riconsegna coincide). Il FOB di break-even dice fino a che prezzo alla liquefazione il LNG resta competitivo: sopra, conviene il gasdotto.")
 
 # Footer
 

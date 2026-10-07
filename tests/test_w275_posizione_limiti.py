@@ -33,6 +33,8 @@ TITLE275 = "📊 Posizione vs limiti di rischio"
 TITLE276 = "💧 Cash flow at risk (CFaR)"
 TITLE277 = "⚡ Aste MI: scostamenti vs MGP"
 TITLE278 = "🌡️ Stress climatico: domanda e prezzo"
+TITLE279 = "🌪️ Derivati meteo: pricing HDD/CDD"
+TITLE280 = "🚢 LNG vs gasdotto: costo delivered"
 TITLE274 = "⚛️ Nucleare SMR: business case"
 
 CSV_POS = ("prodotto,qta_mwh,direzione,prezzo_eur_mwh\n"
@@ -57,12 +59,12 @@ def _registry():
 class TestRegistryTab275:
     def test_tab275_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 278
+        assert len(titoli) == len(dvars) == len(withs) == 280
         assert TITLE275 in titoli
         assert "tab275" in dvars
         assert "tab275" in withs
         assert titoli[dvars.index("tab275")] == TITLE275
-        assert titoli[-1] == TITLE278
+        assert titoli[-1] == TITLE280
         keys = re.findall(r'key="(pl275_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
@@ -73,6 +75,8 @@ class TestRegistryTab275:
         assert titoli[dvars.index("tab276")] == TITLE276
         assert titoli[dvars.index("tab277")] == TITLE277
         assert titoli[dvars.index("tab278")] == TITLE278
+        assert titoli[dvars.index("tab279")] == TITLE279
+        assert titoli[dvars.index("tab280")] == TITLE280
 
     def test_helper_definiti_prima_della_ui(self):
         src = APP.read_text(encoding="utf-8")
