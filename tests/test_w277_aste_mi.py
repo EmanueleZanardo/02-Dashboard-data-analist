@@ -57,6 +57,7 @@ TITLE300 = "🧮📊 Rapporto di diversificazione: quanto rischio risparmia il b
 TITLE301 = "🛡️🔍 Rischio di modello: quale VaR credere?"
 TITLE302 = "✂️📉 Incremental VaR: quanto rischio togli chiudendo la posizione?"
 TITLE303 = "🧱📉 Capacità VaR: quanto nozionale puoi ancora aggiungere?"
+TITLE304 = "🗂️📊 VaR per segmento: dove si concentra il rischio?"
 TITLE276 = "💧 Cash flow at risk (CFaR)"
 
 CSV_PREZZI = "sessione,prezzo_eur_mwh\nMI1,102.5\nMI2,98.0\nMI7,105.0\n"
@@ -74,12 +75,12 @@ def _registry():
 class TestRegistryTab277:
     def test_tab277_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 303
+        assert len(titoli) == len(dvars) == len(withs) == 304
         assert TITLE277 in titoli
         assert "tab277" in dvars
         assert "tab277" in withs
         assert titoli[dvars.index("tab277")] == TITLE277
-        assert titoli[-1] == TITLE303
+        assert titoli[-1] == TITLE304
         keys = re.findall(r'key="(mi277_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

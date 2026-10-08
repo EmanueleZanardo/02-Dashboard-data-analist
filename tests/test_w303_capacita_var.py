@@ -36,6 +36,7 @@ cf303_verdetto = _F["cf303_verdetto"]
 APP = Path(__file__).parent.parent / "app.py"
 
 TITLE303 = "🧱📉 Capacità VaR: quanto nozionale puoi ancora aggiungere?"
+TITLE304 = "🗂️📊 VaR per segmento: dove si concentra il rischio?"
 TITLE302 = "✂️📉 Incremental VaR: quanto rischio togli chiudendo la posizione?"
 TITLE301 = "🛡️🔍 Rischio di modello: quale VaR credere?"
 
@@ -76,13 +77,13 @@ def _registry():
 class TestRegistryTab303:
     def test_tab303_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 303
+        assert len(titoli) == len(dvars) == len(withs) == 304
         assert TITLE303 in titoli
         assert "tab303" in dvars
         assert "tab303" in withs
         assert titoli[dvars.index("tab303")] == TITLE303
-        assert titoli[-1] == TITLE303
-        assert dvars[-1] == "tab303"
+        assert titoli[-1] == TITLE304
+        assert dvars[-1] == "tab304"
         keys = re.findall(r'key="(st303_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

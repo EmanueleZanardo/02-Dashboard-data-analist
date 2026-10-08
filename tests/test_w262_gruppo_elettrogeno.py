@@ -70,6 +70,7 @@ TITLE300 = "🧮📊 Rapporto di diversificazione: quanto rischio risparmia il b
 TITLE301 = "🛡️🔍 Rischio di modello: quale VaR credere?"
 TITLE302 = "✂️📉 Incremental VaR: quanto rischio togli chiudendo la posizione?"
 TITLE303 = "🧱📉 Capacità VaR: quanto nozionale puoi ancora aggiungere?"
+TITLE304 = "🗂️📊 VaR per segmento: dove si concentra il rischio?"
 TITLE261 = "🏢 PUE & costo data center"
 
 # Parametri di riferimento usati nei test
@@ -92,12 +93,12 @@ def _registry():
 class TestRegistryTab262:
     def test_tab262_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 303
+        assert len(titoli) == len(dvars) == len(withs) == 304
         assert TITLE262 in titoli
         assert "tab262" in dvars
         assert "tab262" in withs
         assert titoli[dvars.index("tab262")] == TITLE262
-        assert titoli[-1] == TITLE303
+        assert titoli[-1] == TITLE304
         keys = re.findall(r'key="(gen262_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 10
 

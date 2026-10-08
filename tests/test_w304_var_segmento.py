@@ -1,0 +1,238 @@
+"""Test tab304 '🗂️📊 VaR per segmento: dove si concentra il rischio?': registry + funzioni pure.
+
+Funzioni pure estratte da app.py via AST con tests/appfuncs.py (niente Streamlit).
+Verifica consistenza del registry (titoli/dvar/with coerenti) e l'allineamento
+titolo-contenuto inclusa la tab304. VaR per segmento: i component VaR di Eulero
+(tab292) aggregati per segmento (power, gas, carbon, flex) con quote %, HHI di
+concentrazione e semaforo diversificato/attenzionato/concentrato.
+"""
+
+import math
+import re
+from pathlib import Path
+
+import pytest
+
+from appfuncs import load
+
+_F = load("sv304_num", "sv304_conf", "sv304_corr", "sv304_parse_book",
+          "sv304_norm_cdf", "sv304_norm_ppf", "sv304_sigmas",
+          "sv304_var_book", "sv304_componenti", "sv304_segmenti",
+          "sv304_hhi", "sv304_standalone", "sv304_verdetto")
+sv304_num = _F["sv304_num"]
+sv304_conf = _F["sv304_conf"]
+sv304_corr = _F["sv304_corr"]
+sv304_parse_book = _F["sv304_parse_book"]
+sv304_norm_cdf = _F["sv304_norm_cdf"]
+sv304_norm_ppf = _F["sv304_norm_ppf"]
+sv304_sigmas = _F["sv304_sigmas"]
+sv304_var_book = _F["sv304_var_book"]
+sv304_componenti = _F["sv304_componenti"]
+sv304_segmenti = _F["sv304_segmenti"]
+sv304_hhi = _F["sv304_hhi"]
+sv304_standalone = _F["sv304_standalone"]
+sv304_verdetto = _F["sv304_verdetto"]
+
+APP = Path(__file__).parent.parent / "app.py"
+
+TITLE304 = "🗂️📊 VaR per segmento: dove si concentra il rischio?"
+TITLE303 = "🧱📉 Capacità VaR: quanto nozionale puoi ancora aggiungere?"
+TITLE302 = "✂️📉 Incremental VaR: quanto rischio togli chiudendo la posizione?"
+
+BOOK_TXT = ("Cal-28 Baseload power;2500000;18,5;power\n"
+            "Q3-28 Peak power;1200000;26,0;power\n"
+            "TTF Gas Cal-28;1800000;22,0;gas\n"
+            "EUA Carbon Dec-28;700000;31,0;carbon\n"
+            "Batteria arbitrage;500000;28,0;flex")
+BOOK = [("Cal-28 Baseload power", 2500000.0, 0.185, "power"),
+        ("Q3-28 Peak power", 1200000.0, 0.26, "power"),
+        ("TTF Gas Cal-28", 1800000.0, 0.22, "gas"),
+        ("EUA Carbon Dec-28", 700000.0, 0.31, "carbon"),
+        ("Batteria arbitrage", 500000.0, 0.28, "flex")]
+RHO = 0.35
+CONF = 95
+VAR_TOT = 1774789.1364575038
+SEG_EUR = {'power': 939628.3175022749, 'gas': 478125.4133484301, 'carbon': 223514.3115130074, 'flex': 133521.09409379173}
+SEG_QUOTE = {'power': 52.94309606705063, 'gas': 26.939843360928663, 'carbon': 12.593851681960599, 'flex': 7.5232088900600935}
+HHI = 3743.9303536670254
+STANDALONE = 2512513.915168373
+TOP_SEG = 'power'
+QUOTA_TOP = 52.94309606705063
+N_SEG = 4
+VERDETTO = "rischio attenzionato: 'power' pesa 52.9 % del VaR (HHI 3744): la concentrazione comincia a pesare, valuta un hedge mirato"
+Z95 = 1.6448536269514715
+
+
+def _registry():
+    src = APP.read_text(encoding="utf-8")
+    line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
+    titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
+    dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
+    withs = re.findall(r"    with (tab\d+):", src)
+    return src, titoli, dvars, withs
+
+
+class TestRegistryTab304:
+    def test_tab304_dichiarata(self):
+        src, titoli, dvars, withs = _registry()
+        assert len(titoli) == len(dvars) == len(withs) == 304
+        assert TITLE304 in titoli
+        assert "tab304" in dvars
+        assert "tab304" in withs
+        assert titoli[dvars.index("tab304")] == TITLE304
+        assert titoli[-1] == TITLE304
+        assert dvars[-1] == "tab304"
+        keys = re.findall(r'key="(st304_[^"]+)"', src)
+        assert len(keys) == len(set(keys)) >= 5
+
+    def test_titoli_allineati_302_303_304(self):
+        _, titoli, dvars, _ = _registry()
+        assert titoli[dvars.index("tab302")] == TITLE302
+        assert titoli[dvars.index("tab303")] == TITLE303
+        assert titoli[dvars.index("tab304")] == TITLE304
+
+
+class TestSv304Validatori:
+    def test_num_ok(self):
+        assert sv304_num(3, "x") == 3.0
+
+    def test_num_ko(self):
+        for bad in (True, "3", None, float("nan"), float("inf")):
+            with pytest.raises(ValueError):
+                sv304_num(bad, "x")
+
+    def test_conf(self):
+        assert sv304_conf(95) == 95
+        for bad in (97, "95"):
+            with pytest.raises(ValueError):
+                sv304_conf(bad)
+
+    def test_corr(self):
+        assert sv304_corr(1.0) == 1.0
+        assert sv304_corr(-1.0) == -1.0
+        for bad in (1.5, -1.01):
+            with pytest.raises(ValueError):
+                sv304_corr(bad)
+
+
+class TestSv304Parse:
+    def test_demo(self):
+        book = sv304_parse_book(BOOK_TXT)
+        assert book == BOOK
+
+    def test_righe_vuote(self):
+        assert len(sv304_parse_book("\n" + BOOK_TXT + "\n")) == 5
+
+    def test_formato_ko(self):
+        for bad in ("", "   ", "a;b;c", "a;b;c;d;e", ";100;10;s",
+                    "x;-100;10;s", "x;100;-5;s", "x;100;10;", "x;100;10; ",
+                    "x;abc;10;s", 123):
+            with pytest.raises(ValueError):
+                sv304_parse_book(bad)
+
+
+class TestSv304Norm:
+    def test_ppf95(self):
+        assert sv304_norm_ppf(0.95) == pytest.approx(1.6448536, abs=1e-6)
+        assert sv304_norm_ppf(0.95) == pytest.approx(Z95, abs=1e-9)
+
+    def test_cdf(self):
+        assert sv304_norm_cdf(0.0) == 0.5
+        assert sv304_norm_cdf(Z95) == pytest.approx(0.95, abs=1e-9)
+
+    def test_ppf_ko(self):
+        for bad in (0.0, 1.0):
+            with pytest.raises(ValueError):
+                sv304_norm_ppf(bad)
+
+
+class TestSv304Componenti:
+    def test_somma_uguale_var(self):
+        varb = sv304_var_book(BOOK, RHO, CONF)
+        comps = sv304_componenti(BOOK, RHO, CONF)
+        assert len(comps) == 5
+        assert sum(comps) == pytest.approx(varb, rel=1e-9)
+        assert varb == pytest.approx(VAR_TOT)
+
+    def test_singola_posizione(self):
+        b = [("A", 1000.0, 0.2, "x")]
+        assert sv304_componenti(b, 0.5, 95) == pytest.approx(
+            [sv304_norm_ppf(0.95) * 200.0])
+
+    def test_rho1_somma_lineare(self):
+        b = [("A", 1000.0, 0.2, "x"), ("B", 500.0, 0.3, "y")]
+        z = sv304_norm_ppf(0.95)
+        comps = sv304_componenti(b, 1.0, 95)
+        assert sum(comps) == pytest.approx(z * (200.0 + 150.0))
+        assert comps[0] / comps[1] == pytest.approx(200.0 / 150.0)
+
+
+class TestSv304Segmenti:
+    def test_demo(self):
+        comps = sv304_componenti(BOOK, RHO, CONF)
+        segs = sv304_segmenti(BOOK, comps)
+        assert [r["segmento"] for r in segs] == ["power", "gas", "carbon",
+                                                "flex"]
+        for r in segs:
+            assert r["var_eur"] == pytest.approx(SEG_EUR[r["segmento"]])
+            assert r["quota_pct"] == pytest.approx(SEG_QUOTE[r["segmento"]])
+        assert sum(r["quota_pct"] for r in segs) == pytest.approx(100.0)
+        assert len(segs) == N_SEG
+        assert segs[0]["segmento"] == TOP_SEG
+
+    def test_quote_non_negative_in_demo(self):
+        comps = sv304_componenti(BOOK, RHO, CONF)
+        segs = sv304_segmenti(BOOK, comps)
+        assert all(r["quota_pct"] >= 0.0 for r in segs)
+
+    def test_lunghezze_diverse_ko(self):
+        with pytest.raises(ValueError):
+            sv304_segmenti(BOOK, [1.0, 2.0])
+
+
+class TestSv304Hhi:
+    def test_demo(self):
+        comps = sv304_componenti(BOOK, RHO, CONF)
+        assert sv304_hhi(sv304_segmenti(BOOK, comps)) == pytest.approx(HHI)
+
+    def test_due_uguali(self):
+        segs = [{"segmento": "a", "var_eur": 50.0, "quota_pct": 50.0},
+                {"segmento": "b", "var_eur": 50.0, "quota_pct": 50.0}]
+        assert sv304_hhi(segs) == pytest.approx(5000.0)
+
+    def test_monopolio(self):
+        segs = [{"segmento": "a", "var_eur": 100.0, "quota_pct": 100.0}]
+        assert sv304_hhi(segs) == pytest.approx(10000.0)
+
+
+class TestSv304Standalone:
+    def test_diversificazione(self):
+        solo = sv304_standalone(BOOK, CONF)
+        varb = sv304_var_book(BOOK, RHO, CONF)
+        assert solo == pytest.approx(STANDALONE)
+        assert solo > varb
+
+
+class TestSv304Verdetto:
+    def test_demo(self):
+        comps = sv304_componenti(BOOK, RHO, CONF)
+        segs = sv304_segmenti(BOOK, comps)
+        h = sv304_hhi(segs)
+        assert sv304_verdetto(TOP_SEG, QUOTA_TOP, h) == VERDETTO
+        assert TOP_SEG in VERDETTO
+
+    def test_concentrato(self):
+        v = sv304_verdetto("gas", 75.0, 6000.0)
+        assert v.startswith("rischio concentrato")
+
+    def test_attenzionato(self):
+        v = sv304_verdetto("power", 45.0, 3500.0)
+        assert v.startswith("rischio attenzionato")
+
+    def test_diversificato(self):
+        v = sv304_verdetto("power", 25.0, 2500.0)
+        assert v.startswith("rischio diversificato")
+
+    def test_hhi_negativo_ko(self):
+        with pytest.raises(ValueError):
+            sv304_verdetto("x", 10.0, -1.0)

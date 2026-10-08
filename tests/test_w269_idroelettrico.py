@@ -69,6 +69,7 @@ TITLE300 = "🧮📊 Rapporto di diversificazione: quanto rischio risparmia il b
 TITLE301 = "🛡️🔍 Rischio di modello: quale VaR credere?"
 TITLE302 = "✂️📉 Incremental VaR: quanto rischio togli chiudendo la posizione?"
 TITLE303 = "🧱📉 Capacità VaR: quanto nozionale puoi ancora aggiungere?"
+TITLE304 = "🗂️📊 VaR per segmento: dove si concentra il rischio?"
 TITLE268 = "🌬️ Eolico onshore: business case"
 
 POT = 2.0
@@ -96,12 +97,12 @@ def _registry():
 class TestRegistryTab269:
     def test_tab269_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 303
+        assert len(titoli) == len(dvars) == len(withs) == 304
         assert TITLE269 in titoli
         assert "tab269" in dvars
         assert "tab269" in withs
         assert titoli[dvars.index("tab269")] == TITLE269
-        assert titoli[-1] == TITLE303
+        assert titoli[-1] == TITLE304
         keys = re.findall(r'key="(id269_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
