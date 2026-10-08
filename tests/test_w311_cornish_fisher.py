@@ -21,6 +21,7 @@ _F = _load("cf311_num", "cf311_conf", "cf311_corr", "cf311_skew",
            "cf311_risultato", "cf311_verdetto")
 
 TITLE311 = "📐📉 Cornish-Fisher: il VaR corretto per skew e code grasse"
+TITLE312 = "📐🌊 Expected Shortfall con Cornish-Fisher: la coda oltre il VaR con code grasse"
 TITLE310 = "💧📉 LVaR: il VaR corretto per il costo di liquidazione"
 TITLE309 = "🎯💥 Rho critica: a quale correlazione il VaR tocca il limite?"
 BOOK_DEMO = ("Cal-28 Baseload power;2500000;18,5;-0,8;4,0;power\n"
@@ -57,7 +58,7 @@ def _registry():
 class TestRegistry311:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 311
+        assert len(titoli) == len(dvars) == len(withs) == 312
         assert TITLE311 in titoli
         assert "tab311" in dvars
         assert "    with tab311:" in src
@@ -70,8 +71,8 @@ class TestRegistry311:
 
     def test_ultima_tab(self):
         _, titoli, dvars, _ = _registry()
-        assert titoli[-1] == TITLE311
-        assert dvars[-1] == "tab311"
+        assert titoli[-1] == TITLE312
+        assert dvars[-1] == "tab312"
 
 
 class TestValidatori:

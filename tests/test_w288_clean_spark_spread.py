@@ -58,6 +58,7 @@ TITLE308 = "💥📈 Stress di correlazione: quanto sale il VaR se si rompono?"
 TITLE309 = "🎯💥 Rho critica: a quale correlazione il VaR tocca il limite?"
 TITLE310 = "💧📉 LVaR: il VaR corretto per il costo di liquidazione"
 TITLE311 = "📐📉 Cornish-Fisher: il VaR corretto per skew e code grasse"
+TITLE312 = "📐🌊 Expected Shortfall con Cornish-Fisher: la coda oltre il VaR con code grasse"
 TITLE287 = "🚢⚡ Rigassificazione GNL: margine terminale"
 TITLE286 = "⛽ Basis gas TTF–PSV"
 TITLE285 = "\U0001F6DB\uFE0F Differenziali greggio: sweet vs sour"
@@ -87,12 +88,12 @@ def _registry():
 class TestRegistryTab288:
     def test_tab288_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 311
+        assert len(titoli) == len(dvars) == len(withs) == 312
         assert TITLE288 in titoli
         assert "tab288" in dvars
         assert "tab288" in withs
         assert titoli[dvars.index("tab288")] == TITLE288
-        assert titoli[-1] == TITLE311
+        assert titoli[-1] == TITLE312
         keys = re.findall(r'key="(css288_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

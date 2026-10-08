@@ -43205,6 +43205,279 @@ def cf311_verdetto(ris, soglia):
     return (f"VaR normale conservativo ({g:+.1%}): le code sono sottili, "
             "nessun add-on richiesto")
 
+
+def es312_num(x, nome):
+    """Valida uno scalare numerico: no bool, no NaN/inf."""
+    import math
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        raise ValueError(f"{nome}: deve essere un numero")
+    if math.isnan(x) or math.isinf(x):
+        raise ValueError(f"{nome}: NaN/inf non ammessi")
+    return float(x)
+
+
+def es312_conf(c):
+    """Confidenza ES: solo 90, 95, 99."""
+    if c not in (90, 95, 99):
+        raise ValueError("conf: deve essere 90, 95 o 99")
+    return c
+
+
+def es312_corr(r, nome="rho"):
+    """Correlazione in [-1, 1]."""
+    r = es312_num(r, nome)
+    if r < -1.0 or r > 1.0:
+        raise ValueError(f"{nome}: deve stare in [-1, 1]")
+    return r
+
+
+def es312_skew(s):
+    """Skew dei rendimenti in [-5, 5]: negativa = coda delle perdite grassa."""
+    s = es312_num(s, "skew")
+    if s < -5.0 or s > 5.0:
+        raise ValueError("skew: deve stare in [-5, 5]")
+    return s
+
+
+def es312_kurt(k):
+    """Curtosi in eccesso in [-1.5, 30]: >0 = code grasse."""
+    k = es312_num(k, "curtosi")
+    if k < -1.5 or k > 30.0:
+        raise ValueError("curtosi: deve stare in [-1.5, 30]")
+    return k
+
+
+def es312_parse_book(txt):
+    """Parsa 'nome;nozionale euro;vol %;skew;curtosi eccesso;segmento'."""
+    import math
+    if not isinstance(txt, str):
+        raise ValueError("book: deve essere testo")
+    book = []
+    for ln in txt.split("\n"):
+        ln = ln.strip()
+        if not ln:
+            continue
+        parti = [p.strip() for p in ln.split(";")]
+        if len(parti) != 6 or not parti[0] or not parti[5]:
+            raise ValueError(
+                f"book: riga non valida '{ln}' "
+                "(formato nome;nozionale;vol%;skew;curtosi;segmento)")
+        try:
+            noz = float(parti[1].replace(" ", "").replace(",", "."))
+            vol = float(parti[2].replace(" ", "").replace(",", "."))
+            sk = float(parti[3].replace(" ", "").replace(",", "."))
+            ku = float(parti[4].replace(" ", "").replace(",", "."))
+        except ValueError:
+            raise ValueError(f"book: numeri non validi nella riga '{ln}'")
+        for v in (noz, vol, sk, ku):
+            if math.isnan(v) or math.isinf(v):
+                raise ValueError(f"book: NaN/inf nella riga '{ln}'")
+        if noz <= 0.0 or vol < 0.0:
+            raise ValueError(
+                f"book: nozionale>0 e vol%>=0 richiesti ('{ln}')")
+        book.append((parti[0], noz, vol / 100.0,
+                     es312_skew(sk), es312_kurt(ku), parti[5]))
+    if not book:
+        raise ValueError("book: nessuna posizione valida")
+    return book
+
+
+def es312_norm_ppf(p):
+    """Quantile normale standard per bisezione su [-10, 10]."""
+    p = es312_num(p, "p")
+    if p <= 0.0 or p >= 1.0:
+        raise ValueError("p: deve stare in (0, 1)")
+    import math
+    lo, hi = -10.0, 10.0
+    for _ in range(200):
+        mid = 0.5 * (lo + hi)
+        if 0.5 * (1.0 + math.erf(mid / math.sqrt(2.0))) < p:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
+
+
+def es312_norm_pdf(x):
+    """Densita' normale standard."""
+    import math
+    x = es312_num(x, "x")
+    return math.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
+
+
+def es312_zcf(z, s, k):
+    """Quantile Cornish-Fisher lato perdite da skew/curtosi dei rendimenti.
+
+    Skew dei rendimenti negativa = coda delle perdite grassa: il segno e'
+    girato rispetto alla formula sui rendimenti (Favre-Galeano).
+    """
+    z = es312_num(z, "z")
+    s = es312_skew(s)
+    k = es312_kurt(k)
+    return (z - (z * z - 1.0) * s / 6.0
+            + (z ** 3 - 3.0 * z) * k / 24.0
+            - (2.0 * z ** 3 - 5.0 * z) * s * s / 36.0)
+
+
+def es312_pesi(book):
+    """Skew e curtosi di portafoglio: media ponderata sui nozionali."""
+    tn = sum(n for _, n, _, _, _, _ in book)
+    s = sum(n * sk for _, n, _, sk, _, _ in book) / tn
+    k = sum(n * ku for _, n, _, _, ku, _ in book) / tn
+    return s, k
+
+
+def es312_sigmas(book, rho):
+    """Volatilita' in euro per posizione e varianza di portafoglio."""
+    rho = es312_corr(rho)
+    sig = [n * v for _, n, v, _, _, _ in book]
+    s2 = sum(s * s for s in sig)
+    for i in range(len(sig)):
+        for j in range(i + 1, len(sig)):
+            s2 += 2.0 * rho * sig[i] * sig[j]
+    return sig, max(s2, 0.0)
+
+
+def es312_gl64():
+    """Nodi e pesi di Gauss-Legendre a 64 punti su [-1, 1].
+
+    Radici di P64 per Newton con stima iniziale coseno; pesi
+    w = 2 / ((1 - x^2) * P64'(x)^2).
+    """
+    import math
+    n = 64
+    nodes = []
+    weights = []
+    for i in range(1, (n + 1) // 2 + 1):
+        x = math.cos(math.pi * (i - 0.25) / (n + 0.5))
+        for _ in range(25):
+            p0, p1 = 1.0, x
+            for kk in range(2, n + 1):
+                p2 = ((2 * kk - 1) * x * p1 - (kk - 1) * p0) / kk
+                p0, p1 = p1, p2
+            dp = n * (x * p1 - p0) / (x * x - 1.0)
+            dx = p1 / dp
+            x -= dx
+            if abs(dx) < 1e-14:
+                break
+        p0, p1 = 1.0, x
+        for kk in range(2, n + 1):
+            p2 = ((2 * kk - 1) * x * p1 - (kk - 1) * p0) / kk
+            p0, p1 = p1, p2
+        dp = n * (x * p1 - p0) / (x * x - 1.0)
+        w = 2.0 / ((1.0 - x * x) * dp * dp)
+        nodes += [x, -x]
+        weights += [w, w]
+    return nodes, weights
+
+
+def es312_coda(s, k, p):
+    """Integrale del quantile Cornish-Fisher su [p, 1 - 1e-9].
+
+    Quadratura di Gauss-Legendre a 64 nodi: int_p^1 zcf(ppf(q)) dq.
+    Moltiplicato per sd/(1-p) da' l'ES corretto per skew e code grasse.
+    """
+    p = es312_num(p, "p")
+    if p <= 0.0 or p >= 1.0:
+        raise ValueError("p: deve stare in (0, 1)")
+    s = es312_skew(s)
+    k = es312_kurt(k)
+    a, b = p, 1.0 - 1e-9
+    nodes, weights = es312_gl64()
+    tot = 0.0
+    for xi, wi in zip(nodes, weights):
+        q = 0.5 * ((b - a) * xi + (a + b))
+        tot += wi * es312_zcf(es312_norm_ppf(q), s, k)
+    return 0.5 * (b - a) * tot
+
+
+def es312_es_normale(book, rho, conf):
+    """ES parametrico normale in euro: sd * phi(z) / (1 - p)."""
+    import math
+    conf = es312_conf(conf)
+    p = conf / 100.0
+    _, s2 = es312_sigmas(book, rho)
+    z = es312_norm_ppf(p)
+    return math.sqrt(s2) * es312_norm_pdf(z) / (1.0 - p)
+
+
+def es312_es_cf(book, rho, conf):
+    """ES con correzione Cornish-Fisher: integra il quantile corretto."""
+    import math
+    conf = es312_conf(conf)
+    p = conf / 100.0
+    _, s2 = es312_sigmas(book, rho)
+    s, k = es312_pesi(book)
+    return math.sqrt(s2) * es312_coda(s, k, p) / (1.0 - p)
+
+
+def es312_var_cf(book, rho, conf):
+    """VaR normale e VaR Cornish-Fisher in euro (coppia)."""
+    import math
+    conf = es312_conf(conf)
+    p = conf / 100.0
+    _, s2 = es312_sigmas(book, rho)
+    sd = math.sqrt(s2)
+    z = es312_norm_ppf(p)
+    s, k = es312_pesi(book)
+    zc = es312_zcf(z, s, k)
+    return z * sd, zc * sd
+
+
+def es312_risultato(book, rho, conf):
+    """ES normale vs ES Cornish-Fisher con gap totale e per posizione."""
+    import math
+    conf = es312_conf(conf)
+    p = conf / 100.0
+    _, s2 = es312_sigmas(book, rho)
+    sd = math.sqrt(s2)
+    z = es312_norm_ppf(p)
+    s, k = es312_pesi(book)
+    zc = es312_zcf(z, s, k)
+    var = z * sd
+    var_cf = zc * sd
+    es = sd * es312_norm_pdf(z) / (1.0 - p)
+    es_cf = sd * es312_coda(s, k, p) / (1.0 - p)
+    dett = []
+    for nome, noz, vol, sk, ku, seg in book:
+        sdi = noz * vol
+        zci = es312_zcf(z, sk, ku)
+        vci = zci * sdi
+        eci = sdi * es312_coda(sk, ku, p) / (1.0 - p)
+        dett.append((nome, seg, vci, eci, eci - vci))
+    gap = es_cf - es
+    return {"var": var, "var_cf": var_cf, "es": es, "es_cf": es_cf,
+            "gap_es": gap, "gap_es_pct": gap / es if es > 0.0 else 0.0,
+            "z": z, "zcf": zc, "skew": s, "kurt": k,
+            "dettaglio": dett}
+
+
+def es312_verdetto(ris, soglia):
+    """Semaforo sulla sottostima dell'ES normale per code grasse."""
+    soglia = es312_num(soglia, "soglia")
+    if soglia <= 0.0 or soglia >= 1.0:
+        raise ValueError("soglia: deve stare in (0, 1)")
+    var_cf, es_cf = ris["var_cf"], ris["es_cf"]
+    if es_cf <= 0.0 or es_cf < 0.5 * var_cf:
+        return ("stima inaffidabile: l'integrazione del quantile corretto "
+                "non e' credibile (skew/curtosi estreme): usare ES storico "
+                "o simulazione Monte Carlo")
+    g = ris["gap_es_pct"]
+    if g >= soglia:
+        return (f"code grasse severe ({g:.1%}): la perdita media oltre il VaR "
+                f"supera del {g:.1%} la stima normale: alzare i buffer di coda "
+                f"di {ris['gap_es']:,.0f} euro")
+    if g >= soglia / 2.0:
+        return (f"code grasse materiali ({g:.1%}): aggiungere un add-on ES di "
+                f"{ris['gap_es']:,.0f} euro al limite di coda")
+    if g >= 0.05:
+        return (f"code grasse moderate ({g:.1%}): monitorare skew e curtosi "
+                "del book")
+    if g >= -0.05:
+        return (f"ES quasi normale ({g:+.1%}): la stima normale basta")
+    return (f"ES normale conservativo ({g:+.1%}): le code sono sottili, "
+            "nessun add-on richiesto")
+
 if workspace == _('ws1'):
     st.markdown(f"<h1>{_('ws1')}</h1>", unsafe_allow_html=True)
     banner_demo("simulatore strategico: margini, centrali e curve simulate")
@@ -43846,7 +44119,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256, tab257, tab258, tab259, tab260, tab261, tab262, tab263, tab264, tab265, tab266, tab267, tab268, tab269, tab270, tab271, tab272, tab273, tab274, tab275, tab276, tab277, tab278, tab279, tab280, tab281, tab282, tab283, tab284, tab285, tab286, tab287, tab288, tab289, tab290, tab291, tab292, tab293, tab294, tab295, tab296, tab297, tab298, tab299, tab300, tab301, tab302, tab303, tab304, tab305, tab306, tab307, tab308, tab309, tab310, tab311 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete", "🔥 Teleriscaldamento vs caldaia", "🌿 Clean spread (con CO₂)", "🇮🇹 PUN da prezzi zonali", "❄️ Pompa di calore vs caldaia", "🏢 PUE & costo data center", "🔌 Gruppo elettrogeno vs blackout", "🚗 Flotta aziendale: TCO diesel vs elettrico", "📜 Garanzie di origine: costo del 100% rinnovabile", "♻️ Fine vita FV: revamping vs dismissione", "🌾️ Agrivoltaico: doppio reddito", "🟢 Biometano: business case", "🌬️ Eolico onshore: business case", "🌊 Idroelettrico run-of-river: business case", "🔥 Geotermia profonda: business case", "☀️ Solare termodinamico (CSP): business case", "🌬️ Eolico offshore: business case", "☀️ Fotovoltaico utility-scale: business case", "⚛️ Nucleare SMR: business case", "📊 Posizione vs limiti di rischio", "💧 Cash flow at risk (CFaR)", "⚡ Aste MI: scostamenti vs MGP", "🌡️ Stress climatico: domanda e prezzo", "🌪️ Derivati meteo: pricing HDD/CDD", "🚢 LNG vs gasdotto: costo delivered", "🛢️ Crack spread: margine raffinazione 3-2-1", "🧪 Margine petrolchimico: nafta → etilene", "🛢️ Carry petrolio: contango & stoccaggio fisico", "🏭 Unit commitment CCGT: accendere o no?", "🛛️ Differenziali greggio: sweet vs sour", "⛽ Basis gas TTF–PSV", "🚢⚡ Rigassificazione GNL: margine terminale", "⚡🔥 Clean spark spread: margine centrale a gas", "⚫🔥 Clean dark spread: margine centrale a carbone", "🔀💰 PTR transfrontaliero: vale il prezzo d'asta?", "📊💹 Sharpe & Sortino: la strategia rende davvero?", "🪓📊 Component VaR: quale posizione tagliare per prima?", "🛡📉 Hedge ratio ottimale: quanto coprire con i futures?", "🧪📉 Backtest del VaR: il modello tiene?", "🧪🛡 Backtest dell'ES: la coda e' sottostimata?", "🪓🛡 Component ES: chi contribuisce alla coda?", "➕📊 Marginal VaR: quanto rischio aggiunge il nuovo trade?", "🚦📏 Limite VaR: quanto margine resta?", "🧪⚡ Stress test: quanto perde il book negli scenari?", "🧮📊 Rapporto di diversificazione: quanto rischio risparmia il book?", "🛡️🔍 Rischio di modello: quale VaR credere?", "✂️📉 Incremental VaR: quanto rischio togli chiudendo la posizione?", "🧱📉 Capacità VaR: quanto nozionale puoi ancora aggiungere?", "🗂️📊 VaR per segmento: dove si concentra il rischio?", "🎯🛡 Risk budgeting: il book rispetta i target?", "💎📊 RAROC: il rendimento ripaga il rischio?", "🌊📉 Expected Shortfall: la perdita oltre il VaR", "💥📈 Stress di correlazione: quanto sale il VaR se si rompono?", "🎯💥 Rho critica: a quale correlazione il VaR tocca il limite?", "💧📉 LVaR: il VaR corretto per il costo di liquidazione", "📐📉 Cornish-Fisher: il VaR corretto per skew e code grasse"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256, tab257, tab258, tab259, tab260, tab261, tab262, tab263, tab264, tab265, tab266, tab267, tab268, tab269, tab270, tab271, tab272, tab273, tab274, tab275, tab276, tab277, tab278, tab279, tab280, tab281, tab282, tab283, tab284, tab285, tab286, tab287, tab288, tab289, tab290, tab291, tab292, tab293, tab294, tab295, tab296, tab297, tab298, tab299, tab300, tab301, tab302, tab303, tab304, tab305, tab306, tab307, tab308, tab309, tab310, tab311, tab312 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete", "🔥 Teleriscaldamento vs caldaia", "🌿 Clean spread (con CO₂)", "🇮🇹 PUN da prezzi zonali", "❄️ Pompa di calore vs caldaia", "🏢 PUE & costo data center", "🔌 Gruppo elettrogeno vs blackout", "🚗 Flotta aziendale: TCO diesel vs elettrico", "📜 Garanzie di origine: costo del 100% rinnovabile", "♻️ Fine vita FV: revamping vs dismissione", "🌾️ Agrivoltaico: doppio reddito", "🟢 Biometano: business case", "🌬️ Eolico onshore: business case", "🌊 Idroelettrico run-of-river: business case", "🔥 Geotermia profonda: business case", "☀️ Solare termodinamico (CSP): business case", "🌬️ Eolico offshore: business case", "☀️ Fotovoltaico utility-scale: business case", "⚛️ Nucleare SMR: business case", "📊 Posizione vs limiti di rischio", "💧 Cash flow at risk (CFaR)", "⚡ Aste MI: scostamenti vs MGP", "🌡️ Stress climatico: domanda e prezzo", "🌪️ Derivati meteo: pricing HDD/CDD", "🚢 LNG vs gasdotto: costo delivered", "🛢️ Crack spread: margine raffinazione 3-2-1", "🧪 Margine petrolchimico: nafta → etilene", "🛢️ Carry petrolio: contango & stoccaggio fisico", "🏭 Unit commitment CCGT: accendere o no?", "🛛️ Differenziali greggio: sweet vs sour", "⛽ Basis gas TTF–PSV", "🚢⚡ Rigassificazione GNL: margine terminale", "⚡🔥 Clean spark spread: margine centrale a gas", "⚫🔥 Clean dark spread: margine centrale a carbone", "🔀💰 PTR transfrontaliero: vale il prezzo d'asta?", "📊💹 Sharpe & Sortino: la strategia rende davvero?", "🪓📊 Component VaR: quale posizione tagliare per prima?", "🛡📉 Hedge ratio ottimale: quanto coprire con i futures?", "🧪📉 Backtest del VaR: il modello tiene?", "🧪🛡 Backtest dell'ES: la coda e' sottostimata?", "🪓🛡 Component ES: chi contribuisce alla coda?", "➕📊 Marginal VaR: quanto rischio aggiunge il nuovo trade?", "🚦📏 Limite VaR: quanto margine resta?", "🧪⚡ Stress test: quanto perde il book negli scenari?", "🧮📊 Rapporto di diversificazione: quanto rischio risparmia il book?", "🛡️🔍 Rischio di modello: quale VaR credere?", "✂️📉 Incremental VaR: quanto rischio togli chiudendo la posizione?", "🧱📉 Capacità VaR: quanto nozionale puoi ancora aggiungere?", "🗂️📊 VaR per segmento: dove si concentra il rischio?", "🎯🛡 Risk budgeting: il book rispetta i target?", "💎📊 RAROC: il rendimento ripaga il rischio?", "🌊📉 Expected Shortfall: la perdita oltre il VaR", "💥📈 Stress di correlazione: quanto sale il VaR se si rompono?", "🎯💥 Rho critica: a quale correlazione il VaR tocca il limite?", "💧📉 LVaR: il VaR corretto per il costo di liquidazione", "📐📉 Cornish-Fisher: il VaR corretto per skew e code grasse", "📐🌊 Expected Shortfall con Cornish-Fisher: la coda oltre il VaR con code grasse"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -72249,6 +72522,64 @@ Spark spread;1200000;4,0"""
                                help="Per posizione: VaR normale, VaR corretto e gap.")
         st.caption(f"VaR {conf311}%: normale {ris311['var']:,.0f} \u20ac vs Cornish-Fisher {ris311['var_cf']:,.0f} \u20ac (gap {ris311['gap']:,.0f} \u20ac, {ris311['gap_pct']:.1%}, z {ris311['z']:.3f} -> {ris311['zcf']:.3f}, skew {ris311['skew']:.2f}, curtosi {ris311['kurt']:.2f}): {verd311}.")
         st.caption("Nota: espansione di Cornish-Fisher al primo ordine sui momenti dei rendimenti (segno skew girato lato perdite, Favre-Galeano); skew/curtosi di portafoglio come media ponderata sui nozionali; VaR parametrico sotto normale equi-correlata. Demo a scopo illustrativo.")
+
+    with tab312:
+        titolo312 = edu("Expected Shortfall con Cornish-Fisher: la coda oltre il VaR con code grasse", "Il VaR dice la soglia, l'Expected Shortfall la perdita MEDIA oltre la soglia. Con skew e code grasse (tipiche dei prezzi energy) l'ES normale sottostima la coda: qui l'ES integra il quantile corretto di Cornish-Fisher.")
+        st.markdown(f"<h1>📐🌊 {titolo312}</h1>", unsafe_allow_html=True)
+        st.caption("La perdita media oltre il VaR, con e senza correzione per code grasse.")
+        book312 = es312_parse_book(st.text_area("Book: nome;nozionale \u20ac;vol %;skew rendimenti;curtosi in eccesso;segmento",
+                                                value="Cal-28 Baseload power;2500000;18,5;-0,8;4,0;power\nQ3-28 Peak power;1200000;26,0;-1,2;6,0;power\nTTF Gas Cal-28;1800000;22,0;-0,5;3,0;gas\nEUA Carbon Dec-28;700000;31,0;-0,3;2,0;carbon",
+                                                key="st312_book",
+                                                help="Skew dei rendimenti: negativa = coda delle perdite grassa (tipico long energy). Curtosi in eccesso: 0 = normale, >0 = code grasse."))
+        rho312 = st.slider("Rho corrente (stima del desk)",
+                           -1.0, 1.0, 0.35, 0.05, key="st312_rho",
+                           help="Correlazione media usata oggi nel VaR del book.")
+        conf312 = st.selectbox("Confidenza ES", [90, 95, 99], index=2,
+                               key="st312_conf",
+                               help="A 99% la correzione per le code grasse morde di piu'.")
+        soglia312 = st.number_input("Coda 'severa' (quota)",
+                                    0.05, 0.90, 0.20, 0.05, key="st312_soglia",
+                                    help="Quota di sottostima dell'ES normale oltre cui il verdetto la chiama 'severa'.")
+        ris312 = es312_risultato(book312, rho312, conf312)
+        verd312 = es312_verdetto(ris312, soglia312)
+        k1_312, k2_312, k3_312, k4_312, k5_312, k6_312 = st.columns(6)
+        k1_312.metric("VaR Cornish-Fisher", f"{ris312['var_cf']:,.0f} \u20ac")
+        k2_312.metric("ES normale", f"{ris312['es']:,.0f} \u20ac")
+        k3_312.metric("ES Cornish-Fisher", f"{ris312['es_cf']:,.0f} \u20ac")
+        k4_312.metric("Gap ES \u20ac", f"{ris312['gap_es']:,.0f} \u20ac")
+        k5_312.metric("Gap ES %", f"{ris312['gap_es_pct']:.1%}")
+        k6_312.metric("ES/VaR CF", f"{ris312['es_cf']/ris312['var_cf']:.2f}")
+        if verd312.startswith(("code grasse severe", "stima inaffidabile")):
+            st.error(verd312 + ".")
+        elif verd312.startswith(("code grasse materiali", "code grasse moderate")):
+            st.warning(verd312 + ".")
+        else:
+            st.success(verd312 + ".")
+        dfg_312 = pd.DataFrame([{"posizione": n, "segmento": s,
+                                 "gap ES \u20ac": g}
+                                for n, s, _, _, g in ris312["dettaglio"]])
+        figg_312 = px.bar(dfg_312, x="posizione", y="gap ES \u20ac",
+                          color="segmento",
+                          title="Sottostima dell'ES normale per posizione (standalone)",
+                          labels={"posizione": "Posizione",
+                                  "gap ES \u20ac": "Gap ES (\u20ac)",
+                                  "segmento": "Segmento"})
+        st.plotly_chart(figg_312, use_container_width=True)
+        with st.expander("Dettaglio posizioni: VaR CF vs ES corretto"):
+            dfd_312 = pd.DataFrame(
+                [{"posizione": n, "segmento": s,
+                  "var_cf_eur": round(vc, 0),
+                  "es_cf_eur": round(ec, 0),
+                  "gap_es_eur": round(g, 0)}
+                 for n, s, vc, ec, g in ris312["dettaglio"]])
+            st.dataframe(dfd_312, use_container_width=True, hide_index=True)
+            st.download_button("\u2b07\ufe0f Export CSV Expected Shortfall",
+                               data=dfd_312.to_csv(index=False, sep=";").encode("utf-8"),
+                               file_name="expected_shortfall_cf.csv",
+                               mime="text/csv", key="st312_csv",
+                               help="Per posizione: VaR corretto, ES corretto e gap ES.")
+        st.caption(f"ES {conf312}%: normale {ris312['es']:,.0f} \u20ac vs Cornish-Fisher {ris312['es_cf']:,.0f} \u20ac (gap {ris312['gap_es']:,.0f} \u20ac, {ris312['gap_es_pct']:.1%}, ES/VaR CF {ris312['es_cf']/ris312['var_cf']:.2f}, skew {ris312['skew']:.2f}, curtosi {ris312['kurt']:.2f}): {verd312}.")
+        st.caption("Nota: ES parametrico = perdita media oltre il VaR; la versione corretta integra il quantile di Cornish-Fisher (segno skew girato lato perdite) con quadratura di Gauss-Legendre a 64 nodi; skew/curtosi di portafoglio come media ponderata sui nozionali; VaR/ES parametrici sotto normale equi-correlata. Demo a scopo illustrativo.")
 
 # Footer
 

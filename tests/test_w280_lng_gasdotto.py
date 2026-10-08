@@ -59,6 +59,7 @@ TITLE308 = "💥📈 Stress di correlazione: quanto sale il VaR se si rompono?"
 TITLE309 = "🎯💥 Rho critica: a quale correlazione il VaR tocca il limite?"
 TITLE310 = "💧📉 LVaR: il VaR corretto per il costo di liquidazione"
 TITLE311 = "📐📉 Cornish-Fisher: il VaR corretto per skew e code grasse"
+TITLE312 = "📐🌊 Expected Shortfall con Cornish-Fisher: la coda oltre il VaR con code grasse"
 TITLE279 = "🌪️ Derivati meteo: pricing HDD/CDD"
 TITLE278 = "🌡️ Stress climatico: domanda e prezzo"
 
@@ -80,12 +81,12 @@ def _registry():
 class TestRegistryTab280:
     def test_tab280_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 311
+        assert len(titoli) == len(dvars) == len(withs) == 312
         assert TITLE280 in titoli
         assert "tab280" in dvars
         assert "tab280" in withs
         assert titoli[dvars.index("tab280")] == TITLE280
-        assert titoli[-1] == TITLE311
+        assert titoli[-1] == TITLE312
         keys = re.findall(r'key="(lg280_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

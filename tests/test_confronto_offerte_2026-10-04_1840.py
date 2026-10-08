@@ -195,16 +195,16 @@ class TestRegistry:
                                 and node.value.args and hasattr(node.value.args[0], "elts")):
                 titoli = [t.value for t in node.value.args[0].elts]
         assert titoli is not None
-        assert len(titoli) == 311
-        assert titoli[-1] == "📐📉 Cornish-Fisher: il VaR corretto per skew e code grasse"
+        assert len(titoli) == 312
+        assert titoli[-1] == "📐🌊 Expected Shortfall con Cornish-Fisher: la coda oltre il VaR con code grasse"
         # variabili tabN: devono essere 217 e tab216 presente (non più ultima)
         m = re.search(r"((?:tab\d+, )+tab\d+) = st.tabs\(\[", src)
         assert m is not None
         vars_tab = [v.strip() for v in m.group(1).split(",")]
-        assert len(vars_tab) == 311
+        assert len(vars_tab) == 312
         assert "tab212" in vars_tab and "tab213" in vars_tab
         withs = re.findall(r"^\s*with (tab\d+):", src, re.M)
-        assert len(withs) == len(vars_tab) == 311
+        assert len(withs) == len(vars_tab) == 312
         assert "tab213" in withs and "tab214" in withs
         # key widget uniche: 2 letterali + 5 template f-string (x3 offerte)
         keys = re.findall(r'key=f?"(cfo213_[^"]+)"', src)
