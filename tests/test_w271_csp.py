@@ -70,6 +70,7 @@ TITLE303 = "🧱📉 Capacità VaR: quanto nozionale puoi ancora aggiungere?"
 TITLE304 = "🗂️📊 VaR per segmento: dove si concentra il rischio?"
 TITLE305 = "🎯🛡 Risk budgeting: il book rispetta i target?"
 TITLE306 = "💎📊 RAROC: il rendimento ripaga il rischio?"
+TITLE307 = "🌊📉 Expected Shortfall: la perdita oltre il VaR"
 TITLE270 = "🔥 Geotermia profonda: business case"
 TITLE269 = "🌊 Idroelettrico run-of-river: business case"
 
@@ -98,12 +99,12 @@ def _registry():
 class TestRegistryTab271:
     def test_tab271_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 306
+        assert len(titoli) == len(dvars) == len(withs) == 307
         assert TITLE271 in titoli
         assert "tab271" in dvars
         assert "tab271" in withs
         assert titoli[dvars.index("tab271")] == TITLE271
-        assert titoli[-1] == TITLE306
+        assert titoli[-1] == TITLE307
         keys = re.findall(r'key="(cs271_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

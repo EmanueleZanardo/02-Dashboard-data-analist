@@ -53,6 +53,7 @@ TITLE303 = "🧱📉 Capacità VaR: quanto nozionale puoi ancora aggiungere?"
 TITLE304 = "🗂️📊 VaR per segmento: dove si concentra il rischio?"
 TITLE305 = "🎯🛡 Risk budgeting: il book rispetta i target?"
 TITLE306 = "💎📊 RAROC: il rendimento ripaga il rischio?"
+TITLE307 = "🌊📉 Expected Shortfall: la perdita oltre il VaR"
 TITLE281 = "🛢️ Crack spread: margine raffinazione 3-2-1"
 TITLE280 = "🚢 LNG vs gasdotto: costo delivered"
 
@@ -76,12 +77,12 @@ def _registry():
 class TestRegistryTab282:
     def test_tab282_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 306
+        assert len(titoli) == len(dvars) == len(withs) == 307
         assert TITLE282 in titoli
         assert "tab282" in dvars
         assert "tab282" in withs
         assert titoli[dvars.index("tab282")] == TITLE282
-        assert titoli[-1] == TITLE306
+        assert titoli[-1] == TITLE307
         keys = re.findall(r'key="(pc282_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
