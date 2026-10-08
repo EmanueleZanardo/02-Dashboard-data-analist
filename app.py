@@ -41926,6 +41926,231 @@ def sv304_verdetto(top_seg, quota_pct, hhi):
     return (f"rischio diversificato: nessun segmento oltre il 40 % "
             f"('{top_seg}' {quota_pct:.1f} %, HHI {hhi:.0f})")
 
+
+def rb305_num(x, nome):
+    """Valida uno scalare numerico: no bool, no NaN/inf."""
+    import math
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        raise ValueError(f"{nome}: deve essere un numero")
+    if math.isnan(x) or math.isinf(x):
+        raise ValueError(f"{nome}: NaN/inf non ammessi")
+    return float(x)
+
+
+def rb305_conf(c):
+    """Confidenza VaR: solo 90, 95, 99."""
+    if c not in (90, 95, 99):
+        raise ValueError("conf: deve essere 90, 95 o 99")
+    return c
+
+
+def rb305_corr(r, nome="rho"):
+    """Correlazione in [-1, 1]."""
+    r = rb305_num(r, nome)
+    if r < -1.0 or r > 1.0:
+        raise ValueError(f"{nome}: deve stare in [-1, 1]")
+    return r
+
+
+def rb305_parse_book(txt):
+    """Parsa 'nome;nozionale euro;vol %;segmento' (una riga per posizione)."""
+    import math
+    if not isinstance(txt, str):
+        raise ValueError("book: deve essere testo")
+    book = []
+    for ln in txt.split("\n"):
+        ln = ln.strip()
+        if not ln:
+            continue
+        parti = [p.strip() for p in ln.split(";")]
+        if len(parti) != 4 or not parti[0]:
+            raise ValueError(
+                f"book: riga non valida '{ln}' "
+                "(formato nome;nozionale;vol%;segmento)")
+        try:
+            noz = float(parti[1].replace(" ", "").replace(",", "."))
+            vol = float(parti[2].replace(" ", "").replace(",", "."))
+        except ValueError:
+            raise ValueError(f"book: numeri non validi nella riga '{ln}'")
+        seg = parti[3]
+        if not seg or ";" in seg:
+            raise ValueError(f"book: segmento non valido nella riga '{ln}'")
+        if math.isnan(noz) or math.isnan(vol) or noz <= 0.0 or vol < 0.0:
+            raise ValueError(
+                f"book: nozionale>0 e vol%>=0 richiesti ('{ln}')")
+        book.append((parti[0], noz, vol / 100.0, seg))
+    if not book:
+        raise ValueError("book: nessuna posizione valida")
+    return book
+
+
+def rb305_norm_cdf(x):
+    """CDF normale standard (via erf)."""
+    import math
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+def rb305_norm_ppf(p):
+    """Quantile normale standard per bisezione su [-10, 10]."""
+    p = rb305_num(p, "p")
+    if p <= 0.0 or p >= 1.0:
+        raise ValueError("p: deve stare in (0, 1)")
+    lo, hi = -10.0, 10.0
+    for _ in range(100):
+        mid = 0.5 * (lo + hi)
+        if rb305_norm_cdf(mid) < p:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
+
+
+def rb305_sigmas(book, rho):
+    """Volatilita' in euro per posizione e varianza di portafoglio."""
+    rho = rb305_corr(rho)
+    sig = [n * v for _, n, v, _ in book]
+    s2 = sum(s * s for s in sig)
+    for i in range(len(sig)):
+        for j in range(i + 1, len(sig)):
+            s2 += 2.0 * rho * sig[i] * sig[j]
+    return sig, max(s2, 0.0)
+
+
+def rb305_var_book(book, rho, conf):
+    """VaR parametrico del book in euro."""
+    import math
+    sig, s2 = rb305_sigmas(book, rho)
+    return rb305_norm_ppf(rb305_conf(conf) / 100.0) * math.sqrt(s2)
+
+
+def rb305_componenti(book, rho, conf):
+    """Component VaR di Eulero per posizione (somma = VaR del book)."""
+    import math
+    sig, s2 = rb305_sigmas(book, rho)
+    z = rb305_norm_ppf(rb305_conf(conf) / 100.0)
+    sigma = math.sqrt(s2)
+    if sigma == 0.0:
+        return [0.0 for _ in sig]
+    tot_sig = sum(sig)
+    return [z * si * (si + rho * (tot_sig - si)) / sigma
+            for si in sig]
+
+
+def rb305_quote_seg(book, componenti):
+    """Aggrega i component VaR di Eulero per segmento (euro e quota %)."""
+    if len(book) != len(componenti):
+        raise ValueError("book e componenti: lunghezze diverse")
+    seg_eur = {}
+    for (_, _, _, seg), c in zip(book, componenti):
+        seg_eur[seg] = seg_eur.get(seg, 0.0) + c
+    totale = sum(seg_eur.values())
+    out = []
+    for seg, veur in sorted(seg_eur.items(), key=lambda kv: -kv[1]):
+        quota = 100.0 * veur / totale if totale != 0.0 else 0.0
+        out.append({"segmento": seg, "var_eur": veur, "quota_pct": quota})
+    return out
+
+
+def rb305_parse_target(txt):
+    """Parsa 'segmento;quota target %' (una riga per segmento, somma = 100)."""
+    import math
+    if not isinstance(txt, str):
+        raise ValueError("target: deve essere testo")
+    tgt = {}
+    for ln in txt.split("\n"):
+        ln = ln.strip()
+        if not ln:
+            continue
+        parti = [p.strip() for p in ln.split(";")]
+        if len(parti) != 2 or not parti[0]:
+            raise ValueError(
+                f"target: riga non valida '{ln}' (formato segmento;quota%)")
+        try:
+            q = float(parti[1].replace(" ", "").replace(",", "."))
+        except ValueError:
+            raise ValueError(f"target: quota non valida nella riga '{ln}'")
+        if math.isnan(q) or q < 0.0:
+            raise ValueError(f"target: quota >= 0 richiesta ('{ln}')")
+        if parti[0] in tgt:
+            raise ValueError(f"target: segmento duplicato '{parti[0]}'")
+        tgt[parti[0]] = q
+    if not tgt:
+        raise ValueError("target: nessun segmento valido")
+    tot = sum(tgt.values())
+    if abs(tot - 100.0) > 0.01:
+        raise ValueError(
+            f"target: le quote devono sommare a 100 (trovato {tot:.2f})")
+    return tgt
+
+
+def rb305_gap(seg, targets, var_tot):
+    """Scostamento quota effettiva vs target per segmento (punti % ed euro).
+
+    Copre l'unione dei segmenti: un segmento con target ma senza posizioni
+    ha quota effettiva 0, e viceversa. Ordinato per |gap| decrescente.
+    """
+    var_tot = rb305_num(var_tot, "var_tot")
+    if var_tot < 0.0:
+        raise ValueError("var_tot: deve essere >= 0")
+    if not isinstance(targets, dict):
+        raise ValueError("targets: deve essere un dict")
+    actual = {r["segmento"]: r["quota_pct"] for r in seg}
+    rows = []
+    for s in set(list(actual) + list(targets)):
+        qa = actual.get(s, 0.0)
+        qt = targets.get(s, 0.0)
+        gpp = qa - qt
+        rows.append({"segmento": s, "quota_attuale": qa, "quota_target": qt,
+                     "gap_pp": gpp, "gap_eur": gpp / 100.0 * var_tot})
+    rows.sort(key=lambda r: -abs(r["gap_pp"]))
+    return rows
+
+
+def rb305_proposta(book, componenti, targets):
+    """Fattore di scala del nozionale per posizione: quota_target/quota_attuale.
+
+    Il component VaR di Eulero e' (al primo ordine) lineare nel nozionale del
+    segmento: moltiplicare i nozionali del segmento per target/attuale spinge
+    il contributo verso il target. Se la quota attuale e' 0 il fattore non
+    esiste (None) e il nozionale resta invariato.
+    """
+    seg = rb305_quote_seg(book, componenti)
+    actual = {r["segmento"]: r["quota_pct"] for r in seg}
+    out = []
+    for (nome, noz, vol, s), _ in zip(book, componenti):
+        qa = actual.get(s, 0.0)
+        qt = targets.get(s, 0.0)
+        if qa > 0.0:
+            f = qt / qa
+            nuovo = noz * f
+        else:
+            f, nuovo = None, noz
+        out.append({"posizione": nome, "segmento": s,
+                    "nozionale_attuale": noz, "fattore": f,
+                    "nozionale_proposto": nuovo})
+    return out
+
+
+def rb305_book_proposto(book, proposta):
+    """Ricostruisce il book con i nozionali proposti."""
+    if len(book) != len(proposta):
+        raise ValueError("book e proposta: lunghezze diverse")
+    return [(nome, p["nozionale_proposto"], vol, s)
+            for (nome, _, vol, s), p in zip(book, proposta)]
+
+
+def rb305_verdetto(max_gap_pp):
+    """Semaforo sull'aderenza del book ai target di risk budgeting."""
+    g = rb305_num(max_gap_pp, "max_gap_pp")
+    if g <= 5.0:
+        return (f"budget rispettato: lo scostamento massimo e' {g:.1f} punti, "
+                "entro la tolleranza di 5 punti")
+    if g <= 15.0:
+        return (f"budget da riequilibrare: scostamento massimo {g:.1f} punti "
+                "(tolleranza 5): applica i fattori di scala proposti")
+    return (f"budget fuori target: scostamento massimo {g:.1f} punti, "
+            "oltre i 15 punti: ribilanciare il book")
+
 if workspace == _('ws1'):
     st.markdown(f"<h1>{_('ws1')}</h1>", unsafe_allow_html=True)
     banner_demo("simulatore strategico: margini, centrali e curve simulate")
@@ -42567,7 +42792,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256, tab257, tab258, tab259, tab260, tab261, tab262, tab263, tab264, tab265, tab266, tab267, tab268, tab269, tab270, tab271, tab272, tab273, tab274, tab275, tab276, tab277, tab278, tab279, tab280, tab281, tab282, tab283, tab284, tab285, tab286, tab287, tab288, tab289, tab290, tab291, tab292, tab293, tab294, tab295, tab296, tab297, tab298, tab299, tab300, tab301, tab302, tab303, tab304 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete", "🔥 Teleriscaldamento vs caldaia", "🌿 Clean spread (con CO₂)", "🇮🇹 PUN da prezzi zonali", "❄️ Pompa di calore vs caldaia", "🏢 PUE & costo data center", "🔌 Gruppo elettrogeno vs blackout", "🚗 Flotta aziendale: TCO diesel vs elettrico", "📜 Garanzie di origine: costo del 100% rinnovabile", "♻️ Fine vita FV: revamping vs dismissione", "🌾️ Agrivoltaico: doppio reddito", "🟢 Biometano: business case", "🌬️ Eolico onshore: business case", "🌊 Idroelettrico run-of-river: business case", "🔥 Geotermia profonda: business case", "☀️ Solare termodinamico (CSP): business case", "🌬️ Eolico offshore: business case", "☀️ Fotovoltaico utility-scale: business case", "⚛️ Nucleare SMR: business case", "📊 Posizione vs limiti di rischio", "💧 Cash flow at risk (CFaR)", "⚡ Aste MI: scostamenti vs MGP", "🌡️ Stress climatico: domanda e prezzo", "🌪️ Derivati meteo: pricing HDD/CDD", "🚢 LNG vs gasdotto: costo delivered", "🛢️ Crack spread: margine raffinazione 3-2-1", "🧪 Margine petrolchimico: nafta → etilene", "🛢️ Carry petrolio: contango & stoccaggio fisico", "🏭 Unit commitment CCGT: accendere o no?", "🛛️ Differenziali greggio: sweet vs sour", "⛽ Basis gas TTF–PSV", "🚢⚡ Rigassificazione GNL: margine terminale", "⚡🔥 Clean spark spread: margine centrale a gas", "⚫🔥 Clean dark spread: margine centrale a carbone", "🔀💰 PTR transfrontaliero: vale il prezzo d'asta?", "📊💹 Sharpe & Sortino: la strategia rende davvero?", "🪓📊 Component VaR: quale posizione tagliare per prima?", "🛡📉 Hedge ratio ottimale: quanto coprire con i futures?", "🧪📉 Backtest del VaR: il modello tiene?", "🧪🛡 Backtest dell'ES: la coda e' sottostimata?", "🪓🛡 Component ES: chi contribuisce alla coda?", "➕📊 Marginal VaR: quanto rischio aggiunge il nuovo trade?", "🚦📏 Limite VaR: quanto margine resta?", "🧪⚡ Stress test: quanto perde il book negli scenari?", "🧮📊 Rapporto di diversificazione: quanto rischio risparmia il book?", "🛡️🔍 Rischio di modello: quale VaR credere?", "✂️📉 Incremental VaR: quanto rischio togli chiudendo la posizione?", "🧱📉 Capacità VaR: quanto nozionale puoi ancora aggiungere?", "🗂️📊 VaR per segmento: dove si concentra il rischio?"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256, tab257, tab258, tab259, tab260, tab261, tab262, tab263, tab264, tab265, tab266, tab267, tab268, tab269, tab270, tab271, tab272, tab273, tab274, tab275, tab276, tab277, tab278, tab279, tab280, tab281, tab282, tab283, tab284, tab285, tab286, tab287, tab288, tab289, tab290, tab291, tab292, tab293, tab294, tab295, tab296, tab297, tab298, tab299, tab300, tab301, tab302, tab303, tab304, tab305 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete", "🔥 Teleriscaldamento vs caldaia", "🌿 Clean spread (con CO₂)", "🇮🇹 PUN da prezzi zonali", "❄️ Pompa di calore vs caldaia", "🏢 PUE & costo data center", "🔌 Gruppo elettrogeno vs blackout", "🚗 Flotta aziendale: TCO diesel vs elettrico", "📜 Garanzie di origine: costo del 100% rinnovabile", "♻️ Fine vita FV: revamping vs dismissione", "🌾️ Agrivoltaico: doppio reddito", "🟢 Biometano: business case", "🌬️ Eolico onshore: business case", "🌊 Idroelettrico run-of-river: business case", "🔥 Geotermia profonda: business case", "☀️ Solare termodinamico (CSP): business case", "🌬️ Eolico offshore: business case", "☀️ Fotovoltaico utility-scale: business case", "⚛️ Nucleare SMR: business case", "📊 Posizione vs limiti di rischio", "💧 Cash flow at risk (CFaR)", "⚡ Aste MI: scostamenti vs MGP", "🌡️ Stress climatico: domanda e prezzo", "🌪️ Derivati meteo: pricing HDD/CDD", "🚢 LNG vs gasdotto: costo delivered", "🛢️ Crack spread: margine raffinazione 3-2-1", "🧪 Margine petrolchimico: nafta → etilene", "🛢️ Carry petrolio: contango & stoccaggio fisico", "🏭 Unit commitment CCGT: accendere o no?", "🛛️ Differenziali greggio: sweet vs sour", "⛽ Basis gas TTF–PSV", "🚢⚡ Rigassificazione GNL: margine terminale", "⚡🔥 Clean spark spread: margine centrale a gas", "⚫🔥 Clean dark spread: margine centrale a carbone", "🔀💰 PTR transfrontaliero: vale il prezzo d'asta?", "📊💹 Sharpe & Sortino: la strategia rende davvero?", "🪓📊 Component VaR: quale posizione tagliare per prima?", "🛡📉 Hedge ratio ottimale: quanto coprire con i futures?", "🧪📉 Backtest del VaR: il modello tiene?", "🧪🛡 Backtest dell'ES: la coda e' sottostimata?", "🪓🛡 Component ES: chi contribuisce alla coda?", "➕📊 Marginal VaR: quanto rischio aggiunge il nuovo trade?", "🚦📏 Limite VaR: quanto margine resta?", "🧪⚡ Stress test: quanto perde il book negli scenari?", "🧮📊 Rapporto di diversificazione: quanto rischio risparmia il book?", "🛡️🔍 Rischio di modello: quale VaR credere?", "✂️📉 Incremental VaR: quanto rischio togli chiudendo la posizione?", "🧱📉 Capacità VaR: quanto nozionale puoi ancora aggiungere?", "🗂️📊 VaR per segmento: dove si concentra il rischio?", "🎯🛡 Risk budgeting: il book rispetta i target?"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -70466,6 +70691,90 @@ Spark spread;1200000;4,0"""
                                help="VaR aggregato per segmento con quote percentuali.")
         st.caption(f"VaR {conf304}% = {var304:,.0f} € su {len(book304)} posizioni in {len(seg304)} segmenti. Segmento dominante '{top304['segmento']}' al {top304['quota_pct']:.1f} % (HHI {hhi304:.0f}). Somma standalone {solo304:,.0f} €, diversificazione risparmia {solo304 - var304:,.0f} €.")
         st.caption("Nota: componenti di Eulero su modello parametrico equi-correlato (la somma dei segmenti torna al VaR di book). Demo a scopo illustrativo.")
+
+    with tab305:
+        titolo305 = edu("Risk budgeting: il book rispetta i target?", "Il VaR per segmento (tab304) dice DOVE vive il rischio; qui il desk fissa i target: che quota di rischio deve pesare ogni segmento? Il tab confronta le quote effettive (componenti di Eulero) con i target, misura lo scostamento in punti percentuali e in euro, e propone i fattori di scala dei nozionali per riallineare il book.")
+        st.markdown(f"<h1>\U0001F3AF\U0001F6E1 {titolo305}</h1>", unsafe_allow_html=True)
+        st.caption("Dal rischio misurato al rischio voluto: target, gap e proposta di ribilanciamento.")
+        book305 = rb305_parse_book(st.text_area("Book: nome;nozionale \u20ac;vol %;segmento",
+                                                value="Cal-28 Baseload power;2500000;18,5;power\nQ3-28 Peak power;1200000;26,0;power\nTTF Gas Cal-28;1800000;22,0;gas\nEUA Carbon Dec-28;700000;31,0;carbon\nBatteria arbitrage;500000;28,0;flex",
+                                                key="st305_book",
+                                                help="Una posizione per riga: il quarto campo etichetta il segmento."))
+        tgt305 = rb305_parse_target(st.text_area("Target di rischio: segmento;quota %",
+                                                 value="power;40\ngas;30\ncarbon;20\nflex;10",
+                                                 key="st305_target",
+                                                 help="Una riga per segmento: le quote devono sommare a 100."))
+        rho305 = st.slider("Correlazione equi-correlata (rho)",
+                           -1.0, 1.0, 0.35, 0.05, key="st305_rho",
+                           help="Stessa rho per tutte le coppie del book, come nei tab VaR precedenti.")
+        conf305 = st.selectbox("Confidenza VaR", [90, 95, 99], index=1,
+                               key="st305_conf")
+        var305 = rb305_var_book(book305, rho305, conf305)
+        comp305 = rb305_componenti(book305, rho305, conf305)
+        seg305 = rb305_quote_seg(book305, comp305)
+        gap305 = rb305_gap(seg305, tgt305, var305)
+        prop305 = rb305_proposta(book305, comp305, tgt305)
+        bookp305 = rb305_book_proposto(book305, prop305)
+        varp305 = rb305_var_book(bookp305, rho305, conf305)
+        compp305 = rb305_componenti(bookp305, rho305, conf305)
+        gapp305 = rb305_gap(rb305_quote_seg(bookp305, compp305), tgt305, varp305)
+        mg305 = gap305[0]
+        mgp305 = gapp305[0]
+        gap_pp305 = abs(mg305["gap_pp"])
+        gap_ppd305 = abs(mgp305["gap_pp"])
+        verd305 = rb305_verdetto(gap_pp305)
+        k1_305, k2_305, k3_305, k4_305, k5_305, k6_305 = st.columns(6)
+        k1_305.metric("VaR totale", f"{var305:,.0f} \u20ac")
+        k2_305.metric("Segmenti", f"{len(seg305)}")
+        k3_305.metric("Scostamento max", f"{gap_pp305:.1f} pp",
+                      help=f"Segmento '{mg305['segmento']}': effettivo {mg305['quota_attuale']:.1f} % vs target {mg305['quota_target']:.1f} %.")
+        k4_305.metric("VaR dopo proposta", f"{varp305:,.0f} \u20ac",
+                      help="VaR del book con i nozionali proposti.")
+        k5_305.metric("Scostamento dopo", f"{gap_ppd305:.1f} pp",
+                      help="Scostamento massimo residuo dopo il ribilanciamento proposto.")
+        k6_305.metric("Miglioramento", f"{gap_pp305 - gap_ppd305:+.1f} pp")
+        if verd305.startswith("budget fuori target"):
+            st.error(verd305 + ".")
+        elif verd305.startswith("budget da riequilibrare"):
+            st.warning(verd305 + ".")
+        else:
+            st.success(verd305 + ".")
+        dfg_305 = pd.DataFrame([{"segmento": r["segmento"],
+                                 "Quota effettiva %": round(r["quota_attuale"], 1),
+                                 "Quota target %": round(r["quota_target"], 1)}
+                                for r in gap305])
+        dfm_305 = dfg_305.melt(id_vars="segmento", var_name="serie",
+                               value_name="quota_pct")
+        figg_305 = px.bar(dfm_305, x="segmento", y="quota_pct", color="serie",
+                          barmode="group",
+                          title="Risk budgeting: quote effettive vs target",
+                          labels={"segmento": "Segmento",
+                                  "quota_pct": "Quota %",
+                                  "serie": "Serie"})
+        st.plotly_chart(figg_305, use_container_width=True)
+        with st.expander("Dettaglio gap e proposta di ribilanciamento"):
+            dfd_305 = pd.DataFrame([{"segmento": r["segmento"],
+                                     "quota_eff_%": round(r["quota_attuale"], 2),
+                                     "quota_target_%": round(r["quota_target"], 2),
+                                     "gap_pp": round(r["gap_pp"], 2),
+                                     "gap_eur": round(r["gap_eur"], 0)}
+                                    for r in gap305])
+            st.dataframe(dfd_305, use_container_width=True, hide_index=True)
+            dfp_305 = pd.DataFrame([{"posizione": p["posizione"],
+                                     "segmento": p["segmento"],
+                                     "nozionale_attuale": round(p["nozionale_attuale"], 0),
+                                     "fattore": ("\u2014" if p["fattore"] is None
+                                                 else round(p["fattore"], 3)),
+                                     "nozionale_proposto": round(p["nozionale_proposto"], 0)}
+                                    for p in prop305])
+            st.dataframe(dfp_305, use_container_width=True, hide_index=True)
+            st.download_button("\u2b07\ufe0f Export CSV risk budgeting",
+                               data=dfd_305.to_csv(index=False, sep=";").encode("utf-8"),
+                               file_name="risk_budgeting.csv",
+                               mime="text/csv", key="st305_csv",
+                               help="Gap effettivo vs target per segmento, in punti e in euro.")
+        st.caption(f"VaR {conf305}% = {var305:,.0f} \u20ac su {len(book305)} posizioni in {len(seg305)} segmenti. Scostamento massimo '{mg305['segmento']}' {mg305['gap_pp']:+.1f} pp ({mg305['gap_eur']:+,.0f} \u20ac). Dopo la proposta: VaR {varp305:,.0f} \u20ac, scostamento max {gap_ppd305:.1f} pp.")
+        st.caption("Nota: componenti di Eulero su modello parametrico equi-correlato; i fattori di scala sono euristici al primo ordine (il VaR proposto e' ricalcolato esattamente). Demo a scopo illustrativo.")
 
 # Footer
 
