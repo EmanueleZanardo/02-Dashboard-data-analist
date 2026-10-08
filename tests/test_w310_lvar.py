@@ -23,6 +23,7 @@ _F = _load("la310_num", "la310_conf", "la310_corr", "la310_giorni",
 TITLE310 = "💧📉 LVaR: il VaR corretto per il costo di liquidazione"
 TITLE311 = "📐📉 Cornish-Fisher: il VaR corretto per skew e code grasse"
 TITLE312 = "📐🌊 Expected Shortfall con Cornish-Fisher: la coda oltre il VaR con code grasse"
+TITLE313 = "📉💥 VaR rotto: la probabilita' di breccia con code grasse"
 TITLE309 = "🎯💥 Rho critica: a quale correlazione il VaR tocca il limite?"
 TITLE308 = "💥📈 Stress di correlazione: quanto sale il VaR se si rompono?"
 BOOK_DEMO = ("Cal-28 Baseload power;2500000;18,5;0,4;power\n"
@@ -57,7 +58,7 @@ def _registry():
 class TestRegistry310:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 312
+        assert len(titoli) == len(dvars) == len(withs) == 313
         assert TITLE310 in titoli
         assert "tab310" in dvars
         assert "    with tab310:" in src
@@ -70,8 +71,8 @@ class TestRegistry310:
 
     def test_ultima_tab(self):
         _, titoli, dvars, _ = _registry()
-        assert titoli[-1] == TITLE312
-        assert dvars[-1] == "tab312"
+        assert titoli[-1] == TITLE313
+        assert dvars[-1] == "tab313"
 
 
 class TestValidatori:
