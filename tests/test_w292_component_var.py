@@ -65,6 +65,7 @@ TITLE317 = "🧠📉 CAViaR: il VaR adattivo che impara dai rendimenti"
 TITLE318 = "🌀📉 Copula t-Student: il VaR che vede le code muoversi insieme"
 TITLE319 = "🎛📉 FHS: il VaR con la volatilita' di oggi"
 TITLE320 = "⚙️📉 GARCH(1,1): la volatilita' che ricorda"
+TITLE321 = "🧪📉 Backtest VaR: il modello resiste al tempo?"
 TITLE291 = "📊💹 Sharpe & Sortino: la strategia rende davvero?"
 TITLE290 = "🔀💰 PTR transfrontaliero: vale il prezzo d'asta?"
 
@@ -85,12 +86,12 @@ def _registry():
 class TestRegistryTab292:
     def test_tab292_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 320
+        assert len(titoli) == len(dvars) == len(withs) == 321
         assert TITLE292 in titoli
         assert "tab292" in dvars
         assert "tab292" in withs
         assert titoli[dvars.index("tab292")] == TITLE292
-        assert titoli[-1] == TITLE320
+        assert titoli[-1] == TITLE321
         keys = re.findall(r'key="(cv292_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
