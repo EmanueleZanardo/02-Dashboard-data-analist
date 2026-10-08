@@ -35,6 +35,7 @@ APP = Path(__file__).parent.parent / "app.py"
 TITLE295 = "🧪🛡 Backtest dell'ES: la coda e' sottostimata?"
 TITLE296 = "🪓🛡 Component ES: chi contribuisce alla coda?"
 TITLE297 = "➕📊 Marginal VaR: quanto rischio aggiunge il nuovo trade?"
+TITLE298 = "🚦📏 Limite VaR: quanto margine resta?"
 TITLE294 = "🧪📉 Backtest del VaR: il modello tiene?"
 TITLE293 = "🛡📉 Hedge ratio ottimale: quanto coprire con i futures?"
 
@@ -59,12 +60,12 @@ def _registry():
 class TestRegistryTab295:
     def test_tab295_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 297
+        assert len(titoli) == len(dvars) == len(withs) == 298
         assert TITLE295 in titoli
         assert "tab295" in dvars
         assert "tab295" in withs
         assert titoli[dvars.index("tab295")] == TITLE295
-        assert titoli[-1] == TITLE297
+        assert titoli[-1] == TITLE298
         keys = re.findall(r'key="(es295_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
