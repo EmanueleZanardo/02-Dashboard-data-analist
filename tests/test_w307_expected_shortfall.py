@@ -42,6 +42,7 @@ APP = Path(__file__).parent.parent / "app.py"
 TITLE307 = "🌊📉 Expected Shortfall: la perdita oltre il VaR"
 TITLE308 = "💥📈 Stress di correlazione: quanto sale il VaR se si rompono?"
 TITLE309 = "🎯💥 Rho critica: a quale correlazione il VaR tocca il limite?"
+TITLE310 = "💧📉 LVaR: il VaR corretto per il costo di liquidazione"
 TITLE306 = "💎📊 RAROC: il rendimento ripaga il rischio?"
 TITLE305 = "🎯🛡 Risk budgeting: il book rispetta i target?"
 
@@ -81,13 +82,13 @@ def _registry():
 class TestRegistryTab307:
     def test_tab307_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 309
+        assert len(titoli) == len(dvars) == len(withs) == 310
         assert TITLE307 in titoli
         assert "tab307" in dvars
         assert "tab307" in withs
         assert titoli[dvars.index("tab307")] == TITLE307
-        assert titoli[-1] == TITLE309
-        assert dvars[-1] == "tab309"
+        assert titoli[-1] == TITLE310
+        assert dvars[-1] == "tab310"
         keys = re.findall(r'key="(st307_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
