@@ -36,6 +36,7 @@ APP = Path(__file__).parent.parent / "app.py"
 TITLE298 = "🚦📏 Limite VaR: quanto margine resta?"
 TITLE299 = "🧪⚡ Stress test: quanto perde il book negli scenari?"
 TITLE300 = "🧮📊 Rapporto di diversificazione: quanto rischio risparmia il book?"
+TITLE301 = "🛡️🔍 Rischio di modello: quale VaR credere?"
 TITLE297 = "➕📊 Marginal VaR: quanto rischio aggiunge il nuovo trade?"
 TITLE296 = "🪓🛡 Component ES: chi contribuisce alla coda?"
 
@@ -71,12 +72,12 @@ def _registry():
 class TestRegistryTab298:
     def test_tab298_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 300
+        assert len(titoli) == len(dvars) == len(withs) == 301
         assert TITLE298 in titoli
         assert "tab298" in dvars
         assert "tab298" in withs
         assert titoli[dvars.index("tab298")] == TITLE298
-        assert titoli[-1] == TITLE300
+        assert titoli[-1] == TITLE301
         keys = re.findall(r'key="(rb298_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

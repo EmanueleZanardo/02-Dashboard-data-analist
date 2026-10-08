@@ -34,6 +34,7 @@ TITLE297 = "➕📊 Marginal VaR: quanto rischio aggiunge il nuovo trade?"
 TITLE298 = "🚦📏 Limite VaR: quanto margine resta?"
 TITLE299 = "🧪⚡ Stress test: quanto perde il book negli scenari?"
 TITLE300 = "🧮📊 Rapporto di diversificazione: quanto rischio risparmia il book?"
+TITLE301 = "🛡️🔍 Rischio di modello: quale VaR credere?"
 TITLE296 = "🪓🛡 Component ES: chi contribuisce alla coda?"
 TITLE295 = "🧪🛡 Backtest dell'ES: la coda e' sottostimata?"
 
@@ -64,12 +65,12 @@ def _registry():
 class TestRegistryTab297:
     def test_tab297_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 300
+        assert len(titoli) == len(dvars) == len(withs) == 301
         assert TITLE297 in titoli
         assert "tab297" in dvars
         assert "tab297" in withs
         assert titoli[dvars.index("tab297")] == TITLE297
-        assert titoli[-1] == TITLE300
+        assert titoli[-1] == TITLE301
         keys = re.findall(r'key="(mv297_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

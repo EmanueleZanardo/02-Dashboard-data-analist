@@ -64,6 +64,7 @@ TITLE297 = "➕📊 Marginal VaR: quanto rischio aggiunge il nuovo trade?"
 TITLE298 = "🚦📏 Limite VaR: quanto margine resta?"
 TITLE299 = "🧪⚡ Stress test: quanto perde il book negli scenari?"
 TITLE300 = "🧮📊 Rapporto di diversificazione: quanto rischio risparmia il book?"
+TITLE301 = "🛡️🔍 Rischio di modello: quale VaR credere?"
 TITLE262 = "\U0001F50C Gruppo elettrogeno vs blackout"
 
 # Parametri di riferimento usati nei test
@@ -94,12 +95,12 @@ def _registry():
 class TestRegistryTab263:
     def test_tab263_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 300
+        assert len(titoli) == len(dvars) == len(withs) == 301
         assert TITLE263 in titoli
         assert "tab263" in dvars
         assert "tab263" in withs
         assert titoli[dvars.index("tab263")] == TITLE263
-        assert titoli[-1] == TITLE300
+        assert titoli[-1] == TITLE301
         keys = re.findall(r'key="(fl263_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 16
 
