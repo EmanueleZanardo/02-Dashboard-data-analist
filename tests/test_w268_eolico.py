@@ -84,6 +84,7 @@ TITLE315 = "🏔️📉 Valori estremi (Hill): il VaR oltre il massimo storico"
 TITLE316 = "🌊📉 POT-GPD: il VaR dalla coda paretiana oltre soglia"
 TITLE317 = "🧠📉 CAViaR: il VaR adattivo che impara dai rendimenti"
 TITLE318 = "🌀📉 Copula t-Student: il VaR che vede le code muoversi insieme"
+TITLE319 = "🎛📉 FHS: il VaR con la volatilita' di oggi"
 TITLE267 = "🟢 Biometano: business case"
 
 POT = 10.0
@@ -112,12 +113,12 @@ def _registry():
 class TestRegistryTab268:
     def test_tab268_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 318
+        assert len(titoli) == len(dvars) == len(withs) == 319
         assert TITLE268 in titoli
         assert "tab268" in dvars
         assert "tab268" in withs
         assert titoli[dvars.index("tab268")] == TITLE268
-        assert titoli[-1] == TITLE318
+        assert titoli[-1] == TITLE319
         keys = re.findall(r'key="(eo268_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

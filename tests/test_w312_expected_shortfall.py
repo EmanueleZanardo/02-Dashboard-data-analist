@@ -29,6 +29,7 @@ TITLE315 = "🏔️📉 Valori estremi (Hill): il VaR oltre il massimo storico"
 TITLE316 = "🌊📉 POT-GPD: il VaR dalla coda paretiana oltre soglia"
 TITLE317 = "🧠📉 CAViaR: il VaR adattivo che impara dai rendimenti"
 TITLE318 = "🌀📉 Copula t-Student: il VaR che vede le code muoversi insieme"
+TITLE319 = "🎛📉 FHS: il VaR con la volatilita' di oggi"
 TITLE311 = "📐📉 Cornish-Fisher: il VaR corretto per skew e code grasse"
 TITLE310 = "💧📉 LVaR: il VaR corretto per il costo di liquidazione"
 BOOK_DEMO = ("Cal-28 Baseload power;2500000;18,5;-0,8;4,0;power\n"
@@ -67,7 +68,7 @@ def _registry():
 class TestRegistry312:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 318
+        assert len(titoli) == len(dvars) == len(withs) == 319
         assert TITLE312 in titoli
         assert "tab312" in dvars
         assert "    with tab312:" in src
@@ -80,8 +81,8 @@ class TestRegistry312:
 
     def test_ultima_tab(self):
         _, titoli, dvars, _ = _registry()
-        assert titoli[-1] == TITLE318
-        assert dvars[-1] == "tab318"
+        assert titoli[-1] == TITLE319
+        assert dvars[-1] == "tab319"
 
 
 class TestValidatori:
