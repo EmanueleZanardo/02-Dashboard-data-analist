@@ -142,7 +142,12 @@
 
 # STATUS.md — 02-Dashboard-data-analist (Singularity Quant ETRM)
 
-**Ultimo aggiornamento: 07/10/2026 ~02:10 CEST**
+**Ultimo aggiornamento: 08/10/2026 ~02:00 CEST**
+
+## 08/10/2026 ~02:00 CEST — aggiornamento documentale giornaliero
+- **Commit `1cb71f9` (07/10 23:07 UTC = 08/10 01:07 CEST):** "QA 08/10 00:40 - tab297 'Marginal VaR: quanto rischio aggiunge il nuovo trade?'" — decision tool pre-trade (incremental VaR, component VaR Eulero del candidato, diversificazione; 10 helper mv297_*, 30 test nuovi; suite completa 2942 passed, zero bug, zero segreti hardcoded). Push via Git Data API (101 file) con 2 retry per RemoteDisconnected transient del proxy — tip verificato invariato prima di ogni retry, OK al 3° tentativo.
+- Streamlit keepalive 00:17: dashboard HTTP 200 finale (dopo 303 auth), ~9,8 KB, shell React servita — nessun marcatore sleep ("gone to sleep"/"in the oven"), nessun intervento.
+- Blocchi: vecchia chiave ENTSO-E resta nella storia git (da ruotare); condivisione app Streamlit non più pubblica — serve suo gesto su share.streamlit.io (Settings → Sharing → Public).
 
 ## 07/10/2026 ~02:10 CEST — aggiornamento documentale giornaliero
 - **Commit `80cacd84` (06/10 23:32 UTC = 07/10 01:32 CEST):** "QA 07/10 00:40 - tab274 retry".
