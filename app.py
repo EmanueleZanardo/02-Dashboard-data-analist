@@ -45353,6 +45353,309 @@ def mh320_verdetto(ris):
             f"{pers:.2f}): il regime di volatilita' e' stabile, il VaR "
             f"storico resta affidabile.")
 
+
+def mh321_num(x, nome):
+    """Valida uno scalare numerico reale: no bool, no NaN/inf."""
+    import math
+    import numbers
+    if isinstance(x, bool) or not isinstance(x, numbers.Real):
+        raise ValueError(f"{nome}: deve essere un numero")
+    if math.isnan(x) or math.isinf(x):
+        raise ValueError(f"{nome}: NaN/inf non ammessi")
+    return float(x)
+
+
+def mh321_conf(q):
+    """Confidenza VaR -> coda p = 1 - q/100."""
+    q = mh321_num(q, "conf")
+    if q not in (95.0, 97.5, 99.0):
+        raise ValueError("conf: deve essere 95, 97.5 o 99")
+    return 1.0 - q / 100.0
+
+
+def mh321_finestra(w):
+    """Finestra rolling del VaR storico: 50 <= w <= 1000."""
+    w = mh321_num(w, "finestra")
+    if w != int(w) or not 50 <= w <= 1000:
+        raise ValueError("finestra: intero tra 50 e 1000")
+    return int(w)
+
+
+def mh321_parse_pnl(txt):
+    """Parsa la serie P&L: un valore per riga (o separati da ';').
+
+    La virgola e' il separatore decimale. Richiede almeno 400 osservazioni.
+    """
+    import math
+    if not isinstance(txt, str):
+        raise ValueError("pnl: deve essere testo")
+    vals = []
+    for ln in txt.strip().splitlines():
+        ln = ln.strip()
+        if not ln:
+            continue
+        for pezzo in ln.split(";"):
+            pezzo = pezzo.strip()
+            if not pezzo:
+                continue
+            try:
+                v = float(pezzo.replace(",", "."))
+            except ValueError:
+                raise ValueError(f"pnl: '{pezzo}' non e' un numero")
+            if math.isnan(v) or math.isinf(v):
+                raise ValueError(f"pnl: NaN/inf in '{pezzo}'")
+            vals.append(v)
+    if len(vals) < 400:
+        raise ValueError(
+            f"pnl: servono almeno 400 osservazioni, trovate {len(vals)}")
+    return vals
+
+
+def mh321_losses(r):
+    """Perdite L_t = -P&L_t (convenzione market risk)."""
+    return [-mh321_num(v, "r") for v in r]
+
+
+def mh321_quantile(vs, tail):
+    """Quantile (1-tail) con interpolazione lineare (come simulazione storica)."""
+    vs = sorted(mh321_num(v, "v") for v in vs)
+    tail = mh321_num(tail, "tail")
+    if not 0.0 < tail < 1.0:
+        raise ValueError("tail: deve essere in (0,1)")
+    m = len(vs)
+    if m < 2:
+        raise ValueError("vs: servono almeno 2 osservazioni")
+    pos = (1.0 - tail) * (m - 1)
+    lo = int(pos)
+    if lo >= m - 1:
+        return vs[-1]
+    return vs[lo] + (pos - lo) * (vs[lo + 1] - vs[lo])
+
+
+def mh321_var_rolling(L, q, w):
+    """VaR a simulazione storica su finestra rolling.
+
+    Per ogni t in [w, n): VaR_t = quantile(1-p) delle perdite L[t-w:t].
+    Ritorna la lista dei VaR (uno per ogni giorno testato).
+    """
+    L = [mh321_num(v, "L") for v in L]
+    q = mh321_num(q, "q")
+    p = mh321_conf(q)
+    w = mh321_finestra(w)
+    n = len(L)
+    if n - w < 100:
+        raise ValueError(
+            f"finestra: servono almeno 100 giorni di test, trovati {n - w}")
+    return [mh321_quantile(L[t - w:t], p) for t in range(w, n)]
+
+
+def mh321_breaches(L, var):
+    """Sforamenti: 1 se L_t > VaR_t (perdita oltre il VaR), 0 altrimenti."""
+    L = [mh321_num(v, "L") for v in L]
+    var = [mh321_num(v, "var") for v in var]
+    w = len(L) - len(var)
+    if w < 0:
+        raise ValueError("breaches: var piu' lunga della serie")
+    flags = [1 if L[w + i] > var[i] else 0 for i in range(len(var))]
+    return {"w": w, "flags": flags,
+            "giorni": [w + i + 1 for i, f in enumerate(flags) if f],
+            "perdite": [L[w + i] for i, f in enumerate(flags) if f],
+            "var_br": [var[i] for i, f in enumerate(flags) if f]}
+
+
+def mh321_chi2_1_cdf(x):
+    """CDF chi-quadro a 1 gdl (deterministica): erf(sqrt(x/2))."""
+    import math
+    x = mh321_num(x, "x")
+    if x < 0.0:
+        raise ValueError("x: deve essere >= 0")
+    return math.erf(math.sqrt(x / 2.0))
+
+
+def mh321_chi2_2_cdf(x):
+    """CDF chi-quadro a 2 gdl (deterministica): 1 - exp(-x/2)."""
+    import math
+    x = mh321_num(x, "x")
+    if x < 0.0:
+        raise ValueError("x: deve essere >= 0")
+    return 1.0 - math.exp(-x / 2.0)
+
+
+def mh321_loglik_bin(x, n, p):
+    """Log-likelihood binomiale, protetta dai bordi."""
+    import math
+    x = mh321_num(x, "x")
+    n = mh321_num(n, "n")
+    p = mh321_num(p, "p")
+    if not 0 <= x <= n or n <= 0:
+        raise ValueError("x/n non validi")
+    p = min(max(p, 1e-300), 1.0 - 1e-300)
+    q1 = min(max(x / n, 1e-300), 1.0 - 1e-300)
+    return (n - x) * math.log(1.0 - p) + x * math.log(p), \
+           (n - x) * math.log(1.0 - q1) + x * math.log(q1)
+
+
+def mh321_kupiec(x, n, p):
+    """Test di Kupiec POF (unconditional coverage).
+
+    LR = -2 ln[ L(p) / L(x/n) ] ~ chi2(1). Ritorna LR e p-value.
+    """
+    import math
+    x = mh321_num(x, "x")
+    n = mh321_num(n, "n")
+    p = mh321_num(p, "p")
+    if not 0.0 < p < 1.0:
+        raise ValueError("p: deve essere in (0,1)")
+    if x != int(x) or not 0 <= x <= n or n <= 0:
+        raise ValueError("x/n non validi")
+    l0, l1 = mh321_loglik_bin(x, n, p)
+    lr = max(-2.0 * (l0 - l1), 0.0)
+    return {"lr": lr, "pvalue": 1.0 - mh321_chi2_1_cdf(lr)}
+
+
+def mh321_christoffersen(flags):
+    """Test di Christoffersen (independence + conditional coverage).
+
+    Catena di Markov sugli sforamenti: n00/n01/n10/n11 sulle coppie
+    consecutive. LR_ind ~ chi2(1), LR_cc = LR_pof + LR_ind ~ chi2(2).
+    Ritorna anche la massima sequenza consecutiva di sforamenti.
+    """
+    import math
+    flags = [1 if f else 0 for f in flags]
+    n = len(flags)
+    if n < 2:
+        raise ValueError("flags: servono almeno 2 osservazioni")
+    n00 = n01 = n10 = n11 = 0
+    for a, b in zip(flags[:-1], flags[1:]):
+        if a == 0 and b == 0:
+            n00 += 1
+        elif a == 0 and b == 1:
+            n01 += 1
+        elif a == 1 and b == 0:
+            n10 += 1
+        else:
+            n11 += 1
+    x = sum(flags)
+    N = n - 1
+    pi = (n01 + n11) / N if N else 0.0
+    pi0 = n01 / (n00 + n01) if (n00 + n01) else pi
+    pi1 = n11 / (n10 + n11) if (n10 + n11) else pi
+    ll0 = ((n00 + n10) * math.log(max(1.0 - pi, 1e-300)) +
+           (n01 + n11) * math.log(max(pi, 1e-300)))
+    ll1 = (n00 * math.log(max(1.0 - pi0, 1e-300)) +
+           n01 * math.log(max(pi0, 1e-300)) +
+           n10 * math.log(max(1.0 - pi1, 1e-300)) +
+           n11 * math.log(max(pi1, 1e-300)))
+    lr_ind = max(-2.0 * (ll0 - ll1), 0.0)
+    p_ind = 1.0 - mh321_chi2_1_cdf(lr_ind)
+    run = best = 0
+    for f in flags:
+        run = run + 1 if f else 0
+        best = max(best, run)
+    return {"n00": n00, "n01": n01, "n10": n10, "n11": n11,
+            "pi": pi, "pi0": pi0, "pi1": pi1,
+            "lr_ind": lr_ind, "p_ind": p_ind,
+            "lr_cc": None, "p_cc": None,
+            "max_run": best, "x": x}
+
+
+def mh321_traffic(x, n, p):
+    """Semaforo Basilea generalizzato via CDF binomiale.
+
+    verde: P(X<=x) < 95%; giallo: < 99.99%; rosso altrimenti.
+    Per n=250, q=99 coincide con le zone 0-4 / 5-9 / 10+ di Basilea.
+    """
+    import math
+    x = mh321_num(x, "x")
+    n = mh321_num(n, "n")
+    p = mh321_num(p, "p")
+    if not 0.0 < p < 1.0:
+        raise ValueError("p: deve essere in (0,1)")
+    if x != int(x) or not 0 <= x <= n or n <= 0:
+        raise ValueError("x/n non validi")
+    x = int(x)
+    n = int(n)
+    cum = 0.0
+    c = (1.0 - p) ** n
+    for k in range(0, x + 1):
+        cum += c
+        if k < n:
+            c = c * (n - k) / (k + 1) * p / (1.0 - p)
+    if cum < 0.95:
+        return {"zona": "verde", "cum": cum}
+    if cum < 0.9999:
+        return {"zona": "giallo", "cum": cum}
+    return {"zona": "rosso", "cum": cum}
+
+
+def mh321_risultato(txt, q, w):
+    """Risultato completo del backtest: VaR rolling + 3 test + semaforo."""
+    import math
+    r = mh321_parse_pnl(txt)
+    q = mh321_num(q, "q")
+    p = mh321_conf(q)
+    w = mh321_finestra(w)
+    L = mh321_losses(r)
+    n = len(L)
+    var = mh321_var_rolling(L, q, w)
+    br = mh321_breaches(L, var)
+    n_test = len(var)
+    x = sum(br["flags"])
+    x_att = n_test * p
+    kup = mh321_kupiec(x, n_test, p)
+    chr_ = mh321_christoffersen(br["flags"])
+    lr_cc = kup["lr"] + chr_["lr_ind"]
+    chr_["lr_cc"] = lr_cc
+    chr_["p_cc"] = 1.0 - mh321_chi2_2_cdf(lr_cc)
+    traf = mh321_traffic(x, n_test, p)
+    cov = x / x_att if x_att > 0 else 0.0
+    return {"n": n, "q": q, "w": w, "p": p, "n_test": n_test,
+            "x": x, "x_att": x_att, "coverage": cov,
+            "lr_pof": kup["lr"], "p_pof": kup["pvalue"],
+            "lr_ind": chr_["lr_ind"], "p_ind": chr_["p_ind"],
+            "lr_cc": chr_["lr_cc"], "p_cc": chr_["p_cc"],
+            "n00": chr_["n00"], "n01": chr_["n01"],
+            "n10": chr_["n10"], "n11": chr_["n11"],
+            "max_run": chr_["max_run"],
+            "zona": traf["zona"], "cum_bin": traf["cum"],
+            "var": var, "flags": br["flags"], "w0": br["w"],
+            "giorni": br["giorni"], "perdite": br["perdite"],
+            "var_br": br["var_br"], "L": L}
+
+
+def mh321_verdetto(ris):
+    """Verdetto a 5 stati: copertura, indipendenza, semaforo Basilea."""
+    x = ris["x"]
+    xa = ris["x_att"]
+    cov = ris["coverage"]
+    pof = ris["p_pof"]
+    pind = ris["p_ind"]
+    zona = ris["zona"]
+    run = ris["max_run"]
+    if pof < 0.05 and x > xa:
+        return (f"copertura insufficiente: {x} sforamenti contro {xa:.1f} "
+                f"attesi (coverage {cov:.2f}x, p-value Kupiec {pof:.4f}): il "
+                f"VaR storico rolling non ha retto il regime di mercato, "
+                f"ricalibra finestra o modello prima di usarlo per il limite.")
+    if pof < 0.05:
+        return (f"copertura eccessiva: {x} sforamenti contro {xa:.1f} attesi "
+                f"(coverage {cov:.2f}x, p-value Kupiec {pof:.4f}): il VaR e' "
+                f"troppo prudente, stai immobilizzando capitale in eccesso.")
+    if pind < 0.05:
+        return (f"sforamenti a grappoli: p-value indipendenza {pind:.4f} "
+                f"(max {run} sforamenti consecutivi): il modello non segue i "
+                f"cambi di regime, gli sforamenti arrivano insieme e il "
+                f"rischio di coda e' sottostimato.")
+    if zona == "giallo":
+        return (f"semaforo giallo: {x} sforamenti contro {xa:.1f} attesi "
+                f"(coverage {cov:.2f}x): il modello passa il test di "
+                f"copertura ma e' al limite, aumenta il monitoraggio e "
+                f"prepara la ricalibrazione.")
+    return (f"modello affidabile: {x} sforamenti contro {xa:.1f} attesi "
+            f"(coverage {cov:.2f}x, p-value Kupiec {pof:.4f}, indipendenza "
+            f"{pind:.4f}, semaforo {zona}): il VaR storico rolling supera "
+            f"il backtest, il limite resta valido.")
+
 if workspace == _('ws1'):
     st.markdown(f"<h1>{_('ws1')}</h1>", unsafe_allow_html=True)
     banner_demo("simulatore strategico: margini, centrali e curve simulate")
@@ -45994,7 +46297,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256, tab257, tab258, tab259, tab260, tab261, tab262, tab263, tab264, tab265, tab266, tab267, tab268, tab269, tab270, tab271, tab272, tab273, tab274, tab275, tab276, tab277, tab278, tab279, tab280, tab281, tab282, tab283, tab284, tab285, tab286, tab287, tab288, tab289, tab290, tab291, tab292, tab293, tab294, tab295, tab296, tab297, tab298, tab299, tab300, tab301, tab302, tab303, tab304, tab305, tab306, tab307, tab308, tab309, tab310, tab311, tab312, tab313, tab314, tab315, tab316, tab317, tab318, tab319, tab320 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete", "🔥 Teleriscaldamento vs caldaia", "🌿 Clean spread (con CO₂)", "🇮🇹 PUN da prezzi zonali", "❄️ Pompa di calore vs caldaia", "🏢 PUE & costo data center", "🔌 Gruppo elettrogeno vs blackout", "🚗 Flotta aziendale: TCO diesel vs elettrico", "📜 Garanzie di origine: costo del 100% rinnovabile", "♻️ Fine vita FV: revamping vs dismissione", "🌾️ Agrivoltaico: doppio reddito", "🟢 Biometano: business case", "🌬️ Eolico onshore: business case", "🌊 Idroelettrico run-of-river: business case", "🔥 Geotermia profonda: business case", "☀️ Solare termodinamico (CSP): business case", "🌬️ Eolico offshore: business case", "☀️ Fotovoltaico utility-scale: business case", "⚛️ Nucleare SMR: business case", "📊 Posizione vs limiti di rischio", "💧 Cash flow at risk (CFaR)", "⚡ Aste MI: scostamenti vs MGP", "🌡️ Stress climatico: domanda e prezzo", "🌪️ Derivati meteo: pricing HDD/CDD", "🚢 LNG vs gasdotto: costo delivered", "🛢️ Crack spread: margine raffinazione 3-2-1", "🧪 Margine petrolchimico: nafta → etilene", "🛢️ Carry petrolio: contango & stoccaggio fisico", "🏭 Unit commitment CCGT: accendere o no?", "🛛️ Differenziali greggio: sweet vs sour", "⛽ Basis gas TTF–PSV", "🚢⚡ Rigassificazione GNL: margine terminale", "⚡🔥 Clean spark spread: margine centrale a gas", "⚫🔥 Clean dark spread: margine centrale a carbone", "🔀💰 PTR transfrontaliero: vale il prezzo d'asta?", "📊💹 Sharpe & Sortino: la strategia rende davvero?", "🪓📊 Component VaR: quale posizione tagliare per prima?", "🛡📉 Hedge ratio ottimale: quanto coprire con i futures?", "🧪📉 Backtest del VaR: il modello tiene?", "🧪🛡 Backtest dell'ES: la coda e' sottostimata?", "🪓🛡 Component ES: chi contribuisce alla coda?", "➕📊 Marginal VaR: quanto rischio aggiunge il nuovo trade?", "🚦📏 Limite VaR: quanto margine resta?", "🧪⚡ Stress test: quanto perde il book negli scenari?", "🧮📊 Rapporto di diversificazione: quanto rischio risparmia il book?", "🛡️🔍 Rischio di modello: quale VaR credere?", "✂️📉 Incremental VaR: quanto rischio togli chiudendo la posizione?", "🧱📉 Capacità VaR: quanto nozionale puoi ancora aggiungere?", "🗂️📊 VaR per segmento: dove si concentra il rischio?", "🎯🛡 Risk budgeting: il book rispetta i target?", "💎📊 RAROC: il rendimento ripaga il rischio?", "🌊📉 Expected Shortfall: la perdita oltre il VaR", "💥📈 Stress di correlazione: quanto sale il VaR se si rompono?", "🎯💥 Rho critica: a quale correlazione il VaR tocca il limite?", "💧📉 LVaR: il VaR corretto per il costo di liquidazione", "📐📉 Cornish-Fisher: il VaR corretto per skew e code grasse", "📐🌊 Expected Shortfall con Cornish-Fisher: la coda oltre il VaR con code grasse", "📉💥 VaR rotto: la probabilita' di breccia con code grasse", "⏳📉 VaR multi-orizzonte: lo scaling con autocorrelazione dei rendimenti", "🏔️📉 Valori estremi (Hill): il VaR oltre il massimo storico", "🌊📉 POT-GPD: il VaR dalla coda paretiana oltre soglia", "🧠📉 CAViaR: il VaR adattivo che impara dai rendimenti", "🌀📉 Copula t-Student: il VaR che vede le code muoversi insieme", "🎛📉 FHS: il VaR con la volatilita' di oggi", "⚙️📉 GARCH(1,1): la volatilita' che ricorda"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256, tab257, tab258, tab259, tab260, tab261, tab262, tab263, tab264, tab265, tab266, tab267, tab268, tab269, tab270, tab271, tab272, tab273, tab274, tab275, tab276, tab277, tab278, tab279, tab280, tab281, tab282, tab283, tab284, tab285, tab286, tab287, tab288, tab289, tab290, tab291, tab292, tab293, tab294, tab295, tab296, tab297, tab298, tab299, tab300, tab301, tab302, tab303, tab304, tab305, tab306, tab307, tab308, tab309, tab310, tab311, tab312, tab313, tab314, tab315, tab316, tab317, tab318, tab319, tab320, tab321 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete", "🔥 Teleriscaldamento vs caldaia", "🌿 Clean spread (con CO₂)", "🇮🇹 PUN da prezzi zonali", "❄️ Pompa di calore vs caldaia", "🏢 PUE & costo data center", "🔌 Gruppo elettrogeno vs blackout", "🚗 Flotta aziendale: TCO diesel vs elettrico", "📜 Garanzie di origine: costo del 100% rinnovabile", "♻️ Fine vita FV: revamping vs dismissione", "🌾️ Agrivoltaico: doppio reddito", "🟢 Biometano: business case", "🌬️ Eolico onshore: business case", "🌊 Idroelettrico run-of-river: business case", "🔥 Geotermia profonda: business case", "☀️ Solare termodinamico (CSP): business case", "🌬️ Eolico offshore: business case", "☀️ Fotovoltaico utility-scale: business case", "⚛️ Nucleare SMR: business case", "📊 Posizione vs limiti di rischio", "💧 Cash flow at risk (CFaR)", "⚡ Aste MI: scostamenti vs MGP", "🌡️ Stress climatico: domanda e prezzo", "🌪️ Derivati meteo: pricing HDD/CDD", "🚢 LNG vs gasdotto: costo delivered", "🛢️ Crack spread: margine raffinazione 3-2-1", "🧪 Margine petrolchimico: nafta → etilene", "🛢️ Carry petrolio: contango & stoccaggio fisico", "🏭 Unit commitment CCGT: accendere o no?", "🛛️ Differenziali greggio: sweet vs sour", "⛽ Basis gas TTF–PSV", "🚢⚡ Rigassificazione GNL: margine terminale", "⚡🔥 Clean spark spread: margine centrale a gas", "⚫🔥 Clean dark spread: margine centrale a carbone", "🔀💰 PTR transfrontaliero: vale il prezzo d'asta?", "📊💹 Sharpe & Sortino: la strategia rende davvero?", "🪓📊 Component VaR: quale posizione tagliare per prima?", "🛡📉 Hedge ratio ottimale: quanto coprire con i futures?", "🧪📉 Backtest del VaR: il modello tiene?", "🧪🛡 Backtest dell'ES: la coda e' sottostimata?", "🪓🛡 Component ES: chi contribuisce alla coda?", "➕📊 Marginal VaR: quanto rischio aggiunge il nuovo trade?", "🚦📏 Limite VaR: quanto margine resta?", "🧪⚡ Stress test: quanto perde il book negli scenari?", "🧮📊 Rapporto di diversificazione: quanto rischio risparmia il book?", "🛡️🔍 Rischio di modello: quale VaR credere?", "✂️📉 Incremental VaR: quanto rischio togli chiudendo la posizione?", "🧱📉 Capacità VaR: quanto nozionale puoi ancora aggiungere?", "🗂️📊 VaR per segmento: dove si concentra il rischio?", "🎯🛡 Risk budgeting: il book rispetta i target?", "💎📊 RAROC: il rendimento ripaga il rischio?", "🌊📉 Expected Shortfall: la perdita oltre il VaR", "💥📈 Stress di correlazione: quanto sale il VaR se si rompono?", "🎯💥 Rho critica: a quale correlazione il VaR tocca il limite?", "💧📉 LVaR: il VaR corretto per il costo di liquidazione", "📐📉 Cornish-Fisher: il VaR corretto per skew e code grasse", "📐🌊 Expected Shortfall con Cornish-Fisher: la coda oltre il VaR con code grasse", "📉💥 VaR rotto: la probabilita' di breccia con code grasse", "⏳📉 VaR multi-orizzonte: lo scaling con autocorrelazione dei rendimenti", "🏔️📉 Valori estremi (Hill): il VaR oltre il massimo storico", "🌊📉 POT-GPD: il VaR dalla coda paretiana oltre soglia", "🧠📉 CAViaR: il VaR adattivo che impara dai rendimenti", "🌀📉 Copula t-Student: il VaR che vede le code muoversi insieme", "🎛📉 FHS: il VaR con la volatilita' di oggi", "⚙️📉 GARCH(1,1): la volatilita' che ricorda", "🧪📉 Backtest VaR: il modello resiste al tempo?"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -75127,6 +75430,112 @@ Spark spread;1200000;4,0"""
                                help="Stima GARCH(1,1), VaR/ES GARCH vs storici, gap, volatilita' forecast/media.")
         st.caption(f"Serie di {ris320['n']} P&L, confidenza {q320:g}%, stima {fin320}: \u03b1={ris320['alpha']:g}, \u03b2={ris320['beta']:g} (persistenza {ris320['pers']:.3f}), VaR GARCH {ris320['var_g']:,.0f} \u20ac vs storica {ris320['var_hs']:,.0f} \u20ac (gap {ris320['gap'] * 100:+.1f}%), ES GARCH {ris320['es_g']:,.0f} \u20ac, \u03c3 domani {ris320['sig_now']:,.0f} \u20ac vs media {ris320['sig_avg']:,.0f} \u20ac ({ris320['vol_ratio']:.2f}\u00d7): {verd320}.")
         st.caption("Nota: GARCH(1,1) con variance targeting, stima deterministica su griglia (quasi-ML gaussiana); la storica usa le perdite grezze. Demo a scopo illustrativo.")
+
+    with tab321:
+        titolo321 = edu("Backtest VaR: il modello resiste al tempo?", "Il VaR a simulazione storica su finestra rolling viene confrontato con le perdite reali: test di Kupiec (copertura), test di Christoffersen (indipendenza degli sforamenti) e semaforo Basilea dicono se il modello e' affidabile o va ricalibrato.")
+        st.markdown(f"<h1>🧪📉 {titolo321}</h1>", unsafe_allow_html=True)
+        st.caption("Il VaR stimato ieri reggeva le perdite di oggi? Backtest con tre test standard.")
+        txt321 = st.text_area("Serie P&L giornaliero (\u20ac): un valore per riga",
+                              value="1120.60\n-1328.80\n222.66\n1077.26\n1326.91\n-235.24\n-112.33\n405.17\n1010.39\n628.04\n-876.22\n-2491.20\n-730.85\n-366.36\n1751.67\n-1144.96\n-64.62\n-473.75\n185.38\n439.76\n41.39\n-878.35\n-457.01\n970.49\n603.27\n-807.86\n-649.86\n-567.50\n-1225.23\n400.15\n-369.97\n1099.55\n-209.30\n1002.05\n2292.99\n1304.76\n624.58\n-602.96\n277.48\n-76.14\n-423.18\n-381.97\n-1481.86\n-1355.92\n1518.25\n-1064.52\n-2004.64\n-867.82\n174.98\n-63.68\n-280.78\n527.09\n-2133.01\n334.76\n-384.65\n928.07\n450.37\n-1712.21\n-192.43\n-287.76\n-1155.24\n-2477.41\n900.14\n-563.85\n-254.67\n690.50\n265.57\n765.78\n211.93\n-175.97\n653.14\n84.33\n-307.08\n782.31\n217.84\n-1627.70\n-149.20\n1287.72\n177.43\n508.55\n-691.95\n808.76\n-129.09\n828.76\n378.10\n633.51\n1.47\n-1104.60\n274.43\n-2169.68\n-636.22\n-124.35\n1616.34\n87.04\n350.44\n-10.68\n442.84\n141.62\n-207.47\n-1170.82\n-336.36\n-228.11\n357.66\n-867.66\n-546.80\n641.89\n-1219.47\n-789.13\n1079.22\n-741.13\n1577.10\n87.84\n-237.36\n4.29\n983.34\n-630.33\n-550.49\n1218.69\n132.32\n-128.63\n-809.61\n1363.48\n182.25\n132.90\n1892.30\n-526.04\n-613.70\n-1129.03\n23.61\n-98.37\n750.65\n-404.18\n527.32\n78.62\n1132.37\n-660.67\n-1987.75\n-1286.86\n-570.89\n906.35\n2097.27\n-186.11\n-98.79\n-1968.20\n-637.03\n759.13\n14.50\n741.77\n-2016.48\n416.75\n-999.71\n1544.68\n-192.97\n-450.62\n207.17\n886.26\n486.14\n-1136.32\n466.40\n372.99\n314.50\n-1287.77\n-268.96\n-778.86\n-651.03\n-1540.31\n-1420.13\n1270.51\n-8.81\n-1312.01\n1575.77\n-1347.39\n-885.66\n-1465.37\n-711.99\n-53.94\n-952.97\n-366.15\n-917.99\n271.32\n-69.63\n-107.71\n552.17\n1422.76\n1547.79\n-1594.47\n719.72\n471.96\n2920.48\n160.90\n2275.91\n970.01\n1529.27\n1305.70\n113.63\n88.28\n220.04\n1600.84\n602.77\n655.37\n467.06\n2864.70\n1232.79\n-1931.35\n899.39\n401.69\n79.77\n-67.04\n849.31\n-2253.39\n-1082.60\n512.10\n-1020.81\n853.42\n-201.54\n1786.52\n-208.08\n831.65\n-917.49\n-786.68\n-275.14\n479.84\n271.10\n101.29\n-107.77\n-232.47\n1233.67\n510.93\n611.97\n-240.64\n885.50\n41.82\n157.95\n-566.05\n820.70\n-327.37\n844.07\n1011.31\n-70.82\n869.72\n185.25\n-627.27\n280.40\n-833.37\n247.94\n-123.37\n1379.90\n-189.63\n112.49\n-562.03\n450.14\n-1107.87\n27.22\n317.87\n-107.81\n375.59\n-138.04\n1271.65\n1434.00\n2587.26\n-1407.87\n-224.21\n1178.05\n-995.54\n255.96\n-1024.30\n62.70\n-618.20\n-417.57\n-1063.43\n-752.65\n-113.12\n-1823.02\n262.33\n787.18\n-419.63\n2563.15\n722.59\n961.86\n-742.38\n-1413.48\n1229.95\n524.71\n-575.95\n424.58\n1126.07\n263.86\n262.76\n952.19\n-278.86\n-1130.05\n-3200.24\n-128.64\n91.84\n-1157.37\n1312.76\n-645.07\n-948.08\n-2060.55\n-1024.01\n310.28\n144.99\n-1294.29\n-321.07\n-740.24\n-492.96\n-1968.01\n608.67\n-1341.01\n-128.96\n1563.56\n-1111.86\n-215.43\n-2072.72\n-612.85\n-682.95\n830.45\n-1478.47\n-186.78\n716.77\n478.91\n-140.09\n-585.67\n-292.42\n-662.58\n-206.07\n-56.94\n943.89\n-772.27\n-971.52\n-932.13\n-791.80\n1181.42\n928.74\n2413.45\n-318.49\n85.49\n-675.19\n-569.39\n1220.32\n-542.56\n494.58\n-746.54\n242.61\n1880.18\n701.37\n-810.08\n269.34\n-1.33\n869.23\n1783.16\n-608.63\n2033.02\n-850.28\n1692.15\n139.39\n159.34\n-916.83\n-1065.26\n27.87\n312.45\n-834.46\n-1158.54\n21.94\n570.12\n98.46\n-287.97\n938.39\n-262.88\n934.23\n-1182.93\n-1404.51\n1930.65\n-68.55\n179.71\n481.93\n1062.62\n318.04\n1288.00\n646.77\n-990.12\n-1216.03\n-592.33\n568.64\n-574.81\n-163.71\n2657.55\n-705.23\n240.85\n73.39\n1661.46\n1768.55\n691.38\n1159.80\n-330.82\n-250.51\n1040.66\n-844.41\n836.02\n-814.75\n5369.87\n-7328.61\n-603.98\n-6776.40\n-1761.92\n4743.97\n-1217.72\n5573.22\n-728.11\n2937.34\n-4609.05\n-1935.96\n-6226.60\n6113.10\n1348.54\n2744.33\n1535.60\n-6858.76\n3625.07\n3600.71\n-1733.46\n5291.35\n4826.00\n1192.51\n1026.06\n4254.74\n4195.21\n-314.98\n-2806.72\n-789.38\n-3042.71\n2059.92\n-968.92\n484.40\n-18.32\n-8283.29\n1586.71\n2102.81\n2568.07\n-235.37\n3439.61\n-830.74\n-949.74\n-1381.51\n1384.58\n-1407.50\n-4123.93\n-1647.96\n239.35\n1674.57\n2233.18\n303.21\n991.77\n3712.83\n-2027.18\n-572.31\n8638.13\n3448.63\n4296.07\n-3624.94\n-649.83\n1622.28\n-50.06\n-2666.39\n1062.21\n2437.08\n5745.58\n-506.58\n6668.65\n6216.22\n9471.60\n6387.79\n8839.08\n-5607.20\n4587.07\n3442.10\n-671.76\n1971.24\n3153.72\n-95.73\n-12583.63\n-6630.87\n-8597.07\n2833.72\n3628.75\n-6218.52\n2221.79\n14109.02\n3062.05\n3648.13\n-6730.44\n-1157.66\n6.87\n5027.47\n-2699.22\n5711.76\n853.79\n-2628.03\n-3001.51\n-6487.83\n-160.64\n-1832.16\n3264.07\n6215.86\n373.24\n5970.57\n-9797.43\n-6710.60\n2271.49\n1133.92\n2751.12\n6011.14\n-5623.58\n-816.69\n919.45\n-4915.16\n-7241.93\n-2687.47\n2042.33\n3322.32\n2984.83\n1927.79\n-2903.86\n11088.63\n-70.14\n2283.83\n-1351.84\n-2031.94\n-1114.03\n4493.35\n2131.78\n-1617.67\n-4018.71\n807.45\n5926.71\n5135.57\n1692.96\n1991.07\n1298.85\n4105.89\n-2328.39\n3462.52\n-3095.37\n-5034.95\n-5583.94\n7817.33\n7879.58\n6220.21\n4454.40\n1783.22\n-26.01\n-2068.86\n6498.95\n2887.03\n4778.73\n5153.57\n-2624.29\n-1307.80\n3200.35\n-2176.06\n-8098.00\n964.35\n-1111.40\n-4612.94\n218.76\n531.73\n-7876.89\n-7049.96\n-1686.57\n-1669.57\n-5698.42\n-1131.97\n-1049.07\n6746.17\n1859.57\n-1052.35\n1336.26\n5381.22\n4312.35\n-1882.33\n-146.40\n7571.54\n4084.50\n3432.31\n1661.77\n-3459.17\n3143.05\n-708.83\n-4321.15\n4831.40\n2335.21\n4149.53\n-1017.42\n-4388.81\n3607.38\n-5987.19\n-3860.60\n-3682.35\n2238.95\n-3139.57",
+                              height=150,
+                              key="st321_pnl",
+                              help="Almeno 400 osservazioni. La virgola e' il separatore decimale.")
+        q321 = st.selectbox("Confidenza VaR", [95.0, 97.5, 99.0], index=2,
+                            key="st321_q",
+                            help="Livello di confidenza del VaR backtestato.")
+        w321 = st.selectbox("Finestra rolling (giorni)", [100, 250, 500],
+                            index=1, key="st321_w",
+                            help="Giorni di storia usati per stimare il VaR di ogni giorno.")
+        ris321 = mh321_risultato(txt321, q321, w321)
+        verd321 = mh321_verdetto(ris321)
+        sem321 = {"verde": "\U0001F7E2 verde", "giallo": "\U0001F7E1 giallo",
+                  "rosso": "\U0001F534 rosso"}[ris321["zona"]]
+        k1_321, k2_321, k3_321, k4_321, k5_321, k6_321 = st.columns(6)
+        k1_321.metric("Sforamenti", f"{ris321['x']}")
+        k2_321.metric("Sforamenti attesi", f"{ris321['x_att']:.1f}")
+        k3_321.metric("Coverage", f"{ris321['coverage']:.2f}\u00d7")
+        k4_321.metric("Kupiec p-value", f"{ris321['p_pof']:.4f}")
+        k5_321.metric("Semaforo Basilea", sem321)
+        k6_321.metric("Indipendenza p-value", f"{ris321['p_ind']:.4f}")
+        if verd321.startswith("copertura insufficiente"):
+            st.error(verd321)
+        elif verd321.startswith("copertura eccessiva"):
+            st.warning(verd321)
+        elif verd321.startswith("sforamenti a grappoli"):
+            st.warning(verd321)
+        elif verd321.startswith("semaforo giallo"):
+            st.warning(verd321)
+        else:
+            st.success(verd321)
+        dfl_321 = pd.DataFrame({"giorno": list(range(ris321["w0"] + 1,
+                                                    ris321["n"] + 1)),
+                                "perdita": [-v for v in ris321["L"][ris321["w0"]:]],
+                                "var": ris321["var"]})
+        fig_321 = go.Figure()
+        fig_321.add_trace(go.Scatter(x=dfl_321["giorno"], y=dfl_321["perdita"],
+                                     mode="lines", name="Perdita",
+                                     line=dict(color="steelblue")))
+        fig_321.add_trace(go.Scatter(x=dfl_321["giorno"], y=dfl_321["var"],
+                                     mode="lines", name="VaR rolling",
+                                     line=dict(color="orange")))
+        gb_321 = [g for g in ris321["giorni"]]
+        fig_321.add_trace(go.Scatter(x=gb_321, y=ris321["perdite"],
+                                     mode="markers", name="Sforamento",
+                                     marker=dict(color="red", size=8,
+                                                 symbol="x")))
+        fig_321.update_layout(title="Perdite vs VaR rolling (sforamenti in rosso)",
+                              xaxis_title="giorno", yaxis_title="\u20ac",
+                              height=480)
+        st.plotly_chart(fig_321, use_container_width=True)
+        cum_321 = np.cumsum(ris321["flags"])
+        att_321 = np.arange(1, ris321["n_test"] + 1) * ris321["p"]
+        figc_321 = go.Figure()
+        figc_321.add_trace(go.Scatter(x=list(range(1, ris321["n_test"] + 1)),
+                                      y=cum_321, mode="lines",
+                                      name="Sforamenti cumulati"))
+        figc_321.add_trace(go.Scatter(x=list(range(1, ris321["n_test"] + 1)),
+                                      y=att_321, mode="lines",
+                                      name="Attesi", line=dict(dash="dash",
+                                      color="gray")))
+        figc_321.update_layout(title="Sforamenti cumulati vs attesi",
+                               xaxis_title="giorno di test",
+                               yaxis_title="n", height=380)
+        st.plotly_chart(figc_321, use_container_width=True)
+        with st.expander("Dettaglio: backtest, test statistici e semaforo"):
+            dfd_321 = pd.DataFrame(
+                [{"metrica": "osservazioni", "valore": ris321["n"]},
+                 {"metrica": "confidenza %", "valore": ris321["q"]},
+                 {"metrica": "finestra rolling", "valore": ris321["w"]},
+                 {"metrica": "giorni di test", "valore": ris321["n_test"]},
+                 {"metrica": "sforamenti", "valore": ris321["x"]},
+                 {"metrica": "sforamenti attesi",
+                  "valore": round(ris321["x_att"], 2)},
+                 {"metrica": "coverage (x/attesi)",
+                  "valore": round(ris321["coverage"], 3)},
+                 {"metrica": "Kupiec LR", "valore": round(ris321["lr_pof"], 3)},
+                 {"metrica": "Kupiec p-value",
+                  "valore": round(ris321["p_pof"], 6)},
+                 {"metrica": "Christoffersen LR_ind",
+                  "valore": round(ris321["lr_ind"], 3)},
+                 {"metrica": "indipendenza p-value",
+                  "valore": round(ris321["p_ind"], 6)},
+                 {"metrica": "LR copertura condizionata",
+                  "valore": round(ris321["lr_cc"], 3)},
+                 {"metrica": "copertura cond. p-value",
+                  "valore": round(ris321["p_cc"], 6)},
+                 {"metrica": "max sforamenti consecutivi",
+                  "valore": ris321["max_run"]},
+                 {"metrica": "semaforo Basilea", "valore": ris321["zona"]},
+                 {"metrica": "CDF binomiale",
+                  "valore": round(ris321["cum_bin"], 6)}])
+            st.dataframe(dfd_321, use_container_width=True, hide_index=True)
+            st.download_button("\u2b07\ufe0f Export CSV backtest",
+                               data=dfd_321.to_csv(index=False, sep=";").encode("utf-8"),
+                               file_name="backtest_var.csv",
+                               mime="text/csv", key="st321_csv",
+                               help="Sforamenti, test di Kupiec e Christoffersen, semaforo Basilea, VaR rolling.")
+        st.caption(f"Serie di {ris321['n']} P&L, VaR {q321:g}% finestra {w321}: {ris321['x']} sforamenti su {ris321['n_test']} giorni (attesi {ris321['x_att']:.1f}, coverage {ris321['coverage']:.2f}\u00d7), Kupiec p={ris321['p_pof']:.4f}, indipendenza p={ris321['p_ind']:.4f}, semaforo {ris321['zona']}, max run {ris321['max_run']}: {verd321}.")
+        st.caption("Nota: VaR a simulazione storica su finestra rolling; test di Kupiec (copertura) e Christoffersen (indipendenza, catena di Markov); semaforo Basilea via CDF binomiale. Demo a scopo illustrativo.")
 
 # Footer
 
