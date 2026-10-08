@@ -44,6 +44,7 @@ TITLE295 = "🧪🛡 Backtest dell'ES: la coda e' sottostimata?"
 TITLE296 = "🪓🛡 Component ES: chi contribuisce alla coda?"
 TITLE297 = "➕📊 Marginal VaR: quanto rischio aggiunge il nuovo trade?"
 TITLE298 = "🚦📏 Limite VaR: quanto margine resta?"
+TITLE299 = "🧪⚡ Stress test: quanto perde il book negli scenari?"
 TITLE285 = "\U0001F6DB\uFE0F Differenziali greggio: sweet vs sour"
 TITLE284 = "\U0001F3ED Unit commitment CCGT: accendere o no?"
 TITLE283 = "\U0001F6E2\uFE0F Carry petrolio: contango & stoccaggio fisico"
@@ -71,12 +72,12 @@ def _registry():
 class TestRegistryTab286:
     def test_tab286_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 298
+        assert len(titoli) == len(dvars) == len(withs) == 299
         assert TITLE286 in titoli
         assert "tab286" in dvars
         assert "tab286" in withs
         assert titoli[dvars.index("tab286")] == TITLE286
-        assert titoli[-1] == TITLE298
+        assert titoli[-1] == TITLE299
         keys = re.findall(r'key="(bn286_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
