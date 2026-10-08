@@ -115,12 +115,12 @@ class TestRegistryTab199:
         src = Path(__file__).parent.parent.joinpath("app.py").read_text()
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
-        assert len(titoli) == 313
-        assert titoli[-1] == "📉💥 VaR rotto: la probabilita' di breccia con code grasse"
+        assert len(titoli) == 314
+        assert titoli[-1] == "⏳📉 VaR multi-orizzonte: lo scaling con autocorrelazione dei rendimenti"
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         assert "tab199" in dvars
         withs = re.findall(r"    with (tab\d+):", src)
         assert "tab199" in withs
-        assert len(withs) == len(dvars) == 313
+        assert len(withs) == len(dvars) == 314
         keys = re.findall(r'key="(br199_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 7
