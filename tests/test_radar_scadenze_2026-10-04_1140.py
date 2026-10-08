@@ -221,12 +221,12 @@ class TestRegistryTab201:
         src = Path(__file__).parent.parent.joinpath("app.py").read_text()
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
-        assert len(titoli) == 317
-        assert titoli[-1] == "🧠📉 CAViaR: il VaR adattivo che impara dai rendimenti"
+        assert len(titoli) == 318
+        assert titoli[-1] == "🌀📉 Copula t-Student: il VaR che vede le code muoversi insieme"
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         assert "tab201" in dvars
         withs = re.findall(r"    with (tab\d+):", src)
         assert "tab201" in withs
-        assert len(withs) == len(dvars) == 317
+        assert len(withs) == len(dvars) == 318
         keys = re.findall(r'key="(rs201_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 4

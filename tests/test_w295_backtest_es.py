@@ -55,6 +55,7 @@ TITLE314 = "⏳📉 VaR multi-orizzonte: lo scaling con autocorrelazione dei ren
 TITLE315 = "🏔️📉 Valori estremi (Hill): il VaR oltre il massimo storico"
 TITLE316 = "🌊📉 POT-GPD: il VaR dalla coda paretiana oltre soglia"
 TITLE317 = "🧠📉 CAViaR: il VaR adattivo che impara dai rendimenti"
+TITLE318 = "🌀📉 Copula t-Student: il VaR che vede le code muoversi insieme"
 TITLE294 = "🧪📉 Backtest del VaR: il modello tiene?"
 TITLE293 = "🛡📉 Hedge ratio ottimale: quanto coprire con i futures?"
 
@@ -79,12 +80,12 @@ def _registry():
 class TestRegistryTab295:
     def test_tab295_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 317
+        assert len(titoli) == len(dvars) == len(withs) == 318
         assert TITLE295 in titoli
         assert "tab295" in dvars
         assert "tab295" in withs
         assert titoli[dvars.index("tab295")] == TITLE295
-        assert titoli[-1] == TITLE317
+        assert titoli[-1] == TITLE318
         keys = re.findall(r'key="(es295_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
