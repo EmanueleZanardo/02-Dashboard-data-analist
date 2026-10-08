@@ -80,6 +80,7 @@ TITLE313 = "📉💥 VaR rotto: la probabilita' di breccia con code grasse"
 TITLE314 = "⏳📉 VaR multi-orizzonte: lo scaling con autocorrelazione dei rendimenti"
 TITLE315 = "🏔️📉 Valori estremi (Hill): il VaR oltre il massimo storico"
 TITLE316 = "🌊📉 POT-GPD: il VaR dalla coda paretiana oltre soglia"
+TITLE317 = "🧠📉 CAViaR: il VaR adattivo che impara dai rendimenti"
 TITLE264 = "\U0001F4DC Garanzie di origine: costo del 100% rinnovabile"
 
 PROD0 = 100000.0
@@ -102,12 +103,12 @@ def _registry():
 class TestRegistryTab265:
     def test_tab265_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 316
+        assert len(titoli) == len(dvars) == len(withs) == 317
         assert TITLE265 in titoli
         assert "tab265" in dvars
         assert "tab265" in withs
         assert titoli[dvars.index("tab265")] == TITLE265
-        assert titoli[-1] == TITLE316
+        assert titoli[-1] == TITLE317
         keys = re.findall(r'key="(fv265_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
