@@ -63,6 +63,7 @@ TITLE305 = "🎯🛡 Risk budgeting: il book rispetta i target?"
 TITLE306 = "💎📊 RAROC: il rendimento ripaga il rischio?"
 TITLE307 = "🌊📉 Expected Shortfall: la perdita oltre il VaR"
 TITLE308 = "💥📈 Stress di correlazione: quanto sale il VaR se si rompono?"
+TITLE309 = "🎯💥 Rho critica: a quale correlazione il VaR tocca il limite?"
 TITLE274 = "⚛️ Nucleare SMR: business case"
 
 CSV_POS = ("prodotto,qta_mwh,direzione,prezzo_eur_mwh\n"
@@ -87,12 +88,12 @@ def _registry():
 class TestRegistryTab275:
     def test_tab275_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 308
+        assert len(titoli) == len(dvars) == len(withs) == 309
         assert TITLE275 in titoli
         assert "tab275" in dvars
         assert "tab275" in withs
         assert titoli[dvars.index("tab275")] == TITLE275
-        assert titoli[-1] == TITLE308
+        assert titoli[-1] == TITLE309
         keys = re.findall(r'key="(pl275_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

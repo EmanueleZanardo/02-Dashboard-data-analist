@@ -74,6 +74,7 @@ TITLE305 = "🎯🛡 Risk budgeting: il book rispetta i target?"
 TITLE306 = "💎📊 RAROC: il rendimento ripaga il rischio?"
 TITLE307 = "🌊📉 Expected Shortfall: la perdita oltre il VaR"
 TITLE308 = "💥📈 Stress di correlazione: quanto sale il VaR se si rompono?"
+TITLE309 = "🎯💥 Rho critica: a quale correlazione il VaR tocca il limite?"
 TITLE266 = "🌾️ Agrivoltaico: doppio reddito"
 
 T_ANNO = 30000.0
@@ -101,12 +102,12 @@ def _registry():
 class TestRegistryTab267:
     def test_tab267_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 308
+        assert len(titoli) == len(dvars) == len(withs) == 309
         assert TITLE267 in titoli
         assert "tab267" in dvars
         assert "tab267" in withs
         assert titoli[dvars.index("tab267")] == TITLE267
-        assert titoli[-1] == TITLE308
+        assert titoli[-1] == TITLE309
         keys = re.findall(r'key="(bm267_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

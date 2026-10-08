@@ -155,12 +155,12 @@ class TestRegistryTab221:
         src = Path(__file__).parent.parent.joinpath("app.py").read_text()
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
-        assert len(titoli) == 308
-        assert titoli[-1] == "💥📈 Stress di correlazione: quanto sale il VaR se si rompono?"
+        assert len(titoli) == 309
+        assert titoli[-1] == "🎯💥 Rho critica: a quale correlazione il VaR tocca il limite?"
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         assert "tab221" in dvars
         withs = re.findall(r"    with (tab\d+):", src)
         assert "tab221" in withs
-        assert len(withs) == len(dvars) == 308
+        assert len(withs) == len(dvars) == 309
         keys = re.findall(r'key="(od221_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 4
