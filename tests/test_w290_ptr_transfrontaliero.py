@@ -43,6 +43,7 @@ TITLE296 = "🪓🛡 Component ES: chi contribuisce alla coda?"
 TITLE297 = "➕📊 Marginal VaR: quanto rischio aggiunge il nuovo trade?"
 TITLE298 = "🚦📏 Limite VaR: quanto margine resta?"
 TITLE299 = "🧪⚡ Stress test: quanto perde il book negli scenari?"
+TITLE300 = "🧮📊 Rapporto di diversificazione: quanto rischio risparmia il book?"
 TITLE289 = "⚫🔥 Clean dark spread: margine centrale a carbone"
 TITLE288 = "⚡🔥 Clean spark spread: margine centrale a gas"
 TITLE287 = "🚢⚡ Rigassificazione GNL: margine terminale"
@@ -67,12 +68,12 @@ def _registry():
 class TestRegistryTab290:
     def test_tab290_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 299
+        assert len(titoli) == len(dvars) == len(withs) == 300
         assert TITLE290 in titoli
         assert "tab290" in dvars
         assert "tab290" in withs
         assert titoli[dvars.index("tab290")] == TITLE290
-        assert titoli[-1] == TITLE299
+        assert titoli[-1] == TITLE300
         keys = re.findall(r'key="(ptr290_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
