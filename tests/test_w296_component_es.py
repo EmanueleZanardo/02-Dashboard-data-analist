@@ -36,6 +36,7 @@ TITLE304 = "🗂️📊 VaR per segmento: dove si concentra il rischio?"
 TITLE305 = "🎯🛡 Risk budgeting: il book rispetta i target?"
 TITLE306 = "💎📊 RAROC: il rendimento ripaga il rischio?"
 TITLE307 = "🌊📉 Expected Shortfall: la perdita oltre il VaR"
+TITLE308 = "💥📈 Stress di correlazione: quanto sale il VaR se si rompono?"
 TITLE295 = "🧪🛡 Backtest dell'ES: la coda e' sottostimata?"
 TITLE294 = "🧪📉 Backtest del VaR: il modello tiene?"
 
@@ -114,12 +115,12 @@ def _registry():
 class TestRegistryTab296:
     def test_tab296_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 307
+        assert len(titoli) == len(dvars) == len(withs) == 308
         assert TITLE296 in titoli
         assert "tab296" in dvars
         assert "tab296" in withs
         assert titoli[dvars.index("tab296")] == TITLE296
-        assert titoli[-1] == TITLE307
+        assert titoli[-1] == TITLE308
         keys = re.findall(r'key="(ce296_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
