@@ -23,6 +23,7 @@ _F = _load("mh340_num", "mh340_parse_serie", "mh340_equity",
 
 TITLE340 = "📉 Calmar ratio: il rendimento annuo per unità di max drawdown"
 TITLE341 = "📐 K-ratio: la regolarità della crescita dell'equity"
+TITLE342 = "🎯 Volatilità target: il sizing a volatilità costante"
 TITLE339 = "📉 Sortino ratio: il rendimento per unità di rischio al ribasso"
 TITLE338 = "⚖️ M² Modigliani: il rendimento a parita' di rischio col benchmark"
 TITLE337 = "📐 Treynor & Jensen: il premio per unita' di rischio sistematico"
@@ -57,7 +58,7 @@ def _demo():
 class TestRegistry340:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 341
+        assert len(titoli) == len(dvars) == len(withs) == 342
         assert "tab340" in dvars
         assert "tab340" in withs
 
@@ -70,9 +71,9 @@ class TestRegistry340:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab341"
-        assert titoli[-1] == TITLE341
-        assert withs[-1] == "tab341"
+        assert dvars[-1] == "tab342"
+        assert titoli[-1] == TITLE342
+        assert withs[-1] == "tab342"
 
 
 class TestNum:

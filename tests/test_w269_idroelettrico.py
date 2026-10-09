@@ -107,6 +107,7 @@ TITLE338 = "⚖️ M² Modigliani: il rendimento a parita' di rischio col benchm
 TITLE339 = "📉 Sortino ratio: il rendimento per unità di rischio al ribasso"
 TITLE340 = "📉 Calmar ratio: il rendimento annuo per unità di max drawdown"
 TITLE341 = "📐 K-ratio: la regolarità della crescita dell'equity"
+TITLE342 = "🎯 Volatilità target: il sizing a volatilità costante"
 TITLE268 = "🌬️ Eolico onshore: business case"
 
 POT = 2.0
@@ -134,12 +135,12 @@ def _registry():
 class TestRegistryTab269:
     def test_tab269_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 341
+        assert len(titoli) == len(dvars) == len(withs) == 342
         assert TITLE269 in titoli
         assert "tab269" in dvars
         assert "tab269" in withs
         assert titoli[dvars.index("tab269")] == TITLE269
-        assert titoli[-1] == TITLE341
+        assert titoli[-1] == TITLE342
         keys = re.findall(r'key="(id269_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

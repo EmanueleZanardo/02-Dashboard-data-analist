@@ -52,6 +52,7 @@ TITLE338 = "⚖️ M² Modigliani: il rendimento a parita' di rischio col benchm
 TITLE339 = "📉 Sortino ratio: il rendimento per unità di rischio al ribasso"
 TITLE340 = "📉 Calmar ratio: il rendimento annuo per unità di max drawdown"
 TITLE341 = "📐 K-ratio: la regolarità della crescita dell'equity"
+TITLE342 = "🎯 Volatilità target: il sizing a volatilità costante"
 TITLE309 = "🎯💥 Rho critica: a quale correlazione il VaR tocca il limite?"
 TITLE308 = "💥📈 Stress di correlazione: quanto sale il VaR se si rompono?"
 BOOK_DEMO = ("Cal-28 Baseload power;2500000;18,5;0,4;power\n"
@@ -86,7 +87,7 @@ def _registry():
 class TestRegistry310:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 341
+        assert len(titoli) == len(dvars) == len(withs) == 342
         assert TITLE310 in titoli
         assert "tab310" in dvars
         assert "    with tab310:" in src
@@ -99,8 +100,8 @@ class TestRegistry310:
 
     def test_ultima_tab(self):
         _, titoli, dvars, _ = _registry()
-        assert titoli[-1] == TITLE341
-        assert dvars[-1] == "tab341"
+        assert titoli[-1] == TITLE342
+        assert dvars[-1] == "tab342"
 
 
 class TestValidatori:
