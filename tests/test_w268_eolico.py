@@ -96,6 +96,7 @@ TITLE327 = "🛟 Sterling ratio: il Calmar mediato sui peggiori drawdown"
 TITLE328 = "🔻 Burke ratio: il drawdown penalizzato al quadrato"
 TITLE329 = "🌊📉 CDaR: il drawdown medio oltre la soglia (il VaR dei drawdown)"
 TITLE330 = "🔍📉 Martin ratio: il Calmar che guarda tutto il dolore"
+TITLE331 = "⛵ Tempo di recupero: quanto resta sott'acqua l'equity"
 TITLE267 = "🟢 Biometano: business case"
 
 POT = 10.0
@@ -124,12 +125,12 @@ def _registry():
 class TestRegistryTab268:
     def test_tab268_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 330
+        assert len(titoli) == len(dvars) == len(withs) == 331
         assert TITLE268 in titoli
         assert "tab268" in dvars
         assert "tab268" in withs
         assert titoli[dvars.index("tab268")] == TITLE268
-        assert titoli[-1] == TITLE330
+        assert titoli[-1] == TITLE331
         keys = re.findall(r'key="(eo268_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

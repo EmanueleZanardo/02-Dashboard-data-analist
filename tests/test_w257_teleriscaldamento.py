@@ -39,12 +39,12 @@ def _registry():
 class TestRegistryTab257:
     def test_tab257_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 330
+        assert len(titoli) == len(dvars) == len(withs) == 331
         assert "🔥 Teleriscaldamento vs caldaia" in titoli
         assert "tab257" in dvars
         assert "tab257" in withs
         assert titoli[dvars.index("tab257")] == "🔥 Teleriscaldamento vs caldaia"
-        assert titoli[-1] == "🔍📉 Martin ratio: il Calmar che guarda tutto il dolore"
+        assert titoli[-1] == "⛵ Tempo di recupero: quanto resta sott'acqua l'equity"
         keys = re.findall(r'key="(tl257_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 8
 
