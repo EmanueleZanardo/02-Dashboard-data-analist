@@ -128,12 +128,12 @@ class TestRegistryTab200:
         src = Path(__file__).parent.parent.joinpath("app.py").read_text()
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
-        assert len(titoli) == 331
-        assert titoli[-1] == "⛵ Tempo di recupero: quanto resta sott'acqua l'equity"
+        assert len(titoli) == 332
+        assert titoli[-1] == "🎯 Information ratio: la strategia batte davvero il benchmark?"
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         assert "tab200" in dvars
         withs = re.findall(r"    with (tab\d+):", src)
         assert "tab200" in withs
-        assert len(withs) == len(dvars) == 331
+        assert len(withs) == len(dvars) == 332
         keys = re.findall(r'key="(rv200_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 6

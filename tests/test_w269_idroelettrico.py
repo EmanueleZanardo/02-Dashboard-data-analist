@@ -97,6 +97,7 @@ TITLE328 = "🔻 Burke ratio: il drawdown penalizzato al quadrato"
 TITLE329 = "🌊📉 CDaR: il drawdown medio oltre la soglia (il VaR dei drawdown)"
 TITLE330 = "🔍📉 Martin ratio: il Calmar che guarda tutto il dolore"
 TITLE331 = "⛵ Tempo di recupero: quanto resta sott'acqua l'equity"
+TITLE332 = "🎯 Information ratio: la strategia batte davvero il benchmark?"
 TITLE268 = "🌬️ Eolico onshore: business case"
 
 POT = 2.0
@@ -124,12 +125,12 @@ def _registry():
 class TestRegistryTab269:
     def test_tab269_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 331
+        assert len(titoli) == len(dvars) == len(withs) == 332
         assert TITLE269 in titoli
         assert "tab269" in dvars
         assert "tab269" in withs
         assert titoli[dvars.index("tab269")] == TITLE269
-        assert titoli[-1] == TITLE331
+        assert titoli[-1] == TITLE332
         keys = re.findall(r'key="(id269_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
