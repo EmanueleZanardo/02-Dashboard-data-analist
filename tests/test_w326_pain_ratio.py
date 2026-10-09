@@ -21,6 +21,7 @@ _F = _load("mh326_num", "mh326_parse_equity", "mh326_drawdown", "mh326_cagr",
 TITLE326 = "🩹 Pain index e Pain ratio: il dolore medio oltre il peggio"
 TITLE327 = "🛟 Sterling ratio: il Calmar mediato sui peggiori drawdown"
 TITLE328 = "🔻 Burke ratio: il drawdown penalizzato al quadrato"
+TITLE329 = "🌊📉 CDaR: il drawdown medio oltre la soglia (il VaR dei drawdown)"
 TITLE325 = "📈📉 Calmar ratio: il rendimento che paga il drawdown"
 TITLE324 = "Ω📊 Omega ratio: oltre Sharpe e Sortino"
 SERIE_DEMO = '100\n103\n106\n109\n112\n115\n118\n121\n124\n127\n130\n128\n124\n119\n114\n112\n105\n110\n116\n122\n128\n134\n138\n136\n132\n128\n124\n120\n116\n112\n116\n122\n128\n134\n140\n146\n152\n158\n156\n152\n148\n144\n146\n150\n154\n158\n161\n164'
@@ -56,7 +57,7 @@ def _eq_demo():
 class TestRegistry326:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 328
+        assert len(titoli) == len(dvars) == len(withs) == 329
         assert TITLE326 in titoli
         assert "tab326" in dvars
         assert "    with tab326:" in src
@@ -69,8 +70,8 @@ class TestRegistry326:
 
     def test_ultima_tab(self):
         _, titoli, dvars, _ = _registry()
-        assert titoli[-1] == TITLE328
-        assert dvars[-1] == "tab328"
+        assert titoli[-1] == TITLE329
+        assert dvars[-1] == "tab329"
 
 
 class TestValidatori:
