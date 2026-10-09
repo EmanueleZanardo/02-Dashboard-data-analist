@@ -39,12 +39,12 @@ def _registry():
 class TestRegistryTab256:
     def test_tab256_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 333
+        assert len(titoli) == len(dvars) == len(withs) == 334
         assert "⚡ Perdite di rete" in titoli
         assert "tab256" in dvars
         assert "tab256" in withs
         assert titoli[dvars.index("tab256")] == "⚡ Perdite di rete"
-        assert titoli[-1] == "📊 Capture ratio: quanto cattura la strategia nei mercati su e giù?"
+        assert titoli[-1] == "🎯 Hit rate: quanto spesso la strategia batte il benchmark?"
         keys = re.findall(r'key="(pr256_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 7
 

@@ -24,6 +24,7 @@ TITLE330 = "🔍📉 Martin ratio: il Calmar che guarda tutto il dolore"
 TITLE331 = "⛵ Tempo di recupero: quanto resta sott'acqua l'equity"
 TITLE332 = "🎯 Information ratio: la strategia batte davvero il benchmark?"
 TITLE333 = "📊 Capture ratio: quanto cattura la strategia nei mercati su e giù?"
+TITLE334 = "🎯 Hit rate: quanto spesso la strategia batte il benchmark?"
 TITLE328 = "🔻 Burke ratio: il drawdown penalizzato al quadrato"
 TITLE327 = "🛟 Sterling ratio: il Calmar mediato sui peggiori drawdown"
 TITLE326 = "🩹 Pain index e Pain ratio: il dolore medio oltre il peggio"
@@ -63,7 +64,7 @@ def _eq_demo():
 class TestRegistry329:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 333
+        assert len(titoli) == len(dvars) == len(withs) == 334
         assert TITLE329 in titoli
         assert "tab329" in dvars
         assert "    with tab329:" in src
@@ -77,8 +78,8 @@ class TestRegistry329:
 
     def test_ultima_tab(self):
         _, titoli, dvars, _ = _registry()
-        assert titoli[-1] == TITLE333
-        assert dvars[-1] == "tab333"
+        assert titoli[-1] == TITLE334
+        assert dvars[-1] == "tab334"
 
 
 class TestValidatori:

@@ -97,6 +97,7 @@ TITLE330 = "🔍📉 Martin ratio: il Calmar che guarda tutto il dolore"
 TITLE331 = "⛵ Tempo di recupero: quanto resta sott'acqua l'equity"
 TITLE332 = "🎯 Information ratio: la strategia batte davvero il benchmark?"
 TITLE333 = "📊 Capture ratio: quanto cattura la strategia nei mercati su e giù?"
+TITLE334 = "🎯 Hit rate: quanto spesso la strategia batte il benchmark?"
 TITLE264 = "\U0001F4DC Garanzie di origine: costo del 100% rinnovabile"
 
 PROD0 = 100000.0
@@ -119,12 +120,12 @@ def _registry():
 class TestRegistryTab265:
     def test_tab265_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 333
+        assert len(titoli) == len(dvars) == len(withs) == 334
         assert TITLE265 in titoli
         assert "tab265" in dvars
         assert "tab265" in withs
         assert titoli[dvars.index("tab265")] == TITLE265
-        assert titoli[-1] == TITLE333
+        assert titoli[-1] == TITLE334
         keys = re.findall(r'key="(fv265_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

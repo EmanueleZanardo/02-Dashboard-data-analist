@@ -77,6 +77,7 @@ TITLE330 = "🔍📉 Martin ratio: il Calmar che guarda tutto il dolore"
 TITLE331 = "⛵ Tempo di recupero: quanto resta sott'acqua l'equity"
 TITLE332 = "🎯 Information ratio: la strategia batte davvero il benchmark?"
 TITLE333 = "📊 Capture ratio: quanto cattura la strategia nei mercati su e giù?"
+TITLE334 = "🎯 Hit rate: quanto spesso la strategia batte il benchmark?"
 TITLE289 = "⚫🔥 Clean dark spread: margine centrale a carbone"
 TITLE288 = "⚡🔥 Clean spark spread: margine centrale a gas"
 TITLE287 = "🚢⚡ Rigassificazione GNL: margine terminale"
@@ -101,12 +102,12 @@ def _registry():
 class TestRegistryTab290:
     def test_tab290_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 333
+        assert len(titoli) == len(dvars) == len(withs) == 334
         assert TITLE290 in titoli
         assert "tab290" in dvars
         assert "tab290" in withs
         assert titoli[dvars.index("tab290")] == TITLE290
-        assert titoli[-1] == TITLE333
+        assert titoli[-1] == TITLE334
         keys = re.findall(r'key="(ptr290_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
