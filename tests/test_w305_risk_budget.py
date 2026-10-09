@@ -75,6 +75,7 @@ TITLE336 = "📉 Max drawdown relativo: quanto si scende sotto il benchmark?"
 TITLE337 = "📐 Treynor & Jensen: il premio per unita' di rischio sistematico"
 TITLE338 = "⚖️ M² Modigliani: il rendimento a parita' di rischio col benchmark"
 TITLE339 = "📉 Sortino ratio: il rendimento per unità di rischio al ribasso"
+TITLE340 = "📉 Calmar ratio: il rendimento annuo per unità di max drawdown"
 TITLE304 = "🗂️📊 VaR per segmento: dove si concentra il rischio?"
 TITLE303 = "🧱📉 Capacità VaR: quanto nozionale puoi ancora aggiungere?"
 
@@ -114,13 +115,13 @@ def _registry():
 class TestRegistryTab305:
     def test_tab305_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 339
+        assert len(titoli) == len(dvars) == len(withs) == 340
         assert TITLE305 in titoli
         assert "tab305" in dvars
         assert "tab305" in withs
         assert titoli[dvars.index("tab305")] == TITLE305
-        assert titoli[-1] == TITLE339
-        assert dvars[-1] == "tab339"
+        assert titoli[-1] == TITLE340
+        assert dvars[-1] == "tab340"
         keys = re.findall(r'key="(st305_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

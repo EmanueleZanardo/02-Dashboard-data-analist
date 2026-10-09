@@ -101,6 +101,7 @@ TITLE336 = "📉 Max drawdown relativo: quanto si scende sotto il benchmark?"
 TITLE337 = "📐 Treynor & Jensen: il premio per unita' di rischio sistematico"
 TITLE338 = "⚖️ M² Modigliani: il rendimento a parita' di rischio col benchmark"
 TITLE339 = "📉 Sortino ratio: il rendimento per unità di rischio al ribasso"
+TITLE340 = "📉 Calmar ratio: il rendimento annuo per unità di max drawdown"
 TITLE263 = "\U0001F697 Flotta aziendale: TCO diesel vs elettrico"
 
 CONSUMI_TXT = "85\n78\n82\n75\n70\n65\n60\n62\n68\n75\n82\n90"
@@ -119,12 +120,12 @@ def _registry():
 class TestRegistryTab264:
     def test_tab264_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 339
+        assert len(titoli) == len(dvars) == len(withs) == 340
         assert TITLE264 in titoli
         assert "tab264" in dvars
         assert "tab264" in withs
         assert titoli[dvars.index("tab264")] == TITLE264
-        assert titoli[-1] == TITLE339
+        assert titoli[-1] == TITLE340
         keys = re.findall(r'key="(go264_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

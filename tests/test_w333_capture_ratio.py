@@ -26,6 +26,7 @@ TITLE336 = "📉 Max drawdown relativo: quanto si scende sotto il benchmark?"
 TITLE337 = "📐 Treynor & Jensen: il premio per unita' di rischio sistematico"
 TITLE338 = "⚖️ M² Modigliani: il rendimento a parita' di rischio col benchmark"
 TITLE339 = "📉 Sortino ratio: il rendimento per unità di rischio al ribasso"
+TITLE340 = "📉 Calmar ratio: il rendimento annuo per unità di max drawdown"
 TITLE332 = "🎯 Information ratio: la strategia batte davvero il benchmark?"
 TITLE331 = "⛵ Tempo di recupero: quanto resta sott'acqua l'equity"
 TITLE330 = "🔍📉 Martin ratio: il Calmar che guarda tutto il dolore"
@@ -65,7 +66,7 @@ def _demo():
 class TestRegistry333:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 339
+        assert len(titoli) == len(dvars) == len(withs) == 340
         assert "tab333" in dvars
         assert "tab333" in withs
 
@@ -78,9 +79,9 @@ class TestRegistry333:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab339"
-        assert titoli[-1] == TITLE339
-        assert withs[-1] == "tab339"
+        assert dvars[-1] == "tab340"
+        assert titoli[-1] == TITLE340
+        assert withs[-1] == "tab340"
 
 
 class TestNum:

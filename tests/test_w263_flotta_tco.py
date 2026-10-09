@@ -103,6 +103,7 @@ TITLE336 = "📉 Max drawdown relativo: quanto si scende sotto il benchmark?"
 TITLE337 = "📐 Treynor & Jensen: il premio per unita' di rischio sistematico"
 TITLE338 = "⚖️ M² Modigliani: il rendimento a parita' di rischio col benchmark"
 TITLE339 = "📉 Sortino ratio: il rendimento per unità di rischio al ribasso"
+TITLE340 = "📉 Calmar ratio: il rendimento annuo per unità di max drawdown"
 TITLE262 = "\U0001F50C Gruppo elettrogeno vs blackout"
 
 # Parametri di riferimento usati nei test
@@ -133,12 +134,12 @@ def _registry():
 class TestRegistryTab263:
     def test_tab263_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 339
+        assert len(titoli) == len(dvars) == len(withs) == 340
         assert TITLE263 in titoli
         assert "tab263" in dvars
         assert "tab263" in withs
         assert titoli[dvars.index("tab263")] == TITLE263
-        assert titoli[-1] == TITLE339
+        assert titoli[-1] == TITLE340
         keys = re.findall(r'key="(fl263_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 16
 

@@ -25,6 +25,7 @@ TITLE336 = "📉 Max drawdown relativo: quanto si scende sotto il benchmark?"
 TITLE337 = "📐 Treynor & Jensen: il premio per unita' di rischio sistematico"
 TITLE338 = "⚖️ M² Modigliani: il rendimento a parita' di rischio col benchmark"
 TITLE339 = "📉 Sortino ratio: il rendimento per unità di rischio al ribasso"
+TITLE340 = "📉 Calmar ratio: il rendimento annuo per unità di max drawdown"
 TITLE334 = "🎯 Hit rate: quanto spesso la strategia batte il benchmark?"
 TITLE333 = "📊 Capture ratio: quanto cattura la strategia nei mercati su e giù?"
 TITLE332 = "🎯 Information ratio: la strategia batte davvero il benchmark?"
@@ -63,7 +64,7 @@ def _demo():
 class TestRegistry335:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 339
+        assert len(titoli) == len(dvars) == len(withs) == 340
         assert "tab335" in dvars
         assert "tab335" in withs
 
@@ -76,9 +77,9 @@ class TestRegistry335:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab339"
-        assert titoli[-1] == TITLE339
-        assert withs[-1] == "tab339"
+        assert dvars[-1] == "tab340"
+        assert titoli[-1] == TITLE340
+        assert withs[-1] == "tab340"
 
 
 class TestNum:

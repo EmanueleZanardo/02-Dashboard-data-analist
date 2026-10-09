@@ -145,12 +145,12 @@ class TestRegistryTab226:
             encoding="utf-8")
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
-        assert len(titoli) == 339
-        assert titoli[-1] == "📉 Sortino ratio: il rendimento per unità di rischio al ribasso"
+        assert len(titoli) == 340
+        assert titoli[-1] == "📉 Calmar ratio: il rendimento annuo per unità di max drawdown"
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         assert "tab226" in dvars
         withs = re.findall(r"    with (tab\d+):", src)
         assert "tab226" in withs
-        assert len(withs) == len(dvars) == 339
+        assert len(withs) == len(dvars) == 340
         keys = re.findall(r'key="(ai226_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 10
