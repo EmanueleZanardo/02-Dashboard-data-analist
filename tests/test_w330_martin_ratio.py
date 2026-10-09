@@ -22,6 +22,7 @@ _F = _load("mh330_num", "mh330_parse_equity", "mh330_drawdown", "mh330_ulcer",
 TITLE330 = "🔍📉 Martin ratio: il Calmar che guarda tutto il dolore"
 TITLE331 = "⛵ Tempo di recupero: quanto resta sott'acqua l'equity"
 TITLE332 = "🎯 Information ratio: la strategia batte davvero il benchmark?"
+TITLE333 = "📊 Capture ratio: quanto cattura la strategia nei mercati su e giù?"
 TITLE329 = "🌊📉 CDaR: il drawdown medio oltre la soglia (il VaR dei drawdown)"
 TITLE328 = "🔻 Burke ratio: il drawdown penalizzato al quadrato"
 TITLE327 = "🛟 Sterling ratio: il Calmar mediato sui peggiori drawdown"
@@ -54,7 +55,7 @@ def _eq_demo():
 class TestRegistry330:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 332
+        assert len(titoli) == len(dvars) == len(withs) == 333
         assert TITLE330 in titoli
         assert "tab330" in dvars
         assert "    with tab330:" in src
@@ -68,9 +69,9 @@ class TestRegistry330:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert titoli[-1] == TITLE332
-        assert dvars[-1] == "tab332"
-        assert withs[-1] == "tab332"
+        assert titoli[-1] == TITLE333
+        assert dvars[-1] == "tab333"
+        assert withs[-1] == "tab333"
 
 
 class TestNum:

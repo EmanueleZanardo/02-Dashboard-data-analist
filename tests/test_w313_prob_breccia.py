@@ -42,6 +42,7 @@ TITLE329 = "🌊📉 CDaR: il drawdown medio oltre la soglia (il VaR dei drawdow
 TITLE330 = "🔍📉 Martin ratio: il Calmar che guarda tutto il dolore"
 TITLE331 = "⛵ Tempo di recupero: quanto resta sott'acqua l'equity"
 TITLE332 = "🎯 Information ratio: la strategia batte davvero il benchmark?"
+TITLE333 = "📊 Capture ratio: quanto cattura la strategia nei mercati su e giù?"
 TITLE312 = "📐🌊 Expected Shortfall con Cornish-Fisher: la coda oltre il VaR con code grasse"
 TITLE311 = "📐📉 Cornish-Fisher: il VaR corretto per skew e code grasse"
 BOOK_DEMO = ("Cal-28 Baseload power;2500000;18,5;-0,8;4,0;power\n"
@@ -85,7 +86,7 @@ def _registry():
 class TestRegistry313:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 332
+        assert len(titoli) == len(dvars) == len(withs) == 333
         assert TITLE313 in titoli
         assert "tab313" in dvars
         assert "    with tab313:" in src
@@ -98,8 +99,8 @@ class TestRegistry313:
 
     def test_ultima_tab(self):
         _, titoli, dvars, _ = _registry()
-        assert titoli[-1] == TITLE332
-        assert dvars[-1] == "tab332"
+        assert titoli[-1] == TITLE333
+        assert dvars[-1] == "tab333"
 
 
 class TestValidatori:

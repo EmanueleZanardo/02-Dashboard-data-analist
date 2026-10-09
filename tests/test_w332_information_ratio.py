@@ -21,6 +21,7 @@ _F = _load("mh332_num", "mh332_parse_serie", "mh332_statistiche",
            "mh332_verdetto")
 
 TITLE332 = "🎯 Information ratio: la strategia batte davvero il benchmark?"
+TITLE333 = "📊 Capture ratio: quanto cattura la strategia nei mercati su e giù?"
 TITLE331 = "⛵ Tempo di recupero: quanto resta sott'acqua l'equity"
 TITLE330 = "🔍📉 Martin ratio: il Calmar che guarda tutto il dolore"
 TITLE329 = "🌊📉 CDaR: il drawdown medio oltre la soglia (il VaR dei drawdown)"
@@ -60,7 +61,7 @@ def _demo():
 class TestRegistry332:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 332
+        assert len(titoli) == len(dvars) == len(withs) == 333
         assert "tab332" in dvars
         assert "tab332" in withs
 
@@ -73,9 +74,9 @@ class TestRegistry332:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab332"
-        assert titoli[-1] == TITLE332
-        assert withs[-1] == "tab332"
+        assert dvars[-1] == "tab333"
+        assert titoli[-1] == TITLE333
+        assert withs[-1] == "tab333"
 
 
 class TestNum:

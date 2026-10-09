@@ -68,6 +68,7 @@ TITLE329 = "🌊📉 CDaR: il drawdown medio oltre la soglia (il VaR dei drawdow
 TITLE330 = "🔍📉 Martin ratio: il Calmar che guarda tutto il dolore"
 TITLE331 = "⛵ Tempo di recupero: quanto resta sott'acqua l'equity"
 TITLE332 = "🎯 Information ratio: la strategia batte davvero il benchmark?"
+TITLE333 = "📊 Capture ratio: quanto cattura la strategia nei mercati su e giù?"
 TITLE304 = "🗂️📊 VaR per segmento: dove si concentra il rischio?"
 TITLE303 = "🧱📉 Capacità VaR: quanto nozionale puoi ancora aggiungere?"
 
@@ -107,13 +108,13 @@ def _registry():
 class TestRegistryTab305:
     def test_tab305_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 332
+        assert len(titoli) == len(dvars) == len(withs) == 333
         assert TITLE305 in titoli
         assert "tab305" in dvars
         assert "tab305" in withs
         assert titoli[dvars.index("tab305")] == TITLE305
-        assert titoli[-1] == TITLE332
-        assert dvars[-1] == "tab332"
+        assert titoli[-1] == TITLE333
+        assert dvars[-1] == "tab333"
         keys = re.findall(r'key="(st305_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
