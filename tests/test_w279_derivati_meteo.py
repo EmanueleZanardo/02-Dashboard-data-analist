@@ -77,6 +77,7 @@ TITLE320 = "⚙️📉 GARCH(1,1): la volatilita' che ricorda"
 TITLE321 = "🧪📉 Backtest VaR: il modello resiste al tempo?"
 TITLE322 = "🎯📉 Convergenza forward: il forward indovina lo spot?"
 TITLE323 = "🔄📉 Half-life di mean reversion: lo spot torna alla media?"
+TITLE324 = "Ω📊 Omega ratio: oltre Sharpe e Sortino"
 TITLE278 = "\U0001f321\ufe0f Stress climatico: domanda e prezzo"
 TITLE277 = "\u26a1 Aste MI: scostamenti vs MGP"
 
@@ -97,12 +98,12 @@ def _registry():
 class TestRegistryTab279:
     def test_tab279_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 323
+        assert len(titoli) == len(dvars) == len(withs) == 324
         assert TITLE279 in titoli
         assert "tab279" in dvars
         assert "tab279" in withs
         assert titoli[dvars.index("tab279")] == TITLE279
-        assert titoli[-1] == TITLE323
+        assert titoli[-1] == TITLE324
         keys = re.findall(r'key="(wd279_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

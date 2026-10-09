@@ -33,6 +33,7 @@ TITLE320 = "⚙️📉 GARCH(1,1): la volatilita' che ricorda"
 TITLE321 = "🧪📉 Backtest VaR: il modello resiste al tempo?"
 TITLE322 = "🎯📉 Convergenza forward: il forward indovina lo spot?"
 TITLE323 = "🔄📉 Half-life di mean reversion: lo spot torna alla media?"
+TITLE324 = "Ω📊 Omega ratio: oltre Sharpe e Sortino"
 TITLE312 = "📐🌊 Expected Shortfall con Cornish-Fisher: la coda oltre il VaR con code grasse"
 TITLE311 = "📐📉 Cornish-Fisher: il VaR corretto per skew e code grasse"
 BOOK_DEMO = ("Cal-28 Baseload power;2500000;18,5;-0,8;4,0;power\n"
@@ -76,7 +77,7 @@ def _registry():
 class TestRegistry313:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 323
+        assert len(titoli) == len(dvars) == len(withs) == 324
         assert TITLE313 in titoli
         assert "tab313" in dvars
         assert "    with tab313:" in src
@@ -89,8 +90,8 @@ class TestRegistry313:
 
     def test_ultima_tab(self):
         _, titoli, dvars, _ = _registry()
-        assert titoli[-1] == TITLE323
-        assert dvars[-1] == "tab323"
+        assert titoli[-1] == TITLE324
+        assert dvars[-1] == "tab324"
 
 
 class TestValidatori:

@@ -59,6 +59,7 @@ TITLE320 = "⚙️📉 GARCH(1,1): la volatilita' che ricorda"
 TITLE321 = "🧪📉 Backtest VaR: il modello resiste al tempo?"
 TITLE322 = "🎯📉 Convergenza forward: il forward indovina lo spot?"
 TITLE323 = "🔄📉 Half-life di mean reversion: lo spot torna alla media?"
+TITLE324 = "Ω📊 Omega ratio: oltre Sharpe e Sortino"
 TITLE304 = "🗂️📊 VaR per segmento: dove si concentra il rischio?"
 TITLE303 = "🧱📉 Capacità VaR: quanto nozionale puoi ancora aggiungere?"
 
@@ -98,13 +99,13 @@ def _registry():
 class TestRegistryTab305:
     def test_tab305_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 323
+        assert len(titoli) == len(dvars) == len(withs) == 324
         assert TITLE305 in titoli
         assert "tab305" in dvars
         assert "tab305" in withs
         assert titoli[dvars.index("tab305")] == TITLE305
-        assert titoli[-1] == TITLE323
-        assert dvars[-1] == "tab323"
+        assert titoli[-1] == TITLE324
+        assert dvars[-1] == "tab324"
         keys = re.findall(r'key="(st305_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

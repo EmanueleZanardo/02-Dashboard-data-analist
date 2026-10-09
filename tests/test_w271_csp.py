@@ -87,6 +87,7 @@ TITLE320 = "⚙️📉 GARCH(1,1): la volatilita' che ricorda"
 TITLE321 = "🧪📉 Backtest VaR: il modello resiste al tempo?"
 TITLE322 = "🎯📉 Convergenza forward: il forward indovina lo spot?"
 TITLE323 = "🔄📉 Half-life di mean reversion: lo spot torna alla media?"
+TITLE324 = "Ω📊 Omega ratio: oltre Sharpe e Sortino"
 TITLE270 = "🔥 Geotermia profonda: business case"
 TITLE269 = "🌊 Idroelettrico run-of-river: business case"
 
@@ -115,12 +116,12 @@ def _registry():
 class TestRegistryTab271:
     def test_tab271_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 323
+        assert len(titoli) == len(dvars) == len(withs) == 324
         assert TITLE271 in titoli
         assert "tab271" in dvars
         assert "tab271" in withs
         assert titoli[dvars.index("tab271")] == TITLE271
-        assert titoli[-1] == TITLE323
+        assert titoli[-1] == TITLE324
         keys = re.findall(r'key="(cs271_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
