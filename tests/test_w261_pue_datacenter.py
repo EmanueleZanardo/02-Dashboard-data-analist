@@ -112,6 +112,7 @@ TITLE339 = "📉 Sortino ratio: il rendimento per unità di rischio al ribasso"
 TITLE340 = "📉 Calmar ratio: il rendimento annuo per unità di max drawdown"
 TITLE341 = "📐 K-ratio: la regolarità della crescita dell'equity"
 TITLE342 = "🎯 Volatilità target: il sizing a volatilità costante"
+TITLE343 = "📐 Kelly criterion: il sizing ottimale dall'edge stimato"
 TITLE260 = "❄️ Pompa di calore vs caldaia"
 
 
@@ -127,12 +128,12 @@ def _registry():
 class TestRegistryTab261:
     def test_tab261_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 342
+        assert len(titoli) == len(dvars) == len(withs) == 343
         assert TITLE261 in titoli
         assert "tab261" in dvars
         assert "tab261" in withs
         assert titoli[dvars.index("tab261")] == TITLE261
-        assert titoli[-1] == TITLE342
+        assert titoli[-1] == TITLE343
         keys = re.findall(r'key="(pue261_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 8
 

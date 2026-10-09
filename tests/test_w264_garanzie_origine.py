@@ -104,6 +104,7 @@ TITLE339 = "📉 Sortino ratio: il rendimento per unità di rischio al ribasso"
 TITLE340 = "📉 Calmar ratio: il rendimento annuo per unità di max drawdown"
 TITLE341 = "📐 K-ratio: la regolarità della crescita dell'equity"
 TITLE342 = "🎯 Volatilità target: il sizing a volatilità costante"
+TITLE343 = "📐 Kelly criterion: il sizing ottimale dall'edge stimato"
 TITLE263 = "\U0001F697 Flotta aziendale: TCO diesel vs elettrico"
 
 CONSUMI_TXT = "85\n78\n82\n75\n70\n65\n60\n62\n68\n75\n82\n90"
@@ -122,12 +123,12 @@ def _registry():
 class TestRegistryTab264:
     def test_tab264_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 342
+        assert len(titoli) == len(dvars) == len(withs) == 343
         assert TITLE264 in titoli
         assert "tab264" in dvars
         assert "tab264" in withs
         assert titoli[dvars.index("tab264")] == TITLE264
-        assert titoli[-1] == TITLE342
+        assert titoli[-1] == TITLE343
         keys = re.findall(r'key="(go264_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

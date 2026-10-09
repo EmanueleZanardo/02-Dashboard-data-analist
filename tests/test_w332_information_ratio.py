@@ -31,6 +31,7 @@ TITLE339 = "📉 Sortino ratio: il rendimento per unità di rischio al ribasso"
 TITLE340 = "📉 Calmar ratio: il rendimento annuo per unità di max drawdown"
 TITLE341 = "📐 K-ratio: la regolarità della crescita dell'equity"
 TITLE342 = "🎯 Volatilità target: il sizing a volatilità costante"
+TITLE343 = "📐 Kelly criterion: il sizing ottimale dall'edge stimato"
 TITLE331 = "⛵ Tempo di recupero: quanto resta sott'acqua l'equity"
 TITLE330 = "🔍📉 Martin ratio: il Calmar che guarda tutto il dolore"
 TITLE329 = "🌊📉 CDaR: il drawdown medio oltre la soglia (il VaR dei drawdown)"
@@ -70,7 +71,7 @@ def _demo():
 class TestRegistry332:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 342
+        assert len(titoli) == len(dvars) == len(withs) == 343
         assert "tab332" in dvars
         assert "tab332" in withs
 
@@ -83,9 +84,9 @@ class TestRegistry332:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab342"
-        assert titoli[-1] == TITLE342
-        assert withs[-1] == "tab342"
+        assert dvars[-1] == "tab343"
+        assert titoli[-1] == TITLE343
+        assert withs[-1] == "tab343"
 
 
 class TestNum:
