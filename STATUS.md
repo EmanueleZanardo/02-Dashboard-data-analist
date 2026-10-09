@@ -142,7 +142,11 @@
 
 # STATUS.md — 02-Dashboard-data-analist (Singularity Quant ETRM)
 
-**Ultimo aggiornamento: 08/10/2026 ~02:00 CEST**
+**Ultimo aggiornamento: 09/10/2026 ~02:05 CEST**
+
+## 09/10/2026 ~02:05 CEST — aggiornamento documentale giornaliero
+- **Ciclo QA 09/10 00:40 — tab321 "Backtest VaR: il modello resiste al tempo?" (verificata dal log 09/10):** backtest VaR storico su finestra rolling — test di Kupiec (copertura), Christoffersen (indipendenza + copertura condizionata), semaforo Basilea via CDF binomiale, verdetto a 5 stati. Demo: 10 sforamenti vs 3,5 attesi → "copertura insufficiente". 37/37 test nuovi verdi, 98/98 vecchi (w318–320) verdi dopo bump registry. Push: `fea3421` (app.py) + `0029515` (tests). Bug: nessuno; nessun segreto committato.
+- Blocchi: vecchia chiave ENTSO-E resta nella storia git (da ruotare); condivisione app Streamlit non più pubblica — serve suo gesto su share.streamlit.io (Settings → Sharing → Public).
 
 ## 08/10/2026 ~02:00 CEST — aggiornamento documentale giornaliero
 - **Commit `1cb71f9` (07/10 23:07 UTC = 08/10 01:07 CEST):** "QA 08/10 00:40 - tab297 'Marginal VaR: quanto rischio aggiunge il nuovo trade?'" — decision tool pre-trade (incremental VaR, component VaR Eulero del candidato, diversificazione; 10 helper mv297_*, 30 test nuovi; suite completa 2942 passed, zero bug, zero segreti hardcoded). Push via Git Data API (101 file) con 2 retry per RemoteDisconnected transient del proxy — tip verificato invariato prima di ogni retry, OK al 3° tentativo.
