@@ -67,6 +67,7 @@ TITLE322 = "🎯📉 Convergenza forward: il forward indovina lo spot?"
 TITLE323 = "🔄📉 Half-life di mean reversion: lo spot torna alla media?"
 TITLE324 = "Ω📊 Omega ratio: oltre Sharpe e Sortino"
 TITLE325 = "📈📉 Calmar ratio: il rendimento che paga il drawdown"
+TITLE326 = "🩹 Pain index e Pain ratio: il dolore medio oltre il peggio"
 TITLE300 = "🧮📊 Rapporto di diversificazione: quanto rischio risparmia il book?"
 TITLE299 = "🧪⚡ Stress test: quanto perde il book negli scenari?"
 
@@ -87,12 +88,12 @@ def _registry():
 class TestRegistryTab301:
     def test_tab301_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 325
+        assert len(titoli) == len(dvars) == len(withs) == 326
         assert TITLE301 in titoli
         assert "tab301" in dvars
         assert "tab301" in withs
         assert titoli[dvars.index("tab301")] == TITLE301
-        assert titoli[-1] == TITLE325
+        assert titoli[-1] == TITLE326
         keys = re.findall(r'key="(st301_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

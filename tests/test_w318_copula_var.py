@@ -28,6 +28,7 @@ TITLE322 = "🎯📉 Convergenza forward: il forward indovina lo spot?"
 TITLE323 = "🔄📉 Half-life di mean reversion: lo spot torna alla media?"
 TITLE324 = "Ω📊 Omega ratio: oltre Sharpe e Sortino"
 TITLE325 = "📈📉 Calmar ratio: il rendimento che paga il drawdown"
+TITLE326 = "🩹 Pain index e Pain ratio: il dolore medio oltre il peggio"
 TITLE317 = "🧠📉 CAViaR: il VaR adattivo che impara dai rendimenti"
 TITLE316 = "🌊📉 POT-GPD: il VaR dalla coda paretiana oltre soglia"
 BOOK_DEMO = 'Gas TTF front-month;2500000;3,2;gas\nPower DE baseload Q1-27;1800000;2,8;power\nCO2 EUA Dic-26;900000;2,5;co2\nSpread PSV-TTF;600000;4,1;basis\nSpark spread CCGT 55%;1200000;3,6;power\nCarbone API2 ARA;700000;3,0;coal'
@@ -69,7 +70,7 @@ def _ris_demo():
 class TestRegistry318:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 325
+        assert len(titoli) == len(dvars) == len(withs) == 326
         assert TITLE318 in titoli
         assert "tab318" in dvars
         assert "    with tab318:" in src
@@ -82,8 +83,8 @@ class TestRegistry318:
 
     def test_ultima_tab(self):
         _, titoli, dvars, _ = _registry()
-        assert titoli[-1] == TITLE325
-        assert dvars[-1] == "tab325"
+        assert titoli[-1] == TITLE326
+        assert dvars[-1] == "tab326"
 
 
 class TestValidatori:

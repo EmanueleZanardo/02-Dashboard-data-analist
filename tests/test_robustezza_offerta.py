@@ -205,15 +205,15 @@ class TestRegistry:
                                 and node.value.args and hasattr(node.value.args[0], "elts")):
                 titoli = [t.value for t in node.value.args[0].elts]
         assert titoli is not None
-        assert len(titoli) == 325
-        assert titoli[-1] == "📈📉 Calmar ratio: il rendimento che paga il drawdown"
+        assert len(titoli) == 326
+        assert titoli[-1] == "🩹 Pain index e Pain ratio: il dolore medio oltre il peggio"
         m = re.search(r"((?:tab\d+, )+tab\d+) = st.tabs\(\[", src)
         assert m is not None
         vars_tab = [v.strip() for v in m.group(1).split(",")]
-        assert len(vars_tab) == 325
+        assert len(vars_tab) == 326
         assert "tab214" in vars_tab
         withs = re.findall(r"^\s*with (tab\d+):", src, re.M)
-        assert len(withs) == len(vars_tab) == 325
+        assert len(withs) == len(vars_tab) == 326
         assert "tab215" in withs
         # key widget univoche della tab215
         keys = re.findall(r'key="(rob215_[^"]+)"', src)
