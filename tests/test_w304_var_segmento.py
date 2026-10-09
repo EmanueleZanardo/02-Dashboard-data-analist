@@ -59,6 +59,7 @@ TITLE324 = "Ω📊 Omega ratio: oltre Sharpe e Sortino"
 TITLE325 = "📈📉 Calmar ratio: il rendimento che paga il drawdown"
 TITLE326 = "🩹 Pain index e Pain ratio: il dolore medio oltre il peggio"
 TITLE327 = "🛟 Sterling ratio: il Calmar mediato sui peggiori drawdown"
+TITLE328 = "🔻 Burke ratio: il drawdown penalizzato al quadrato"
 TITLE303 = "🧱📉 Capacità VaR: quanto nozionale puoi ancora aggiungere?"
 TITLE302 = "✂️📉 Incremental VaR: quanto rischio togli chiudendo la posizione?"
 
@@ -98,13 +99,13 @@ def _registry():
 class TestRegistryTab304:
     def test_tab304_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 327
+        assert len(titoli) == len(dvars) == len(withs) == 328
         assert TITLE304 in titoli
         assert "tab304" in dvars
         assert "tab304" in withs
         assert titoli[dvars.index("tab304")] == TITLE304
-        assert titoli[-1] == TITLE327
-        assert dvars[-1] == "tab327"
+        assert titoli[-1] == TITLE328
+        assert dvars[-1] == "tab328"
         keys = re.findall(r'key="(st304_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

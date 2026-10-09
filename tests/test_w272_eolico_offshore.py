@@ -91,6 +91,7 @@ TITLE324 = "Ω📊 Omega ratio: oltre Sharpe e Sortino"
 TITLE325 = "📈📉 Calmar ratio: il rendimento che paga il drawdown"
 TITLE326 = "🩹 Pain index e Pain ratio: il dolore medio oltre il peggio"
 TITLE327 = "🛟 Sterling ratio: il Calmar mediato sui peggiori drawdown"
+TITLE328 = "🔻 Burke ratio: il drawdown penalizzato al quadrato"
 TITLE271 = "☀️ Solare termodinamico (CSP): business case"
 TITLE270 = "🔥 Geotermia profonda: business case"
 
@@ -122,12 +123,12 @@ def _registry():
 class TestRegistryTab272:
     def test_tab272_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 327
+        assert len(titoli) == len(dvars) == len(withs) == 328
         assert TITLE272 in titoli
         assert "tab272" in dvars
         assert "tab272" in withs
         assert titoli[dvars.index("tab272")] == TITLE272
-        assert titoli[-1] == TITLE327
+        assert titoli[-1] == TITLE328
         keys = re.findall(r'key="(eo272_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
