@@ -67,6 +67,7 @@ TITLE333 = "📊 Capture ratio: quanto cattura la strategia nei mercati su e gi�
 TITLE334 = "🎯 Hit rate: quanto spesso la strategia batte il benchmark?"
 TITLE335 = "📏 Tracking error: quanto si discosta la strategia dal benchmark?"
 TITLE336 = "📉 Max drawdown relativo: quanto si scende sotto il benchmark?"
+TITLE337 = "📐 Treynor & Jensen: il premio per unita' di rischio sistematico"
 TITLE298 = "🚦📏 Limite VaR: quanto margine resta?"
 TITLE297 = "➕📊 Marginal VaR: quanto rischio aggiunge il nuovo trade?"
 
@@ -106,12 +107,12 @@ def _registry():
 class TestRegistryTab299:
     def test_tab299_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 336
+        assert len(titoli) == len(dvars) == len(withs) == 337
         assert TITLE299 in titoli
         assert "tab299" in dvars
         assert "tab299" in withs
         assert titoli[dvars.index("tab299")] == TITLE299
-        assert titoli[-1] == TITLE336
+        assert titoli[-1] == TITLE337
         keys = re.findall(r'key="(st299_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

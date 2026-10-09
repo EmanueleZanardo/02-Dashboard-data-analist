@@ -102,6 +102,7 @@ TITLE333 = "📊 Capture ratio: quanto cattura la strategia nei mercati su e gi�
 TITLE334 = "🎯 Hit rate: quanto spesso la strategia batte il benchmark?"
 TITLE335 = "📏 Tracking error: quanto si discosta la strategia dal benchmark?"
 TITLE336 = "📉 Max drawdown relativo: quanto si scende sotto il benchmark?"
+TITLE337 = "📐 Treynor & Jensen: il premio per unita' di rischio sistematico"
 TITLE267 = "🟢 Biometano: business case"
 
 POT = 10.0
@@ -130,12 +131,12 @@ def _registry():
 class TestRegistryTab268:
     def test_tab268_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 336
+        assert len(titoli) == len(dvars) == len(withs) == 337
         assert TITLE268 in titoli
         assert "tab268" in dvars
         assert "tab268" in withs
         assert titoli[dvars.index("tab268")] == TITLE268
-        assert titoli[-1] == TITLE336
+        assert titoli[-1] == TITLE337
         keys = re.findall(r'key="(eo268_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

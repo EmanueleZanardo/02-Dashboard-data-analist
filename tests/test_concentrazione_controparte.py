@@ -137,12 +137,12 @@ class TestRegistryTab202:
         src = Path(__file__).parent.parent.joinpath("app.py").read_text()
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
-        assert len(titoli) == 336
-        assert titoli[-1] == "📉 Max drawdown relativo: quanto si scende sotto il benchmark?"
+        assert len(titoli) == 337
+        assert titoli[-1] == "📐 Treynor & Jensen: il premio per unita' di rischio sistematico"
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         assert "tab202" in dvars
         withs = re.findall(r"    with (tab\d+):", src)
         assert "tab202" in withs
-        assert len(withs) == len(dvars) == 336
+        assert len(withs) == len(dvars) == 337
         keys = re.findall(r'key="(cc202_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 3

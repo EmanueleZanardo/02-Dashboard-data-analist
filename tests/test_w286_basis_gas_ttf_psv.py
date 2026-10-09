@@ -82,6 +82,7 @@ TITLE333 = "📊 Capture ratio: quanto cattura la strategia nei mercati su e gi�
 TITLE334 = "🎯 Hit rate: quanto spesso la strategia batte il benchmark?"
 TITLE335 = "📏 Tracking error: quanto si discosta la strategia dal benchmark?"
 TITLE336 = "📉 Max drawdown relativo: quanto si scende sotto il benchmark?"
+TITLE337 = "📐 Treynor & Jensen: il premio per unita' di rischio sistematico"
 TITLE285 = "\U0001F6DB\uFE0F Differenziali greggio: sweet vs sour"
 TITLE284 = "\U0001F3ED Unit commitment CCGT: accendere o no?"
 TITLE283 = "\U0001F6E2\uFE0F Carry petrolio: contango & stoccaggio fisico"
@@ -109,12 +110,12 @@ def _registry():
 class TestRegistryTab286:
     def test_tab286_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 336
+        assert len(titoli) == len(dvars) == len(withs) == 337
         assert TITLE286 in titoli
         assert "tab286" in dvars
         assert "tab286" in withs
         assert titoli[dvars.index("tab286")] == TITLE286
-        assert titoli[-1] == TITLE336
+        assert titoli[-1] == TITLE337
         keys = re.findall(r'key="(bn286_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

@@ -26,6 +26,7 @@ TITLE333 = "📊 Capture ratio: quanto cattura la strategia nei mercati su e gi�
 TITLE334 = "🎯 Hit rate: quanto spesso la strategia batte il benchmark?"
 TITLE335 = "📏 Tracking error: quanto si discosta la strategia dal benchmark?"
 TITLE336 = "📉 Max drawdown relativo: quanto si scende sotto il benchmark?"
+TITLE337 = "📐 Treynor & Jensen: il premio per unita' di rischio sistematico"
 TITLE330 = "🔍📉 Martin ratio: il Calmar che guarda tutto il dolore"
 TITLE329 = "🌊📉 CDaR: il drawdown medio oltre la soglia (il VaR dei drawdown)"
 TITLE328 = "🔻 Burke ratio: il drawdown penalizzato al quadrato"
@@ -63,7 +64,7 @@ def _eq_demo():
 class TestRegistry331:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 336
+        assert len(titoli) == len(dvars) == len(withs) == 337
         assert TITLE331 in titoli
         assert "tab331" in dvars
         assert "    with tab331:" in src
@@ -77,9 +78,9 @@ class TestRegistry331:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert titoli[-1] == TITLE336
-        assert dvars[-1] == "tab336"
-        assert withs[-1] == "tab336"
+        assert titoli[-1] == TITLE337
+        assert dvars[-1] == "tab337"
+        assert withs[-1] == "tab337"
 
 
 class TestNum:
