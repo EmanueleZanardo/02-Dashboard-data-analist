@@ -48,6 +48,7 @@ TITLE334 = "🎯 Hit rate: quanto spesso la strategia batte il benchmark?"
 TITLE335 = "📏 Tracking error: quanto si discosta la strategia dal benchmark?"
 TITLE336 = "📉 Max drawdown relativo: quanto si scende sotto il benchmark?"
 TITLE337 = "📐 Treynor & Jensen: il premio per unita' di rischio sistematico"
+TITLE338 = "⚖️ M² Modigliani: il rendimento a parita' di rischio col benchmark"
 TITLE311 = "📐📉 Cornish-Fisher: il VaR corretto per skew e code grasse"
 TITLE310 = "💧📉 LVaR: il VaR corretto per il costo di liquidazione"
 BOOK_DEMO = ("Cal-28 Baseload power;2500000;18,5;-0,8;4,0;power\n"
@@ -86,7 +87,7 @@ def _registry():
 class TestRegistry312:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 337
+        assert len(titoli) == len(dvars) == len(withs) == 338
         assert TITLE312 in titoli
         assert "tab312" in dvars
         assert "    with tab312:" in src
@@ -99,8 +100,8 @@ class TestRegistry312:
 
     def test_ultima_tab(self):
         _, titoli, dvars, _ = _registry()
-        assert titoli[-1] == TITLE337
-        assert dvars[-1] == "tab337"
+        assert titoli[-1] == TITLE338
+        assert dvars[-1] == "tab338"
 
 
 class TestValidatori:

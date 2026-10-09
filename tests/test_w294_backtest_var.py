@@ -73,6 +73,7 @@ TITLE334 = "🎯 Hit rate: quanto spesso la strategia batte il benchmark?"
 TITLE335 = "📏 Tracking error: quanto si discosta la strategia dal benchmark?"
 TITLE336 = "📉 Max drawdown relativo: quanto si scende sotto il benchmark?"
 TITLE337 = "📐 Treynor & Jensen: il premio per unita' di rischio sistematico"
+TITLE338 = "⚖️ M² Modigliani: il rendimento a parita' di rischio col benchmark"
 TITLE293 = "🛡📉 Hedge ratio ottimale: quanto coprire con i futures?"
 TITLE292 = "🪓📊 Component VaR: quale posizione tagliare per prima?"
 
@@ -97,12 +98,12 @@ def _registry():
 class TestRegistryTab294:
     def test_tab294_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 337
+        assert len(titoli) == len(dvars) == len(withs) == 338
         assert TITLE294 in titoli
         assert "tab294" in dvars
         assert "tab294" in withs
         assert titoli[dvars.index("tab294")] == TITLE294
-        assert titoli[-1] == TITLE337
+        assert titoli[-1] == TITLE338
         keys = re.findall(r'key="(bv294_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
