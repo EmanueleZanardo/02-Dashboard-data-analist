@@ -91,6 +91,7 @@ TITLE318 = "🌀📉 Copula t-Student: il VaR che vede le code muoversi insieme"
 TITLE319 = "🎛📉 FHS: il VaR con la volatilita' di oggi"
 TITLE320 = "⚙️📉 GARCH(1,1): la volatilita' che ricorda"
 TITLE321 = "🧪📉 Backtest VaR: il modello resiste al tempo?"
+TITLE322 = "🎯📉 Convergenza forward: il forward indovina lo spot?"
 TITLE260 = "❄️ Pompa di calore vs caldaia"
 
 
@@ -106,12 +107,12 @@ def _registry():
 class TestRegistryTab261:
     def test_tab261_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 321
+        assert len(titoli) == len(dvars) == len(withs) == 322
         assert TITLE261 in titoli
         assert "tab261" in dvars
         assert "tab261" in withs
         assert titoli[dvars.index("tab261")] == TITLE261
-        assert titoli[-1] == TITLE321
+        assert titoli[-1] == TITLE322
         keys = re.findall(r'key="(pue261_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 8
 

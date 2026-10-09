@@ -29,6 +29,7 @@ TITLE318 = "🌀📉 Copula t-Student: il VaR che vede le code muoversi insieme"
 TITLE319 = "🎛📉 FHS: il VaR con la volatilita' di oggi"
 TITLE320 = "⚙️📉 GARCH(1,1): la volatilita' che ricorda"
 TITLE321 = "🧪📉 Backtest VaR: il modello resiste al tempo?"
+TITLE322 = "🎯📉 Convergenza forward: il forward indovina lo spot?"
 TITLE313 = "📉💥 VaR rotto: la probabilita' di breccia con code grasse"
 TITLE312 = "📐🌊 Expected Shortfall con Cornish-Fisher: la coda oltre il VaR con code grasse"
 BOOK_DEMO = ("Cal-28 Baseload power;2500000;2,1;-0,15;power\n"
@@ -67,7 +68,7 @@ def _registry():
 class TestRegistry314:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 321
+        assert len(titoli) == len(dvars) == len(withs) == 322
         assert TITLE314 in titoli
         assert "tab314" in dvars
         assert "    with tab314:" in src
@@ -80,8 +81,8 @@ class TestRegistry314:
 
     def test_ultima_tab(self):
         _, titoli, dvars, _ = _registry()
-        assert titoli[-1] == TITLE321
-        assert dvars[-1] == "tab321"
+        assert titoli[-1] == TITLE322
+        assert dvars[-1] == "tab322"
 
 
 class TestValidatori:
