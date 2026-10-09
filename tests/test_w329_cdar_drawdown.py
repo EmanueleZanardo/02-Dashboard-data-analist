@@ -20,6 +20,7 @@ _F = _load("mh329_num", "mh329_parse_equity", "mh329_drawdown", "mh329_cagr",
            "mh329_cdar", "mh329_verdetto")
 
 TITLE329 = "🌊📉 CDaR: il drawdown medio oltre la soglia (il VaR dei drawdown)"
+TITLE330 = "🔍📉 Martin ratio: il Calmar che guarda tutto il dolore"
 TITLE328 = "🔻 Burke ratio: il drawdown penalizzato al quadrato"
 TITLE327 = "🛟 Sterling ratio: il Calmar mediato sui peggiori drawdown"
 TITLE326 = "🩹 Pain index e Pain ratio: il dolore medio oltre il peggio"
@@ -59,7 +60,7 @@ def _eq_demo():
 class TestRegistry329:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 329
+        assert len(titoli) == len(dvars) == len(withs) == 330
         assert TITLE329 in titoli
         assert "tab329" in dvars
         assert "    with tab329:" in src
@@ -73,8 +74,8 @@ class TestRegistry329:
 
     def test_ultima_tab(self):
         _, titoli, dvars, _ = _registry()
-        assert titoli[-1] == TITLE329
-        assert dvars[-1] == "tab329"
+        assert titoli[-1] == TITLE330
+        assert dvars[-1] == "tab330"
 
 
 class TestValidatori:

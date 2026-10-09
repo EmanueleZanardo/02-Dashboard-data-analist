@@ -37,12 +37,12 @@ def _registry():
 class TestRegistryTab250:
     def test_tab250_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 329
+        assert len(titoli) == len(dvars) == len(withs) == 330
         assert "💸 Capitale circolante" in titoli
         assert "tab250" in dvars
         assert "tab250" in withs
         assert titoli[dvars.index("tab250")] == "💸 Capitale circolante"
-        assert titoli[-1] == "🌊📉 CDaR: il drawdown medio oltre la soglia (il VaR dei drawdown)"
+        assert titoli[-1] == "🔍📉 Martin ratio: il Calmar che guarda tutto il dolore"
         keys = re.findall(r'key="(t250_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
