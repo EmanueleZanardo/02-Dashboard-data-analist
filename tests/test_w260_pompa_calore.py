@@ -44,12 +44,12 @@ def _registry():
 class TestRegistryTab260:
     def test_tab260_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 335
+        assert len(titoli) == len(dvars) == len(withs) == 336
         assert TITLE260 in titoli
         assert "tab260" in dvars
         assert "tab260" in withs
         assert titoli[dvars.index("tab260")] == TITLE260
-        assert titoli[-1] == "📏 Tracking error: quanto si discosta la strategia dal benchmark?"
+        assert titoli[-1] == "📉 Max drawdown relativo: quanto si scende sotto il benchmark?"
         keys = re.findall(r'key="(pc260_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 8
 
