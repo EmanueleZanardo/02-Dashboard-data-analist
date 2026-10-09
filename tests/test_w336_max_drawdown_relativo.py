@@ -24,6 +24,7 @@ _F = _load("mh336_num", "mh336_parse_serie", "mh336_statistiche",
 TITLE336 = "📉 Max drawdown relativo: quanto si scende sotto il benchmark?"
 TITLE337 = "📐 Treynor & Jensen: il premio per unita' di rischio sistematico"
 TITLE338 = "⚖️ M² Modigliani: il rendimento a parita' di rischio col benchmark"
+TITLE339 = "📉 Sortino ratio: il rendimento per unità di rischio al ribasso"
 TITLE335 = "📏 Tracking error: quanto si discosta la strategia dal benchmark?"
 TITLE334 = "🎯 Hit rate: quanto spesso la strategia batte il benchmark?"
 TITLE333 = "📊 Capture ratio: quanto cattura la strategia nei mercati su e giù?"
@@ -61,7 +62,7 @@ def _demo():
 class TestRegistry336:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 338
+        assert len(titoli) == len(dvars) == len(withs) == 339
         assert "tab336" in dvars
         assert "tab336" in withs
 
@@ -74,9 +75,9 @@ class TestRegistry336:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab338"
-        assert titoli[-1] == TITLE338
-        assert withs[-1] == "tab338"
+        assert dvars[-1] == "tab339"
+        assert titoli[-1] == TITLE339
+        assert withs[-1] == "tab339"
 
 
 class TestNum:

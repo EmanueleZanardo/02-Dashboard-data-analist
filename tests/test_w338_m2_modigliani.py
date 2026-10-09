@@ -21,6 +21,7 @@ from appfuncs import load as _load
 _F = _load("mh338_num", "mh338_parse_serie", "mh338_misure", "mh338_verdetto")
 
 TITLE338 = "⚖️ M² Modigliani: il rendimento a parita' di rischio col benchmark"
+TITLE339 = "📉 Sortino ratio: il rendimento per unità di rischio al ribasso"
 TITLE337 = "📐 Treynor & Jensen: il premio per unita' di rischio sistematico"
 TITLE336 = "📉 Max drawdown relativo: quanto si scende sotto il benchmark?"
 TITLE335 = "📏 Tracking error: quanto si discosta la strategia dal benchmark?"
@@ -61,7 +62,7 @@ def _demo():
 class TestRegistry338:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 338
+        assert len(titoli) == len(dvars) == len(withs) == 339
         assert "tab338" in dvars
         assert "tab338" in withs
 
@@ -74,9 +75,9 @@ class TestRegistry338:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab338"
-        assert titoli[-1] == TITLE338
-        assert withs[-1] == "tab338"
+        assert dvars[-1] == "tab339"
+        assert titoli[-1] == TITLE339
+        assert withs[-1] == "tab339"
 
 
 class TestNum:
