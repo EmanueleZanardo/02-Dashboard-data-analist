@@ -22,6 +22,7 @@ _F = _load("mh343_num", "mh343_kelly", "mh343_growth", "mh343_misure",
            "mh343_verdetto")
 
 TITLE343 = "📐 Kelly criterion: il sizing ottimale dall'edge stimato"
+TITLE344 = "🎲 Risk of ruin: probabilita' di toccare una barriera di drawdown"
 TITLE342 = "🎯 Volatilità target: il sizing a volatilità costante"
 TITLE341 = "📐 K-ratio: la regolarità della crescita dell'equity"
 TITLE340 = "📉 Calmar ratio: il rendimento annuo per unità di max drawdown"
@@ -51,7 +52,7 @@ def _registry():
 class TestRegistry343:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 343
+        assert len(titoli) == len(dvars) == len(withs) == 344
         assert "tab343" in dvars
         assert "tab343" in withs
 
@@ -64,9 +65,9 @@ class TestRegistry343:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab343"
-        assert titoli[-1] == TITLE343
-        assert withs[-1] == "tab343"
+        assert dvars[-1] == "tab344"
+        assert titoli[-1] == TITLE344
+        assert withs[-1] == "tab344"
 
 
 class TestNum:
