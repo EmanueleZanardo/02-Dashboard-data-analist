@@ -31,6 +31,7 @@ TITLE362 = "Kelly con tre esiti: sizing con vincita, perdita parziale e perdita 
 TITLE363 = "Kelly con limite di posizione: sizing con cap f_max"
 TITLE364 = "Kelly con vincoli multipli: cap, lotti, stop e drawdown"
 TITLE365 = "Kelly con incertezza: haircut bayesiano sulla p stimata"
+TITLE366 = "Kelly su N trade: raddoppio, dimezzamento e crescita attesa"
 TITLE347 = "VaR & Expected Shortfall del P&L dopo N trade"
 TITLE346 = "📊 Monte Carlo: distribuzione del capitale dopo N trade"
 TITLE345 = "🎯 Sizing anti-rovina: f massima con ROR vincolato"
@@ -63,7 +64,7 @@ def _registry():
 class TestRegistry348:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 365
+        assert len(titoli) == len(dvars) == len(withs) == 366
         assert "tab348" in dvars
         assert "tab348" in withs
 
@@ -76,9 +77,9 @@ class TestRegistry348:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab365"
-        assert titoli[-1] == TITLE365
-        assert withs[-1] == "tab365"
+        assert dvars[-1] == "tab366"
+        assert titoli[-1] == TITLE366
+        assert withs[-1] == "tab366"
 
 
 class TestNum:

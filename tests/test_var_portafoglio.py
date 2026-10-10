@@ -89,7 +89,7 @@ class TestVarPortafoglioBase:
         b = genera_demo_var_portafoglio()
         assert a.equals(b)
         assert list(a.columns) == ["Power (€/MWh)", "Gas (€/MWh)", "CO2 (€/t)"]
-        assert len(a) == 365
+        assert len(a) == 366
 
     def test_verdetto_tag(self):
         demo = genera_demo_var_portafoglio()
@@ -162,12 +162,12 @@ class TestRegistryTab198:
         src = Path(__file__).parent.parent.joinpath("app.py").read_text()
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
-        assert len(titoli) == 365
-        assert titoli[-1] == "Kelly con incertezza: haircut bayesiano sulla p stimata"
+        assert len(titoli) == 366
+        assert titoli[-1] == "Kelly su N trade: raddoppio, dimezzamento e crescita attesa"
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         assert "tab198" in dvars
         withs = re.findall(r"    with (tab\d+):", src)
         assert "tab198" in withs
-        assert len(withs) == len(dvars) == 365
+        assert len(withs) == len(dvars) == 366
         keys = re.findall(r'key="(var198_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 7

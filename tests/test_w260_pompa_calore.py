@@ -44,12 +44,12 @@ def _registry():
 class TestRegistryTab260:
     def test_tab260_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 365
+        assert len(titoli) == len(dvars) == len(withs) == 366
         assert TITLE260 in titoli
         assert "tab260" in dvars
         assert "tab260" in withs
         assert titoli[dvars.index("tab260")] == TITLE260
-        assert titoli[-1] == "Kelly con incertezza: haircut bayesiano sulla p stimata"
+        assert titoli[-1] == "Kelly su N trade: raddoppio, dimezzamento e crescita attesa"
         keys = re.findall(r'key="(pc260_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 8
 

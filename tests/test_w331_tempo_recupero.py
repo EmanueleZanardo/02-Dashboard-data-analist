@@ -55,6 +55,7 @@ TITLE362 = "Kelly con tre esiti: sizing con vincita, perdita parziale e perdita 
 TITLE363 = "Kelly con limite di posizione: sizing con cap f_max"
 TITLE364 = "Kelly con vincoli multipli: cap, lotti, stop e drawdown"
 TITLE365 = "Kelly con incertezza: haircut bayesiano sulla p stimata"
+TITLE366 = "Kelly su N trade: raddoppio, dimezzamento e crescita attesa"
 TITLE330 = "🔍📉 Martin ratio: il Calmar che guarda tutto il dolore"
 TITLE329 = "🌊📉 CDaR: il drawdown medio oltre la soglia (il VaR dei drawdown)"
 TITLE328 = "🔻 Burke ratio: il drawdown penalizzato al quadrato"
@@ -92,7 +93,7 @@ def _eq_demo():
 class TestRegistry331:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 365
+        assert len(titoli) == len(dvars) == len(withs) == 366
         assert TITLE331 in titoli
         assert "tab331" in dvars
         assert "    with tab331:" in src
@@ -106,9 +107,9 @@ class TestRegistry331:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert titoli[-1] == TITLE365
-        assert dvars[-1] == "tab365"
-        assert withs[-1] == "tab365"
+        assert titoli[-1] == TITLE366
+        assert dvars[-1] == "tab366"
+        assert withs[-1] == "tab366"
 
 
 class TestNum:

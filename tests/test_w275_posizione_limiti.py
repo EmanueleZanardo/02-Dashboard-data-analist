@@ -120,6 +120,7 @@ TITLE362 = "Kelly con tre esiti: sizing con vincita, perdita parziale e perdita 
 TITLE363 = "Kelly con limite di posizione: sizing con cap f_max"
 TITLE364 = "Kelly con vincoli multipli: cap, lotti, stop e drawdown"
 TITLE365 = "Kelly con incertezza: haircut bayesiano sulla p stimata"
+TITLE366 = "Kelly su N trade: raddoppio, dimezzamento e crescita attesa"
 TITLE274 = "⚛️ Nucleare SMR: business case"
 
 CSV_POS = ("prodotto,qta_mwh,direzione,prezzo_eur_mwh\n"
@@ -144,12 +145,12 @@ def _registry():
 class TestRegistryTab275:
     def test_tab275_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 365
+        assert len(titoli) == len(dvars) == len(withs) == 366
         assert TITLE275 in titoli
         assert "tab275" in dvars
         assert "tab275" in withs
         assert titoli[dvars.index("tab275")] == TITLE275
-        assert titoli[-1] == TITLE365
+        assert titoli[-1] == TITLE366
         keys = re.findall(r'key="(pl275_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
