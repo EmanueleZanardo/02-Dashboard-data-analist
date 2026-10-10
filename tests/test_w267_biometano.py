@@ -132,6 +132,7 @@ TITLE363 = "Kelly con limite di posizione: sizing con cap f_max"
 TITLE364 = "Kelly con vincoli multipli: cap, lotti, stop e drawdown"
 TITLE365 = "Kelly con incertezza: haircut bayesiano sulla p stimata"
 TITLE366 = "Kelly su N trade: raddoppio, dimezzamento e crescita attesa"
+TITLE367 = "Kelly: mappa di sensibilità f* e crescita su (p, b)"
 TITLE266 = "🌾️ Agrivoltaico: doppio reddito"
 
 T_ANNO = 30000.0
@@ -159,12 +160,12 @@ def _registry():
 class TestRegistryTab267:
     def test_tab267_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 366
+        assert len(titoli) == len(dvars) == len(withs) == 367
         assert TITLE267 in titoli
         assert "tab267" in dvars
         assert "tab267" in withs
         assert titoli[dvars.index("tab267")] == TITLE267
-        assert titoli[-1] == TITLE366
+        assert titoli[-1] == TITLE367
         keys = re.findall(r'key="(bm267_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

@@ -45,12 +45,12 @@ def _registry():
 class TestRegistryTab259:
     def test_tab259_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 366
+        assert len(titoli) == len(dvars) == len(withs) == 367
         assert "🇮🇹 PUN da prezzi zonali" in titoli
         assert "tab259" in dvars
         assert "tab259" in withs
         assert titoli[dvars.index("tab259")] == "🇮🇹 PUN da prezzi zonali"
-        assert titoli[-1] == "Kelly su N trade: raddoppio, dimezzamento e crescita attesa"
+        assert titoli[-1] == "Kelly: mappa di sensibilità f* e crescita su (p, b)"
         keys = re.findall(r'key="(pun259_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 8
 
