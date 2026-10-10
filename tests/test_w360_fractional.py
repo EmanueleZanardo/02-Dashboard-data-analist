@@ -15,6 +15,7 @@ _F = _load("mh360_num", "mh360_parse_seq", "mh360_kelly",
 
 TITLE360 = "Kelly frazionario (fractional Kelly): λ·f*"
 TITLE361 = "Rischio di rovina (risk of ruin): probabilita' di rovina prima del target"
+TITLE362 = "Kelly con tre esiti: sizing con vincita, perdita parziale e perdita piena"
 TITLE359 = "Kelly con take-profit: sizing con vincita troncata"
 TITLE358 = "Kelly con stop-loss: sizing con perdita troncata"
 TITLE357 = "Kelly con lotti interi: sizing discreto e drag di arrotondamento"
@@ -52,7 +53,7 @@ def _registry():
 class TestRegistry360:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 361
+        assert len(titoli) == len(dvars) == len(withs) == 362
         assert "tab360" in dvars
         assert "tab360" in withs
 
@@ -66,9 +67,9 @@ class TestRegistry360:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab361"
-        assert titoli[-1] == TITLE361
-        assert withs[-1] == "tab361"
+        assert dvars[-1] == "tab362"
+        assert titoli[-1] == TITLE362
+        assert withs[-1] == "tab362"
 
 
 class TestNum:

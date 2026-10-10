@@ -72,6 +72,7 @@ TITLE358 = "Kelly con stop-loss: sizing con perdita troncata"
 TITLE359 = "Kelly con take-profit: sizing con vincita troncata"
 TITLE360 = "Kelly frazionario (fractional Kelly): λ·f*"
 TITLE361 = "Rischio di rovina (risk of ruin): probabilita' di rovina prima del target"
+TITLE362 = "Kelly con tre esiti: sizing con vincita, perdita parziale e perdita piena"
 TITLE307 = "🌊📉 Expected Shortfall: la perdita oltre il VaR"
 TITLE306 = "💎📊 RAROC: il rendimento ripaga il rischio?"
 BOOK_DEMO = ("Cal-28 Baseload power;2500000;18,5;power\n"
@@ -111,7 +112,7 @@ def _registry():
 class TestRegistry308:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 361
+        assert len(titoli) == len(dvars) == len(withs) == 362
         assert TITLE308 in titoli
         assert "tab308" in dvars
         assert "    with tab308:" in src
@@ -124,8 +125,8 @@ class TestRegistry308:
 
     def test_ultima_tab(self):
         _, titoli, dvars, _ = _registry()
-        assert titoli[-1] == TITLE361
-        assert dvars[-1] == "tab361"
+        assert titoli[-1] == TITLE362
+        assert dvars[-1] == "tab362"
 
 
 class TestValidatori:
