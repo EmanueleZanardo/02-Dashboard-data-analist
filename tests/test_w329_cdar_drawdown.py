@@ -37,6 +37,7 @@ TITLE343 = "📐 Kelly criterion: il sizing ottimale dall'edge stimato"
 TITLE344 = "🎲 Risk of ruin: probabilita' di toccare una barriera di drawdown"
 TITLE345 = "🎯 Sizing anti-rovina: f massima con ROR vincolato"
 TITLE346 = "📊 Monte Carlo: distribuzione del capitale dopo N trade"
+TITLE347 = "VaR & Expected Shortfall del P&L dopo N trade"
 TITLE328 = "🔻 Burke ratio: il drawdown penalizzato al quadrato"
 TITLE327 = "🛟 Sterling ratio: il Calmar mediato sui peggiori drawdown"
 TITLE326 = "🩹 Pain index e Pain ratio: il dolore medio oltre il peggio"
@@ -76,7 +77,7 @@ def _eq_demo():
 class TestRegistry329:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 346
+        assert len(titoli) == len(dvars) == len(withs) == 347
         assert TITLE329 in titoli
         assert "tab329" in dvars
         assert "    with tab329:" in src
@@ -90,8 +91,8 @@ class TestRegistry329:
 
     def test_ultima_tab(self):
         _, titoli, dvars, _ = _registry()
-        assert titoli[-1] == TITLE346
-        assert dvars[-1] == "tab346"
+        assert titoli[-1] == TITLE347
+        assert dvars[-1] == "tab347"
 
 
 class TestValidatori:

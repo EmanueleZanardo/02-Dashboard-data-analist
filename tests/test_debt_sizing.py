@@ -120,15 +120,15 @@ class TestRegistryTab205:
                                 and node.value.args and hasattr(node.value.args[0], "elts")):
                 titoli = [t.value for t in node.value.args[0].elts]
         assert titoli is not None
-        assert len(titoli) == 346
-        assert titoli[-1] == "📊 Monte Carlo: distribuzione del capitale dopo N trade"
+        assert len(titoli) == 347
+        assert titoli[-1] == "VaR & Expected Shortfall del P&L dopo N trade"
         import re as _re
         m = _re.search(r"((?:tab\d+, )+tab\d+) = st.tabs\(\[", src)
         assert m is not None
         vars_tab = [v.strip() for v in m.group(1).split(",")]
-        assert len(vars_tab) == 346
-        assert vars_tab[-1] == "tab346"
+        assert len(vars_tab) == 347
+        assert vars_tab[-1] == "tab347"
         withs = _re.findall(r"    with (tab\d+):", src)
-        assert len(withs) == 346 and "tab205" in withs
+        assert len(withs) == 347 and "tab205" in withs
         keys = _re.findall(r'key="(deb205_[^"]+)"', src)
         assert len(keys) == len(set(keys)) == 11

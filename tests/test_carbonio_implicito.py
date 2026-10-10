@@ -126,7 +126,7 @@ class TestRegistryTab185:
         withs = re.findall(r"^    with (tab\d+):", src, re.M)
         assert withs == ["tab%d" % i for i in range(1, len(withs) + 1)]
         assert "tab185" in withs
-        assert len(withs) == len(dvars) == 346
+        assert len(withs) == len(dvars) == 347
         assert '"💨 CO₂ implicita"' in src
         assert "calcola_carbonio_implicito" in src
         keys = re.findall(r'key="(co2i185_[^"]+)"', src)

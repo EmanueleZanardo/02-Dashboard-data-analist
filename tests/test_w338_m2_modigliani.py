@@ -29,6 +29,7 @@ TITLE343 = "📐 Kelly criterion: il sizing ottimale dall'edge stimato"
 TITLE344 = "🎲 Risk of ruin: probabilita' di toccare una barriera di drawdown"
 TITLE345 = "🎯 Sizing anti-rovina: f massima con ROR vincolato"
 TITLE346 = "📊 Monte Carlo: distribuzione del capitale dopo N trade"
+TITLE347 = "VaR & Expected Shortfall del P&L dopo N trade"
 TITLE337 = "📐 Treynor & Jensen: il premio per unita' di rischio sistematico"
 TITLE336 = "📉 Max drawdown relativo: quanto si scende sotto il benchmark?"
 TITLE335 = "📏 Tracking error: quanto si discosta la strategia dal benchmark?"
@@ -69,7 +70,7 @@ def _demo():
 class TestRegistry338:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 346
+        assert len(titoli) == len(dvars) == len(withs) == 347
         assert "tab338" in dvars
         assert "tab338" in withs
 
@@ -82,9 +83,9 @@ class TestRegistry338:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab346"
-        assert titoli[-1] == TITLE346
-        assert withs[-1] == "tab346"
+        assert dvars[-1] == "tab347"
+        assert titoli[-1] == TITLE347
+        assert withs[-1] == "tab347"
 
 
 class TestNum:
