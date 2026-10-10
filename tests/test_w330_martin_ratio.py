@@ -49,6 +49,7 @@ TITLE356 = "Kelly bayesiano: sizing con win-rate posterior"
 TITLE357 = "Kelly con lotti interi: sizing discreto e drag di arrotondamento"
 TITLE358 = "Kelly con stop-loss: sizing con perdita troncata"
 TITLE359 = "Kelly con take-profit: sizing con vincita troncata"
+TITLE360 = "Kelly frazionario (fractional Kelly): λ·f*"
 TITLE329 = "🌊📉 CDaR: il drawdown medio oltre la soglia (il VaR dei drawdown)"
 TITLE328 = "🔻 Burke ratio: il drawdown penalizzato al quadrato"
 TITLE327 = "🛟 Sterling ratio: il Calmar mediato sui peggiori drawdown"
@@ -81,7 +82,7 @@ def _eq_demo():
 class TestRegistry330:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 359
+        assert len(titoli) == len(dvars) == len(withs) == 360
         assert TITLE330 in titoli
         assert "tab330" in dvars
         assert "    with tab330:" in src
@@ -95,9 +96,9 @@ class TestRegistry330:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert titoli[-1] == TITLE359
-        assert dvars[-1] == "tab359"
-        assert withs[-1] == "tab359"
+        assert titoli[-1] == TITLE360
+        assert dvars[-1] == "tab360"
+        assert withs[-1] == "tab360"
 
 
 class TestNum:

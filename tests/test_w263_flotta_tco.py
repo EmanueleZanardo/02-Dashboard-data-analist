@@ -123,6 +123,7 @@ TITLE356 = "Kelly bayesiano: sizing con win-rate posterior"
 TITLE357 = "Kelly con lotti interi: sizing discreto e drag di arrotondamento"
 TITLE358 = "Kelly con stop-loss: sizing con perdita troncata"
 TITLE359 = "Kelly con take-profit: sizing con vincita troncata"
+TITLE360 = "Kelly frazionario (fractional Kelly): λ·f*"
 TITLE262 = "\U0001F50C Gruppo elettrogeno vs blackout"
 
 # Parametri di riferimento usati nei test
@@ -153,12 +154,12 @@ def _registry():
 class TestRegistryTab263:
     def test_tab263_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 359
+        assert len(titoli) == len(dvars) == len(withs) == 360
         assert TITLE263 in titoli
         assert "tab263" in dvars
         assert "tab263" in withs
         assert titoli[dvars.index("tab263")] == TITLE263
-        assert titoli[-1] == TITLE359
+        assert titoli[-1] == TITLE360
         keys = re.findall(r'key="(fl263_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 16
 
