@@ -142,7 +142,14 @@
 
 # STATUS.md — 02-Dashboard-data-analist (Singularity Quant ETRM)
 
-**Ultimo aggiornamento: 09/10/2026 ~02:05 CEST**
+**Ultimo aggiornamento: 10/10/2026 ~02:10 CEST**
+
+## 10/10/2026 ~02:10 CEST — aggiornamento documentale giornaliero
+- **Ciclo QA 09/10 23:40 — tab344 "Risk of ruin" (commit `ac603de`, push Git Data API verificato):** R = barriera^θ (Cramer-Lundberg, θ via bisezione 200 iter su p(1+fb)^-θ+q(1-f)^-θ=1); Monte Carlo deterministico (seed 344) controprova; default sizing half-Kelly da tab343. Demo: p=55%, b=1.2, f=8.75%, barriera 50% → θ=3.007, R=12.44% (PERICOLOSO). Bug evitato: prima formula Van Tharp dava R=75.7% vs MC 11.1% — sostituita. Test 43/43 nuovi verdi, regressione tab343 OK, collect-only 4481 OK.
+- **Ciclo QA 10/10 00:40 — tab345 "Sizing anti-rovina: f massima con ROR vincolato" (commit `075af0c`, 150 file, push verificato):** chiude l'arco sizing&capital (tab343 Kelly → tab344 RoR → tab345 problema inverso). f_safe = unica f con R(f)=Rmax via bisezione; f raccomandata = min(half-Kelly, f_safe); verdetto 3 stati (SIZING BLOCCATO / VINCOLO ROVINA ATTIVO / HALF-KELLY ENTRO RMAX). Demo: half-Kelly 8.75% ha R=12.4% > 5% → tagliata a 6.59%. Test 40/40 + regressione w344 OK; bump registry 344→345 su 148 test. Nessun segreto hardcoded.
+- Nota generatore: shift meccanico "340"→"341" aveva corrotto "2340"→"2341" nel nome push-list file (lista ricostruita da git status) — convenzione: shift timestamp DOPO gli shift numerici.
+- **Streamlit keepalive 00:32:** app trovata ASLEEP → sveglia in ~60s ("Your app is waking up!"). Presenta un login gate interno by design ("SINGULARITY OS", campo Key) — nessuna chiave inserita. Nessun allarme.
+- Blocchi: vecchia chiave ENTSO-E resta nella storia git (da ruotare); app non pubblica — serve suo gesto su share.streamlit.io (Settings → Sharing → Public).
 
 ## 09/10/2026 ~02:05 CEST — aggiornamento documentale giornaliero
 - **Ciclo QA 09/10 00:40 — tab321 "Backtest VaR: il modello resiste al tempo?" (verificata dal log 09/10):** backtest VaR storico su finestra rolling — test di Kupiec (copertura), Christoffersen (indipendenza + copertura condizionata), semaforo Basilea via CDF binomiale, verdetto a 5 stati. Demo: 10 sforamenti vs 3,5 attesi → "copertura insufficiente". 37/37 test nuovi verdi, 98/98 vecchi (w318–320) verdi dopo bump registry. Push: `fea3421` (app.py) + `0029515` (tests). Bug: nessuno; nessun segreto committato.
