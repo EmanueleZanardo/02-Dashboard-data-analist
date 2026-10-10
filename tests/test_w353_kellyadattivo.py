@@ -14,6 +14,7 @@ _F = _load("mh353_num", "mh353_parse_seq", "mh353_ewma_p", "mh353_kelly_f",
            "mh353_adaptive", "mh353_verdetto", "mh353_confronto")
 
 TITLE353 = "Kelly adattivo: win-rate rolling e size dinamica"
+TITLE354 = "Kelly con controllo drawdown: sizing frazionato al drawdown"
 TITLE352 = "Kelly con correlazione: due posizioni correlate"
 TITLE351 = "Kelly con portafoglio: due posizioni simultanee"
 TITLE350 = "Kelly robusto: sizing con edge incerta"
@@ -46,7 +47,7 @@ def _registry():
 class TestRegistry353:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 353
+        assert len(titoli) == len(dvars) == len(withs) == 354
         assert "tab353" in dvars
         assert "tab353" in withs
 
@@ -60,9 +61,9 @@ class TestRegistry353:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab353"
-        assert titoli[-1] == TITLE353
-        assert withs[-1] == "tab353"
+        assert dvars[-1] == "tab354"
+        assert titoli[-1] == TITLE354
+        assert withs[-1] == "tab354"
 
 
 class TestNum:

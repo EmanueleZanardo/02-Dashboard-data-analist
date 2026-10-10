@@ -120,12 +120,12 @@ class TestRegistryTab231:
         src = Path(__file__).parent.parent.joinpath("app.py").read_text(encoding="utf-8")
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
-        assert len(titoli) == 353
+        assert len(titoli) == 354
         assert "🔍 Qualità dati (gap & outlier)" in titoli
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         assert "tab231" in dvars
         withs = re.findall(r"    with (tab\d+):", src)
         assert "tab231" in withs
-        assert len(withs) == len(dvars) == 353
+        assert len(withs) == len(dvars) == 354
         keys = re.findall(r'key="(t231_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 10

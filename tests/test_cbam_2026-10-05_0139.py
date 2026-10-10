@@ -116,12 +116,12 @@ class TestRegistryTab220:
         src = Path(__file__).parent.parent.joinpath("app.py").read_text()
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
-        assert len(titoli) == 353
-        assert titoli[-1] == "Kelly adattivo: win-rate rolling e size dinamica"
+        assert len(titoli) == 354
+        assert titoli[-1] == "Kelly con controllo drawdown: sizing frazionato al drawdown"
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         assert "tab220" in dvars
         withs = re.findall(r"    with (tab\d+):", src)
         assert "tab220" in withs
-        assert len(withs) == len(dvars) == 353
+        assert len(withs) == len(dvars) == 354
         keys = re.findall(r'key="(cb220_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 4

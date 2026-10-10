@@ -32,6 +32,7 @@ TITLE350 = "Kelly robusto: sizing con edge incerta"
 TITLE351 = "Kelly con portafoglio: due posizioni simultanee"
 TITLE352 = "Kelly con correlazione: due posizioni correlate"
 TITLE353 = "Kelly adattivo: win-rate rolling e size dinamica"
+TITLE354 = "Kelly con controllo drawdown: sizing frazionato al drawdown"
 TITLE343 = "📐 Kelly criterion: il sizing ottimale dall'edge stimato"
 TITLE342 = "🎯 Volatilità target: il sizing a volatilità costante"
 TITLE341 = "📐 K-ratio: la regolarità della crescita dell'equity"
@@ -75,7 +76,7 @@ def _registry():
 class TestRegistry344:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 353
+        assert len(titoli) == len(dvars) == len(withs) == 354
         assert "tab344" in dvars
         assert "tab344" in withs
 
@@ -88,9 +89,9 @@ class TestRegistry344:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab353"
-        assert titoli[-1] == TITLE353
-        assert withs[-1] == "tab353"
+        assert dvars[-1] == "tab354"
+        assert titoli[-1] == TITLE354
+        assert withs[-1] == "tab354"
 
 
 class TestNum:
