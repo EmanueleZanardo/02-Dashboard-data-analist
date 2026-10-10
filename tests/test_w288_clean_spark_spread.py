@@ -101,6 +101,7 @@ TITLE351 = "Kelly con portafoglio: due posizioni simultanee"
 TITLE352 = "Kelly con correlazione: due posizioni correlate"
 TITLE353 = "Kelly adattivo: win-rate rolling e size dinamica"
 TITLE354 = "Kelly con controllo drawdown: sizing frazionato al drawdown"
+TITLE355 = "Kelly con target di volatilità: sizing riscalato sulla vol"
 TITLE287 = "🚢⚡ Rigassificazione GNL: margine terminale"
 TITLE286 = "⛽ Basis gas TTF–PSV"
 TITLE285 = "\U0001F6DB\uFE0F Differenziali greggio: sweet vs sour"
@@ -130,12 +131,12 @@ def _registry():
 class TestRegistryTab288:
     def test_tab288_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 354
+        assert len(titoli) == len(dvars) == len(withs) == 355
         assert TITLE288 in titoli
         assert "tab288" in dvars
         assert "tab288" in withs
         assert titoli[dvars.index("tab288")] == TITLE288
-        assert titoli[-1] == TITLE354
+        assert titoli[-1] == TITLE355
         keys = re.findall(r'key="(css288_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

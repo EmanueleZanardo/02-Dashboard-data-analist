@@ -36,12 +36,12 @@ def _registry():
 class TestRegistryTab249:
     def test_tab249_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 354
+        assert len(titoli) == len(dvars) == len(withs) == 355
         assert "🔌 Preventivo allacciamento" in titoli
         assert "tab249" in dvars
         assert "tab249" in withs
         assert titoli[dvars.index("tab249")] == "🔌 Preventivo allacciamento"
-        assert titoli[-1] == "Kelly con controllo drawdown: sizing frazionato al drawdown"
+        assert titoli[-1] == "Kelly con target di volatilità: sizing riscalato sulla vol"
         keys = re.findall(r'key="(t249_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
