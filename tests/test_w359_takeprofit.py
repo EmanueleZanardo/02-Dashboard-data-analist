@@ -1,4 +1,4 @@
-"""Test tab358 'Kelly con stop-loss: sizing con perdita troncata': registry + funzioni pure."""
+"""Test tab359 'Kelly con take-profit: sizing con vincita troncata': registry + funzioni pure."""
 
 import math
 import re
@@ -10,32 +10,31 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from appfuncs import load as _load
 
-_F = _load("mh358_num", "mh358_parse_seq", "mh358_kelly_stop",
-           "mh358_kelly_base", "mh358_verdetto", "mh358_walk",
-           "mh358_confronto")
+_F = _load("mh359_num", "mh359_parse_seq", "mh359_kelly_tp",
+           "mh359_kelly_base", "mh359_verdetto", "mh359_walk",
+           "mh359_confronto")
 
-TITLE358 = "Kelly con stop-loss: sizing con perdita troncata"
 TITLE359 = "Kelly con take-profit: sizing con vincita troncata"
+TITLE358 = "Kelly con stop-loss: sizing con perdita troncata"
 TITLE357 = "Kelly con lotti interi: sizing discreto e drag di arrotondamento"
 TITLE356 = "Kelly bayesiano: sizing con win-rate posterior"
 TITLE355 = "Kelly con target di volatilità: sizing riscalato sulla vol"
-TITLE354 = "Kelly con controllo drawdown: sizing frazionato al drawdown"
 SEQ = 'WWWLWLWWLLLWWWLLWLLL'
 B = 1.5
 P = 0.5
-S = 0.5
+T = 1.1
 EQUITY0 = 10000.0
-FSTOP = 0.6666666666666666
+FTP = 0.04545454545454549
 FBASE = 0.16666666666666666
-BOOST = 4.0
-EQSFIN = 177577.26633812618
+RATIO = 0.272727272727273
+EQSFIN = 10229.611250772074
 EQBFIN = 15041.37952717448
-GAP = 162535.8868109517
-GAP_PCT = 10.805916207174118
-MAXDD = 0.736625514403292
+GAP = -4811.768276402407
+GAP_PCT = -0.31990205869808913
+MAXDD = 0.16790604179731916
 N = 20
 NWINS = 10
-VERDETTO = 'BOOST FORTE: lo stop al 50% porta il Kelly a 66.67%. (4.0x il Kelly base 16.67%). Verifica che lo stop sia eseguibile: slippage e gap possono allargare la perdita reale oltre il livello dichiarato.'
+VERDETTO = "TAGLIO FORTE: il take-profit a 1.10x dimezza il Kelly (da 16.67% a 4.55%, rapporto 0.27x): il TP mangia buona parte dell'edge. O accetti un sizing molto prudente, o allenti il take-profit per lasciare correre di piu' i profitti."
 
 
 def _registry():
@@ -48,20 +47,20 @@ def _registry():
     return src, titoli, dvars, withs
 
 
-class TestRegistry358:
+class TestRegistry359:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
         assert len(titoli) == len(dvars) == len(withs) == 359
-        assert "tab358" in dvars
-        assert "tab358" in withs
+        assert "tab359" in dvars
+        assert "tab359" in withs
 
-    def test_titoli_allineati_354_355_356_357_358(self):
+    def test_titoli_allineati_355_356_357_358_359(self):
         _, titoli, dvars, _ = _registry()
-        assert titoli[dvars.index("tab354")] == TITLE354
         assert titoli[dvars.index("tab355")] == TITLE355
         assert titoli[dvars.index("tab356")] == TITLE356
         assert titoli[dvars.index("tab357")] == TITLE357
         assert titoli[dvars.index("tab358")] == TITLE358
+        assert titoli[dvars.index("tab359")] == TITLE359
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
@@ -72,141 +71,130 @@ class TestRegistry358:
 
 class TestNum:
     def test_num_ok(self):
-        assert _F["mh358_num"](1.5, "x") == 1.5
+        assert _F["mh359_num"](1.5, "x") == 1.5
 
     def test_num_bool_ko(self):
         with pytest.raises(ValueError):
-            _F["mh358_num"](True, "x")
+            _F["mh359_num"](True, "x")
 
     def test_num_nan_ko(self):
         with pytest.raises(ValueError):
-            _F["mh358_num"](float("nan"), "x")
+            _F["mh359_num"](float("nan"), "x")
 
 
 class TestParseSeq:
     def test_misto(self):
-        assert _F["mh358_parse_seq"]("Ww1Ll0") == (1, 1, 1, 0, 0, 0)
+        assert _F["mh359_parse_seq"]("Ww1Ll0") == (1, 1, 1, 0, 0, 0)
 
     def test_separatori(self):
-        assert _F["mh358_parse_seq"]("W, L;W") == (1, 0, 1)
+        assert _F["mh359_parse_seq"]("W, L;W") == (1, 0, 1)
 
     def test_carattere_ko(self):
         with pytest.raises(ValueError):
-            _F["mh358_parse_seq"]("WX")
+            _F["mh359_parse_seq"]("WX")
 
     def test_vuota_ko(self):
         with pytest.raises(ValueError):
-            _F["mh358_parse_seq"](" ,;")
+            _F["mh359_parse_seq"](" ,;")
 
     def test_non_stringa_ko(self):
         with pytest.raises(ValueError):
-            _F["mh358_parse_seq"](123)
+            _F["mh359_parse_seq"](123)
 
 
-class TestKellyStop:
+class TestKellyTp:
     def test_demo(self):
-        assert _F["mh358_kelly_stop"](0.5, 1.5, 0.5) == 2.0 / 3.0
+        assert _F["mh359_kelly_tp"](0.5, 1.1) == pytest.approx(0.05 / 1.1)
 
     def test_no_edge_zero(self):
-        assert _F["mh358_kelly_stop"](0.2, 1.5, 0.5) == 0.0
-
-    def test_stop_crea_edge(self):
-        # senza stop f* sarebbe 0, con stop s=0.3 c'e' edge
-        assert _F["mh358_kelly_stop"](0.3, 1.5, 0.3) == pytest.approx(
-            0.24 / 0.45)
+        assert _F["mh359_kelly_tp"](0.2, 1.1) == 0.0
 
     def test_mai_negativo(self):
-        assert _F["mh358_kelly_stop"](0.1, 1.5, 0.5) == 0.0
+        assert _F["mh359_kelly_tp"](0.1, 1.1) == 0.0
 
-    def test_s_ko(self):
+    def test_t_ko(self):
         with pytest.raises(ValueError):
-            _F["mh358_kelly_stop"](0.5, 1.5, 0.0)
-
-    def test_b_ko(self):
-        with pytest.raises(ValueError):
-            _F["mh358_kelly_stop"](0.5, 0.0, 0.5)
+            _F["mh359_kelly_tp"](0.5, 0.0)
 
     def test_p_ko(self):
         with pytest.raises(ValueError):
-            _F["mh358_kelly_stop"](1.5, 1.5, 0.5)
+            _F["mh359_kelly_tp"](1.5, 1.1)
 
 
 class TestKellyBase:
     def test_demo(self):
-        assert _F["mh358_kelly_base"](0.5, 1.5) == 1.0 / 6.0
+        assert _F["mh359_kelly_base"](0.5, 1.5) == 1.0 / 6.0
 
     def test_no_edge_zero(self):
-        assert _F["mh358_kelly_base"](0.2, 1.5) == 0.0
+        assert _F["mh359_kelly_base"](0.2, 1.5) == 0.0
 
-    def test_sempre_sotto_stop(self):
-        for p, b, s in ((0.5, 1.5, 0.5), (0.6, 2.0, 0.3),
-                        (0.4, 1.2, 0.8), (0.7, 1.5, 0.2)):
-            fs = _F["mh358_kelly_stop"](p, b, s)
-            fb = _F["mh358_kelly_base"](p, b)
-            if (p * b - (1.0 - p) * s) > 0:
-                assert fs >= fb
+    def test_sempre_sopra_tp(self):
+        for p, b, t in ((0.5, 1.5, 1.1), (0.6, 2.0, 1.3),
+                        (0.7, 1.5, 1.2), (0.55, 1.8, 1.4)):
+            ft = _F["mh359_kelly_tp"](p, t)
+            fb = _F["mh359_kelly_base"](p, b)
+            if (p * t - (1.0 - p)) > 0:
+                assert fb >= ft
 
 
 class TestVerdetto:
     def test_nessun_edge(self):
-        v = _F["mh358_verdetto"](0.2, 1.5, 0.5)
+        v = _F["mh359_verdetto"](0.2, 1.5, 1.1)
         assert v.startswith("NESSUN EDGE")
 
-    def test_stop_inutile(self):
-        v = _F["mh358_verdetto"](0.5, 1.5, 1.2)
-        assert v.startswith("STOP INUTILE")
+    def test_tp_inutile(self):
+        v = _F["mh359_verdetto"](0.5, 1.5, 1.5)
+        assert v.startswith("TP INUTILE")
 
-    def test_sizing_estremo(self):
-        v = _F["mh358_verdetto"](0.7, 1.5, 0.2)
-        assert v.startswith("SIZING ESTREMO")
+    def test_taglio_forte(self):
+        v = _F["mh359_verdetto"](0.5, 1.5, 1.1)
+        assert v.startswith("TAGLIO FORTE")
 
-    def test_boost_forte(self):
-        v = _F["mh358_verdetto"](0.5, 1.5, 0.5)
-        assert v.startswith("BOOST FORTE")
+    def test_taglio_moderato(self):
+        v = _F["mh359_verdetto"](0.5, 1.5, 1.3)
+        assert v.startswith("TAGLIO MODERATO")
 
-    def test_boost_forte_stop_crea_edge(self):
-        v = _F["mh358_verdetto"](0.3, 1.5, 0.3)
-        assert v.startswith("BOOST FORTE")
-        assert "CREA" in v
+    def test_taglio_leggero(self):
+        v = _F["mh359_verdetto"](0.5, 1.5, 1.45)
+        assert v.startswith("TAGLIO LEGGERO")
 
-    def test_boost_moderato(self):
-        v = _F["mh358_verdetto"](0.5, 1.5, 0.8)
-        assert v.startswith("BOOST MODERATO")
+    def test_soglie_05_09(self):
+        # r = 0.2727 -> FORTE; r = 0.6923 -> MODERATO; r = 0.9310 -> LEGGERO
+        assert _F["mh359_verdetto"](0.5, 1.5, 1.1).startswith("TAGLIO FORTE")
+        assert _F["mh359_verdetto"](0.5, 1.5, 1.3).startswith(
+            "TAGLIO MODERATO")
+        assert _F["mh359_verdetto"](0.5, 1.5, 1.45).startswith(
+            "TAGLIO LEGGERO")
 
-    def test_soglia_boost_25(self):
-        # m = 4.0 -> FORTE; m = 1.75 -> MODERATO
-        assert _F["mh358_verdetto"](0.5, 1.5, 0.5).startswith("BOOST FORTE")
-        assert _F["mh358_verdetto"](0.5, 1.5, 0.8).startswith(
-            "BOOST MODERATO")
-
-    def test_s_ko(self):
+    def test_t_ko(self):
         with pytest.raises(ValueError):
-            _F["mh358_verdetto"](0.5, 1.5, 0.0)
+            _F["mh359_verdetto"](0.5, 1.5, 0.0)
 
     def test_p_ko(self):
         with pytest.raises(ValueError):
-            _F["mh358_verdetto"](2.0, 1.5, 0.5)
+            _F["mh359_verdetto"](2.0, 1.5, 1.1)
 
 
 class TestWalk:
     def _demo(self):
-        return _F["mh358_confronto"](SEQ, B, P, S, EQUITY0)
+        return _F["mh359_confronto"](SEQ, B, P, T, EQUITY0)
 
     def test_demo_numeri(self):
         m = self._demo()
         assert m["n"] == N == 20
         assert m["n_wins"] == NWINS == 10
-        assert m["f_stop"] == FSTOP == 2.0 / 3.0
+        assert m["f_tp"] == FTP == pytest.approx(0.05 / 1.1)
         assert m["f_base"] == FBASE == 1.0 / 6.0
-        assert m["boost"] == BOOST == 4.0
+        assert m["ratio"] == RATIO == pytest.approx(
+            (0.05 / 1.1) / (1.0 / 6.0))
         assert abs(m["eqs_fin"] - EQSFIN) < 1e-9
         assert abs(m["eqb_fin"] - EQBFIN) < 1e-9
         assert abs(m["gap"] - GAP) < 1e-9
         assert abs(m["gap_pct"] - GAP_PCT) < 1e-12
-        assert abs(m["max_dd_stop"] - MAXDD) < 1e-12
+        assert abs(m["max_dd_tp"] - MAXDD) < 1e-12
         assert m["verdetto"] == VERDETTO
-        assert m["verdetto"].startswith("BOOST FORTE")
-        assert m["s"] == S == 0.5
+        assert m["verdetto"].startswith("TAGLIO FORTE")
+        assert m["t"] == T == 1.1
         assert m["equity0"] == EQUITY0 == 10000.0
 
     def test_determinismo(self):
@@ -235,7 +223,7 @@ class TestWalk:
         assert [r["trade"] for r in m["righe"]] == list(range(1, N + 1))
         assert "".join(r["esito"] for r in m["righe"]) == SEQ
         for i, r in enumerate(m["righe"]):
-            assert r["eq_stop"] == m["eqs_path"][i + 1]
+            assert r["eq_tp"] == m["eqs_path"][i + 1]
             assert r["eq_base"] == m["eqb_path"][i + 1]
 
     def test_gap_coerente(self):
@@ -245,34 +233,34 @@ class TestWalk:
 
     def test_seq_vuota_ko(self):
         with pytest.raises(ValueError):
-            _F["mh358_confronto"]("", B, P, S, EQUITY0)
+            _F["mh359_confronto"]("", B, P, T, EQUITY0)
 
     def test_p_ko(self):
         with pytest.raises(ValueError):
-            _F["mh358_confronto"](SEQ, B, 1.5, S, EQUITY0)
+            _F["mh359_confronto"](SEQ, B, 1.5, T, EQUITY0)
 
     def test_equity_ko(self):
         with pytest.raises(ValueError):
-            _F["mh358_confronto"](SEQ, B, P, S, 0.0)
+            _F["mh359_confronto"](SEQ, B, P, T, 0.0)
 
-    def test_s_ko(self):
+    def test_t_ko(self):
         with pytest.raises(ValueError):
-            _F["mh358_confronto"](SEQ, B, P, -0.5, EQUITY0)
+            _F["mh359_confronto"](SEQ, B, P, -0.5, EQUITY0)
 
 
 class TestConfronto:
     def test_chiavi_e_parametri(self):
-        m = _F["mh358_confronto"](SEQ, B, P, S, EQUITY0)
+        m = _F["mh359_confronto"](SEQ, B, P, T, EQUITY0)
         assert m["b"] == B
         assert m["p"] == P
-        assert m["s"] == S
+        assert m["t"] == T
         assert m["equity0"] == EQUITY0
 
     def test_seq_ko(self):
         with pytest.raises(ValueError):
-            _F["mh358_confronto"]("XYZ", B, P, S, EQUITY0)
+            _F["mh359_confronto"]("XYZ", B, P, T, EQUITY0)
 
-    def test_s_ko(self):
+    def test_t_ko(self):
         with pytest.raises(ValueError):
-            _F["mh358_confronto"](SEQ, B, P, 0.0, EQUITY0)
+            _F["mh359_confronto"](SEQ, B, P, 0.0, EQUITY0)
 
