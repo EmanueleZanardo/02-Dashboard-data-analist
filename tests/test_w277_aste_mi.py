@@ -121,6 +121,7 @@ TITLE364 = "Kelly con vincoli multipli: cap, lotti, stop e drawdown"
 TITLE365 = "Kelly con incertezza: haircut bayesiano sulla p stimata"
 TITLE366 = "Kelly su N trade: raddoppio, dimezzamento e crescita attesa"
 TITLE367 = "Kelly: mappa di sensibilità f* e crescita su (p, b)"
+TITLE368 = "Kelly su ritorni continui: f* = μ/σ² e volatility drag"
 TITLE276 = "💧 Cash flow at risk (CFaR)"
 
 CSV_PREZZI = "sessione,prezzo_eur_mwh\nMI1,102.5\nMI2,98.0\nMI7,105.0\n"
@@ -138,12 +139,12 @@ def _registry():
 class TestRegistryTab277:
     def test_tab277_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 367
+        assert len(titoli) == len(dvars) == len(withs) == 368
         assert TITLE277 in titoli
         assert "tab277" in dvars
         assert "tab277" in withs
         assert titoli[dvars.index("tab277")] == TITLE277
-        assert titoli[-1] == TITLE367
+        assert titoli[-1] == TITLE368
         keys = re.findall(r'key="(mi277_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

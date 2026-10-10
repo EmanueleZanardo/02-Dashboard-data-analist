@@ -103,6 +103,7 @@ TITLE364 = "Kelly con vincoli multipli: cap, lotti, stop e drawdown"
 TITLE365 = "Kelly con incertezza: haircut bayesiano sulla p stimata"
 TITLE366 = "Kelly su N trade: raddoppio, dimezzamento e crescita attesa"
 TITLE367 = "Kelly: mappa di sensibilità f* e crescita su (p, b)"
+TITLE368 = "Kelly su ritorni continui: f* = μ/σ² e volatility drag"
 TITLE304 = "🗂️📊 VaR per segmento: dove si concentra il rischio?"
 TITLE303 = "🧱📉 Capacità VaR: quanto nozionale puoi ancora aggiungere?"
 
@@ -142,13 +143,13 @@ def _registry():
 class TestRegistryTab305:
     def test_tab305_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 367
+        assert len(titoli) == len(dvars) == len(withs) == 368
         assert TITLE305 in titoli
         assert "tab305" in dvars
         assert "tab305" in withs
         assert titoli[dvars.index("tab305")] == TITLE305
-        assert titoli[-1] == TITLE367
-        assert dvars[-1] == "tab367"
+        assert titoli[-1] == TITLE368
+        assert dvars[-1] == "tab368"
         keys = re.findall(r'key="(st305_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
