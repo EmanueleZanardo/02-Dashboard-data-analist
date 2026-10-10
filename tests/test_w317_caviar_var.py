@@ -72,6 +72,7 @@ TITLE365 = "Kelly con incertezza: haircut bayesiano sulla p stimata"
 TITLE366 = "Kelly su N trade: raddoppio, dimezzamento e crescita attesa"
 TITLE367 = "Kelly: mappa di sensibilità f* e crescita su (p, b)"
 TITLE368 = "Kelly su ritorni continui: f* = μ/σ² e volatility drag"
+TITLE369 = "Kelly con costi di transazione: f* netto = (μ-c)/σ²"
 TITLE316 = "🌊📉 POT-GPD: il VaR dalla coda paretiana oltre soglia"
 TITLE315 = "🏔️📉 Valori estremi (Hill): il VaR oltre il massimo storico"
 SERIE_DEMO = '-85 -708 -309 119 -352 -344 39 -712 -119 -879\n-394 -326 811 -297 738 -971 138 1071 618 1165\n-872 371 -1866 -285 -494 381 264 347 -1447 -891\n-17 85 1552 -424 585 -279 1140 -810 32 -633\n257 -443 -477 -251 508 -161 -93 544 85 452\n-112 160 248 -93 -160 -172 -36 26 -146 252\n434 -73 -25 -470 276 196 81 -616 -621 -929\n-150 -913 -86 542 -313 -258 844 -887 1256 -406\n889 156 178 304 -277 48 -470 153 -218 -1412\n-402 -226 -833 115 288 10 -160 345 741 -303\n852 -74 -141 433 -622 28 -549 -374 -382 267\n81 585 -455 -372 -416 71 551 -214 745 -42\n-57 71 -674 -2 -199 430 137 154 665 83\n234 535 373 392 192 -563 888 -894 126 343\n467 1064 322 -445 131 -284 147 586 -189 348\n-600 -145 27 255 -200 516 282 328 -291 -335\n-247 181 -43 381 111 -215 -141 342 19 -286\n201 -420 -229 243 -257 125 563 556 -620 -49\n-185 196 550 -235 -258 -971 1487 1493 837 -925\n1252 647 277 -770 -84 -531 -467 400 -24 -52\n-319 277 427 -229 -41 -335 96 -85 97 139\n-30 -311 -104 66 186 21 3 447 -258 161\n-193 -671 4 282 517 174 222 -262 -127 412\n-448 214 340 -90 -137 478 85 273 80 214\n-7 109 -123 -493 307 303 282 286 -432 -600\n-206 214 -239 191 -184 108 98 -227 412 -208\n-19 -357 -261 198 336 -503 998 -642 -591 -606\n-13 216 -582 -54 -942 -264 406 -140 -296 -470\n-630 856 527 -310 -408 339 -668 98 386 82\n-112 419 555 317 292 -742 -642 71 144 416'
@@ -110,7 +111,7 @@ def _ris_demo():
 class TestRegistry317:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 368
+        assert len(titoli) == len(dvars) == len(withs) == 369
         assert TITLE317 in titoli
         assert "tab317" in dvars
         assert "    with tab317:" in src
@@ -123,8 +124,8 @@ class TestRegistry317:
 
     def test_ultima_tab(self):
         _, titoli, dvars, _ = _registry()
-        assert titoli[-1] == TITLE368
-        assert dvars[-1] == "tab368"
+        assert titoli[-1] == TITLE369
+        assert dvars[-1] == "tab369"
 
 
 class TestValidatori:

@@ -61,6 +61,7 @@ TITLE365 = "Kelly con incertezza: haircut bayesiano sulla p stimata"
 TITLE366 = "Kelly su N trade: raddoppio, dimezzamento e crescita attesa"
 TITLE367 = "Kelly: mappa di sensibilità f* e crescita su (p, b)"
 TITLE368 = "Kelly su ritorni continui: f* = μ/σ² e volatility drag"
+TITLE369 = "Kelly con costi di transazione: f* netto = (μ-c)/σ²"
 TITLE325 = "📈📉 Calmar ratio: il rendimento che paga il drawdown"
 TITLE324 = "Ω📊 Omega ratio: oltre Sharpe e Sortino"
 SERIE_DEMO = '100\n103\n106\n109\n112\n115\n118\n121\n124\n127\n130\n128\n124\n119\n114\n112\n105\n110\n116\n122\n128\n134\n138\n136\n132\n128\n124\n120\n116\n112\n116\n122\n128\n134\n140\n146\n152\n158\n156\n152\n148\n144\n146\n150\n154\n158\n161\n164'
@@ -96,7 +97,7 @@ def _eq_demo():
 class TestRegistry326:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 368
+        assert len(titoli) == len(dvars) == len(withs) == 369
         assert TITLE326 in titoli
         assert "tab326" in dvars
         assert "    with tab326:" in src
@@ -109,8 +110,8 @@ class TestRegistry326:
 
     def test_ultima_tab(self):
         _, titoli, dvars, _ = _registry()
-        assert titoli[-1] == TITLE368
-        assert dvars[-1] == "tab368"
+        assert titoli[-1] == TITLE369
+        assert dvars[-1] == "tab369"
 
 
 class TestValidatori:

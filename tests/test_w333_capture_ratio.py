@@ -55,6 +55,7 @@ TITLE365 = "Kelly con incertezza: haircut bayesiano sulla p stimata"
 TITLE366 = "Kelly su N trade: raddoppio, dimezzamento e crescita attesa"
 TITLE367 = "Kelly: mappa di sensibilità f* e crescita su (p, b)"
 TITLE368 = "Kelly su ritorni continui: f* = μ/σ² e volatility drag"
+TITLE369 = "Kelly con costi di transazione: f* netto = (μ-c)/σ²"
 TITLE332 = "🎯 Information ratio: la strategia batte davvero il benchmark?"
 TITLE331 = "⛵ Tempo di recupero: quanto resta sott'acqua l'equity"
 TITLE330 = "🔍📉 Martin ratio: il Calmar che guarda tutto il dolore"
@@ -94,7 +95,7 @@ def _demo():
 class TestRegistry333:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 368
+        assert len(titoli) == len(dvars) == len(withs) == 369
         assert "tab333" in dvars
         assert "tab333" in withs
 
@@ -107,9 +108,9 @@ class TestRegistry333:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab368"
-        assert titoli[-1] == TITLE368
-        assert withs[-1] == "tab368"
+        assert dvars[-1] == "tab369"
+        assert titoli[-1] == TITLE369
+        assert withs[-1] == "tab369"
 
 
 class TestNum:

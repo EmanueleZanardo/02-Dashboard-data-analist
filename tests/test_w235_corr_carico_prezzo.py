@@ -86,13 +86,13 @@ class TestRegistryTab235:
         src = Path(__file__).parent.parent.joinpath("app.py").read_text(encoding="utf-8")
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
-        assert len(titoli) == 368
+        assert len(titoli) == 369
         assert "🔁 Correlazione carico-prezzo" in titoli
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         assert "tab235" in dvars
         withs = re.findall(r"    with (tab\d+):", src)
         assert "tab235" in withs
-        assert len(withs) == len(dvars) == 368
+        assert len(withs) == len(dvars) == 369
         keys = re.findall(r'key="(t235_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 10
 
