@@ -121,6 +121,7 @@ TITLE357 = "Kelly con lotti interi: sizing discreto e drag di arrotondamento"
 TITLE358 = "Kelly con stop-loss: sizing con perdita troncata"
 TITLE359 = "Kelly con take-profit: sizing con vincita troncata"
 TITLE360 = "Kelly frazionario (fractional Kelly): λ·f*"
+TITLE361 = "Rischio di rovina (risk of ruin): probabilita' di rovina prima del target"
 TITLE273 = "☀️ Fotovoltaico utility-scale: business case"
 TITLE272 = "🌬️ Eolico offshore: business case"
 
@@ -150,12 +151,12 @@ def _registry():
 class TestRegistryTab274:
     def test_tab274_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 360
+        assert len(titoli) == len(dvars) == len(withs) == 361
         assert TITLE274 in titoli
         assert "tab274" in dvars
         assert "tab274" in withs
         assert titoli[dvars.index("tab274")] == TITLE274
-        assert titoli[-1] == TITLE360
+        assert titoli[-1] == TITLE361
         keys = re.findall(r'key="(sm274_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
