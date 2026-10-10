@@ -96,6 +96,7 @@ TITLE360 = "Kelly frazionario (fractional Kelly): λ·f*"
 TITLE361 = "Rischio di rovina (risk of ruin): probabilita' di rovina prima del target"
 TITLE362 = "Kelly con tre esiti: sizing con vincita, perdita parziale e perdita piena"
 TITLE363 = "Kelly con limite di posizione: sizing con cap f_max"
+TITLE364 = "Kelly con vincoli multipli: cap, lotti, stop e drawdown"
 TITLE299 = "🧪⚡ Stress test: quanto perde il book negli scenari?"
 TITLE298 = "🚦📏 Limite VaR: quanto margine resta?"
 
@@ -122,12 +123,12 @@ def _registry():
 class TestRegistryTab300:
     def test_tab300_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 363
+        assert len(titoli) == len(dvars) == len(withs) == 364
         assert TITLE300 in titoli
         assert "tab300" in dvars
         assert "tab300" in withs
         assert titoli[dvars.index("tab300")] == TITLE300
-        assert titoli[-1] == TITLE363
+        assert titoli[-1] == TITLE364
         keys = re.findall(r'key="(st300_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

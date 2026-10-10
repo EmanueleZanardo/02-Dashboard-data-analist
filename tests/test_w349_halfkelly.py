@@ -28,6 +28,7 @@ TITLE360 = "Kelly frazionario (fractional Kelly): λ·f*"
 TITLE361 = "Rischio di rovina (risk of ruin): probabilita' di rovina prima del target"
 TITLE362 = "Kelly con tre esiti: sizing con vincita, perdita parziale e perdita piena"
 TITLE363 = "Kelly con limite di posizione: sizing con cap f_max"
+TITLE364 = "Kelly con vincoli multipli: cap, lotti, stop e drawdown"
 TITLE348 = "Kelly con costi di trading: sizing netto"
 TITLE347 = "VaR & Expected Shortfall del P&L dopo N trade"
 TITLE346 = "📊 Monte Carlo: distribuzione del capitale dopo N trade"
@@ -67,7 +68,7 @@ def _registry():
 class TestRegistry349:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 363
+        assert len(titoli) == len(dvars) == len(withs) == 364
         assert "tab349" in dvars
         assert "tab349" in withs
 
@@ -80,9 +81,9 @@ class TestRegistry349:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab363"
-        assert titoli[-1] == TITLE363
-        assert withs[-1] == "tab363"
+        assert dvars[-1] == "tab364"
+        assert titoli[-1] == TITLE364
+        assert withs[-1] == "tab364"
 
 
 class TestNum:
