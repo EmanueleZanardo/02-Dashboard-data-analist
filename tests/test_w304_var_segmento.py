@@ -89,6 +89,7 @@ TITLE354 = "Kelly con controllo drawdown: sizing frazionato al drawdown"
 TITLE355 = "Kelly con target di volatilità: sizing riscalato sulla vol"
 TITLE356 = "Kelly bayesiano: sizing con win-rate posterior"
 TITLE357 = "Kelly con lotti interi: sizing discreto e drag di arrotondamento"
+TITLE358 = "Kelly con stop-loss: sizing con perdita troncata"
 TITLE303 = "🧱📉 Capacità VaR: quanto nozionale puoi ancora aggiungere?"
 TITLE302 = "✂️📉 Incremental VaR: quanto rischio togli chiudendo la posizione?"
 
@@ -128,13 +129,13 @@ def _registry():
 class TestRegistryTab304:
     def test_tab304_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 357
+        assert len(titoli) == len(dvars) == len(withs) == 358
         assert TITLE304 in titoli
         assert "tab304" in dvars
         assert "tab304" in withs
         assert titoli[dvars.index("tab304")] == TITLE304
-        assert titoli[-1] == TITLE357
-        assert dvars[-1] == "tab357"
+        assert titoli[-1] == TITLE358
+        assert dvars[-1] == "tab358"
         keys = re.findall(r'key="(st304_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
