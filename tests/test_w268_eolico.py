@@ -130,6 +130,7 @@ TITLE361 = "Rischio di rovina (risk of ruin): probabilita' di rovina prima del t
 TITLE362 = "Kelly con tre esiti: sizing con vincita, perdita parziale e perdita piena"
 TITLE363 = "Kelly con limite di posizione: sizing con cap f_max"
 TITLE364 = "Kelly con vincoli multipli: cap, lotti, stop e drawdown"
+TITLE365 = "Kelly con incertezza: haircut bayesiano sulla p stimata"
 TITLE267 = "🟢 Biometano: business case"
 
 POT = 10.0
@@ -158,12 +159,12 @@ def _registry():
 class TestRegistryTab268:
     def test_tab268_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 364
+        assert len(titoli) == len(dvars) == len(withs) == 365
         assert TITLE268 in titoli
         assert "tab268" in dvars
         assert "tab268" in withs
         assert titoli[dvars.index("tab268")] == TITLE268
-        assert titoli[-1] == TITLE364
+        assert titoli[-1] == TITLE365
         keys = re.findall(r'key="(eo268_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

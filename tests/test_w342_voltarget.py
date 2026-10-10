@@ -45,6 +45,7 @@ TITLE361 = "Rischio di rovina (risk of ruin): probabilita' di rovina prima del t
 TITLE362 = "Kelly con tre esiti: sizing con vincita, perdita parziale e perdita piena"
 TITLE363 = "Kelly con limite di posizione: sizing con cap f_max"
 TITLE364 = "Kelly con vincoli multipli: cap, lotti, stop e drawdown"
+TITLE365 = "Kelly con incertezza: haircut bayesiano sulla p stimata"
 TITLE341 = "📐 K-ratio: la regolarità della crescita dell'equity"
 TITLE340 = "📉 Calmar ratio: il rendimento annuo per unità di max drawdown"
 TITLE339 = "📉 Sortino ratio: il rendimento per unità di rischio al ribasso"
@@ -80,7 +81,7 @@ def _demo():
 class TestRegistry342:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 364
+        assert len(titoli) == len(dvars) == len(withs) == 365
         assert "tab342" in dvars
         assert "tab342" in withs
 
@@ -93,9 +94,9 @@ class TestRegistry342:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab364"
-        assert titoli[-1] == TITLE364
-        assert withs[-1] == "tab364"
+        assert dvars[-1] == "tab365"
+        assert titoli[-1] == TITLE365
+        assert withs[-1] == "tab365"
 
 
 class TestNum:
