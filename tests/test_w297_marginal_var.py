@@ -81,6 +81,7 @@ TITLE344 = "🎲 Risk of ruin: probabilita' di toccare una barriera di drawdown"
 TITLE345 = "🎯 Sizing anti-rovina: f massima con ROR vincolato"
 TITLE346 = "📊 Monte Carlo: distribuzione del capitale dopo N trade"
 TITLE347 = "VaR & Expected Shortfall del P&L dopo N trade"
+TITLE348 = "Kelly con costi di trading: sizing netto"
 TITLE296 = "🪓🛡 Component ES: chi contribuisce alla coda?"
 TITLE295 = "🧪🛡 Backtest dell'ES: la coda e' sottostimata?"
 
@@ -111,12 +112,12 @@ def _registry():
 class TestRegistryTab297:
     def test_tab297_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 347
+        assert len(titoli) == len(dvars) == len(withs) == 348
         assert TITLE297 in titoli
         assert "tab297" in dvars
         assert "tab297" in withs
         assert titoli[dvars.index("tab297")] == TITLE297
-        assert titoli[-1] == TITLE347
+        assert titoli[-1] == TITLE348
         keys = re.findall(r'key="(mv297_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
