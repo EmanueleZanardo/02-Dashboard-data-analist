@@ -28,6 +28,7 @@ TITLE346 = "📊 Monte Carlo: distribuzione del capitale dopo N trade"
 TITLE347 = "VaR & Expected Shortfall del P&L dopo N trade"
 TITLE348 = "Kelly con costi di trading: sizing netto"
 TITLE349 = "Frazione di Kelly: half-Kelly e trade-off crescita/volatilità"
+TITLE350 = "Kelly robusto: sizing con edge incerta"
 TITLE342 = "🎯 Volatilità target: il sizing a volatilità costante"
 TITLE341 = "📐 K-ratio: la regolarità della crescita dell'equity"
 TITLE340 = "📉 Calmar ratio: il rendimento annuo per unità di max drawdown"
@@ -57,7 +58,7 @@ def _registry():
 class TestRegistry343:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 349
+        assert len(titoli) == len(dvars) == len(withs) == 350
         assert "tab343" in dvars
         assert "tab343" in withs
 
@@ -70,9 +71,9 @@ class TestRegistry343:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab349"
-        assert titoli[-1] == TITLE349
-        assert withs[-1] == "tab349"
+        assert dvars[-1] == "tab350"
+        assert titoli[-1] == TITLE350
+        assert withs[-1] == "tab350"
 
 
 class TestNum:

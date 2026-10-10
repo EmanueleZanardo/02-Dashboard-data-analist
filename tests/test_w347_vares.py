@@ -25,6 +25,7 @@ _F = _load("mh347_num", "mh347_int", "mh347_norm_ppf", "mh347_var_es",
 TITLE347 = "VaR & Expected Shortfall del P&L dopo N trade"
 TITLE348 = "Kelly con costi di trading: sizing netto"
 TITLE349 = "Frazione di Kelly: half-Kelly e trade-off crescita/volatilità"
+TITLE350 = "Kelly robusto: sizing con edge incerta"
 TITLE346 = "📊 Monte Carlo: distribuzione del capitale dopo N trade"
 TITLE345 = "🎯 Sizing anti-rovina: f massima con ROR vincolato"
 TITLE344 = "🎲 Risk of ruin: probabilita' di toccare una barriera di drawdown"
@@ -70,7 +71,7 @@ def _registry():
 class TestRegistry347:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 349
+        assert len(titoli) == len(dvars) == len(withs) == 350
         assert "tab347" in dvars
         assert "tab347" in withs
 
@@ -83,9 +84,9 @@ class TestRegistry347:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab349"
-        assert titoli[-1] == TITLE349
-        assert withs[-1] == "tab349"
+        assert dvars[-1] == "tab350"
+        assert titoli[-1] == TITLE350
+        assert withs[-1] == "tab350"
 
 
 class TestNum:
