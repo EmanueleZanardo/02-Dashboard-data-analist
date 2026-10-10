@@ -100,6 +100,7 @@ TITLE349 = "Frazione di Kelly: half-Kelly e trade-off crescita/volatilità"
 TITLE350 = "Kelly robusto: sizing con edge incerta"
 TITLE351 = "Kelly con portafoglio: due posizioni simultanee"
 TITLE352 = "Kelly con correlazione: due posizioni correlate"
+TITLE353 = "Kelly adattivo: win-rate rolling e size dinamica"
 TITLE279 = "🌪️ Derivati meteo: pricing HDD/CDD"
 TITLE278 = "🌡️ Stress climatico: domanda e prezzo"
 
@@ -121,12 +122,12 @@ def _registry():
 class TestRegistryTab280:
     def test_tab280_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 352
+        assert len(titoli) == len(dvars) == len(withs) == 353
         assert TITLE280 in titoli
         assert "tab280" in dvars
         assert "tab280" in withs
         assert titoli[dvars.index("tab280")] == TITLE280
-        assert titoli[-1] == TITLE352
+        assert titoli[-1] == TITLE353
         keys = re.findall(r'key="(lg280_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

@@ -43,6 +43,7 @@ TITLE349 = "Frazione di Kelly: half-Kelly e trade-off crescita/volatilità"
 TITLE350 = "Kelly robusto: sizing con edge incerta"
 TITLE351 = "Kelly con portafoglio: due posizioni simultanee"
 TITLE352 = "Kelly con correlazione: due posizioni correlate"
+TITLE353 = "Kelly adattivo: win-rate rolling e size dinamica"
 TITLE328 = "🔻 Burke ratio: il drawdown penalizzato al quadrato"
 TITLE327 = "🛟 Sterling ratio: il Calmar mediato sui peggiori drawdown"
 TITLE326 = "🩹 Pain index e Pain ratio: il dolore medio oltre il peggio"
@@ -82,7 +83,7 @@ def _eq_demo():
 class TestRegistry329:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 352
+        assert len(titoli) == len(dvars) == len(withs) == 353
         assert TITLE329 in titoli
         assert "tab329" in dvars
         assert "    with tab329:" in src
@@ -96,8 +97,8 @@ class TestRegistry329:
 
     def test_ultima_tab(self):
         _, titoli, dvars, _ = _registry()
-        assert titoli[-1] == TITLE352
-        assert dvars[-1] == "tab352"
+        assert titoli[-1] == TITLE353
+        assert dvars[-1] == "tab353"
 
 
 class TestValidatori:
