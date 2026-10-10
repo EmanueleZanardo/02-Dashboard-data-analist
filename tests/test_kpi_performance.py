@@ -184,12 +184,12 @@ class TestRegistryTab197:
         src = Path(__file__).parent.parent.joinpath("app.py").read_text()
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
-        assert len(titoli) == 348
-        assert titoli[-1] == "Kelly con costi di trading: sizing netto"
+        assert len(titoli) == 349
+        assert titoli[-1] == "Frazione di Kelly: half-Kelly e trade-off crescita/volatilità"
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         assert "tab197" in dvars
         withs = re.findall(r"    with (tab\d+):", src)
         assert "tab197" in withs
-        assert len(withs) == len(dvars) == 348
+        assert len(withs) == len(dvars) == 349
         keys = re.findall(r'key="(kpi197_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 7
