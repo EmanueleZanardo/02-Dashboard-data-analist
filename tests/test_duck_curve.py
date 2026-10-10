@@ -116,12 +116,12 @@ class TestRegistryTab227:
             encoding="utf-8")
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
-        assert len(titoli) == 356
-        assert titoli[-1] == "Kelly bayesiano: sizing con win-rate posterior"
+        assert len(titoli) == 357
+        assert titoli[-1] == "Kelly con lotti interi: sizing discreto e drag di arrotondamento"
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         assert "tab227" in dvars
         withs = re.findall(r"    with (tab\d+):", src)
         assert "tab227" in withs
-        assert len(withs) == len(dvars) == 356
+        assert len(withs) == len(dvars) == 357
         keys = re.findall(r'key="(ai227_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 6
