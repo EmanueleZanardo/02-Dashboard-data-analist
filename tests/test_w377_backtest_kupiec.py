@@ -15,6 +15,7 @@ _F = _load("mh377_num", "mh377_z", "mh377_chi2_1_sf", "mh377_sim_gbm",
            "mh377_basel_zone", "mh377_verdetto", "mh377_backtest")
 
 TITLE377 = "Backtest VaR di Kupiec: copertura e likelihood ratio"
+TITLE378 = "Reverse stress test: quanto shock regge il limite?"
 TITLE376 = "Shock correlazioni: stress test sul rischio di coda"
 TITLE375 = "Component ES: contributo al rischio di coda per posizione"
 TITLE374 = "Component VaR: contributo al rischio per posizione"
@@ -53,7 +54,7 @@ def _registry():
 class TestRegistry377:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 377
+        assert len(titoli) == len(dvars) == len(withs) == 378
         assert "tab377" in dvars
         assert "tab377" in withs
 
@@ -68,9 +69,9 @@ class TestRegistry377:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab377"
-        assert titoli[-1] == TITLE377
-        assert withs[-1] == "tab377"
+        assert dvars[-1] == "tab378"
+        assert titoli[-1] == TITLE378
+        assert withs[-1] == "tab378"
 
 
 class TestNum:

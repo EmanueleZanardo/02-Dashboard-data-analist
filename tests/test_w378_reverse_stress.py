@@ -1,0 +1,302 @@
+"""Test tab378 'Reverse stress test: quanto shock regge il limite?': registry + funzioni pure."""
+
+import math
+import re
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from appfuncs import load as _load
+
+_F = _load("mh378_num", "mh378_z", "mh378_cov", "mh378_sigma_p",
+           "mh378_AB", "mh378_var_p", "mh378_var_k",
+           "mh378_break_vol", "mh378_break_corr", "mh378_verdetto",
+           "mh378_reverse")
+
+TITLE378 = "Reverse stress test: quanto shock regge il limite?"
+TITLE377 = "Backtest VaR di Kupiec: copertura e likelihood ratio"
+TITLE376 = "Shock correlazioni: stress test sul rischio di coda"
+TITLE375 = "Component ES: contributo al rischio di coda per posizione"
+TITLE374 = "Component VaR: contributo al rischio per posizione"
+TITLE373 = "Kelly con limite VaR: sizing con vincolo di perdita massima"
+E = (10000.0, 8000.0, 6000.0)
+S = (0.15, 0.2, 0.1)
+RHO = (0.6, 0.3, 0.4)
+SE = (1500.0, 1600.0, 600.0)
+ALPHA = 0.95
+LIM = 12000.0
+LIM2 = 5500.0
+Z = 1.6448536269514715
+SIGP = 3059.0848304680926
+VARB = 5031.746778547669
+MSTAR = 2.3848576902082503
+KSTAR2 = 0.4207636568358517
+AA = 9358000.0
+BB = 4332000.0
+C01 = 1440000.0
+
+
+def _registry():
+    src = (Path(__file__).resolve().parent.parent / "app.py").read_text(
+        encoding="utf-8")
+    line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
+    titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
+    dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
+    withs = re.findall(r"with (tab\d+):", src)
+    return src, titoli, dvars, withs
+
+
+class TestRegistry378:
+    def test_conteggi(self):
+        src, titoli, dvars, withs = _registry()
+        assert len(titoli) == len(dvars) == len(withs) == 378
+        assert "tab378" in dvars
+        assert "tab378" in withs
+
+    def test_titoli_allineati_373_374_375_376_377_378(self):
+        _, titoli, dvars, _ = _registry()
+        assert titoli[dvars.index("tab373")] == TITLE373
+        assert titoli[dvars.index("tab374")] == TITLE374
+        assert titoli[dvars.index("tab375")] == TITLE375
+        assert titoli[dvars.index("tab376")] == TITLE376
+        assert titoli[dvars.index("tab377")] == TITLE377
+        assert titoli[dvars.index("tab378")] == TITLE378
+
+    def test_ultima_tab(self):
+        _, titoli, dvars, withs = _registry()
+        assert dvars[-1] == "tab378"
+        assert titoli[-1] == TITLE378
+        assert withs[-1] == "tab378"
+
+
+class TestNum:
+    def test_num_ok(self):
+        assert _F["mh378_num"](0.5, "x") == 0.5
+
+    def test_num_bool_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh378_num"](True, "x")
+
+    def test_num_nan_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh378_num"](float("nan"), "x")
+
+    def test_num_inf_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh378_num"](float("inf"), "x")
+
+
+class TestZ:
+    def test_z_demo(self):
+        assert _F["mh378_z"](ALPHA) == pytest.approx(Z)
+
+    def test_z_95_forma_nota(self):
+        assert _F["mh378_z"](0.95) == pytest.approx(1.6448536269514722)
+
+    def test_z_range_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh378_z"](0.4)
+        with pytest.raises(ValueError):
+            _F["mh378_z"](1.0)
+
+
+class TestCov:
+    def test_demo_c01(self):
+        C = _F["mh378_cov"](SE, RHO)
+        assert C[0][1] == pytest.approx(C01)
+        assert C[1][0] == pytest.approx(C01)
+
+    def test_diagonale(self):
+        C = _F["mh378_cov"](SE, RHO)
+        for i in range(3):
+            assert C[i][i] == pytest.approx(SE[i] ** 2)
+
+    def test_rho_fuori_range_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh378_cov"](SE, (1.5, 0.0, 0.0))
+
+    def test_s_negativa_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh378_cov"]((-1.0, SE[1], SE[2]), RHO)
+
+    def test_len_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh378_cov"]((1.0, 2.0), RHO)
+
+
+class TestSigmaP:
+    def test_demo(self):
+        assert _F["mh378_sigma_p"](E, S, RHO) == pytest.approx(SIGP)
+
+    def test_forma_chiusa(self):
+        se = [E[i] * S[i] for i in range(3)]
+        r12, r13, r23 = RHO
+        var = (se[0] ** 2 + se[1] ** 2 + se[2] ** 2
+               + 2.0 * (se[0] * se[1] * r12 + se[0] * se[2] * r13
+                        + se[1] * se[2] * r23))
+        assert _F["mh378_sigma_p"](E, S, RHO) == pytest.approx(
+            math.sqrt(var))
+
+    def test_zero_vol(self):
+        assert _F["mh378_sigma_p"](E, (0.0, 0.0, 0.0), RHO) == pytest.approx(
+            0.0)
+
+    def test_s_negativa_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh378_sigma_p"](E, (-0.1, S[1], S[2]), RHO)
+
+
+class TestAB:
+    def test_demo(self):
+        A, B = _F["mh378_AB"](E, S, RHO)
+        assert A == pytest.approx(AA)
+        assert B == pytest.approx(BB)
+
+    def test_a_uguale_sigma_quadro(self):
+        A, _ = _F["mh378_AB"](E, S, RHO)
+        assert A == pytest.approx(SIGP ** 2)
+
+    def test_b_forma_chiusa(self):
+        se = [E[i] * S[i] for i in range(3)]
+        r12, r13, r23 = RHO
+        b = 2.0 * (se[0] * se[1] * (1.0 - r12)
+                   + se[0] * se[2] * (1.0 - r13)
+                   + se[1] * se[2] * (1.0 - r23))
+        _, B = _F["mh378_AB"](E, S, RHO)
+        assert B == pytest.approx(b)
+
+    def test_sigma_k_affine(self):
+        A, B = _F["mh378_AB"](E, S, RHO)
+        for k in (0.0, 0.37, 1.0):
+            rp = tuple((1.0 - k) * r + k for r in RHO)
+            s2 = _F["mh378_sigma_p"](E, S, rp) ** 2
+            assert s2 == pytest.approx(A + k * B)
+
+
+class TestVarP:
+    def test_demo(self):
+        assert _F["mh378_var_p"](E, S, RHO, ALPHA) == pytest.approx(VARB)
+
+    def test_uguale_z_sigma(self):
+        assert _F["mh378_var_p"](E, S, RHO, ALPHA) == pytest.approx(Z * SIGP)
+
+    def test_scala_con_m(self):
+        m = 2.5
+        v = _F["mh378_var_p"](E, tuple(m * x for x in S), RHO, ALPHA)
+        assert v == pytest.approx(m * VARB)
+
+
+class TestVarK:
+    def test_k0_uguale_base(self):
+        A, B = _F["mh378_AB"](E, S, RHO)
+        assert _F["mh378_var_k"](A, B, Z, 0.0) == pytest.approx(VARB)
+
+    def test_k1_forma_chiusa(self):
+        A, B = _F["mh378_AB"](E, S, RHO)
+        assert _F["mh378_var_k"](A, B, Z, 1.0) == pytest.approx(
+            Z * math.sqrt(A + B))
+
+    def test_k_fuori_ko(self):
+        A, B = _F["mh378_AB"](E, S, RHO)
+        with pytest.raises(ValueError):
+            _F["mh378_var_k"](A, B, Z, 1.5)
+
+
+class TestBreakVol:
+    def test_demo(self):
+        assert _F["mh378_break_vol"](E, S, RHO, ALPHA, LIM) == pytest.approx(
+            MSTAR)
+        assert MSTAR == pytest.approx(LIM / VARB)
+
+    def test_gia_rotto(self):
+        m = _F["mh378_break_vol"](E, S, RHO, ALPHA, VARB / 2.0)
+        assert m == pytest.approx(0.5)
+        assert m < 1.0
+
+    def test_limite_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh378_break_vol"](E, S, RHO, ALPHA, 0.0)
+
+    def test_var_nullo_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh378_break_vol"](E, (0.0, 0.0, 0.0), RHO, ALPHA, LIM)
+
+
+class TestBreakCorr:
+    def test_demo_none(self):
+        # con LIM serve k* > 1: nemmeno la correlazione piena rompe
+        assert _F["mh378_break_corr"](E, S, RHO, ALPHA, LIM) is None
+
+    def test_k2_forma_chiusa(self):
+        A, B = _F["mh378_AB"](E, S, RHO)
+        att = ((LIM2 / Z) ** 2 - A) / B
+        k = _F["mh378_break_corr"](E, S, RHO, ALPHA, LIM2)
+        assert k == pytest.approx(KSTAR2)
+        assert k == pytest.approx(att)
+        assert 0.0 < k < 1.0
+
+    def test_k2_rompe_davvero(self):
+        k = _F["mh378_break_corr"](E, S, RHO, ALPHA, LIM2)
+        rp = tuple((1.0 - k) * r + k for r in RHO)
+        assert _F["mh378_var_p"](E, S, rp, ALPHA) == pytest.approx(LIM2)
+
+    def test_gia_rotto_negativo(self):
+        k = _F["mh378_break_corr"](E, S, RHO, ALPHA, VARB / 2.0)
+        assert k < 0.0
+
+    def test_limite_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh378_break_corr"](E, S, RHO, ALPHA, -5.0)
+
+
+class TestVerdetto:
+    def test_rotto(self):
+        assert _F["mh378_verdetto"](VARB, VARB / 2.0, 0.5, -0.3).startswith(
+            "ROTTO")
+
+    def test_fragile(self):
+        assert _F["mh378_verdetto"](VARB, LIM, 1.5, None).startswith(
+            "FRAGILE")
+
+    def test_moderato(self):
+        assert _F["mh378_verdetto"](VARB, LIM, 2.5, 0.4).startswith(
+            "MODERATO")
+
+    def test_resiliente(self):
+        assert _F["mh378_verdetto"](VARB, LIM, 3.0, None).startswith(
+            "RESILIENTE")
+
+    def test_bordi(self):
+        assert _F["mh378_verdetto"](VARB, LIM, 1.0, None).startswith(
+            "FRAGILE")
+        assert _F["mh378_verdetto"](VARB, LIM, 2.0, None).startswith(
+            "MODERATO")
+        assert _F["mh378_verdetto"](VARB, LIM, 2.9999, None).startswith(
+            "MODERATO")
+
+
+class TestReverse:
+    def _b(self):
+        return _F["mh378_reverse"](E, S, RHO, ALPHA, LIM)
+
+    def test_demo(self):
+        b = self._b()
+        assert b["z"] == pytest.approx(Z)
+        assert b["sigma_p"] == pytest.approx(SIGP)
+        assert b["var_base"] == pytest.approx(VARB)
+        assert b["m_star"] == pytest.approx(MSTAR)
+        assert b["k_star"] is None
+        assert b["limite"] == pytest.approx(LIM)
+        assert b["verdetto"].startswith("MODERATO")
+
+    def test_coerenza(self):
+        b = self._b()
+        assert b["var_base"] == pytest.approx(b["z"] * b["sigma_p"])
+        assert b["m_star"] == pytest.approx(b["limite"] / b["var_base"])
+        assert b["A"] == pytest.approx(b["sigma_p"] ** 2)
+
+    def test_k2_non_none(self):
+        b = _F["mh378_reverse"](E, S, RHO, ALPHA, LIM2)
+        assert b["k_star"] == pytest.approx(KSTAR2)

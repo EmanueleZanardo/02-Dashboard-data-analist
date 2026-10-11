@@ -119,6 +119,7 @@ TITLE374 = "Component VaR: contributo al rischio per posizione"
 TITLE375 = "Component ES: contributo al rischio di coda per posizione"
 TITLE376 = "Shock correlazioni: stress test sul rischio di coda"
 TITLE377 = "Backtest VaR di Kupiec: copertura e likelihood ratio"
+TITLE378 = "Reverse stress test: quanto shock regge il limite?"
 TITLE300 = "🧮📊 Rapporto di diversificazione: quanto rischio risparmia il book?"
 TITLE299 = "🧪⚡ Stress test: quanto perde il book negli scenari?"
 
@@ -139,12 +140,12 @@ def _registry():
 class TestRegistryTab301:
     def test_tab301_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 377
+        assert len(titoli) == len(dvars) == len(withs) == 378
         assert TITLE301 in titoli
         assert "tab301" in dvars
         assert "tab301" in withs
         assert titoli[dvars.index("tab301")] == TITLE301
-        assert titoli[-1] == TITLE377
+        assert titoli[-1] == TITLE378
         keys = re.findall(r'key="(st301_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

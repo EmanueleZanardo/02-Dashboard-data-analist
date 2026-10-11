@@ -141,6 +141,7 @@ TITLE374 = "Component VaR: contributo al rischio per posizione"
 TITLE375 = "Component ES: contributo al rischio di coda per posizione"
 TITLE376 = "Shock correlazioni: stress test sul rischio di coda"
 TITLE377 = "Backtest VaR di Kupiec: copertura e likelihood ratio"
+TITLE378 = "Reverse stress test: quanto shock regge il limite?"
 TITLE264 = "\U0001F4DC Garanzie di origine: costo del 100% rinnovabile"
 
 PROD0 = 100000.0
@@ -163,12 +164,12 @@ def _registry():
 class TestRegistryTab265:
     def test_tab265_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 377
+        assert len(titoli) == len(dvars) == len(withs) == 378
         assert TITLE265 in titoli
         assert "tab265" in dvars
         assert "tab265" in withs
         assert titoli[dvars.index("tab265")] == TITLE265
-        assert titoli[-1] == TITLE377
+        assert titoli[-1] == TITLE378
         keys = re.findall(r'key="(fv265_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

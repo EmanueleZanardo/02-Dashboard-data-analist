@@ -132,6 +132,7 @@ TITLE374 = "Component VaR: contributo al rischio per posizione"
 TITLE375 = "Component ES: contributo al rischio di coda per posizione"
 TITLE376 = "Shock correlazioni: stress test sul rischio di coda"
 TITLE377 = "Backtest VaR di Kupiec: copertura e likelihood ratio"
+TITLE378 = "Reverse stress test: quanto shock regge il limite?"
 TITLE274 = "⚛️ Nucleare SMR: business case"
 
 CSV_POS = ("prodotto,qta_mwh,direzione,prezzo_eur_mwh\n"
@@ -156,12 +157,12 @@ def _registry():
 class TestRegistryTab275:
     def test_tab275_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 377
+        assert len(titoli) == len(dvars) == len(withs) == 378
         assert TITLE275 in titoli
         assert "tab275" in dvars
         assert "tab275" in withs
         assert titoli[dvars.index("tab275")] == TITLE275
-        assert titoli[-1] == TITLE377
+        assert titoli[-1] == TITLE378
         keys = re.findall(r'key="(pl275_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

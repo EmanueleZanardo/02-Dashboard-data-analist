@@ -68,6 +68,7 @@ TITLE374 = "Component VaR: contributo al rischio per posizione"
 TITLE375 = "Component ES: contributo al rischio di coda per posizione"
 TITLE376 = "Shock correlazioni: stress test sul rischio di coda"
 TITLE377 = "Backtest VaR di Kupiec: copertura e likelihood ratio"
+TITLE378 = "Reverse stress test: quanto shock regge il limite?"
 TITLE328 = "🔻 Burke ratio: il drawdown penalizzato al quadrato"
 TITLE327 = "🛟 Sterling ratio: il Calmar mediato sui peggiori drawdown"
 TITLE326 = "🩹 Pain index e Pain ratio: il dolore medio oltre il peggio"
@@ -107,7 +108,7 @@ def _eq_demo():
 class TestRegistry329:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 377
+        assert len(titoli) == len(dvars) == len(withs) == 378
         assert TITLE329 in titoli
         assert "tab329" in dvars
         assert "    with tab329:" in src
@@ -121,8 +122,8 @@ class TestRegistry329:
 
     def test_ultima_tab(self):
         _, titoli, dvars, _ = _registry()
-        assert titoli[-1] == TITLE377
-        assert dvars[-1] == "tab377"
+        assert titoli[-1] == TITLE378
+        assert dvars[-1] == "tab378"
 
 
 class TestValidatori:
