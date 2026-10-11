@@ -119,6 +119,7 @@ TITLE383 = "Jump VaR: VaR con salti di prezzo (Merton)"
 TITLE384 = "Delta-Gamma VaR: VaR parametrico di una posizione con opzioni"
 TITLE385 = "Expected Shortfall: misura di rischio coerente"
 TITLE386 = "VaR ed ES con code pesanti (t-Student)"
+TITLE387 = "🌈📉 Misura spettrale: l'ES pesato con l'avversione al rischio"
 TITLE299 = "🧪⚡ Stress test: quanto perde il book negli scenari?"
 TITLE298 = "🚦📏 Limite VaR: quanto margine resta?"
 
@@ -145,12 +146,12 @@ def _registry():
 class TestRegistryTab300:
     def test_tab300_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 386
+        assert len(titoli) == len(dvars) == len(withs) == 387
         assert TITLE300 in titoli
         assert "tab300" in dvars
         assert "tab300" in withs
         assert titoli[dvars.index("tab300")] == TITLE300
-        assert titoli[-1] == TITLE386
+        assert titoli[-1] == TITLE387
         keys = re.findall(r'key="(st300_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

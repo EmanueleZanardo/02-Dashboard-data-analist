@@ -27,6 +27,7 @@ TITLE383 = "Jump VaR: VaR con salti di prezzo (Merton)"
 TITLE384 = "Delta-Gamma VaR: VaR parametrico di una posizione con opzioni"
 TITLE385 = "Expected Shortfall: misura di rischio coerente"
 TITLE386 = "VaR ed ES con code pesanti (t-Student)"
+TITLE387 = "🌈📉 Misura spettrale: l'ES pesato con l'avversione al rischio"
 TITLE374 = "Component VaR: contributo al rischio per posizione"
 TITLE373 = "Kelly con limite VaR: sizing con vincolo di perdita massima"
 TITLE372 = "Monte Carlo: VaR e Expected Shortfall di una posizione power"
@@ -85,7 +86,7 @@ def _registry():
 class TestRegistry375:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 386
+        assert len(titoli) == len(dvars) == len(withs) == 387
         assert "tab375" in dvars
         assert "tab375" in withs
 
@@ -100,9 +101,9 @@ class TestRegistry375:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab386"
-        assert titoli[-1] == TITLE386
-        assert withs[-1] == "tab386"
+        assert dvars[-1] == "tab387"
+        assert titoli[-1] == TITLE387
+        assert withs[-1] == "tab387"
 
 
 class TestNum:
