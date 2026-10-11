@@ -149,7 +149,7 @@ class TestRiepilogoPeriodo:
         r = calcola_riepilogo_periodo(piatta(14))
         assert r["ok"] is True
         k = r["kpi"]
-        assert k["ore"] == 369
+        assert k["ore"] == 370
         assert k["giorni"] == 14
         assert k["medio"] == pytest.approx(100.0)
         assert k["mediano"] == pytest.approx(100.0)
@@ -158,14 +158,14 @@ class TestRiepilogoPeriodo:
         assert k["quota_negativi"] == pytest.approx(0.0)
         assert k["baseload_1MW"] == pytest.approx(33600.0)
         assert len(r["mensile"]) == 2            # set + ott
-        assert r["mensile"]["Ore"].sum() == 369
+        assert r["mensile"]["Ore"].sum() == 370
         assert list(r["fasce"]["Fascia"]) == ["F1", "F2", "F3"]
-        assert r["fasce"]["Ore"].sum() == 369
+        assert r["fasce"]["Ore"].sum() == 370
         assert len(r["giorni"]) == 14
         assert r["giorni"]["Range (€/MWh)"].sum() == 0.0
         assert list(r["settimanale"]["Giorno settimana"]) == \
             ["Lun", "Mar", "Mer", "Gio", "Ven", "Sab", "Dom"]
-        assert r["settimanale"]["Ore"].sum() == 369
+        assert r["settimanale"]["Ore"].sum() == 370
 
     def test_serie_vuota(self):
         r = calcola_riepilogo_periodo(pd.Series([], dtype=float))

@@ -67,6 +67,7 @@ TITLE366 = "Kelly su N trade: raddoppio, dimezzamento e crescita attesa"
 TITLE367 = "Kelly: mappa di sensibilità f* e crescita su (p, b)"
 TITLE368 = "Kelly su ritorni continui: f* = μ/σ² e volatility drag"
 TITLE369 = "Kelly con costi di transazione: f* netto = (μ-c)/σ²"
+TITLE370 = "Kelly e drawdown: probabilità di toccare un max drawdown"
 TITLE321 = "🧪📉 Backtest VaR: il modello resiste al tempo?"
 TITLE320 = "⚙️📉 GARCH(1,1): la volatilita' che ricorda"
 COPPIE_DEMO = '106.93;116.98\n107.84;99.26\n101.46;97.31\n88.64;90.64\n78.61;68.61\n67.77;69.39\n70.00;69.14\n68.48;69.67\n78.87;85.82\n92.17;86.39\n104.68;98.48\n105.29;108.10\n107.33;106.83\n106.99;117.16\n98.01;90.92\n95.39;75.36\n80.48;82.50\n68.78;53.28\n67.03;47.34\n71.72;65.30\n76.58;63.33\n94.04;69.27\n100.38;106.04\n106.42;102.37'
@@ -99,7 +100,7 @@ def _ris_demo():
 class TestRegistry322:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 369
+        assert len(titoli) == len(dvars) == len(withs) == 370
         assert TITLE322 in titoli
         assert "tab322" in dvars
         assert "    with tab322:" in src
@@ -112,8 +113,8 @@ class TestRegistry322:
 
     def test_ultima_tab(self):
         _, titoli, dvars, _ = _registry()
-        assert titoli[-1] == TITLE369
-        assert dvars[-1] == "tab369"
+        assert titoli[-1] == TITLE370
+        assert dvars[-1] == "tab370"
 
 
 class TestValidatori:
