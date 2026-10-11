@@ -116,12 +116,12 @@ class TestRegistryTab220:
         src = Path(__file__).parent.parent.joinpath("app.py").read_text()
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
-        assert len(titoli) == 388
-        assert titoli[-1] == "🧲📈 Misura entropica: rischio con avversione costante (CARA)"
+        assert len(titoli) == 389
+        assert titoli[-1] == "🌀📈 Wang transform: misura distorsiva del rischio"
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         assert "tab220" in dvars
         withs = re.findall(r"    with (tab\d+):", src)
         assert "tab220" in withs
-        assert len(withs) == len(dvars) == 388
+        assert len(withs) == len(dvars) == 389
         keys = re.findall(r'key="(cb220_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 4

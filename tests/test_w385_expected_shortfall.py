@@ -17,6 +17,7 @@ TITLE385 = "Expected Shortfall: misura di rischio coerente"
 TITLE386 = "VaR ed ES con code pesanti (t-Student)"
 TITLE387 = "🌈📉 Misura spettrale: l'ES pesato con l'avversione al rischio"
 TITLE388 = "🧲📈 Misura entropica: rischio con avversione costante (CARA)"
+TITLE389 = "🌀📈 Wang transform: misura distorsiva del rischio"
 TITLE384 = "Delta-Gamma VaR: VaR parametrico di una posizione con opzioni"
 TITLE383 = "Jump VaR: VaR con salti di prezzo (Merton)"
 TITLE382 = "Hedge VaR: copertura ottimale con futures"
@@ -47,7 +48,7 @@ class TestRegistry385:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert len(titoli) == len(dvars) == len(withs) == 388
+        assert len(titoli) == len(dvars) == len(withs) == 389
         assert "tab385" in dvars
         assert "tab385" in withs
 
@@ -73,9 +74,9 @@ class TestRegistry385:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert dvars[-1] == "tab388"
-        assert titoli[-1] == TITLE388
-        assert withs[-1] == "tab388"
+        assert dvars[-1] == "tab389"
+        assert titoli[-1] == TITLE389
+        assert withs[-1] == "tab389"
 
 
 class TestNum:
