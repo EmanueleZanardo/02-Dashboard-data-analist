@@ -60,7 +60,7 @@ class TestBasisRiskBase:
         d1, d2 = genera_demo_basis(), genera_demo_basis()
         assert d1.equals(d2)
         assert list(d1.columns) == ["Hub (€/MWh)", "Locale (€/MWh)"]
-        assert len(d1) == 376
+        assert len(d1) == 377
         r = calcola_basis_risk(d1, "Hub (€/MWh)", "Locale (€/MWh)")
         assert r["errore"] is None and r["valido"]
         assert r["n_spike"] > 0
@@ -115,12 +115,12 @@ class TestRegistryTab199:
         src = Path(__file__).parent.parent.joinpath("app.py").read_text()
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
-        assert len(titoli) == 376
-        assert titoli[-1] == "Shock correlazioni: stress test sul rischio di coda"
+        assert len(titoli) == 377
+        assert titoli[-1] == "Backtest VaR di Kupiec: copertura e likelihood ratio"
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         assert "tab199" in dvars
         withs = re.findall(r"    with (tab\d+):", src)
         assert "tab199" in withs
-        assert len(withs) == len(dvars) == 376
+        assert len(withs) == len(dvars) == 377
         keys = re.findall(r'key="(br199_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 7
