@@ -144,6 +144,7 @@ TITLE387 = "🌈📉 Misura spettrale: l'ES pesato con l'avversione al rischio"
 TITLE388 = "🧲📈 Misura entropica: rischio con avversione costante (CARA)"
 TITLE389 = "🌀📈 Wang transform: misura distorsiva del rischio"
 TITLE390 = "🎯📈 EVaR: il bound di Chernoff piu' conservativo"
+TITLE391 = "🔀📊 RVaR: la media dei quantili tra VaR ed ES"
 TITLE276 = "💧 Cash flow at risk (CFaR)"
 
 CSV_PREZZI = "sessione,prezzo_eur_mwh\nMI1,102.5\nMI2,98.0\nMI7,105.0\n"
@@ -161,12 +162,12 @@ def _registry():
 class TestRegistryTab277:
     def test_tab277_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 390
+        assert len(titoli) == len(dvars) == len(withs) == 391
         assert TITLE277 in titoli
         assert "tab277" in dvars
         assert "tab277" in withs
         assert titoli[dvars.index("tab277")] == TITLE277
-        assert titoli[-1] == TITLE390
+        assert titoli[-1] == TITLE391
         keys = re.findall(r'key="(mi277_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

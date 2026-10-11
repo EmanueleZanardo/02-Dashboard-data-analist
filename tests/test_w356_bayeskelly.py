@@ -50,6 +50,7 @@ TITLE387 = "🌈📉 Misura spettrale: l'ES pesato con l'avversione al rischio"
 TITLE388 = "🧲📈 Misura entropica: rischio con avversione costante (CARA)"
 TITLE389 = "🌀📈 Wang transform: misura distorsiva del rischio"
 TITLE390 = "🎯📈 EVaR: il bound di Chernoff piu' conservativo"
+TITLE391 = "🔀📊 RVaR: la media dei quantili tra VaR ed ES"
 TITLE355 = "Kelly con target di volatilità: sizing riscalato sulla vol"
 TITLE354 = "Kelly con controllo drawdown: sizing frazionato al drawdown"
 TITLE353 = "Kelly adattivo: win-rate rolling e size dinamica"
@@ -85,7 +86,7 @@ def _registry():
 class TestRegistry356:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 390
+        assert len(titoli) == len(dvars) == len(withs) == 391
         assert "tab356" in dvars
         assert "tab356" in withs
 
@@ -99,9 +100,9 @@ class TestRegistry356:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab390"
-        assert titoli[-1] == TITLE390
-        assert withs[-1] == "tab390"
+        assert dvars[-1] == "tab391"
+        assert titoli[-1] == TITLE391
+        assert withs[-1] == "tab391"
 
 
 class TestNum:
