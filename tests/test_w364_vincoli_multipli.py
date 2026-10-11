@@ -26,6 +26,7 @@ TITLE372 = "Monte Carlo: VaR e Expected Shortfall di una posizione power"
 TITLE373 = "Kelly con limite VaR: sizing con vincolo di perdita massima"
 TITLE374 = "Component VaR: contributo al rischio per posizione"
 TITLE375 = "Component ES: contributo al rischio di coda per posizione"
+TITLE376 = "Shock correlazioni: stress test sul rischio di coda"
 TITLE363 = "Kelly con limite di posizione: sizing con cap f_max"
 TITLE362 = "Kelly con tre esiti: sizing con vincita, perdita parziale e perdita piena"
 TITLE361 = "Rischio di rovina (risk of ruin): probabilita' di rovina prima del target"
@@ -64,7 +65,7 @@ def _registry():
 class TestRegistry364:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 375
+        assert len(titoli) == len(dvars) == len(withs) == 376
         assert "tab364" in dvars
         assert "tab364" in withs
 
@@ -78,9 +79,9 @@ class TestRegistry364:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab375"
-        assert titoli[-1] == TITLE375
-        assert withs[-1] == "tab375"
+        assert dvars[-1] == "tab376"
+        assert titoli[-1] == TITLE376
+        assert withs[-1] == "tab376"
 
 
 class TestNum:

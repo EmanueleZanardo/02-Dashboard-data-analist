@@ -106,6 +106,7 @@ TITLE372 = "Monte Carlo: VaR e Expected Shortfall di una posizione power"
 TITLE373 = "Kelly con limite VaR: sizing con vincolo di perdita massima"
 TITLE374 = "Component VaR: contributo al rischio per posizione"
 TITLE375 = "Component ES: contributo al rischio di coda per posizione"
+TITLE376 = "Shock correlazioni: stress test sul rischio di coda"
 TITLE298 = "🚦📏 Limite VaR: quanto margine resta?"
 TITLE297 = "➕📊 Marginal VaR: quanto rischio aggiunge il nuovo trade?"
 
@@ -145,12 +146,12 @@ def _registry():
 class TestRegistryTab299:
     def test_tab299_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 375
+        assert len(titoli) == len(dvars) == len(withs) == 376
         assert TITLE299 in titoli
         assert "tab299" in dvars
         assert "tab299" in withs
         assert titoli[dvars.index("tab299")] == TITLE299
-        assert titoli[-1] == TITLE375
+        assert titoli[-1] == TITLE376
         keys = re.findall(r'key="(st299_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

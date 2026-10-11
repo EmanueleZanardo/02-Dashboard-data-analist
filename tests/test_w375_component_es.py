@@ -16,6 +16,7 @@ _F = _load("mh375_num", "mh375_z", "mh375_phi", "mh375_es_mult",
            "mh375_analisi")
 
 TITLE375 = "Component ES: contributo al rischio di coda per posizione"
+TITLE376 = "Shock correlazioni: stress test sul rischio di coda"
 TITLE374 = "Component VaR: contributo al rischio per posizione"
 TITLE373 = "Kelly con limite VaR: sizing con vincolo di perdita massima"
 TITLE372 = "Monte Carlo: VaR e Expected Shortfall di una posizione power"
@@ -74,7 +75,7 @@ def _registry():
 class TestRegistry375:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 375
+        assert len(titoli) == len(dvars) == len(withs) == 376
         assert "tab375" in dvars
         assert "tab375" in withs
 
@@ -89,9 +90,9 @@ class TestRegistry375:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab375"
-        assert titoli[-1] == TITLE375
-        assert withs[-1] == "tab375"
+        assert dvars[-1] == "tab376"
+        assert titoli[-1] == TITLE376
+        assert withs[-1] == "tab376"
 
 
 class TestNum:
