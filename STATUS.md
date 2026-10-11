@@ -142,7 +142,14 @@
 
 # STATUS.md — 02-Dashboard-data-analist (Singularity Quant ETRM)
 
-**Ultimo aggiornamento: 10/10/2026 ~02:10 CEST**
+**Ultimo aggiornamento: 11/10/2026 ~02:10 CEST**
+
+## 11/10/2026 ~02:10 CEST — aggiornamento documentale giornaliero
+- **Ciclo QA 00:40 — tab369 "Kelly con costi di transazione: f*_netto = (mu-c)/sigma^2" (commit `29073e9`, 175 file, push verificato):** breakeven mu_min=c, edge tax c/mu, curve g lorda/netta, sizing frazionato, export CSV. Demo mu=2% sigma=10% c=0.3% cap=100% -> f*_lordo=200%, f*_netto=170% CAP VINCOLANTE, g*_netta=1.445%/trade. 51 test nuovi verdi, regressione tab368 OK, collect-only 5450 righe OK, bump registry 368->369 su 173 file. Nota: primo run fallito su assert posizionamento max curva (griglia 0.03125) — fix tolleranza griglia + resume, pattern invariato.
+- **Ciclo QA 01:40 — tab370 "Kelly e drawdown: probabilita' di toccare un max drawdown" (commit `c2203951`, 176 file, push verificato via push_resilient.py):** continua la serie Kelly (367->370): P=(1-D)^(2*g/(f*sigma)^2) (barriera di rovina browniano geometrico), g=f*mu-(f*sigma)^2/2. Demo f=100% mu=2% sigma=10% D=30% -> g=1.50%/trade, P=34.3% (RISCHIO ALTO), trade per raddoppio ~46, Sharpe=0.20, f* Kelly=200%. Verdetto a 5 stati (soglie P 50/25/10%), curva P vs f + heatmap P su (f,D) + export CSV. 50 test nuovi verdi, regressione tab369 OK, collect-only 5500 righe OK, bump 369->370 su 174 file. Nessun segreto hardcoded.
+- Nota operativa: il push `c2203951` del ciclo 01:40 e' atterrato ~00:01 UTC dopo il fetch notturno (fetch iniziale mostrava 29073e9) — re-GET commits/main ha confermato c2203951, nessun conflitto.
+- **Streamlit keepalive 00:20:** https://czpox8o8x6arnxw96txnvt.streamlit.app/ 200 OK, app sveglia (nessuna stringa di sleep), nessun intervento. Nota: serve -L + cookie-jar per completare il flusso (303 -> login -> app).
+- Blocchi: vecchia chiave ENTSO-E resta nella storia git (da ruotare); app non pubblica — serve suo gesto su share.streamlit.io (Settings -> Sharing -> Public).
 
 ## 10/10/2026 ~02:10 CEST — aggiornamento documentale giornaliero
 - **Ciclo QA 09/10 23:40 — tab344 "Risk of ruin" (commit `ac603de`, push Git Data API verificato):** R = barriera^θ (Cramer-Lundberg, θ via bisezione 200 iter su p(1+fb)^-θ+q(1-f)^-θ=1); Monte Carlo deterministico (seed 344) controprova; default sizing half-Kelly da tab343. Demo: p=55%, b=1.2, f=8.75%, barriera 50% → θ=3.007, R=12.44% (PERICOLOSO). Bug evitato: prima formula Van Tharp dava R=75.7% vs MC 11.1% — sostituita. Test 43/43 nuovi verdi, regressione tab343 OK, collect-only 4481 OK.
