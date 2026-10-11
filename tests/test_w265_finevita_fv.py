@@ -146,6 +146,7 @@ TITLE379 = "Mappa di rottura: superficie VaR su shock congiunti vol+corr"
 TITLE380 = "Liquidity-adjusted VaR: VaR + costo di liquidazione"
 TITLE381 = "Component VaR: attribution del VaR per asset"
 TITLE382 = "Hedge VaR: copertura ottimale con futures"
+TITLE383 = "Jump VaR: VaR con salti di prezzo (Merton)"
 TITLE264 = "\U0001F4DC Garanzie di origine: costo del 100% rinnovabile"
 
 PROD0 = 100000.0
@@ -168,12 +169,12 @@ def _registry():
 class TestRegistryTab265:
     def test_tab265_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 382
+        assert len(titoli) == len(dvars) == len(withs) == 383
         assert TITLE265 in titoli
         assert "tab265" in dvars
         assert "tab265" in withs
         assert titoli[dvars.index("tab265")] == TITLE265
-        assert titoli[-1] == TITLE382
+        assert titoli[-1] == TITLE383
         keys = re.findall(r'key="(fv265_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

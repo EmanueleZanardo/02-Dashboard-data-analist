@@ -127,6 +127,7 @@ TITLE379 = "Mappa di rottura: superficie VaR su shock congiunti vol+corr"
 TITLE380 = "Liquidity-adjusted VaR: VaR + costo di liquidazione"
 TITLE381 = "Component VaR: attribution del VaR per asset"
 TITLE382 = "Hedge VaR: copertura ottimale con futures"
+TITLE383 = "Jump VaR: VaR con salti di prezzo (Merton)"
 TITLE286 = "⛽ Basis gas TTF–PSV"
 TITLE285 = "\U0001F6DB\uFE0F Differenziali greggio: sweet vs sour"
 TITLE284 = "\U0001F3ED Unit commitment CCGT: accendere o no?"
@@ -153,12 +154,12 @@ def _registry():
 class TestRegistryTab287:
     def test_tab287_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 382
+        assert len(titoli) == len(dvars) == len(withs) == 383
         assert TITLE287 in titoli
         assert "tab287" in dvars
         assert "tab287" in withs
         assert titoli[dvars.index("tab287")] == TITLE287
-        assert titoli[-1] == TITLE382
+        assert titoli[-1] == TITLE383
         keys = re.findall(r'key="(rg287_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

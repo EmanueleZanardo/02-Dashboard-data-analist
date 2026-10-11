@@ -16,6 +16,7 @@ _F = _load("mh382_num", "mh382_z", "mh382_hedge_ratio",
            "mh382_verdetto", "mh382_mappa")
 
 TITLE382 = "Hedge VaR: copertura ottimale con futures"
+TITLE383 = "Jump VaR: VaR con salti di prezzo (Merton)"
 TITLE381 = "Component VaR: attribution del VaR per asset"
 TITLE380 = "Liquidity-adjusted VaR: VaR + costo di liquidazione"
 TITLE379 = "Mappa di rottura: superficie VaR su shock congiunti vol+corr"
@@ -51,7 +52,7 @@ def _registry():
 class TestRegistry382:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 382
+        assert len(titoli) == len(dvars) == len(withs) == 383
         assert "tab382" in dvars
         assert "tab382" in withs
 
@@ -66,9 +67,9 @@ class TestRegistry382:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab382"
-        assert titoli[-1] == TITLE382
-        assert withs[-1] == "tab382"
+        assert dvars[-1] == "tab383"
+        assert titoli[-1] == TITLE383
+        assert withs[-1] == "tab383"
 
 
 class TestNum:

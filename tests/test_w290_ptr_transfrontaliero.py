@@ -126,6 +126,7 @@ TITLE379 = "Mappa di rottura: superficie VaR su shock congiunti vol+corr"
 TITLE380 = "Liquidity-adjusted VaR: VaR + costo di liquidazione"
 TITLE381 = "Component VaR: attribution del VaR per asset"
 TITLE382 = "Hedge VaR: copertura ottimale con futures"
+TITLE383 = "Jump VaR: VaR con salti di prezzo (Merton)"
 TITLE289 = "⚫🔥 Clean dark spread: margine centrale a carbone"
 TITLE288 = "⚡🔥 Clean spark spread: margine centrale a gas"
 TITLE287 = "🚢⚡ Rigassificazione GNL: margine terminale"
@@ -150,12 +151,12 @@ def _registry():
 class TestRegistryTab290:
     def test_tab290_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 382
+        assert len(titoli) == len(dvars) == len(withs) == 383
         assert TITLE290 in titoli
         assert "tab290" in dvars
         assert "tab290" in withs
         assert titoli[dvars.index("tab290")] == TITLE290
-        assert titoli[-1] == TITLE382
+        assert titoli[-1] == TITLE383
         keys = re.findall(r'key="(ptr290_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
