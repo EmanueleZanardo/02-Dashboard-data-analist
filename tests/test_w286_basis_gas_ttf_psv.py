@@ -120,6 +120,7 @@ TITLE371 = "Kelly frazionario: frazione ottima per un budget di volatilità"
 TITLE372 = "Monte Carlo: VaR e Expected Shortfall di una posizione power"
 TITLE373 = "Kelly con limite VaR: sizing con vincolo di perdita massima"
 TITLE374 = "Component VaR: contributo al rischio per posizione"
+TITLE375 = "Component ES: contributo al rischio di coda per posizione"
 TITLE285 = "\U0001F6DB\uFE0F Differenziali greggio: sweet vs sour"
 TITLE284 = "\U0001F3ED Unit commitment CCGT: accendere o no?"
 TITLE283 = "\U0001F6E2\uFE0F Carry petrolio: contango & stoccaggio fisico"
@@ -147,12 +148,12 @@ def _registry():
 class TestRegistryTab286:
     def test_tab286_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 374
+        assert len(titoli) == len(dvars) == len(withs) == 375
         assert TITLE286 in titoli
         assert "tab286" in dvars
         assert "tab286" in withs
         assert titoli[dvars.index("tab286")] == TITLE286
-        assert titoli[-1] == TITLE374
+        assert titoli[-1] == TITLE375
         keys = re.findall(r'key="(bn286_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

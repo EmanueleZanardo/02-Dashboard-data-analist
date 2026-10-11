@@ -133,10 +133,10 @@ class TestRegistryTab211:
         src = APP.read_text(encoding="utf-8")
         m = re.search(r"st\.tabs\(\[([^\]]*?)\]\)", src, re.S)
         titoli = eval("[" + m.group(1) + "]")
-        assert len(titoli) == 374
-        assert titoli[-1] == "Component VaR: contributo al rischio per posizione"
+        assert len(titoli) == 375
+        assert titoli[-1] == "Component ES: contributo al rischio di coda per posizione"
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
-        assert len(dvars) == 374 and "tab211" in dvars
+        assert len(dvars) == 375 and "tab211" in dvars
         withs = re.findall(r"    with (tab\d+):", src)
-        assert len(withs) == 374 and "tab211" in withs
+        assert len(withs) == 375 and "tab211" in withs

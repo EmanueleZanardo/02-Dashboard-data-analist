@@ -71,7 +71,7 @@ class TestRollingVarBase:
         d1, d2 = genera_demo_rolling_risk(), genera_demo_rolling_risk()
         assert d1.equals(d2)
         assert d1.name == "Costo (€/giorno)"
-        assert len(d1) == 374
+        assert len(d1) == 375
         r = calcola_rolling_var(d1)
         assert r["errore"] is None and r["valido"]
         assert r["var_attuale"] < r["es_attuale"]
@@ -128,12 +128,12 @@ class TestRegistryTab200:
         src = Path(__file__).parent.parent.joinpath("app.py").read_text()
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
-        assert len(titoli) == 374
-        assert titoli[-1] == "Component VaR: contributo al rischio per posizione"
+        assert len(titoli) == 375
+        assert titoli[-1] == "Component ES: contributo al rischio di coda per posizione"
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         assert "tab200" in dvars
         withs = re.findall(r"    with (tab\d+):", src)
         assert "tab200" in withs
-        assert len(withs) == len(dvars) == 374
+        assert len(withs) == len(dvars) == 375
         keys = re.findall(r'key="(rv200_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 6
