@@ -185,7 +185,7 @@ check("sg cap zero -> invalido", not stocc(_sg([10.0, 50.0]), 0.0, 5.0, 5.0)["va
 check("sg 1 giorno -> invalido", not stocc(_sg([10.0]), 10.0, 5.0, 5.0)["valido"])
 gm1 = mgas(__import__("datetime").date(2026, 1, 1), __import__("datetime").date(2026, 12, 31))
 gm2 = mgas(__import__("datetime").date(2026, 1, 1), __import__("datetime").date(2026, 12, 31))
-check("sg mock deterministico", gm1.equals(gm2) and len(gm1) == 372)
+check("sg mock deterministico", gm1.equals(gm2) and len(gm1) == 373)
 check("sg mock inverno > estate",
       gm1[gm1.index.month == 1].mean() > gm1[gm1.index.month == 7].mean() + 5.0)
 
