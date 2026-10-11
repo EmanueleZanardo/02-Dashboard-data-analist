@@ -73,6 +73,7 @@ TITLE389 = "🌀📈 Wang transform: misura distorsiva del rischio"
 TITLE390 = "🎯📈 EVaR: il bound di Chernoff piu' conservativo"
 TITLE391 = "🔀📊 RVaR: la media dei quantili tra VaR ed ES"
 TITLE392 = "🎯📊 Median Shortfall: la mediana della coda, robusta tra VaR ed ES"
+TITLE393 = "🎯📉 LPM: il rischio downside contro un target"
 TITLE341 = "📐 K-ratio: la regolarità della crescita dell'equity"
 TITLE340 = "📉 Calmar ratio: il rendimento annuo per unità di max drawdown"
 TITLE339 = "📉 Sortino ratio: il rendimento per unità di rischio al ribasso"
@@ -108,7 +109,7 @@ def _demo():
 class TestRegistry342:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 392
+        assert len(titoli) == len(dvars) == len(withs) == 393
         assert "tab342" in dvars
         assert "tab342" in withs
 
@@ -121,9 +122,9 @@ class TestRegistry342:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab392"
-        assert titoli[-1] == TITLE392
-        assert withs[-1] == "tab392"
+        assert dvars[-1] == "tab393"
+        assert titoli[-1] == TITLE393
+        assert withs[-1] == "tab393"
 
 
 class TestNum:

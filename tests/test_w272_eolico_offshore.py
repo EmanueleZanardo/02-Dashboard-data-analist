@@ -156,6 +156,7 @@ TITLE389 = "🌀📈 Wang transform: misura distorsiva del rischio"
 TITLE390 = "🎯📈 EVaR: il bound di Chernoff piu' conservativo"
 TITLE391 = "🔀📊 RVaR: la media dei quantili tra VaR ed ES"
 TITLE392 = "🎯📊 Median Shortfall: la mediana della coda, robusta tra VaR ed ES"
+TITLE393 = "🎯📉 LPM: il rischio downside contro un target"
 TITLE271 = "☀️ Solare termodinamico (CSP): business case"
 TITLE270 = "🔥 Geotermia profonda: business case"
 
@@ -187,12 +188,12 @@ def _registry():
 class TestRegistryTab272:
     def test_tab272_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 392
+        assert len(titoli) == len(dvars) == len(withs) == 393
         assert TITLE272 in titoli
         assert "tab272" in dvars
         assert "tab272" in withs
         assert titoli[dvars.index("tab272")] == TITLE272
-        assert titoli[-1] == TITLE392
+        assert titoli[-1] == TITLE393
         keys = re.findall(r'key="(eo272_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
