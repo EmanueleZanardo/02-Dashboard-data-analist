@@ -135,6 +135,7 @@ TITLE386 = "VaR ed ES con code pesanti (t-Student)"
 TITLE387 = "🌈📉 Misura spettrale: l'ES pesato con l'avversione al rischio"
 TITLE388 = "🧲📈 Misura entropica: rischio con avversione costante (CARA)"
 TITLE389 = "🌀📈 Wang transform: misura distorsiva del rischio"
+TITLE390 = "🎯📈 EVaR: il bound di Chernoff piu' conservativo"
 TITLE282 = "🧪 Margine petrolchimico: nafta \u2192 etilene"
 TITLE281 = "🛢️ Crack spread: margine raffinazione 3-2-1"
 
@@ -160,12 +161,12 @@ def _registry():
 class TestRegistryTab283:
     def test_tab283_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 389
+        assert len(titoli) == len(dvars) == len(withs) == 390
         assert TITLE283 in titoli
         assert "tab283" in dvars
         assert "tab283" in withs
         assert titoli[dvars.index("tab283")] == TITLE283
-        assert titoli[-1] == TITLE389
+        assert titoli[-1] == TITLE390
         keys = re.findall(r'key="(po283_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

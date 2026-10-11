@@ -156,6 +156,7 @@ TITLE386 = "VaR ed ES con code pesanti (t-Student)"
 TITLE387 = "🌈📉 Misura spettrale: l'ES pesato con l'avversione al rischio"
 TITLE388 = "🧲📈 Misura entropica: rischio con avversione costante (CARA)"
 TITLE389 = "🌀📈 Wang transform: misura distorsiva del rischio"
+TITLE390 = "🎯📈 EVaR: il bound di Chernoff piu' conservativo"
 TITLE261 = "🏢 PUE & costo data center"
 
 # Parametri di riferimento usati nei test
@@ -178,12 +179,12 @@ def _registry():
 class TestRegistryTab262:
     def test_tab262_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 389
+        assert len(titoli) == len(dvars) == len(withs) == 390
         assert TITLE262 in titoli
         assert "tab262" in dvars
         assert "tab262" in withs
         assert titoli[dvars.index("tab262")] == TITLE262
-        assert titoli[-1] == TITLE389
+        assert titoli[-1] == TITLE390
         keys = re.findall(r'key="(gen262_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 10
 

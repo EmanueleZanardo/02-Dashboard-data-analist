@@ -1,0 +1,249 @@
+"""Test tab390 '🎯📈 EVaR: il bound di Chernoff piu' conservativo': registry + funzioni pure."""
+
+import math
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from appfuncs import load as _load
+
+_F = _load("mh390_num", "mh390_evar_closed", "mh390_zstar", "mh390_evar_opt",
+           "mh390_var", "mh390_es", "mh390_extra",
+           "mh390_verdetto", "mh390_mappa")
+
+TITLE390 = "🎯📈 EVaR: il bound di Chernoff piu' conservativo"
+TITLE389 = "🌀📈 Wang transform: misura distorsiva del rischio"
+TITLE388 = "🧲📈 Misura entropica: rischio con avversione costante (CARA)"
+TITLE387 = "🌈📉 Misura spettrale: l'ES pesato con l'avversione al rischio"
+TITLE386 = "VaR ed ES con code pesanti (t-Student)"
+TITLE385 = "Expected Shortfall: misura di rischio coerente"
+MU = 0.0
+SIG = 10000.0
+ALPHA = 0.99
+EVAR = 30348.542587702923
+VAR_ = 23263.47874040841
+ES_ = 26652.142203458054
+EXTRA = 0.13869055462886104
+RATIO = 1.138690554628861
+ZSTAR = 0.00030348542587702927
+
+
+class TestRegistry390:
+    def test_conteggi(self):
+        import re
+        src = (Path(__file__).resolve().parent.parent / "app.py"
+               ).read_text(encoding="utf-8")
+        line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
+        titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
+        dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
+        withs = re.findall(r"with (tab\d+):", src)
+        assert len(titoli) == len(dvars) == len(withs) == 390
+        assert "tab390" in dvars
+        assert "tab390" in withs
+
+    def test_titoli_allineati_385_386_387_388_389_390(self):
+        import re
+        src = (Path(__file__).resolve().parent.parent / "app.py"
+               ).read_text(encoding="utf-8")
+        line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
+        titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
+        dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
+        assert titoli[dvars.index("tab385")] == TITLE385
+        assert titoli[dvars.index("tab386")] == TITLE386
+        assert titoli[dvars.index("tab387")] == TITLE387
+        assert titoli[dvars.index("tab388")] == TITLE388
+        assert titoli[dvars.index("tab389")] == TITLE389
+        assert titoli[dvars.index("tab390")] == TITLE390
+
+    def test_ultima_tab(self):
+        import re
+        src = (Path(__file__).resolve().parent.parent / "app.py"
+               ).read_text(encoding="utf-8")
+        line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
+        titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
+        dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
+        withs = re.findall(r"with (tab\d+):", src)
+        assert dvars[-1] == "tab390"
+        assert titoli[-1] == TITLE390
+        assert withs[-1] == "tab390"
+
+
+class TestNum:
+    def test_num_ok(self):
+        assert _F["mh390_num"](0.5, "x") == 0.5
+
+    def test_num_bool_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh390_num"](True, "x")
+
+    def test_num_nan_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh390_num"](float("nan"), "x")
+
+    def test_num_inf_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh390_num"](float("inf"), "x")
+
+
+class TestEvarClosed:
+    def test_demo(self):
+        assert _F["mh390_evar_closed"](MU, SIG, ALPHA) == pytest.approx(EVAR)
+
+    def test_forma_chiusa(self):
+        assert _F["mh390_evar_closed"](MU, SIG, ALPHA) == pytest.approx(
+            MU + SIG * math.sqrt(-2.0 * math.log(1.0 - ALPHA)))
+
+    def test_monotona_alpha(self):
+        assert _F["mh390_evar_closed"](MU, SIG, 0.95) < \
+            _F["mh390_evar_closed"](MU, SIG, 0.975) < EVAR
+
+    def test_traslazione(self):
+        # equivarianza per traslazione: EVaR(mu + c) = EVaR(mu) + c
+        assert _F["mh390_evar_closed"](5000.0, SIG, ALPHA) - EVAR == \
+            pytest.approx(5000.0)
+
+    def test_scaling_sig(self):
+        assert _F["mh390_evar_closed"](MU, 2 * SIG, ALPHA) == \
+            pytest.approx(2 * EVAR)
+
+    def test_sig_zero(self):
+        assert _F["mh390_evar_closed"](2000.0, 0.0, ALPHA) == 2000.0
+
+    def test_gerarchia(self):
+        # il bound di Chernoff e' il piu' conservativo
+        assert EVAR >= ES_ >= VAR_
+
+    def test_sig_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh390_evar_closed"](MU, -1.0, ALPHA)
+
+    def test_alpha_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh390_evar_closed"](MU, SIG, 0.5)
+        with pytest.raises(ValueError):
+            _F["mh390_evar_closed"](MU, SIG, 1.0)
+
+
+class TestEvarOpt:
+    def test_uguale_forma_chiusa(self):
+        assert _F["mh390_evar_opt"](MU, SIG, ALPHA) == \
+            pytest.approx(EVAR, rel=1e-6)
+
+    def test_altro_punto(self):
+        assert _F["mh390_evar_opt"](5000.0, 20000.0, 0.975) == \
+            pytest.approx(_F["mh390_evar_closed"](5000.0, 20000.0, 0.975),
+                          rel=1e-6)
+
+    def test_deterministico(self):
+        assert _F["mh390_evar_opt"](MU, SIG, ALPHA) == \
+            _F["mh390_evar_opt"](MU, SIG, ALPHA)
+
+    def test_zstar_positivo(self):
+        assert ZSTAR > 0.0
+        assert _F["mh390_zstar"](SIG, ALPHA) == pytest.approx(ZSTAR)
+
+    def test_zstar_coerente(self):
+        # il bound valutato in z* ridà la forma chiusa
+        h = (MU * ZSTAR + 0.5 * SIG * SIG * ZSTAR * ZSTAR -
+             math.log(1.0 - ALPHA)) / ZSTAR
+        assert h == pytest.approx(EVAR, rel=1e-12)
+
+    def test_sig_zero_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh390_evar_opt"](MU, 0.0, ALPHA)
+
+    def test_n_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh390_evar_opt"](MU, SIG, ALPHA, 8)
+
+    def test_alpha_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh390_evar_opt"](MU, SIG, 0.4)
+
+
+class TestVarEs:
+    def test_demo(self):
+        assert _F["mh390_var"](MU, SIG, ALPHA) == pytest.approx(VAR_)
+        assert _F["mh390_es"](MU, SIG, ALPHA) == pytest.approx(ES_)
+
+    def test_forma_chiusa(self):
+        from statistics import NormalDist
+        z = NormalDist().inv_cdf(ALPHA)
+        phi = math.exp(-0.5 * z * z) / math.sqrt(2.0 * math.pi)
+        assert _F["mh390_var"](MU, SIG, ALPHA) == pytest.approx(
+            MU + SIG * z)
+        assert _F["mh390_es"](MU, SIG, ALPHA) == pytest.approx(
+            MU + SIG * phi / (1.0 - ALPHA))
+
+    def test_ratio_normale_99(self):
+        assert ES_ / VAR_ == pytest.approx(1.1457, abs=1e-3)
+        assert EVAR / VAR_ == pytest.approx(1.3046, abs=1e-3)
+
+    def test_alpha_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh390_var"](MU, SIG, 0.5)
+        with pytest.raises(ValueError):
+            _F["mh390_es"](MU, SIG, 1.0)
+
+    def test_sig_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh390_var"](MU, -1.0, ALPHA)
+
+
+class TestExtraVerdetto:
+    def test_demo(self):
+        assert _F["mh390_extra"](EVAR, ES_) == pytest.approx(EXTRA)
+        assert _F["mh390_verdetto"](EXTRA).startswith("PRUDENTE")
+
+    def test_bordi(self):
+        assert _F["mh390_verdetto"](-0.90).startswith("MENO CONSERVATIVA")
+        assert _F["mh390_verdetto"](-0.25).startswith("MENO CONSERVATIVA")
+        assert _F["mh390_verdetto"](-0.2499).startswith("IN LINEA")
+        assert _F["mh390_verdetto"](0.0999).startswith("IN LINEA")
+        assert _F["mh390_verdetto"](0.10).startswith("PRUDENTE")
+        assert _F["mh390_verdetto"](0.4999).startswith("PRUDENTE")
+        assert _F["mh390_verdetto"](0.50).startswith("ESTREMA")
+        assert _F["mh390_verdetto"](math.inf).startswith("ESTREMA")
+
+    def test_extra_inf(self):
+        assert _F["mh390_extra"](100.0, 0.0) == math.inf
+
+    def test_extra_zero(self):
+        assert _F["mh390_extra"](0.0, 0.0) == 0.0
+
+    def test_es_negativo_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh390_extra"](EVAR, -1.0)
+
+    def test_nan_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh390_verdetto"](float("nan"))
+
+
+class TestMappa:
+    def _b(self):
+        return _F["mh390_mappa"](MU, SIG, ALPHA)
+
+    def test_demo(self):
+        b = self._b()
+        assert b["mu"] == MU
+        assert b["sig"] == SIG
+        assert b["alpha"] == ALPHA
+        assert b["evar"] == pytest.approx(EVAR)
+        assert b["var"] == pytest.approx(VAR_)
+        assert b["es"] == pytest.approx(ES_)
+        assert b["zstar"] == pytest.approx(ZSTAR)
+        assert b["extra"] == pytest.approx(EXTRA)
+        assert b["ratio"] == pytest.approx(RATIO)
+        assert b["verdetto"].startswith("PRUDENTE")
+
+    def test_coerenza(self):
+        b = self._b()
+        assert b["evar"] == pytest.approx(
+            b["mu"] + b["sig"] * math.sqrt(-2.0 * math.log(1.0 - b["alpha"])))
+        assert b["extra"] == pytest.approx(b["evar"] / b["es"] - 1.0)
+        assert b["ratio"] == pytest.approx(b["evar"] / b["es"])
+        assert b["zstar"] == pytest.approx(
+            math.sqrt(-2.0 * math.log(1.0 - b["alpha"])) / b["sig"])

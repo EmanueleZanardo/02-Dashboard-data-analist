@@ -92,6 +92,7 @@ TITLE386 = "VaR ed ES con code pesanti (t-Student)"
 TITLE387 = "🌈📉 Misura spettrale: l'ES pesato con l'avversione al rischio"
 TITLE388 = "🧲📈 Misura entropica: rischio con avversione costante (CARA)"
 TITLE389 = "🌀📈 Wang transform: misura distorsiva del rischio"
+TITLE390 = "🎯📈 EVaR: il bound di Chernoff piu' conservativo"
 TITLE317 = "🧠📉 CAViaR: il VaR adattivo che impara dai rendimenti"
 TITLE316 = "🌊📉 POT-GPD: il VaR dalla coda paretiana oltre soglia"
 BOOK_DEMO = 'Gas TTF front-month;2500000;3,2;gas\nPower DE baseload Q1-27;1800000;2,8;power\nCO2 EUA Dic-26;900000;2,5;co2\nSpread PSV-TTF;600000;4,1;basis\nSpark spread CCGT 55%;1200000;3,6;power\nCarbone API2 ARA;700000;3,0;coal'
@@ -133,7 +134,7 @@ def _ris_demo():
 class TestRegistry318:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 389
+        assert len(titoli) == len(dvars) == len(withs) == 390
         assert TITLE318 in titoli
         assert "tab318" in dvars
         assert "    with tab318:" in src
@@ -146,8 +147,8 @@ class TestRegistry318:
 
     def test_ultima_tab(self):
         _, titoli, dvars, _ = _registry()
-        assert titoli[-1] == TITLE389
-        assert dvars[-1] == "tab389"
+        assert titoli[-1] == TITLE390
+        assert dvars[-1] == "tab390"
 
 
 class TestValidatori:
