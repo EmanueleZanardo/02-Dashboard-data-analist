@@ -16,6 +16,7 @@ _F = _load("mh370_num", "mh370_growth", "mh370_vol_log",
            "mh370_curva_rischio", "mh370_mappa", "mh370_analisi")
 
 TITLE370 = "Kelly e drawdown: probabilità di toccare un max drawdown"
+TITLE371 = "Kelly frazionario: frazione ottima per un budget di volatilità"
 TITLE369 = "Kelly con costi di transazione: f* netto = (μ-c)/σ²"
 TITLE368 = "Kelly su ritorni continui: f* = μ/σ² e volatility drag"
 TITLE367 = "Kelly: mappa di sensibilità f* e crescita su (p, b)"
@@ -46,7 +47,7 @@ def _registry():
 class TestRegistry370:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 370
+        assert len(titoli) == len(dvars) == len(withs) == 371
         assert "tab370" in dvars
         assert "tab370" in withs
 
@@ -61,9 +62,9 @@ class TestRegistry370:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab370"
-        assert titoli[-1] == TITLE370
-        assert withs[-1] == "tab370"
+        assert dvars[-1] == "tab371"
+        assert titoli[-1] == TITLE371
+        assert withs[-1] == "tab371"
 
 
 class TestNum:

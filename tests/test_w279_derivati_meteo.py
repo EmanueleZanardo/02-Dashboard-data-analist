@@ -124,6 +124,7 @@ TITLE367 = "Kelly: mappa di sensibilità f* e crescita su (p, b)"
 TITLE368 = "Kelly su ritorni continui: f* = μ/σ² e volatility drag"
 TITLE369 = "Kelly con costi di transazione: f* netto = (μ-c)/σ²"
 TITLE370 = "Kelly e drawdown: probabilità di toccare un max drawdown"
+TITLE371 = "Kelly frazionario: frazione ottima per un budget di volatilità"
 TITLE278 = "\U0001f321\ufe0f Stress climatico: domanda e prezzo"
 TITLE277 = "\u26a1 Aste MI: scostamenti vs MGP"
 
@@ -144,12 +145,12 @@ def _registry():
 class TestRegistryTab279:
     def test_tab279_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 370
+        assert len(titoli) == len(dvars) == len(withs) == 371
         assert TITLE279 in titoli
         assert "tab279" in dvars
         assert "tab279" in withs
         assert titoli[dvars.index("tab279")] == TITLE279
-        assert titoli[-1] == TITLE370
+        assert titoli[-1] == TITLE371
         keys = re.findall(r'key="(wd279_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
