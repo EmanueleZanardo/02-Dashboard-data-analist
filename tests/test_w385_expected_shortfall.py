@@ -14,6 +14,7 @@ _F = _load("mh385_num", "mh385_phi", "mh385_ppf", "mh385_port_sigma",
            "mh385_verdetto", "mh385_tail_prob", "mh385_mappa")
 
 TITLE385 = "Expected Shortfall: misura di rischio coerente"
+TITLE386 = "VaR ed ES con code pesanti (t-Student)"
 TITLE384 = "Delta-Gamma VaR: VaR parametrico di una posizione con opzioni"
 TITLE383 = "Jump VaR: VaR con salti di prezzo (Merton)"
 TITLE382 = "Hedge VaR: copertura ottimale con futures"
@@ -44,7 +45,7 @@ class TestRegistry385:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert len(titoli) == len(dvars) == len(withs) == 385
+        assert len(titoli) == len(dvars) == len(withs) == 386
         assert "tab385" in dvars
         assert "tab385" in withs
 
@@ -70,9 +71,9 @@ class TestRegistry385:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert dvars[-1] == "tab385"
-        assert titoli[-1] == TITLE385
-        assert withs[-1] == "tab385"
+        assert dvars[-1] == "tab386"
+        assert titoli[-1] == TITLE386
+        assert withs[-1] == "tab386"
 
 
 class TestNum:
