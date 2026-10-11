@@ -128,6 +128,7 @@ TITLE378 = "Reverse stress test: quanto shock regge il limite?"
 TITLE379 = "Mappa di rottura: superficie VaR su shock congiunti vol+corr"
 TITLE380 = "Liquidity-adjusted VaR: VaR + costo di liquidazione"
 TITLE381 = "Component VaR: attribution del VaR per asset"
+TITLE382 = "Hedge VaR: copertura ottimale con futures"
 TITLE283 = "\U0001F6E2\uFE0F Carry petrolio: contango & stoccaggio fisico"
 TITLE282 = "\U0001F9EA Margine petrolchimico: nafta \u2192 etilene"
 
@@ -154,12 +155,12 @@ def _registry():
 class TestRegistryTab284:
     def test_tab284_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 381
+        assert len(titoli) == len(dvars) == len(withs) == 382
         assert TITLE284 in titoli
         assert "tab284" in dvars
         assert "tab284" in withs
         assert titoli[dvars.index("tab284")] == TITLE284
-        assert titoli[-1] == TITLE381
+        assert titoli[-1] == TITLE382
         keys = re.findall(r'key="(uc284_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
