@@ -95,6 +95,7 @@ TITLE381 = "Component VaR: attribution del VaR per asset"
 TITLE382 = "Hedge VaR: copertura ottimale con futures"
 TITLE383 = "Jump VaR: VaR con salti di prezzo (Merton)"
 TITLE384 = "Delta-Gamma VaR: VaR parametrico di una posizione con opzioni"
+TITLE385 = "Expected Shortfall: misura di rischio coerente"
 TITLE309 = "🎯💥 Rho critica: a quale correlazione il VaR tocca il limite?"
 TITLE308 = "💥📈 Stress di correlazione: quanto sale il VaR se si rompono?"
 BOOK_DEMO = ("Cal-28 Baseload power;2500000;18,5;0,4;power\n"
@@ -129,7 +130,7 @@ def _registry():
 class TestRegistry310:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 384
+        assert len(titoli) == len(dvars) == len(withs) == 385
         assert TITLE310 in titoli
         assert "tab310" in dvars
         assert "    with tab310:" in src
@@ -142,8 +143,8 @@ class TestRegistry310:
 
     def test_ultima_tab(self):
         _, titoli, dvars, _ = _registry()
-        assert titoli[-1] == TITLE384
-        assert dvars[-1] == "tab384"
+        assert titoli[-1] == TITLE385
+        assert dvars[-1] == "tab385"
 
 
 class TestValidatori:

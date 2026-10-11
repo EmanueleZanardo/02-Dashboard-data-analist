@@ -131,6 +131,7 @@ TITLE381 = "Component VaR: attribution del VaR per asset"
 TITLE382 = "Hedge VaR: copertura ottimale con futures"
 TITLE383 = "Jump VaR: VaR con salti di prezzo (Merton)"
 TITLE384 = "Delta-Gamma VaR: VaR parametrico di una posizione con opzioni"
+TITLE385 = "Expected Shortfall: misura di rischio coerente"
 TITLE287 = "🚢⚡ Rigassificazione GNL: margine terminale"
 TITLE286 = "⛽ Basis gas TTF–PSV"
 TITLE285 = "\U0001F6DB\uFE0F Differenziali greggio: sweet vs sour"
@@ -160,12 +161,12 @@ def _registry():
 class TestRegistryTab288:
     def test_tab288_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 384
+        assert len(titoli) == len(dvars) == len(withs) == 385
         assert TITLE288 in titoli
         assert "tab288" in dvars
         assert "tab288" in withs
         assert titoli[dvars.index("tab288")] == TITLE288
-        assert titoli[-1] == TITLE384
+        assert titoli[-1] == TITLE385
         keys = re.findall(r'key="(css288_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
