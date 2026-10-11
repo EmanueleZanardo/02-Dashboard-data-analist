@@ -15,6 +15,7 @@ _F = _load("mh380_num", "mh380_z", "mh380_sigma_p", "mh380_var_base",
            "mh380_verdetto", "mh380_mappa")
 
 TITLE380 = "Liquidity-adjusted VaR: VaR + costo di liquidazione"
+TITLE381 = "Component VaR: attribution del VaR per asset"
 TITLE379 = "Mappa di rottura: superficie VaR su shock congiunti vol+corr"
 TITLE378 = "Reverse stress test: quanto shock regge il limite?"
 TITLE377 = "Backtest VaR di Kupiec: copertura e likelihood ratio"
@@ -53,7 +54,7 @@ def _registry():
 class TestRegistry380:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 380
+        assert len(titoli) == len(dvars) == len(withs) == 381
         assert "tab380" in dvars
         assert "tab380" in withs
 
@@ -68,9 +69,9 @@ class TestRegistry380:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab380"
-        assert titoli[-1] == TITLE380
-        assert withs[-1] == "tab380"
+        assert dvars[-1] == "tab381"
+        assert titoli[-1] == TITLE381
+        assert withs[-1] == "tab381"
 
 
 class TestNum:

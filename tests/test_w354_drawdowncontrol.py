@@ -40,6 +40,7 @@ TITLE377 = "Backtest VaR di Kupiec: copertura e likelihood ratio"
 TITLE378 = "Reverse stress test: quanto shock regge il limite?"
 TITLE379 = "Mappa di rottura: superficie VaR su shock congiunti vol+corr"
 TITLE380 = "Liquidity-adjusted VaR: VaR + costo di liquidazione"
+TITLE381 = "Component VaR: attribution del VaR per asset"
 TITLE353 = "Kelly adattivo: win-rate rolling e size dinamica"
 TITLE352 = "Kelly con correlazione: due posizioni correlate"
 TITLE351 = "Kelly con portafoglio: due posizioni simultanee"
@@ -71,7 +72,7 @@ def _registry():
 class TestRegistry354:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 380
+        assert len(titoli) == len(dvars) == len(withs) == 381
         assert "tab354" in dvars
         assert "tab354" in withs
 
@@ -85,9 +86,9 @@ class TestRegistry354:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab380"
-        assert titoli[-1] == TITLE380
-        assert withs[-1] == "tab380"
+        assert dvars[-1] == "tab381"
+        assert titoli[-1] == TITLE381
+        assert withs[-1] == "tab381"
 
 
 class TestNum:
