@@ -64,6 +64,7 @@ TITLE380 = "Liquidity-adjusted VaR: VaR + costo di liquidazione"
 TITLE381 = "Component VaR: attribution del VaR per asset"
 TITLE382 = "Hedge VaR: copertura ottimale con futures"
 TITLE383 = "Jump VaR: VaR con salti di prezzo (Merton)"
+TITLE384 = "Delta-Gamma VaR: VaR parametrico di una posizione con opzioni"
 TITLE341 = "📐 K-ratio: la regolarità della crescita dell'equity"
 TITLE340 = "📉 Calmar ratio: il rendimento annuo per unità di max drawdown"
 TITLE339 = "📉 Sortino ratio: il rendimento per unità di rischio al ribasso"
@@ -99,7 +100,7 @@ def _demo():
 class TestRegistry342:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 383
+        assert len(titoli) == len(dvars) == len(withs) == 384
         assert "tab342" in dvars
         assert "tab342" in withs
 
@@ -112,9 +113,9 @@ class TestRegistry342:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab383"
-        assert titoli[-1] == TITLE383
-        assert withs[-1] == "tab383"
+        assert dvars[-1] == "tab384"
+        assert titoli[-1] == TITLE384
+        assert withs[-1] == "tab384"
 
 
 class TestNum:
