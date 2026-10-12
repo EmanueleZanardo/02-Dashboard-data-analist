@@ -92,6 +92,7 @@ TITLE403 = "🎯 Sharpe massimo (MS): i pesi che massimizzano il rendimento per 
 TITLE404 = "🎯 Rendimento target (TR): minima varianza a rendimento atteso fissato"
 TITLE405 = "κ Kappa ratio: un'unica famiglia per Omega e Sortino"
 TITLE406 = "📏 Tail ratio: la coda destra contro la sinistra"
+TITLE407 = "🔄 Recovery factor: quanto rende ogni euro di drawdown"
 TITLE335 = "📏 Tracking error: quanto si discosta la strategia dal benchmark?"
 TITLE334 = "🎯 Hit rate: quanto spesso la strategia batte il benchmark?"
 TITLE333 = "📊 Capture ratio: quanto cattura la strategia nei mercati su e giù?"
@@ -129,7 +130,7 @@ def _demo():
 class TestRegistry336:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 406
+        assert len(titoli) == len(dvars) == len(withs) == 407
         assert "tab336" in dvars
         assert "tab336" in withs
 
@@ -142,9 +143,9 @@ class TestRegistry336:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab406"
-        assert titoli[-1] == TITLE406
-        assert withs[-1] == "tab406"
+        assert dvars[-1] == "tab407"
+        assert titoli[-1] == TITLE407
+        assert withs[-1] == "tab407"
 
 
 class TestNum:

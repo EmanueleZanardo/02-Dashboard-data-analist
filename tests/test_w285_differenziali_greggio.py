@@ -155,6 +155,7 @@ TITLE403 = "🎯 Sharpe massimo (MS): i pesi che massimizzano il rendimento per 
 TITLE404 = "🎯 Rendimento target (TR): minima varianza a rendimento atteso fissato"
 TITLE405 = "κ Kappa ratio: un'unica famiglia per Omega e Sortino"
 TITLE406 = "📏 Tail ratio: la coda destra contro la sinistra"
+TITLE407 = "🔄 Recovery factor: quanto rende ogni euro di drawdown"
 TITLE284 = "\U0001F3ED Unit commitment CCGT: accendere o no?"
 TITLE283 = "\U0001F6E2\uFE0F Carry petrolio: contango & stoccaggio fisico"
 
@@ -183,12 +184,12 @@ def _registry():
 class TestRegistryTab285:
     def test_tab285_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 406
+        assert len(titoli) == len(dvars) == len(withs) == 407
         assert TITLE285 in titoli
         assert "tab285" in dvars
         assert "tab285" in withs
         assert titoli[dvars.index("tab285")] == TITLE285
-        assert titoli[-1] == TITLE406
+        assert titoli[-1] == TITLE407
         keys = re.findall(r'key="(gd285_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

@@ -142,6 +142,7 @@ TITLE403 = "🎯 Sharpe massimo (MS): i pesi che massimizzano il rendimento per 
 TITLE404 = "🎯 Rendimento target (TR): minima varianza a rendimento atteso fissato"
 TITLE405 = "κ Kappa ratio: un'unica famiglia per Omega e Sortino"
 TITLE406 = "📏 Tail ratio: la coda destra contro la sinistra"
+TITLE407 = "🔄 Recovery factor: quanto rende ogni euro di drawdown"
 TITLE293 = "🛡📉 Hedge ratio ottimale: quanto coprire con i futures?"
 TITLE292 = "🪓📊 Component VaR: quale posizione tagliare per prima?"
 
@@ -166,12 +167,12 @@ def _registry():
 class TestRegistryTab294:
     def test_tab294_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 406
+        assert len(titoli) == len(dvars) == len(withs) == 407
         assert TITLE294 in titoli
         assert "tab294" in dvars
         assert "tab294" in withs
         assert titoli[dvars.index("tab294")] == TITLE294
-        assert titoli[-1] == TITLE406
+        assert titoli[-1] == TITLE407
         keys = re.findall(r'key="(bv294_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

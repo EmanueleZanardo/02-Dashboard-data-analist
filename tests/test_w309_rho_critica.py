@@ -117,6 +117,7 @@ TITLE403 = "🎯 Sharpe massimo (MS): i pesi che massimizzano il rendimento per 
 TITLE404 = "🎯 Rendimento target (TR): minima varianza a rendimento atteso fissato"
 TITLE405 = "κ Kappa ratio: un'unica famiglia per Omega e Sortino"
 TITLE406 = "📏 Tail ratio: la coda destra contro la sinistra"
+TITLE407 = "🔄 Recovery factor: quanto rende ogni euro di drawdown"
 TITLE308 = "💥📈 Stress di correlazione: quanto sale il VaR se si rompono?"
 TITLE307 = "🌊📉 Expected Shortfall: la perdita oltre il VaR"
 BOOK_DEMO = ("Cal-28 Baseload power;2500000;18,5;power\n"
@@ -154,7 +155,7 @@ def _registry():
 class TestRegistry309:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 406
+        assert len(titoli) == len(dvars) == len(withs) == 407
         assert TITLE309 in titoli
         assert "tab309" in dvars
         assert "    with tab309:" in src
@@ -167,8 +168,8 @@ class TestRegistry309:
 
     def test_ultima_tab(self):
         _, titoli, dvars, _ = _registry()
-        assert titoli[-1] == TITLE406
-        assert dvars[-1] == "tab406"
+        assert titoli[-1] == TITLE407
+        assert dvars[-1] == "tab407"
 
 
 class TestValidatori:
