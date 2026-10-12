@@ -1,0 +1,223 @@
+"""Test tab414 '🎯 Probabilistic Sharpe ratio: lo Sharpe e' davvero significativo?': registry + funzioni pure."""
+
+import math
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from appfuncs import load as _load
+
+_F = _load("mh414_num", "mh414_parse_serie", "mh414_phi", "mh414_stats",
+           "mh414_sigma2", "mh414_psr_da_stat", "mh414_verdetto",
+           "mh414_mappa")
+
+TITLE414 = "🎯 Probabilistic Sharpe ratio: lo Sharpe e' davvero significativo?"
+TITLE413 = "📐 Sharpe corretto: il rendimento per unita' di rischio con code grasse"
+TITLE412 = "🎯 Omega ratio: quanto upside prendi per ogni euro di downside"
+TITLE411 = "🌊 Volatility drag: quanto rendimento mangia la volatilita'"
+TITLE410 = "⚖ Gain-to-Pain ratio: quanto guadagno per ogni euro perso"
+TITLE409 = "🛟 Sterling ratio: quanto rende contro i K peggiori drawdown"
+DEMO = '3.5\n3.9\n2.6\n4.3\n2.9\n4.8\n2.1\n3.7\n3.2\n4.5\n2.8\n2.4\n4.1\n3.6\n5.0\n2.3\n3.1\n3.8\n2.5\n4.6\n3.0\n4.2\n2.2\n3.4\n4.0\n2.7\n4.7\n3.3\n2.0\n4.4\n-9.5\n-7.2\n-14.0\n-8.3\n-6.1\n-10.2'
+PSR = 0.8981260210565327
+PSR_N = 0.9449323153940414
+SIG = 1.2570048886573466
+MINTRL = 59.62306872222972
+
+
+class TestRegistry414:
+    def test_conteggi(self):
+        import re
+        src = (Path(__file__).resolve().parent.parent / "app.py"
+               ).read_text(encoding="utf-8")
+        line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
+        titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
+        dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
+        withs = re.findall(r"with (tab\d+):", src)
+        assert len(titoli) == len(dvars) == len(withs) == 414
+        assert "tab414" in dvars
+        assert "tab414" in withs
+
+    def test_titoli_allineati_409_410_411_412_413_414(self):
+        import re
+        src = (Path(__file__).resolve().parent.parent / "app.py"
+               ).read_text(encoding="utf-8")
+        line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
+        titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
+        dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
+        assert titoli[dvars.index("tab409")] == TITLE409
+        assert titoli[dvars.index("tab410")] == TITLE410
+        assert titoli[dvars.index("tab411")] == TITLE411
+        assert titoli[dvars.index("tab412")] == TITLE412
+        assert titoli[dvars.index("tab413")] == TITLE413
+        assert titoli[dvars.index("tab414")] == TITLE414
+
+    def test_ultima_tab(self):
+        import re
+        src = (Path(__file__).resolve().parent.parent / "app.py"
+               ).read_text(encoding="utf-8")
+        line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
+        titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
+        dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
+        withs = re.findall(r"with (tab\d+):", src)
+        assert dvars[-1] == "tab414"
+        assert titoli[-1] == TITLE414
+        assert withs[-1] == "tab414"
+
+
+class TestPSR414:
+    def _xs(self):
+        return _F["mh414_parse_serie"](DEMO)
+
+    def test_demo_valori(self):
+        xs = self._xs()
+        assert len(xs) == 36
+        m = _F["mh414_mappa"](xs)
+        assert abs(m["psr"] - PSR) < 1e-12
+        assert abs(m["psr_norm"] - PSR_N) < 1e-12
+        assert abs(m["sigma"] - SIG) < 1e-12
+        assert abs(m["mintrl"] - MINTRL) < 1e-9
+        assert m["n_per"] == 36
+        assert m["rf"] == 0.0
+        assert m["sr0"] == 0.0
+        # 0.8981 -> ACCETTABILE: evidenza ma non significativita' al 95%
+        assert m["verdetto"].startswith("ACCETTABILE")
+        # le code grasse tagliano quasi 5pp di confidenza vs normale
+        assert m["haircut_pp"] > 4.0
+        # MinTRL: servono ~60 periodi, contro ~38 dell'ipotesi normale
+        assert m["mintrl"] > 55.0
+
+    def test_definizione_psr_a_mano(self):
+        # sigma_SR^2 = 1-sk*SR+((ku-1)/4)*SR^2; PSR = Phi(SR*sqrt(n-1)/sig)
+        xs = list(self._xs())
+        n = len(xs)
+        mu = sum(xs) / n
+        ss = sum((x - mu) ** 2 for x in xs)
+        vpop = ss / n
+        std = math.sqrt(ss / (n - 1))
+        sk = (sum((x - mu) ** 3 for x in xs) / n) / (vpop ** 1.5)
+        ku = (sum((x - mu) ** 4 for x in xs) / n) / (vpop ** 2)
+        sr = mu / std
+        s2 = 1.0 - sk * sr + ((ku - 1.0) / 4.0) * sr ** 2
+        z = sr * math.sqrt(n - 1) / math.sqrt(s2)
+        psr = 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
+        z_n = sr * math.sqrt(n - 1)
+        psr_n = 0.5 * (1.0 + math.erf(z_n / math.sqrt(2.0)))
+        p = _F["mh414_psr_da_stat"](_F["mh414_stats"](tuple(xs), 0.0), 0.0)
+        assert abs(p["sigma2"] - s2) < 1e-12
+        assert abs(p["z"] - z) < 1e-12
+        assert abs(p["psr"] - psr) < 1e-12
+        assert abs(p["psr_norm"] - psr_n) < 1e-12
+        assert abs(p["haircut_pp"] - (psr_n - psr) * 100.0) < 1e-12
+
+    def test_phi(self):
+        assert abs(_F["mh414_phi"](0.0) - 0.5) < 1e-15
+        assert abs(_F["mh414_phi"](1.6448536269514722) - 0.95) < 1e-9
+        assert abs(_F["mh414_phi"](10.0) - 1.0) < 1e-12
+        assert _F["mh414_phi"](-10.0) < 1e-12
+        with pytest.raises(ValueError):
+            _F["mh414_phi"](float("nan"))
+
+    def test_sigma2(self):
+        F = _F
+        # momenti estremi -> ValueError (1 - 3 + 0.75 < 0)
+        with pytest.raises(ValueError):
+            F["mh414_sigma2"](3.0, 4.0, 1.0)
+        # normalita' + SR=0 -> varianza esattamente 1
+        assert abs(F["mh414_sigma2"](0.0, 3.0, 0.0) - 1.0) < 1e-12
+        with pytest.raises(ValueError):
+            F["mh414_sigma2"](float("nan"), 3.0, 0.5)
+        with pytest.raises(ValueError):
+            F["mh414_sigma2"](0.0, 3.0, True)
+
+    def test_hurdle_e_mintrl(self):
+        F = _F
+        s = F["mh414_stats"](self._xs(), 0.0)
+        pm = F["mh414_psr_da_stat"](s, -0.5)
+        p0 = F["mh414_psr_da_stat"](s, 0.0)
+        pp = F["mh414_psr_da_stat"](s, 0.5)
+        # il PSR e' decrescente nell'hurdle
+        assert pm["psr"] > p0["psr"] > pp["psr"]
+        # hurdle >= Sharpe osservato -> MinTRL infinito (nessun T basta)
+        assert math.isinf(F["mh414_psr_da_stat"](s, s["sharpe"])["mintrl"])
+        assert math.isinf(F["mh414_psr_da_stat"](s, 5.0)["mintrl"])
+        assert not math.isinf(p0["mintrl"])
+        assert p0["mintrl"] > 1.0
+
+    def test_serie_simmetrica_psr_quasi_normale(self):
+        # serie quasi normale: la correzione code grasse resta ~neutra
+        import random
+        random.seed(7)
+        xs = tuple(random.gauss(0.5, 2.0) for _ in range(60))
+        s = _F["mh414_stats"](xs, 0.0)
+        p = _F["mh414_psr_da_stat"](s, 0.0)
+        assert abs(p["sigma"] - 1.0) < 0.15
+        assert abs(p["psr"] - p["psr_norm"]) < 0.05
+
+    def test_verdetto_soglie(self):
+        F = _F
+        assert F["mh414_verdetto"](0.0).startswith("NON SIGNIFICATIVO")
+        assert F["mh414_verdetto"](0.49).startswith("NON SIGNIFICATIVO")
+        assert F["mh414_verdetto"](0.50).startswith("DEBOLE")
+        assert F["mh414_verdetto"](0.74).startswith("DEBOLE")
+        assert F["mh414_verdetto"](0.75).startswith("ACCETTABILE")
+        assert F["mh414_verdetto"](0.899).startswith("ACCETTABILE")
+        assert F["mh414_verdetto"](0.90).startswith("BUONO")
+        assert F["mh414_verdetto"](0.949).startswith("BUONO")
+        assert F["mh414_verdetto"](0.95).startswith("FORTE")
+        assert F["mh414_verdetto"](0.989).startswith("FORTE")
+        assert F["mh414_verdetto"](0.99).startswith("MOLTO FORTE")
+        assert F["mh414_verdetto"](1.0).startswith("MOLTO FORTE")
+        with pytest.raises(ValueError):
+            F["mh414_verdetto"](float("nan"))
+        with pytest.raises(ValueError):
+            F["mh414_verdetto"](True)
+
+    def test_casi_degeneri(self):
+        F = _F
+        # serie piatta -> ValueError
+        with pytest.raises(ValueError):
+            F["mh414_stats"](tuple([1.0] * 25), 0.0)
+        with pytest.raises(ValueError):
+            F["mh414_mappa"](tuple([2.0] * 25), 2.0)
+        with pytest.raises(ValueError):
+            F["mh414_mappa"]((1.0,) * 19)
+        # stats senza chiavi -> ValueError
+        with pytest.raises(ValueError):
+            F["mh414_psr_da_stat"]({}, 0.0)
+        with pytest.raises(ValueError):
+            F["mh414_psr_da_stat"]({"n": 36}, 0.0)
+
+    def test_validatori(self):
+        for _bad in (lambda: _F["mh414_stats"](None),
+                     lambda: _F["mh414_stats"]((1.0,) * 19),
+                     lambda: _F["mh414_stats"]((1.0,) * 25,
+                                               float("nan")),
+                     lambda: _F["mh414_stats"](tuple([3.0] * 25), 0.0),
+                     lambda: _F["mh414_sigma2"](float("nan"), 3.0, 0.5),
+                     lambda: _F["mh414_sigma2"](3.0, 4.0, 1.0),
+                     lambda: _F["mh414_psr_da_stat"](None, 0.0),
+                     lambda: _F["mh414_psr_da_stat"](
+                         {"n": 36, "sharpe": 0.2, "skew": 0.0,
+                          "kurt": 3.0}, float("nan")),
+                     lambda: _F["mh414_parse_serie"](
+                         "\n".join(["1.0"] * 19)),
+                     lambda: _F["mh414_parse_serie"](
+                         "\n".join(["xx"] + ["1.0"] * 20)),
+                     lambda: _F["mh414_parse_serie"](None),
+                     lambda: _F["mh414_phi"](float("inf")),
+                     lambda: _F["mh414_num"](True, "x"),
+                     lambda: _F["mh414_num"](float("nan"), "x"),
+                     lambda: _F["mh414_mappa"]((1.0,) * 19),
+                     lambda: _F["mh414_mappa"](None),
+                     lambda: _F["mh414_mappa"](tuple([1.0] * 25), "xx")):
+            with pytest.raises(ValueError):
+                _bad()
+
+    def test_mappa_stringa_input(self):
+        # mappa accetta anche il testo grezzo della text area
+        m = _F["mh414_mappa"](DEMO)
+        assert abs(m["psr"] - PSR) < 1e-12
+        assert m["n_per"] == 36
+

@@ -176,6 +176,7 @@ TITLE409 = "🛟 Sterling ratio: quanto rende contro i K peggiori drawdown"
 TITLE410 = "⚖ Gain-to-Pain ratio: quanto guadagno per ogni euro perso"
 TITLE411 = "🌊 Volatility drag: quanto rendimento mangia la volatilita'"
 TITLE412 = "🎯 Omega ratio: quanto upside prendi per ogni euro di downside"
+TITLE414 = "🎯 Probabilistic Sharpe ratio: lo Sharpe e' davvero significativo?"
 TITLE413 = "📐 Sharpe corretto: il rendimento per unita' di rischio con code grasse"
 TITLE264 = "\U0001F4DC Garanzie di origine: costo del 100% rinnovabile"
 
@@ -199,12 +200,12 @@ def _registry():
 class TestRegistryTab265:
     def test_tab265_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 413
+        assert len(titoli) == len(dvars) == len(withs) == 414
         assert TITLE265 in titoli
         assert "tab265" in dvars
         assert "tab265" in withs
         assert titoli[dvars.index("tab265")] == TITLE265
-        assert titoli[-1] == TITLE413
+        assert titoli[-1] == TITLE414
         keys = re.findall(r'key="(fv265_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
