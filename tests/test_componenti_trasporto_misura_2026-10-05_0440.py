@@ -125,13 +125,13 @@ class TestRegistryTab223:
             encoding="utf-8")
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
-        assert len(titoli) == 402
-        assert titoli[-1] == "🛡️ Minima varianza (MV): i pesi che minimizzano la volatilità di portafoglio"
+        assert len(titoli) == 403
+        assert titoli[-1] == "🎯 Sharpe massimo (MS): i pesi che massimizzano il rendimento per unità di rischio"
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         assert "tab223" in dvars
         withs = re.findall(r"    with (tab\d+):", src)
         assert "tab223" in withs
-        assert len(withs) == len(dvars) == 402
+        assert len(withs) == len(dvars) == 403
         keys = re.findall(r'key="(tm223_[^"]+)"', src)
         dyn_keys = re.findall(r'key=_pfx223 \+ "([^"]+)"', src)
         # le key dinamiche sono prefissate a runtime con tm223_bt_/tm223_mt_

@@ -178,12 +178,12 @@ class TestBusinessCaseAccumulo:
         src = Path(__file__).parent.parent.joinpath("app.py").read_text()
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
-        assert len(titoli) == 402
-        assert titoli[-1] == "🛡️ Minima varianza (MV): i pesi che minimizzano la volatilità di portafoglio"
+        assert len(titoli) == 403
+        assert titoli[-1] == "🎯 Sharpe massimo (MS): i pesi che massimizzano il rendimento per unità di rischio"
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         assert "tab196" in dvars
         withs = re.findall(r"    with (tab\d+):", src)
         assert "tab196" in withs
-        assert len(withs) == len(dvars) == 402
+        assert len(withs) == len(dvars) == 403
         keys = re.findall(r'key="(bac196_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 12
