@@ -47564,6 +47564,238 @@ def mh327_verdetto(sterling, n_ep):
 # Tutti gli helper sono top-level mh394_* (namespace condiviso appfuncs).
 # ===========================================================================
 
+# ===========================================================================
+# W395 (12/10/2026) - tab395 "🌀 Distortion risk measures: VaR, ES e Wang da un'unica formula"
+# Distortion risk measure (Wang): rho_g = integrale di g(S(x)) in dx, con
+# S(x) = P(perdita > x) e g:[0,1]->[0,1] crescente, g(0)=0, g(1)=1.
+# Scegliere g = scegliere QUANTO pesare la coda. Teorema: g concava <=>
+# misura COERENTE. Le 5 famiglie sono casi della stessa formula:
+#   var:  g(s) = 1_{s > 1-alpha}            (gradino: NON coerente)
+#   es:   g(s) = min(s/(1-alpha), 1)        (concava: coerente)
+#   wang: g(s) = Phi(Phi^{-1}(s) + lambda)  (concava per lambda >= 0)
+#   ph:   g(s) = s^r, 0 < r <= 1           (concava)
+#   dp:   g(s) = 1 - (1-s)^s, s >= 1       (concava)
+# Forme chiuse sotto normalita' X ~ N(mu, sig^2):
+#   VaR: mu + sig*Phi^{-1}(alpha);
+#   ES:  mu + sig*phi(z)/(1-alpha);
+#   Wang: mu + lambda*sig (la perdita distorta e' N(mu+lambda*sig, sig^2)).
+# PH/DP solo per quadratura in forma S, con split ai kink (x=0 per il
+# termine -1 della formula a due code; x=VaR_alpha per il kink ES).
+# Tutti gli helper sono top-level mh395_* (namespace condiviso appfuncs).
+# ===========================================================================
+
+def mh395_num(x, nome):
+    import math
+    import numbers
+    if isinstance(x, bool) or not isinstance(x, numbers.Real):
+        raise ValueError(f"{nome}: deve essere un numero")
+    if math.isnan(x) or math.isinf(x):
+        raise ValueError(f"{nome}: NaN/inf non ammessi")
+    return float(x)
+
+
+def mh395_check_alpha(a):
+    import math
+    if isinstance(a, bool) or not isinstance(a, (int, float)):
+        raise ValueError("alpha: deve essere un numero in (0, 1)")
+    aa = float(a)
+    if math.isnan(aa) or not 0.0 < aa < 1.0:
+        raise ValueError("alpha: deve stare in (0, 1)")
+    return aa
+
+
+def mh395_check_family(family):
+    if family not in ("var", "es", "wang", "ph", "dp"):
+        raise ValueError("family: una di 'var', 'es', 'wang', 'ph', 'dp'")
+    return family
+
+
+def mh395_check_param(family, p):
+    import math
+    fam = mh395_check_family(family)
+    if fam in ("var", "es"):
+        return None
+    if isinstance(p, bool) or not isinstance(p, (int, float)):
+        raise ValueError("param: deve essere un numero")
+    pp = float(p)
+    if math.isnan(pp) or math.isinf(pp):
+        raise ValueError("param: NaN/inf non ammessi")
+    if fam == "wang" and pp < 0.0:
+        raise ValueError("param: lambda di Wang deve essere >= 0")
+    if fam == "ph" and not 0.0 < pp <= 1.0:
+        raise ValueError("param: r di PH deve stare in (0, 1]")
+    if fam == "dp" and pp < 1.0:
+        raise ValueError("param: s di Dual Power deve essere >= 1")
+    return pp
+
+
+def mh395_g(u, family, param, alpha):
+    """Distorsione g della survival S = P(L > x): g(0)=0, g(1)=1."""
+    import math
+    from statistics import NormalDist
+    uu = mh395_num(u, "u")
+    if not 0.0 <= uu <= 1.0:
+        raise ValueError("u: deve stare in [0, 1]")
+    aa = mh395_check_alpha(alpha)
+    fam = mh395_check_family(family)
+    pp = mh395_check_param(fam, param)
+    if uu == 0.0:
+        return 0.0
+    if uu == 1.0:
+        return 1.0
+    if fam == "var":
+        return 1.0 if uu > 1.0 - aa else 0.0
+    if fam == "es":
+        return min(uu / (1.0 - aa), 1.0)
+    _nd = NormalDist()
+    if fam == "wang":
+        return _nd.cdf(_nd.inv_cdf(uu) + pp)
+    if fam == "ph":
+        return uu ** pp
+    return 1.0 - (1.0 - uu) ** pp
+
+
+def mh395_rho_chiusa(mu, sig, family, param, alpha):
+    """Forma chiusa quando esiste (var/es/wang; ph(1)/dp(1)/wang(0)=media).
+    Restituisce None per ph/dp generici (solo quadratura)."""
+    import math
+    from statistics import NormalDist
+    mm = mh395_num(mu, "mu")
+    ss = mh395_num(sig, "sig")
+    if ss < 0.0:
+        raise ValueError("sig: deve essere >= 0")
+    fam = mh395_check_family(family)
+    aa = mh395_check_alpha(alpha)
+    pp = mh395_check_param(fam, param)
+    _nd = NormalDist()
+    if fam == "var":
+        return mm + ss * _nd.inv_cdf(aa)
+    if fam == "es":
+        z = _nd.inv_cdf(aa)
+        phi = math.exp(-0.5 * z * z) / math.sqrt(2.0 * math.pi)
+        return mm + ss * phi / (1.0 - aa)
+    if fam == "wang":
+        return mm + pp * ss
+    if (fam == "ph" or fam == "dp") and pp == 1.0:
+        return mm
+    return None
+
+
+def _mh395_quad(mu, sig, fam, pp, aa, n):
+    """Quadratura in forma S con split ai kink. Solo uso interno."""
+    from statistics import NormalDist
+    _nd = NormalDist()
+    _lo, _hi = mu - 12.0 * sig, mu + 12.0 * sig
+    _splits = [0.0]
+    if fam == "es":
+        _splits.append(mu + sig * _nd.inv_cdf(aa))
+    _pts = sorted(set([_lo] + [p for p in _splits if _lo < p < _hi] +
+                      [_hi]))
+    _tot = 0.0
+    for _a, _b in zip(_pts[:-1], _pts[1:]):
+        _h = (_b - _a) / n
+        for _i in range(n):
+            _x = _a + (_i + 0.5) * _h
+            _gv = mh395_g(_nd.cdf((mu - _x) / sig), fam, pp, aa)
+            _tot += (_gv - 1.0 if _x < 0.0 else _gv) * _h
+    return _tot
+
+
+def mh395_rho(mu, sig, family, param, alpha, n=4001):
+    """rho_g: forma chiusa dove esiste, quadratura S-form per ph/dp."""
+    mm = mh395_num(mu, "mu")
+    ss = mh395_num(sig, "sig")
+    if ss < 0.0:
+        raise ValueError("sig: deve essere >= 0")
+    fam = mh395_check_family(family)
+    aa = mh395_check_alpha(alpha)
+    pp = mh395_check_param(fam, param)
+    nn = int(n)
+    if nn < 8:
+        raise ValueError("n: almeno 8 intervalli")
+    if ss == 0.0:
+        return mm
+    _chiusa = mh395_rho_chiusa(mm, ss, fam, pp, aa)
+    if _chiusa is not None:
+        return _chiusa
+    return _mh395_quad(mm, ss, fam, pp, aa, nn)
+
+
+def mh395_rho_quad(mu, sig, family, param, alpha, n=4001):
+    """Cross-check: quadratura forzata anche dove esiste la chiusa."""
+    mm = mh395_num(mu, "mu")
+    ss = mh395_num(sig, "sig")
+    if ss < 0.0:
+        raise ValueError("sig: deve essere >= 0")
+    fam = mh395_check_family(family)
+    aa = mh395_check_alpha(alpha)
+    pp = mh395_check_param(fam, param)
+    nn = int(n)
+    if nn < 8:
+        raise ValueError("n: almeno 8 intervalli")
+    if ss == 0.0:
+        return mm
+    if fam == "var":
+        from statistics import NormalDist
+        return mm + ss * NormalDist().inv_cdf(aa)
+    return _mh395_quad(mm, ss, fam, pp, aa, nn)
+
+
+def mh395_concava_ok(family, param, alpha, n=201):
+    """Coerenza <=> g concava su [0,1]: differenze seconde <= tol."""
+    fam = mh395_check_family(family)
+    aa = mh395_check_alpha(alpha)
+    pp = mh395_check_param(fam, param)
+    nn = int(n)
+    if nn < 8:
+        raise ValueError("n: almeno 8 punti")
+    _vs = [mh395_g(i / nn, fam, pp, aa) for i in range(nn + 1)]
+    _mx = max(_vs[i + 1] - 2.0 * _vs[i] + _vs[i - 1]
+              for i in range(1, nn))
+    return _mx <= 1e-9
+
+
+def mh395_benchmarks(mu, sig, alpha):
+    """VaR ed ES allo stesso livello (forme chiuse), per confronto."""
+    mm = mh395_num(mu, "mu")
+    ss = mh395_num(sig, "sig")
+    if ss < 0.0:
+        raise ValueError("sig: deve essere >= 0")
+    aa = mh395_check_alpha(alpha)
+    return {"var": mh395_rho_chiusa(mm, ss, "var", None, aa),
+            "es": mh395_rho_chiusa(mm, ss, "es", None, aa)}
+
+
+def mh395_verdetto(rho, var, es):
+    """3 stati: dove cade rho_g rispetto ai benchmark VaR/ES."""
+    rr = mh395_num(rho, "rho")
+    vv = mh395_num(var, "var")
+    ee = mh395_num(es, "es")
+    if rr < vv:
+        return ("SOTTO-VaR: la distorsione pesa la coda MENO del quantile "
+                "VaR - misura meno conservativa (come l'expectile).")
+    if rr <= ee:
+        return ("TRA VaR ED ES: la distorsione cade tra i due benchmark "
+                "regolamentari.")
+    return ("OLTRE ES: la distorsione pesa la coda PIU' dell'ES - misura "
+            "piu' conservativa dell'Expected Shortfall.")
+
+
+def mh395_mappa(mu, sig, family, param, alpha):
+    """Bundle demo/UI: rho_g, benchmark, coerenza, verdetto."""
+    mm = mh395_num(mu, "mu")
+    ss = mh395_num(sig, "sig")
+    if ss < 0.0:
+        raise ValueError("sig: deve essere >= 0")
+    fam = mh395_check_family(family)
+    aa = mh395_check_alpha(alpha)
+    pp = mh395_check_param(fam, param)
+    rr = mh395_rho(mm, ss, fam, pp, aa)
+    bb = mh395_benchmarks(mm, ss, aa)
+    return {"mu": mm, "sig": ss, "alpha": aa, "family": fam,
+            "param": pp, "rho": rr, "var": bb["var"], "es": bb["es"],
+            "coerente": mh395_concava_ok(fam, pp, aa),
+            "verdetto": mh395_verdetto(rr, bb["var"], bb["es"])}
 def mh394_num(x, nome):
     import math
     import numbers
@@ -58754,7 +58986,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256, tab257, tab258, tab259, tab260, tab261, tab262, tab263, tab264, tab265, tab266, tab267, tab268, tab269, tab270, tab271, tab272, tab273, tab274, tab275, tab276, tab277, tab278, tab279, tab280, tab281, tab282, tab283, tab284, tab285, tab286, tab287, tab288, tab289, tab290, tab291, tab292, tab293, tab294, tab295, tab296, tab297, tab298, tab299, tab300, tab301, tab302, tab303, tab304, tab305, tab306, tab307, tab308, tab309, tab310, tab311, tab312, tab313, tab314, tab315, tab316, tab317, tab318, tab319, tab320, tab321, tab322, tab323, tab324, tab325, tab326, tab327, tab328, tab329, tab330, tab331, tab332, tab333, tab334, tab335, tab336, tab337, tab338, tab339, tab340, tab341, tab342, tab343, tab344, tab345, tab346, tab347, tab348, tab349, tab350, tab351, tab352, tab353, tab354, tab355, tab356, tab357, tab358, tab359, tab360, tab361, tab362, tab363, tab364, tab365, tab366, tab367, tab368, tab369, tab370, tab371, tab372, tab373, tab374, tab375, tab376, tab377, tab378, tab379, tab380, tab381, tab382, tab383, tab384, tab385, tab386, tab387, tab388, tab389, tab390, tab391, tab392, tab393, tab394 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete", "🔥 Teleriscaldamento vs caldaia", "🌿 Clean spread (con CO₂)", "🇮🇹 PUN da prezzi zonali", "❄️ Pompa di calore vs caldaia", "🏢 PUE & costo data center", "🔌 Gruppo elettrogeno vs blackout", "🚗 Flotta aziendale: TCO diesel vs elettrico", "📜 Garanzie di origine: costo del 100% rinnovabile", "♻️ Fine vita FV: revamping vs dismissione", "🌾️ Agrivoltaico: doppio reddito", "🟢 Biometano: business case", "🌬️ Eolico onshore: business case", "🌊 Idroelettrico run-of-river: business case", "🔥 Geotermia profonda: business case", "☀️ Solare termodinamico (CSP): business case", "🌬️ Eolico offshore: business case", "☀️ Fotovoltaico utility-scale: business case", "⚛️ Nucleare SMR: business case", "📊 Posizione vs limiti di rischio", "💧 Cash flow at risk (CFaR)", "⚡ Aste MI: scostamenti vs MGP", "🌡️ Stress climatico: domanda e prezzo", "🌪️ Derivati meteo: pricing HDD/CDD", "🚢 LNG vs gasdotto: costo delivered", "🛢️ Crack spread: margine raffinazione 3-2-1", "🧪 Margine petrolchimico: nafta → etilene", "🛢️ Carry petrolio: contango & stoccaggio fisico", "🏭 Unit commitment CCGT: accendere o no?", "🛛️ Differenziali greggio: sweet vs sour", "⛽ Basis gas TTF–PSV", "🚢⚡ Rigassificazione GNL: margine terminale", "⚡🔥 Clean spark spread: margine centrale a gas", "⚫🔥 Clean dark spread: margine centrale a carbone", "🔀💰 PTR transfrontaliero: vale il prezzo d'asta?", "📊💹 Sharpe & Sortino: la strategia rende davvero?", "🪓📊 Component VaR: quale posizione tagliare per prima?", "🛡📉 Hedge ratio ottimale: quanto coprire con i futures?", "🧪📉 Backtest del VaR: il modello tiene?", "🧪🛡 Backtest dell'ES: la coda e' sottostimata?", "🪓🛡 Component ES: chi contribuisce alla coda?", "➕📊 Marginal VaR: quanto rischio aggiunge il nuovo trade?", "🚦📏 Limite VaR: quanto margine resta?", "🧪⚡ Stress test: quanto perde il book negli scenari?", "🧮📊 Rapporto di diversificazione: quanto rischio risparmia il book?", "🛡️🔍 Rischio di modello: quale VaR credere?", "✂️📉 Incremental VaR: quanto rischio togli chiudendo la posizione?", "🧱📉 Capacità VaR: quanto nozionale puoi ancora aggiungere?", "🗂️📊 VaR per segmento: dove si concentra il rischio?", "🎯🛡 Risk budgeting: il book rispetta i target?", "💎📊 RAROC: il rendimento ripaga il rischio?", "🌊📉 Expected Shortfall: la perdita oltre il VaR", "💥📈 Stress di correlazione: quanto sale il VaR se si rompono?", "🎯💥 Rho critica: a quale correlazione il VaR tocca il limite?", "💧📉 LVaR: il VaR corretto per il costo di liquidazione", "📐📉 Cornish-Fisher: il VaR corretto per skew e code grasse", "📐🌊 Expected Shortfall con Cornish-Fisher: la coda oltre il VaR con code grasse", "📉💥 VaR rotto: la probabilita' di breccia con code grasse", "⏳📉 VaR multi-orizzonte: lo scaling con autocorrelazione dei rendimenti", "🏔️📉 Valori estremi (Hill): il VaR oltre il massimo storico", "🌊📉 POT-GPD: il VaR dalla coda paretiana oltre soglia", "🧠📉 CAViaR: il VaR adattivo che impara dai rendimenti", "🌀📉 Copula t-Student: il VaR che vede le code muoversi insieme", "🎛📉 FHS: il VaR con la volatilita' di oggi", "⚙️📉 GARCH(1,1): la volatilita' che ricorda", "🧪📉 Backtest VaR: il modello resiste al tempo?", "🎯📉 Convergenza forward: il forward indovina lo spot?", "🔄📉 Half-life di mean reversion: lo spot torna alla media?", "Ω📊 Omega ratio: oltre Sharpe e Sortino", "📈📉 Calmar ratio: il rendimento che paga il drawdown", "🩹 Pain index e Pain ratio: il dolore medio oltre il peggio", "🛟 Sterling ratio: il Calmar mediato sui peggiori drawdown", "🔻 Burke ratio: il drawdown penalizzato al quadrato", "🌊📉 CDaR: il drawdown medio oltre la soglia (il VaR dei drawdown)", "🔍📉 Martin ratio: il Calmar che guarda tutto il dolore", "⛵ Tempo di recupero: quanto resta sott'acqua l'equity", "🎯 Information ratio: la strategia batte davvero il benchmark?", "📊 Capture ratio: quanto cattura la strategia nei mercati su e giù?", "🎯 Hit rate: quanto spesso la strategia batte il benchmark?", "📏 Tracking error: quanto si discosta la strategia dal benchmark?", "📉 Max drawdown relativo: quanto si scende sotto il benchmark?", "📐 Treynor & Jensen: il premio per unita' di rischio sistematico", "⚖️ M² Modigliani: il rendimento a parita' di rischio col benchmark", "📉 Sortino ratio: il rendimento per unità di rischio al ribasso", "📉 Calmar ratio: il rendimento annuo per unità di max drawdown", "📐 K-ratio: la regolarità della crescita dell'equity", "🎯 Volatilità target: il sizing a volatilità costante", "📐 Kelly criterion: il sizing ottimale dall'edge stimato", "🎲 Risk of ruin: probabilita' di toccare una barriera di drawdown", "🎯 Sizing anti-rovina: f massima con ROR vincolato", "📊 Monte Carlo: distribuzione del capitale dopo N trade", "VaR & Expected Shortfall del P&L dopo N trade", "Kelly con costi di trading: sizing netto", "Frazione di Kelly: half-Kelly e trade-off crescita/volatilità", "Kelly robusto: sizing con edge incerta", "Kelly con portafoglio: due posizioni simultanee", "Kelly con correlazione: due posizioni correlate", "Kelly adattivo: win-rate rolling e size dinamica", "Kelly con controllo drawdown: sizing frazionato al drawdown", "Kelly con target di volatilità: sizing riscalato sulla vol", "Kelly bayesiano: sizing con win-rate posterior", "Kelly con lotti interi: sizing discreto e drag di arrotondamento", "Kelly con stop-loss: sizing con perdita troncata", "Kelly con take-profit: sizing con vincita troncata", "Kelly frazionario (fractional Kelly): λ·f*", "Rischio di rovina (risk of ruin): probabilita' di rovina prima del target", "Kelly con tre esiti: sizing con vincita, perdita parziale e perdita piena", "Kelly con limite di posizione: sizing con cap f_max", "Kelly con vincoli multipli: cap, lotti, stop e drawdown", "Kelly con incertezza: haircut bayesiano sulla p stimata", "Kelly su N trade: raddoppio, dimezzamento e crescita attesa", "Kelly: mappa di sensibilità f* e crescita su (p, b)", "Kelly su ritorni continui: f* = μ/σ² e volatility drag", "Kelly con costi di transazione: f* netto = (μ-c)/σ²", "Kelly e drawdown: probabilità di toccare un max drawdown", "Kelly frazionario: frazione ottima per un budget di volatilità", "Monte Carlo: VaR e Expected Shortfall di una posizione power", "Kelly con limite VaR: sizing con vincolo di perdita massima", "Component VaR: contributo al rischio per posizione", "Component ES: contributo al rischio di coda per posizione", "Shock correlazioni: stress test sul rischio di coda", "Backtest VaR di Kupiec: copertura e likelihood ratio", "Reverse stress test: quanto shock regge il limite?", "Mappa di rottura: superficie VaR su shock congiunti vol+corr", "Liquidity-adjusted VaR: VaR + costo di liquidazione", "Component VaR: attribution del VaR per asset", "Hedge VaR: copertura ottimale con futures", "Jump VaR: VaR con salti di prezzo (Merton)", "Delta-Gamma VaR: VaR parametrico di una posizione con opzioni", "Expected Shortfall: misura di rischio coerente", "VaR ed ES con code pesanti (t-Student)", "🌈📉 Misura spettrale: l'ES pesato con l'avversione al rischio", "🧲📈 Misura entropica: rischio con avversione costante (CARA)", "🌀📈 Wang transform: misura distorsiva del rischio", "🎯📈 EVaR: il bound di Chernoff piu' conservativo", "🔀📊 RVaR: la media dei quantili tra VaR ed ES", "🎯📊 Median Shortfall: la mediana della coda, robusta tra VaR ed ES", "🎯📉 LPM: il rischio downside contro un target", "📐⚖ Expectile: la misura di rischio elicitabile e coerente"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256, tab257, tab258, tab259, tab260, tab261, tab262, tab263, tab264, tab265, tab266, tab267, tab268, tab269, tab270, tab271, tab272, tab273, tab274, tab275, tab276, tab277, tab278, tab279, tab280, tab281, tab282, tab283, tab284, tab285, tab286, tab287, tab288, tab289, tab290, tab291, tab292, tab293, tab294, tab295, tab296, tab297, tab298, tab299, tab300, tab301, tab302, tab303, tab304, tab305, tab306, tab307, tab308, tab309, tab310, tab311, tab312, tab313, tab314, tab315, tab316, tab317, tab318, tab319, tab320, tab321, tab322, tab323, tab324, tab325, tab326, tab327, tab328, tab329, tab330, tab331, tab332, tab333, tab334, tab335, tab336, tab337, tab338, tab339, tab340, tab341, tab342, tab343, tab344, tab345, tab346, tab347, tab348, tab349, tab350, tab351, tab352, tab353, tab354, tab355, tab356, tab357, tab358, tab359, tab360, tab361, tab362, tab363, tab364, tab365, tab366, tab367, tab368, tab369, tab370, tab371, tab372, tab373, tab374, tab375, tab376, tab377, tab378, tab379, tab380, tab381, tab382, tab383, tab384, tab385, tab386, tab387, tab388, tab389, tab390, tab391, tab392, tab393, tab394, tab395 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete", "🔥 Teleriscaldamento vs caldaia", "🌿 Clean spread (con CO₂)", "🇮🇹 PUN da prezzi zonali", "❄️ Pompa di calore vs caldaia", "🏢 PUE & costo data center", "🔌 Gruppo elettrogeno vs blackout", "🚗 Flotta aziendale: TCO diesel vs elettrico", "📜 Garanzie di origine: costo del 100% rinnovabile", "♻️ Fine vita FV: revamping vs dismissione", "🌾️ Agrivoltaico: doppio reddito", "🟢 Biometano: business case", "🌬️ Eolico onshore: business case", "🌊 Idroelettrico run-of-river: business case", "🔥 Geotermia profonda: business case", "☀️ Solare termodinamico (CSP): business case", "🌬️ Eolico offshore: business case", "☀️ Fotovoltaico utility-scale: business case", "⚛️ Nucleare SMR: business case", "📊 Posizione vs limiti di rischio", "💧 Cash flow at risk (CFaR)", "⚡ Aste MI: scostamenti vs MGP", "🌡️ Stress climatico: domanda e prezzo", "🌪️ Derivati meteo: pricing HDD/CDD", "🚢 LNG vs gasdotto: costo delivered", "🛢️ Crack spread: margine raffinazione 3-2-1", "🧪 Margine petrolchimico: nafta → etilene", "🛢️ Carry petrolio: contango & stoccaggio fisico", "🏭 Unit commitment CCGT: accendere o no?", "🛛️ Differenziali greggio: sweet vs sour", "⛽ Basis gas TTF–PSV", "🚢⚡ Rigassificazione GNL: margine terminale", "⚡🔥 Clean spark spread: margine centrale a gas", "⚫🔥 Clean dark spread: margine centrale a carbone", "🔀💰 PTR transfrontaliero: vale il prezzo d'asta?", "📊💹 Sharpe & Sortino: la strategia rende davvero?", "🪓📊 Component VaR: quale posizione tagliare per prima?", "🛡📉 Hedge ratio ottimale: quanto coprire con i futures?", "🧪📉 Backtest del VaR: il modello tiene?", "🧪🛡 Backtest dell'ES: la coda e' sottostimata?", "🪓🛡 Component ES: chi contribuisce alla coda?", "➕📊 Marginal VaR: quanto rischio aggiunge il nuovo trade?", "🚦📏 Limite VaR: quanto margine resta?", "🧪⚡ Stress test: quanto perde il book negli scenari?", "🧮📊 Rapporto di diversificazione: quanto rischio risparmia il book?", "🛡️🔍 Rischio di modello: quale VaR credere?", "✂️📉 Incremental VaR: quanto rischio togli chiudendo la posizione?", "🧱📉 Capacità VaR: quanto nozionale puoi ancora aggiungere?", "🗂️📊 VaR per segmento: dove si concentra il rischio?", "🎯🛡 Risk budgeting: il book rispetta i target?", "💎📊 RAROC: il rendimento ripaga il rischio?", "🌊📉 Expected Shortfall: la perdita oltre il VaR", "💥📈 Stress di correlazione: quanto sale il VaR se si rompono?", "🎯💥 Rho critica: a quale correlazione il VaR tocca il limite?", "💧📉 LVaR: il VaR corretto per il costo di liquidazione", "📐📉 Cornish-Fisher: il VaR corretto per skew e code grasse", "📐🌊 Expected Shortfall con Cornish-Fisher: la coda oltre il VaR con code grasse", "📉💥 VaR rotto: la probabilita' di breccia con code grasse", "⏳📉 VaR multi-orizzonte: lo scaling con autocorrelazione dei rendimenti", "🏔️📉 Valori estremi (Hill): il VaR oltre il massimo storico", "🌊📉 POT-GPD: il VaR dalla coda paretiana oltre soglia", "🧠📉 CAViaR: il VaR adattivo che impara dai rendimenti", "🌀📉 Copula t-Student: il VaR che vede le code muoversi insieme", "🎛📉 FHS: il VaR con la volatilita' di oggi", "⚙️📉 GARCH(1,1): la volatilita' che ricorda", "🧪📉 Backtest VaR: il modello resiste al tempo?", "🎯📉 Convergenza forward: il forward indovina lo spot?", "🔄📉 Half-life di mean reversion: lo spot torna alla media?", "Ω📊 Omega ratio: oltre Sharpe e Sortino", "📈📉 Calmar ratio: il rendimento che paga il drawdown", "🩹 Pain index e Pain ratio: il dolore medio oltre il peggio", "🛟 Sterling ratio: il Calmar mediato sui peggiori drawdown", "🔻 Burke ratio: il drawdown penalizzato al quadrato", "🌊📉 CDaR: il drawdown medio oltre la soglia (il VaR dei drawdown)", "🔍📉 Martin ratio: il Calmar che guarda tutto il dolore", "⛵ Tempo di recupero: quanto resta sott'acqua l'equity", "🎯 Information ratio: la strategia batte davvero il benchmark?", "📊 Capture ratio: quanto cattura la strategia nei mercati su e giù?", "🎯 Hit rate: quanto spesso la strategia batte il benchmark?", "📏 Tracking error: quanto si discosta la strategia dal benchmark?", "📉 Max drawdown relativo: quanto si scende sotto il benchmark?", "📐 Treynor & Jensen: il premio per unita' di rischio sistematico", "⚖️ M² Modigliani: il rendimento a parita' di rischio col benchmark", "📉 Sortino ratio: il rendimento per unità di rischio al ribasso", "📉 Calmar ratio: il rendimento annuo per unità di max drawdown", "📐 K-ratio: la regolarità della crescita dell'equity", "🎯 Volatilità target: il sizing a volatilità costante", "📐 Kelly criterion: il sizing ottimale dall'edge stimato", "🎲 Risk of ruin: probabilita' di toccare una barriera di drawdown", "🎯 Sizing anti-rovina: f massima con ROR vincolato", "📊 Monte Carlo: distribuzione del capitale dopo N trade", "VaR & Expected Shortfall del P&L dopo N trade", "Kelly con costi di trading: sizing netto", "Frazione di Kelly: half-Kelly e trade-off crescita/volatilità", "Kelly robusto: sizing con edge incerta", "Kelly con portafoglio: due posizioni simultanee", "Kelly con correlazione: due posizioni correlate", "Kelly adattivo: win-rate rolling e size dinamica", "Kelly con controllo drawdown: sizing frazionato al drawdown", "Kelly con target di volatilità: sizing riscalato sulla vol", "Kelly bayesiano: sizing con win-rate posterior", "Kelly con lotti interi: sizing discreto e drag di arrotondamento", "Kelly con stop-loss: sizing con perdita troncata", "Kelly con take-profit: sizing con vincita troncata", "Kelly frazionario (fractional Kelly): λ·f*", "Rischio di rovina (risk of ruin): probabilita' di rovina prima del target", "Kelly con tre esiti: sizing con vincita, perdita parziale e perdita piena", "Kelly con limite di posizione: sizing con cap f_max", "Kelly con vincoli multipli: cap, lotti, stop e drawdown", "Kelly con incertezza: haircut bayesiano sulla p stimata", "Kelly su N trade: raddoppio, dimezzamento e crescita attesa", "Kelly: mappa di sensibilità f* e crescita su (p, b)", "Kelly su ritorni continui: f* = μ/σ² e volatility drag", "Kelly con costi di transazione: f* netto = (μ-c)/σ²", "Kelly e drawdown: probabilità di toccare un max drawdown", "Kelly frazionario: frazione ottima per un budget di volatilità", "Monte Carlo: VaR e Expected Shortfall di una posizione power", "Kelly con limite VaR: sizing con vincolo di perdita massima", "Component VaR: contributo al rischio per posizione", "Component ES: contributo al rischio di coda per posizione", "Shock correlazioni: stress test sul rischio di coda", "Backtest VaR di Kupiec: copertura e likelihood ratio", "Reverse stress test: quanto shock regge il limite?", "Mappa di rottura: superficie VaR su shock congiunti vol+corr", "Liquidity-adjusted VaR: VaR + costo di liquidazione", "Component VaR: attribution del VaR per asset", "Hedge VaR: copertura ottimale con futures", "Jump VaR: VaR con salti di prezzo (Merton)", "Delta-Gamma VaR: VaR parametrico di una posizione con opzioni", "Expected Shortfall: misura di rischio coerente", "VaR ed ES con code pesanti (t-Student)", "🌈📉 Misura spettrale: l'ES pesato con l'avversione al rischio", "🧲📈 Misura entropica: rischio con avversione costante (CARA)", "🌀📈 Wang transform: misura distorsiva del rischio", "🎯📈 EVaR: il bound di Chernoff piu' conservativo", "🔀📊 RVaR: la media dei quantili tra VaR ed ES", "🎯📊 Median Shortfall: la mediana della coda, robusta tra VaR ed ES", "🎯📉 LPM: il rischio downside contro un target", "📐⚖ Expectile: la misura di rischio elicitabile e coerente", "🌀 Distortion risk measures: VaR, ES e Wang da un'unica formula"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -95149,6 +95381,177 @@ Spark spread;1200000;4,0"""
                     mime="text/csv", key="st394_csv2")
         except ValueError as e394:
             st.error(f"Input non valido: {e394}")
+
+    with tab395:
+        st.header("🌀 Distortion risk measures: VaR, ES e Wang da un'unica formula")
+        st.info("Nota operativa: una distortion risk measure e' rho_g = integrale di g(S(x)) in dx, con S(x)=P(perdita>x) e g:[0,1]->[0,1] crescente: scegliere g = scegliere QUANTO pesare la coda. Teorema: g concava <=> misura COERENTE (il gradino del VaR non lo e'). VaR, ES, Wang, Proportional Hazard e Dual Power sono 5 casi della stessa formula: cambia solo g. Forme chiuse (normale): VaR=mu+sig*Phi^{-1}(alpha), ES=mu+sig*phi(z)/(1-alpha), Wang=mu+lambda*sig.")
+        r395a = st.columns(3)
+        mu395 = r395a[0].slider("Perdita attesa (kEUR)", min_value=-5,
+                                max_value=20, value=0, step=1,
+                                key="st395_mu",
+                                help="Perdita media attesa (kEUR); negativa = guadagno atteso.")
+        sg395 = r395a[1].slider("Deviazione std (kEUR)", min_value=1,
+                                max_value=50, value=10, step=1,
+                                key="st395_sg",
+                                help="Deviazione standard della perdita (migliaia di EUR).")
+        al395 = r395a[2].slider("Livello alpha (%)", min_value=50,
+                                max_value=99, value=97, step=1,
+                                key="st395_al",
+                                help="Livello di confidenza in % (usato da VaR ed ES).")
+        al395v = float(al395) / 100.0
+        fam395 = st.selectbox(
+            "Famiglia di distorsione",
+            ["wang", "es", "ph", "dp", "var"],
+            format_func=lambda f: {"wang": "Wang (lambda)",
+                                   "es": "Expected Shortfall",
+                                   "ph": "Proportional Hazard (r)",
+                                   "dp": "Dual Power (s)",
+                                   "var": "VaR (gradino: non coerente)"}[f],
+            key="st395_fam",
+            help="La g applicata alla survival S(x)=P(perdita>x).")
+        if fam395 == "wang":
+            pa395 = st.slider("lambda di Wang", min_value=0.0,
+                              max_value=2.0, value=0.5, step=0.1,
+                              key="st395_pa",
+                              help="rho = mu + lambda*sig (la normale distorta).")
+        elif fam395 == "ph":
+            pa395 = st.slider("r di Proportional Hazard", min_value=0.05,
+                              max_value=1.0, value=0.5, step=0.05,
+                              key="st395_pa",
+                              help="g(s)=s^r; r=1 -> media, r<1 -> piu' peso alla coda.")
+        elif fam395 == "dp":
+            pa395 = st.slider("s di Dual Power", min_value=1.0,
+                              max_value=5.0, value=2.0, step=0.5,
+                              key="st395_pa",
+                              help="g(s)=1-(1-s)^s; s=1 -> media, s>1 -> piu' peso alla coda.")
+        else:
+            pa395 = None
+        try:
+            b395 = mh395_mappa(float(mu395) * 1000.0, float(sg395) * 1000.0,
+                               fam395, pa395, al395v)
+            k395m = st.columns(4)
+            k395m[0].metric("rho_g",
+                            f"{b395['rho']:,.0f} EUR".replace(",", "."),
+                            help="Distortion risk measure con la g scelta.")
+            k395m[1].metric("VaR stesso livello",
+                            f"{b395['var']:,.0f} EUR".replace(",", "."),
+                            help="VaR_alpha: benchmark quantile.")
+            k395m[2].metric("ES stesso livello",
+                            f"{b395['es']:,.0f} EUR".replace(",", "."),
+                            help="ES_alpha: benchmark coerente.")
+            k395m[3].metric("Coerente",
+                            "SI" if b395["coerente"] else "NO",
+                            help="g concava su [0,1] <=> misura coerente.")
+            v395 = b395["verdetto"]
+            if v395.startswith("OLTRE ES"):
+                st.error(v395)
+            elif v395.startswith("TRA VaR"):
+                st.info(v395)
+            else:
+                st.warning(v395)
+            if not b395["coerente"]:
+                st.warning("La g scelta NON e' concava: la misura non e' "
+                           "coerente (il VaR gradino viola la "
+                           "subadditivita').")
+            st.caption(f"mu={b395['mu']:,.0f} sig={b395['sig']:,.0f} EUR, "
+                       f"alpha={b395['alpha'] * 100.0:.1f}%, "
+                       f"famiglia={b395['family']}.".replace(",", "."))
+            _f395defs = [("var", None), ("es", None),
+                         ("wang", pa395 if fam395 == "wang" else 0.5),
+                         ("ph", pa395 if fam395 == "ph" else 0.5),
+                         ("dp", pa395 if fam395 == "dp" else 2.0)]
+            _s395 = [i / 200.0 for i in range(201)]
+            fig395a = go.Figure()
+            for _ff, _pp in _f395defs:
+                fig395a.add_trace(go.Scatter(
+                    x=_s395,
+                    y=[mh395_g(ss_, _ff, _pp, b395["alpha"])
+                       for ss_ in _s395],
+                    mode="lines", name=_ff,
+                    hovertemplate=_ff + "=g(%{x:.2f})=%{y:.3f}<extra></extra>"))
+            fig395a.add_trace(go.Scatter(
+                x=_s395, y=_s395, mode="lines", name="diagonale (media)",
+                line=dict(dash="dash"),
+                hovertemplate="g=%{x:.2f}<extra></extra>"))
+            fig395a.update_layout(title="Le 5 distorsioni g(s): sopra la diagonale = piu' peso alla coda",
+                                  xaxis_title="s = S(x) = P(perdita > x)",
+                                  yaxis_title="g(s)", height=400)
+            st.plotly_chart(fig395a, use_container_width=True)
+            _rho395 = [mh395_rho(b395["mu"], b395["sig"], _ff, _pp,
+                                 b395["alpha"]) for _ff, _pp in _f395defs]
+            fig395b = go.Figure()
+            fig395b.add_trace(go.Bar(
+                x=[_ff for _ff, _pp in _f395defs], y=_rho395,
+                text=[f"{_rr:,.0f}" for _rr in _rho395],
+                textposition="outside",
+                hovertemplate="%{x}: rho=%{y:,.0f} EUR<extra></extra>"))
+            fig395b.update_layout(
+                title="Un'unica formula, 5 misure: rho_g per famiglia",
+                yaxis_title="EUR", height=400)
+            st.plotly_chart(fig395b, use_container_width=True)
+            al395s = [0.50 + i * 0.49 / 99.0 for i in range(100)]
+            rh395 = [mh395_rho(b395["mu"], b395["sig"], fam395, pa395, aa)
+                     for aa in al395s]
+            va395 = [mh395_rho_chiusa(b395["mu"], b395["sig"], "var",
+                                       None, aa) for aa in al395s]
+            _es395 = [mh395_rho_chiusa(b395["mu"], b395["sig"], "es",
+                                       None, aa) for aa in al395s]
+            fig395c = go.Figure()
+            fig395c.add_trace(go.Scatter(
+                x=[aa * 100.0 for aa in al395s], y=rh395, mode="lines",
+                name="rho_g (" + fam395 + ")",
+                hovertemplate="alpha=%{x:.1f}%, rho=%{y:,.0f} EUR<extra></extra>"))
+            fig395c.add_trace(go.Scatter(
+                x=[aa * 100.0 for aa in al395s], y=va395, mode="lines",
+                name="VaR", line=dict(dash="dash"),
+                hovertemplate="alpha=%{x:.1f}%, VaR=%{y:,.0f} EUR<extra></extra>"))
+            fig395c.add_trace(go.Scatter(
+                x=[aa * 100.0 for aa in al395s], y=_es395, mode="lines",
+                name="ES", line=dict(dash="dot"),
+                hovertemplate="alpha=%{x:.1f}%, ES=%{y:,.0f} EUR<extra></extra>"))
+            fig395c.add_vline(x=b395["alpha"] * 100.0, line_dash="dot",
+                              annotation_text="alpha scelto")
+            fig395c.update_layout(title="rho_g vs livello alpha (con benchmark VaR/ES)",
+                                  xaxis_title="alpha (%)",
+                                  yaxis_title="EUR", height=400)
+            st.plotly_chart(fig395c, use_container_width=True)
+            rows395 = [
+                {"voce": "perdita attesa mu (EUR)",
+                 "valore": round(b395["mu"], 2)},
+                {"voce": "deviazione std sig (EUR)",
+                 "valore": round(b395["sig"], 2)},
+                {"voce": "livello alpha", "valore": round(b395["alpha"], 4)},
+                {"voce": "famiglia g", "valore": b395["family"]},
+                {"voce": "parametro", "valore": b395["param"]},
+                {"voce": "rho_g (EUR)", "valore": round(b395["rho"], 2)},
+                {"voce": "VaR_alpha (EUR)", "valore": round(b395["var"], 2)},
+                {"voce": "ES_alpha (EUR)", "valore": round(b395["es"], 2)},
+                {"voce": "coerente (g concava)",
+                 "valore": "SI" if b395["coerente"] else "NO"},
+                {"voce": "verdetto", "valore": b395["verdetto"]},
+            ]
+            st.dataframe(pd.DataFrame(rows395), use_container_width=True)
+            curva395 = [{"alpha": round(aa, 4),
+                         "rho_EUR": round(rr, 2),
+                         "VaR_EUR": round(vv, 2),
+                         "ES_EUR": round(ee, 2)}
+                        for aa, rr, vv, ee in zip(al395s, rh395, va395,
+                                                  _es395)]
+            with st.expander("Export"):
+                st.download_button(
+                    "Export CSV riepilogo distortion",
+                    data=pd.DataFrame(rows395).to_csv(
+                        index=False, sep=";").encode("utf-8"),
+                    file_name="distortion_riepilogo.csv",
+                    mime="text/csv", key="st395_csv1")
+                st.download_button(
+                    "Export CSV curva rho(alpha)",
+                    data=pd.DataFrame(curva395).to_csv(
+                        index=False, sep=";").encode("utf-8"),
+                    file_name="distortion_curva_alpha.csv",
+                    mime="text/csv", key="st395_csv2")
+        except ValueError as e395:
+            st.error(f"Input non valido: {e395}")
 
 # Footer
 

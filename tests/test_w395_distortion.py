@@ -1,0 +1,373 @@
+"""Test tab395 '🌀 Distortion risk measures: VaR, ES e Wang da un'unica formula': registry + funzioni pure."""
+
+import math
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from appfuncs import load as _load
+
+_F = _load("mh395_num", "mh395_check_alpha", "mh395_check_family",
+           "mh395_check_param", "mh395_g", "mh395_rho_chiusa",
+           "_mh395_quad", "mh395_rho", "mh395_rho_quad",
+           "mh395_concava_ok", "mh395_benchmarks", "mh395_verdetto",
+           "mh395_mappa")
+
+TITLE395 = "🌀 Distortion risk measures: VaR, ES e Wang da un'unica formula"
+TITLE394 = "📐⚖ Expectile: la misura di rischio elicitabile e coerente"
+TITLE393 = "🎯📉 LPM: il rischio downside contro un target"
+TITLE392 = "🎯📊 Median Shortfall: la mediana della coda, robusta tra VaR ed ES"
+TITLE391 = "🔀📊 RVaR: la media dei quantili tra VaR ed ES"
+TITLE390 = "🎯📈 EVaR: il bound di Chernoff piu' conservativo"
+MU = 0.0
+SIG = 10000.0
+ALPHA = 0.975
+FAM = 'wang'
+PARAM = 0.5
+RHO = 5000.0
+VAR = 19599.639845400536
+ES = 23378.027922014157
+_FAMS = ("var", "es", "wang", "ph", "dp")
+_PAR = {"var": None, "es": None, "wang": 0.5, "ph": 0.5, "dp": 2.0}
+
+
+class TestRegistry395:
+    def test_conteggi(self):
+        import re
+        src = (Path(__file__).resolve().parent.parent / "app.py"
+               ).read_text(encoding="utf-8")
+        line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
+        titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
+        dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
+        withs = re.findall(r"with (tab\d+):", src)
+        assert len(titoli) == len(dvars) == len(withs) == 395
+        assert "tab395" in dvars
+        assert "tab395" in withs
+
+    def test_titoli_allineati_390_391_392_393_394_395(self):
+        import re
+        src = (Path(__file__).resolve().parent.parent / "app.py"
+               ).read_text(encoding="utf-8")
+        line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
+        titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
+        dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
+        assert titoli[dvars.index("tab390")] == TITLE390
+        assert titoli[dvars.index("tab391")] == TITLE391
+        assert titoli[dvars.index("tab392")] == TITLE392
+        assert titoli[dvars.index("tab393")] == TITLE393
+        assert titoli[dvars.index("tab394")] == TITLE394
+        assert titoli[dvars.index("tab395")] == TITLE395
+
+    def test_ultima_tab(self):
+        import re
+        src = (Path(__file__).resolve().parent.parent / "app.py"
+               ).read_text(encoding="utf-8")
+        line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
+        titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
+        dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
+        withs = re.findall(r"with (tab\d+):", src)
+        assert dvars[-1] == "tab395"
+        assert titoli[-1] == TITLE395
+        assert withs[-1] == "tab395"
+
+
+class TestNum:
+    def test_num_ok(self):
+        assert _F["mh395_num"](0.5, "x") == 0.5
+
+    def test_num_bool_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh395_num"](True, "x")
+
+    def test_num_nan_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh395_num"](float("nan"), "x")
+
+    def test_num_inf_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh395_num"](float("inf"), "x")
+
+
+class TestCheckAlpha:
+    @pytest.mark.parametrize("a", [0.5, 0.9, 0.975, 0.99])
+    def test_alpha_ok(self, a):
+        assert _F["mh395_check_alpha"](a) == a
+
+    @pytest.mark.parametrize("a", [0.0, 1.0, -0.1, 1.5, True, False,
+                                   "0.9", None])
+    def test_alpha_ko(self, a):
+        with pytest.raises(ValueError):
+            _F["mh395_check_alpha"](a)
+
+    def test_alpha_nan_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh395_check_alpha"](float("nan"))
+
+
+class TestFamilyParam:
+    @pytest.mark.parametrize("fam", ["var", "es", "wang", "ph", "dp"])
+    def test_family_ok(self, fam):
+        assert _F["mh395_check_family"](fam) == fam
+
+    @pytest.mark.parametrize("fam", ["x", "", None, 5, True])
+    def test_family_ko(self, fam):
+        with pytest.raises(ValueError):
+            _F["mh395_check_family"](fam)
+
+    @pytest.mark.parametrize("p", [0.0, 0.5, 2.0])
+    def test_param_wang_ok(self, p):
+        assert _F["mh395_check_param"]("wang", p) == p
+
+    @pytest.mark.parametrize("p", [-0.1, float("nan"), float("inf"),
+                                   "0.5", True])
+    def test_param_wang_ko(self, p):
+        with pytest.raises(ValueError):
+            _F["mh395_check_param"]("wang", p)
+
+    @pytest.mark.parametrize("p", [0.05, 0.5, 1.0])
+    def test_param_ph_ok(self, p):
+        assert _F["mh395_check_param"]("ph", p) == p
+
+    @pytest.mark.parametrize("p", [0.0, 1.5, -1.0])
+    def test_param_ph_ko(self, p):
+        with pytest.raises(ValueError):
+            _F["mh395_check_param"]("ph", p)
+
+    @pytest.mark.parametrize("p", [1.0, 2.0, 5.0])
+    def test_param_dp_ok(self, p):
+        assert _F["mh395_check_param"]("dp", p) == p
+
+    @pytest.mark.parametrize("p", [0.5, 0.99, -2.0])
+    def test_param_dp_ko(self, p):
+        with pytest.raises(ValueError):
+            _F["mh395_check_param"]("dp", p)
+
+    def test_param_var_es_ignorato(self):
+        assert _F["mh395_check_param"]("var", "qualsiasi") is None
+        assert _F["mh395_check_param"]("es", 999) is None
+
+
+class TestG:
+    @pytest.mark.parametrize("fam", ["var", "es", "wang", "ph", "dp"])
+    def test_estremi(self, fam):
+        assert _F["mh395_g"](0.0, fam, _PAR[fam], ALPHA) == 0.0
+        assert _F["mh395_g"](1.0, fam, _PAR[fam], ALPHA) == 1.0
+
+    def test_var_gradino(self):
+        assert _F["mh395_g"](0.02, "var", None, 0.975) == 0.0
+        assert _F["mh395_g"](0.025, "var", None, 0.975) == 0.0
+        assert _F["mh395_g"](0.03, "var", None, 0.975) == 1.0
+
+    def test_es_valore_noto(self):
+        # 1-alpha = 0.025000000000000022 in floating point: confronto
+        # approssimato, non esatto
+        assert abs(_F["mh395_g"](0.0125, "es", None, 0.975) - 0.5) < 1e-12
+        assert _F["mh395_g"](0.5, "es", None, 0.975) == 1.0
+
+    def test_wang_lambda_zero_identita(self):
+        assert abs(_F["mh395_g"](0.3, "wang", 0.0, ALPHA) - 0.3) < 1e-12
+
+    def test_wang_valore_noto(self):
+        assert abs(_F["mh395_g"](0.5, "wang", 0.5, ALPHA) -
+                   0.6914624612740131) < 1e-12
+
+    def test_ph_valore_noto(self):
+        assert _F["mh395_g"](0.25, "ph", 0.5, ALPHA) == 0.5
+
+    def test_dp_valore_noto(self):
+        assert _F["mh395_g"](0.5, "dp", 2.0, ALPHA) == 0.75
+
+    def test_ph_dp_uno_identita(self):
+        assert abs(_F["mh395_g"](0.37, "ph", 1.0, ALPHA) - 0.37) < 1e-12
+        assert abs(_F["mh395_g"](0.37, "dp", 1.0, ALPHA) - 0.37) < 1e-12
+
+    @pytest.mark.parametrize("u", [-0.1, 1.1, float("nan")])
+    def test_u_ko(self, u):
+        with pytest.raises(ValueError):
+            _F["mh395_g"](u, "es", None, ALPHA)
+
+    def test_alpha_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh395_g"](0.5, "es", None, 1.5)
+
+    def test_family_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh395_g"](0.5, "xx", None, ALPHA)
+
+
+class TestRhoChiusa:
+    def test_demo_var(self):
+        assert _F["mh395_rho_chiusa"](MU, SIG, "var", None, ALPHA) == VAR
+
+    def test_demo_es(self):
+        assert _F["mh395_rho_chiusa"](MU, SIG, "es", None, ALPHA) == ES
+
+    def test_demo_wang(self):
+        assert _F["mh395_rho_chiusa"](MU, SIG, FAM, PARAM, ALPHA) == RHO
+
+    def test_var_formula(self):
+        from statistics import NormalDist
+        z = NormalDist().inv_cdf(ALPHA)
+        assert abs(_F["mh395_rho_chiusa"](MU, SIG, "var", None, ALPHA) -
+                   (MU + SIG * z)) < 1e-9
+
+    def test_es_formula(self):
+        from statistics import NormalDist
+        z = NormalDist().inv_cdf(ALPHA)
+        phi = math.exp(-0.5 * z * z) / math.sqrt(2.0 * math.pi)
+        assert abs(_F["mh395_rho_chiusa"](MU, SIG, "es", None, ALPHA) -
+                   (MU + SIG * phi / (1.0 - ALPHA))) < 1e-9
+
+    @pytest.mark.parametrize("lam", [0.0, 0.25, 0.5, 1.0, 2.0])
+    def test_wang_mu_piu_lambda_sig(self, lam):
+        assert _F["mh395_rho_chiusa"](MU, SIG, "wang", lam, ALPHA) == \
+            MU + lam * SIG
+
+    def test_identita_ph_dp(self):
+        assert _F["mh395_rho_chiusa"](MU, SIG, "ph", 1.0, ALPHA) == MU
+        assert _F["mh395_rho_chiusa"](MU, SIG, "dp", 1.0, ALPHA) == MU
+
+    def test_ph_dp_generici_none(self):
+        assert _F["mh395_rho_chiusa"](MU, SIG, "ph", 0.5, ALPHA) is None
+        assert _F["mh395_rho_chiusa"](MU, SIG, "dp", 2.0, ALPHA) is None
+
+    def test_sig_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh395_rho_chiusa"](MU, -1.0, "es", None, ALPHA)
+
+
+class TestRho:
+    def test_demo(self):
+        assert _F["mh395_rho"](MU, SIG, FAM, PARAM, ALPHA) == RHO
+
+    def test_demo_meno_del_var(self):
+        assert RHO < VAR
+
+    @pytest.mark.parametrize("aa", [0.90, 0.95, 0.975])
+    def test_es_quad_vs_chiusa(self, aa):
+        c = _F["mh395_rho"](MU, SIG, "es", None, aa)
+        q = _F["mh395_rho_quad"](MU, SIG, "es", None, aa)
+        assert abs(c - q) / SIG < 1e-6
+
+    @pytest.mark.parametrize("lam", [0.25, 0.5, 1.0])
+    def test_wang_quad_vs_chiusa(self, lam):
+        c = _F["mh395_rho"](MU, SIG, "wang", lam, ALPHA)
+        q = _F["mh395_rho_quad"](MU, SIG, "wang", lam, ALPHA)
+        assert abs(c - q) / SIG < 1e-6
+
+    @pytest.mark.parametrize("r", [0.25, 0.5, 0.75])
+    def test_ph_sopra_media(self, r):
+        assert _F["mh395_rho"](MU, SIG, "ph", r, ALPHA) > MU
+
+    def test_ph_monotonia_decrescente_in_r(self):
+        assert _F["mh395_rho"](MU, SIG, "ph", 0.25, ALPHA) > \
+            _F["mh395_rho"](MU, SIG, "ph", 0.5, ALPHA) > \
+            _F["mh395_rho"](MU, SIG, "ph", 0.75, ALPHA) > MU
+
+    def test_dp_monotonia_crescente_in_s(self):
+        assert MU < _F["mh395_rho"](MU, SIG, "dp", 1.5, ALPHA) < \
+            _F["mh395_rho"](MU, SIG, "dp", 2.0, ALPHA) < \
+            _F["mh395_rho"](MU, SIG, "dp", 3.0, ALPHA)
+
+    @pytest.mark.parametrize("fam", ["var", "es", "wang", "ph", "dp"])
+    def test_sig_zero(self, fam):
+        assert _F["mh395_rho"](2000.0, 0.0, fam, _PAR[fam], ALPHA) == 2000.0
+        assert _F["mh395_rho_quad"](2000.0, 0.0, fam, _PAR[fam],
+                                   ALPHA) == 2000.0
+
+    def test_traslazione(self):
+        assert abs(_F["mh395_rho"](5000.0, SIG, FAM, PARAM, ALPHA) -
+                   (RHO + 5000.0)) < 1e-9
+
+    def test_scaling(self):
+        assert abs(_F["mh395_rho"](MU, 2.0 * SIG, FAM, PARAM, ALPHA) -
+                   2.0 * RHO) < 1e-9
+
+    def test_deterministico(self):
+        assert _F["mh395_rho"](MU, SIG, "ph", 0.5, ALPHA) == \
+            _F["mh395_rho"](MU, SIG, "ph", 0.5, ALPHA)
+
+    def test_sig_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh395_rho"](MU, -1.0, FAM, PARAM, ALPHA)
+
+    def test_n_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh395_rho"](MU, SIG, FAM, PARAM, ALPHA, n=4)
+
+    def test_alpha_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh395_rho"](MU, SIG, FAM, PARAM, 2.0)
+
+    def test_family_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh395_rho"](MU, SIG, "xx", PARAM, ALPHA)
+
+
+class TestConcava:
+    def test_var_non_concava(self):
+        assert _F["mh395_concava_ok"]("var", None, ALPHA) is False
+
+    @pytest.mark.parametrize("fp", [("es", None), ("wang", 0.5),
+                                    ("ph", 0.5), ("dp", 2.0)])
+    def test_concave(self, fp):
+        assert _F["mh395_concava_ok"](fp[0], fp[1], ALPHA) is True
+
+    def test_n_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh395_concava_ok"]("es", None, ALPHA, n=4)
+
+
+class TestBenchmarks:
+    def test_demo(self):
+        b = _F["mh395_benchmarks"](MU, SIG, ALPHA)
+        assert b["var"] == VAR
+        assert b["es"] == ES
+
+    def test_sig_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh395_benchmarks"](MU, -1.0, ALPHA)
+
+
+class TestVerdetto:
+    def test_demo(self):
+        assert _F["mh395_verdetto"](RHO, VAR, ES).startswith("SOTTO-VaR")
+
+    def test_bordi(self):
+        assert _F["mh395_verdetto"](VAR, VAR, ES).startswith("TRA VaR")
+        assert _F["mh395_verdetto"](ES, VAR, ES).startswith("TRA VaR")
+        assert _F["mh395_verdetto"](VAR - 1.0, VAR,
+                                   ES).startswith("SOTTO-VaR")
+        assert _F["mh395_verdetto"](ES + 1.0, VAR,
+                                   ES).startswith("OLTRE ES")
+
+    def test_nan_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh395_verdetto"](float("nan"), VAR, ES)
+
+
+class TestMappa:
+    def _b(self):
+        return _F["mh395_mappa"](MU, SIG, FAM, PARAM, ALPHA)
+
+    def test_demo(self):
+        b = self._b()
+        assert b["mu"] == MU and b["sig"] == SIG
+        assert b["alpha"] == ALPHA
+        assert b["family"] == FAM and b["param"] == PARAM
+        assert b["rho"] == RHO
+        assert b["var"] == VAR and b["es"] == ES
+        assert b["coerente"] is True
+        assert b["verdetto"].startswith("SOTTO-VaR")
+
+    def test_coerenza_var(self):
+        b = _F["mh395_mappa"](MU, SIG, "var", None, ALPHA)
+        assert b["coerente"] is False
+        assert b["rho"] == b["var"]
+        assert b["verdetto"].startswith("TRA VaR")
+
+    def test_alpha_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh395_mappa"](MU, SIG, FAM, PARAM, 2.0)
