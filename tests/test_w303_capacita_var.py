@@ -133,6 +133,7 @@ TITLE397 = "🔀 Entropic risk measure: avversione esponenziale al rischio"
 TITLE398 = "🎯 Contributi di rischio ES: allocazione di Eulero del portafoglio"
 TITLE399 = "🔱 Risk parity: pesi a parità di contributo di rischio (risk budgeting)"
 TITLE400 = "🎯 Numero effettivo di scommesse (ENB): quante posizioni indipendenti hai davvero?"
+TITLE401 = "📈 Massima diversificazione (MD): i pesi che massimizzano il rapporto DR"
 TITLE302 = "✂️📉 Incremental VaR: quanto rischio togli chiudendo la posizione?"
 TITLE301 = "🛡️🔍 Rischio di modello: quale VaR credere?"
 
@@ -173,13 +174,13 @@ def _registry():
 class TestRegistryTab303:
     def test_tab303_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 400
+        assert len(titoli) == len(dvars) == len(withs) == 401
         assert TITLE303 in titoli
         assert "tab303" in dvars
         assert "tab303" in withs
         assert titoli[dvars.index("tab303")] == TITLE303
-        assert titoli[-1] == TITLE400
-        assert dvars[-1] == "tab400"
+        assert titoli[-1] == TITLE401
+        assert dvars[-1] == "tab401"
         keys = re.findall(r'key="(st303_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

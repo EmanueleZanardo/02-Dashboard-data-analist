@@ -116,12 +116,12 @@ class TestRegistryTab227:
             encoding="utf-8")
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
-        assert len(titoli) == 400
-        assert titoli[-1] == "🎯 Numero effettivo di scommesse (ENB): quante posizioni indipendenti hai davvero?"
+        assert len(titoli) == 401
+        assert titoli[-1] == "📈 Massima diversificazione (MD): i pesi che massimizzano il rapporto DR"
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         assert "tab227" in dvars
         withs = re.findall(r"    with (tab\d+):", src)
         assert "tab227" in withs
-        assert len(withs) == len(dvars) == 400
+        assert len(withs) == len(dvars) == 401
         keys = re.findall(r'key="(ai227_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 6

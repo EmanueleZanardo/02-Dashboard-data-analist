@@ -36,12 +36,12 @@ def _registry():
 class TestRegistryTab253:
     def test_tab253_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 400
+        assert len(titoli) == len(dvars) == len(withs) == 401
         assert "🌑 Costo interruzioni (VoLL)" in titoli
         assert "tab253" in dvars
         assert "tab253" in withs
         assert titoli[dvars.index("tab253")] == "🌑 Costo interruzioni (VoLL)"
-        assert titoli[-1] == "🎯 Numero effettivo di scommesse (ENB): quante posizioni indipendenti hai davvero?"
+        assert titoli[-1] == "📈 Massima diversificazione (MD): i pesi che massimizzano il rapporto DR"
         keys = re.findall(r'key="(ci253_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 10
 

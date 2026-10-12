@@ -34,6 +34,7 @@ TITLE397 = "🔀 Entropic risk measure: avversione esponenziale al rischio"
 TITLE398 = "🎯 Contributi di rischio ES: allocazione di Eulero del portafoglio"
 TITLE399 = "🔱 Risk parity: pesi a parità di contributo di rischio (risk budgeting)"
 TITLE400 = "🎯 Numero effettivo di scommesse (ENB): quante posizioni indipendenti hai davvero?"
+TITLE401 = "📈 Massima diversificazione (MD): i pesi che massimizzano il rapporto DR"
 TITLE381 = "Component VaR: attribution del VaR per asset"
 TITLE380 = "Liquidity-adjusted VaR: VaR + costo di liquidazione"
 TITLE379 = "Mappa di rottura: superficie VaR su shock congiunti vol+corr"
@@ -69,7 +70,7 @@ def _registry():
 class TestRegistry382:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 400
+        assert len(titoli) == len(dvars) == len(withs) == 401
         assert "tab382" in dvars
         assert "tab382" in withs
 
@@ -84,9 +85,9 @@ class TestRegistry382:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab400"
-        assert titoli[-1] == TITLE400
-        assert withs[-1] == "tab400"
+        assert dvars[-1] == "tab401"
+        assert titoli[-1] == TITLE401
+        assert withs[-1] == "tab401"
 
 
 class TestNum:
