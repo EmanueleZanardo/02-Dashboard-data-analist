@@ -164,6 +164,7 @@ TITLE407 = "🔄 Recovery factor: quanto rende ogni euro di drawdown"
 TITLE408 = "💢 Pain index: il dolore che serve per il rendimento"
 TITLE409 = "🛟 Sterling ratio: quanto rende contro i K peggiori drawdown"
 TITLE410 = "⚖ Gain-to-Pain ratio: quanto guadagno per ogni euro perso"
+TITLE411 = "🌊 Volatility drag: quanto rendimento mangia la volatilita'"
 TITLE276 = "💧 Cash flow at risk (CFaR)"
 
 CSV_PREZZI = "sessione,prezzo_eur_mwh\nMI1,102.5\nMI2,98.0\nMI7,105.0\n"
@@ -181,12 +182,12 @@ def _registry():
 class TestRegistryTab277:
     def test_tab277_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 410
+        assert len(titoli) == len(dvars) == len(withs) == 411
         assert TITLE277 in titoli
         assert "tab277" in dvars
         assert "tab277" in withs
         assert titoli[dvars.index("tab277")] == TITLE277
-        assert titoli[-1] == TITLE410
+        assert titoli[-1] == TITLE411
         keys = re.findall(r'key="(mi277_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

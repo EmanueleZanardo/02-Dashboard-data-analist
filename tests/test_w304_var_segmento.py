@@ -142,6 +142,7 @@ TITLE407 = "🔄 Recovery factor: quanto rende ogni euro di drawdown"
 TITLE408 = "💢 Pain index: il dolore che serve per il rendimento"
 TITLE409 = "🛟 Sterling ratio: quanto rende contro i K peggiori drawdown"
 TITLE410 = "⚖ Gain-to-Pain ratio: quanto guadagno per ogni euro perso"
+TITLE411 = "🌊 Volatility drag: quanto rendimento mangia la volatilita'"
 TITLE303 = "🧱📉 Capacità VaR: quanto nozionale puoi ancora aggiungere?"
 TITLE302 = "✂️📉 Incremental VaR: quanto rischio togli chiudendo la posizione?"
 
@@ -181,13 +182,13 @@ def _registry():
 class TestRegistryTab304:
     def test_tab304_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 410
+        assert len(titoli) == len(dvars) == len(withs) == 411
         assert TITLE304 in titoli
         assert "tab304" in dvars
         assert "tab304" in withs
         assert titoli[dvars.index("tab304")] == TITLE304
-        assert titoli[-1] == TITLE410
-        assert dvars[-1] == "tab410"
+        assert titoli[-1] == TITLE411
+        assert dvars[-1] == "tab411"
         keys = re.findall(r'key="(st304_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

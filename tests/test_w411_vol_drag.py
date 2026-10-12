@@ -1,0 +1,176 @@
+"""Test tab411 '🌊 Volatility drag: quanto rendimento mangia la volatilita'': registry + funzioni pure."""
+
+import math
+import statistics
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from appfuncs import load as _load
+
+_F = _load("mh411_num", "mh411_parse_serie", "mh411_equity",
+           "mh411_drag", "mh411_verdetto", "mh411_mappa")
+
+TITLE411 = "🌊 Volatility drag: quanto rendimento mangia la volatilita'"
+TITLE410 = "⚖ Gain-to-Pain ratio: quanto guadagno per ogni euro perso"
+TITLE409 = "🛟 Sterling ratio: quanto rende contro i K peggiori drawdown"
+TITLE408 = "💢 Pain index: il dolore che serve per il rendimento"
+TITLE407 = "🔄 Recovery factor: quanto rende ogni euro di drawdown"
+TITLE406 = "📏 Tail ratio: la coda destra contro la sinistra"
+DEMO = '7.5\n-4.2\n9.1\n-6.8\n5.4\n-3.1\n8.2\n-5.5\n4.9\n-2.4\n6.7\n-7.1\n3.8\n-1.9\n5.9\n-4.6\n2.7\n6.3\n-3.8\n4.1\n-5.9\n7.8\n-2.7\n3.2\n-6.1\n5.5\n-4.9\n6.9\n-3.4\n4.4\n-5.2\n7.1\n-2.1\n3.6\n-4.4\n2.9'
+MEDIA = 0.8861111111111111
+GEO = 0.7489052166361976
+DRAG = 0.1372058944749135
+SIGMA = 5.254688529609521
+APPROX = 0.13805875771604936
+QUOTA = 15.484050787137575
+EQUITY = 130.81335417564307
+EQNODRAG = 137.38196785908085
+
+
+class TestRegistry411:
+    def test_conteggi(self):
+        import re
+        src = (Path(__file__).resolve().parent.parent / "app.py"
+               ).read_text(encoding="utf-8")
+        line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
+        titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
+        dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
+        withs = re.findall(r"with (tab\d+):", src)
+        assert len(titoli) == len(dvars) == len(withs) == 411
+        assert "tab411" in dvars
+        assert "tab411" in withs
+
+    def test_titoli_allineati_406_407_408_409_410_411(self):
+        import re
+        src = (Path(__file__).resolve().parent.parent / "app.py"
+               ).read_text(encoding="utf-8")
+        line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
+        titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
+        dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
+        assert titoli[dvars.index("tab406")] == TITLE406
+        assert titoli[dvars.index("tab407")] == TITLE407
+        assert titoli[dvars.index("tab408")] == TITLE408
+        assert titoli[dvars.index("tab409")] == TITLE409
+        assert titoli[dvars.index("tab410")] == TITLE410
+        assert titoli[dvars.index("tab411")] == TITLE411
+
+    def test_ultima_tab(self):
+        import re
+        src = (Path(__file__).resolve().parent.parent / "app.py"
+               ).read_text(encoding="utf-8")
+        line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
+        titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
+        dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
+        withs = re.findall(r"with (tab\d+):", src)
+        assert dvars[-1] == "tab411"
+        assert titoli[-1] == TITLE411
+        assert withs[-1] == "tab411"
+
+
+class TestVolDrag411:
+    def _xs(self):
+        return _F["mh411_parse_serie"](DEMO)
+
+    def test_demo_valori(self):
+        xs = self._xs()
+        assert len(xs) == 36
+        m = _F["mh411_mappa"](xs)
+        assert abs(m["media"] - MEDIA) < 1e-12
+        assert abs(m["geo"] - GEO) < 1e-12
+        assert abs(m["drag"] - DRAG) < 1e-12
+        assert abs(m["sigma"] - SIGMA) < 1e-12
+        assert abs(m["approx"] - APPROX) < 1e-12
+        assert abs(m["quota"] - QUOTA) < 1e-12
+        assert abs(m["equity"][-1] - EQUITY) < 1e-9
+        assert abs(m["equity_nodrag"][-1] - EQNODRAG) < 1e-9
+        assert m["n_per"] == 36
+        assert m["verdetto"].startswith("SIGNIFICATIVO")
+
+    def test_drag_definizione(self):
+        # drag = media - geo, calcolato a mano
+        xs = list(self._xs())
+        n = len(xs)
+        media = sum(xs) / n
+        geo = (math.prod(1.0 + r / 100.0 for r in xs)
+               ** (1.0 / n) - 1.0) * 100.0
+        d = _F["mh411_drag"](tuple(xs))
+        assert abs(d["media"] - media) < 1e-12
+        assert abs(d["geo"] - geo) < 1e-12
+        assert abs(d["drag"] - (media - geo)) < 1e-12
+        assert abs(d["sigma"] - statistics.pstdev(xs)) < 1e-12
+        assert abs(d["quota"] - (media - geo) / media * 100.0) < 1e-12
+
+    def test_approx_sigma_quadro(self):
+        # il drag e' vicino a sigma^2/200 (Jensen): scarto piccolo sulla demo
+        xs = self._xs()
+        d = _F["mh411_drag"](xs)
+        assert abs(d["scarto"] - (d["drag"] - d["approx"])) < 1e-15
+        assert abs(d["scarto"]) < 0.02
+
+    def test_equity_nodrag(self):
+        xs = self._xs()
+        m = _F["mh411_mappa"](xs)
+        mu = m["media"] / 100.0
+        assert len(m["equity"]) == len(m["equity_nodrag"]) == 37
+        assert abs(m["equity_nodrag"][-1]
+                   - 100.0 * (1.0 + mu) ** 36) < 1e-9
+        assert abs(m["gap"] - (m["equity_nodrag"][-1]
+                               - m["equity"][-1])) < 1e-12
+        assert m["gap"] > 0.0  # con vol > 0 il drag costa sempre
+
+    def test_casi_degeneri(self):
+        F = _F
+        # serie piatta -> drag 0, quota 0 -> TRASCURABILE
+        d = F["mh411_drag"](tuple([2.0] * 25))
+        assert abs(d["drag"]) < 1e-9
+        assert abs(d["geo"] - 2.0) < 1e-9
+        assert abs(d["quota"]) < 1e-9
+        assert F["mh411_verdetto"](d["quota"], d["media"]
+                                   ).startswith("TRASCURABILE")
+        # media <= 0 -> NESSUN RENDIMENTO
+        d2 = F["mh411_drag"](tuple([-1.0] * 25))
+        assert d2["quota"] is None
+        assert F["mh411_verdetto"](d2["quota"], d2["media"]
+                                   ).startswith("NESSUN RENDIMENTO")
+        # soglie verdetto
+        assert F["mh411_verdetto"](4.9, 1.0).startswith("TRASCURABILE")
+        assert F["mh411_verdetto"](5.0, 1.0).startswith("MODERATO")
+        assert F["mh411_verdetto"](14.9, 1.0).startswith("MODERATO")
+        assert F["mh411_verdetto"](15.0, 1.0).startswith("SIGNIFICATIVO")
+        assert F["mh411_verdetto"](29.9, 1.0).startswith("SIGNIFICATIVO")
+        assert F["mh411_verdetto"](30.0, 1.0).startswith("DEVASTANTE")
+        assert F["mh411_verdetto"](80.0, 1.0).startswith("DEVASTANTE")
+        with pytest.raises(ValueError):
+            F["mh411_verdetto"](None, 1.0)
+        with pytest.raises(ValueError):
+            F["mh411_verdetto"](float("nan"), 1.0)
+        with pytest.raises(ValueError):
+            F["mh411_verdetto"](True, 1.0)
+
+    def test_validatori(self):
+        for _bad in (lambda: _F["mh411_drag"](None),
+                     lambda: _F["mh411_drag"]((1.0,) * 19),
+                     lambda: _F["mh411_drag"](tuple([50.0] * 19 + [-150.0])),
+                     lambda: _F["mh411_equity"](None),
+                     lambda: _F["mh411_equity"]((1.0,) * 19),
+                     lambda: _F["mh411_parse_serie"](
+                         "\n".join(["1.0"] * 19)),
+                     lambda: _F["mh411_parse_serie"](
+                         "\n".join(["xx"] + ["1.0"] * 20)),
+                     lambda: _F["mh411_parse_serie"](None),
+                     lambda: _F["mh411_num"](True, "x"),
+                     lambda: _F["mh411_num"](float("nan"), "x"),
+                     lambda: _F["mh411_mappa"]((1.0,) * 19),
+                     lambda: _F["mh411_mappa"](None)):
+            with pytest.raises(ValueError):
+                _bad()
+
+    def test_mappa_stringa_input(self):
+        # mappa accetta anche il testo grezzo della text area
+        m = _F["mh411_mappa"](DEMO)
+        assert abs(m["drag"] - DRAG) < 1e-12
+        assert m["n_per"] == 36
+

@@ -93,6 +93,7 @@ TITLE407 = "🔄 Recovery factor: quanto rende ogni euro di drawdown"
 TITLE408 = "💢 Pain index: il dolore che serve per il rendimento"
 TITLE409 = "🛟 Sterling ratio: quanto rende contro i K peggiori drawdown"
 TITLE410 = "⚖ Gain-to-Pain ratio: quanto guadagno per ogni euro perso"
+TITLE411 = "🌊 Volatility drag: quanto rendimento mangia la volatilita'"
 TITLE337 = "📐 Treynor & Jensen: il premio per unita' di rischio sistematico"
 TITLE336 = "📉 Max drawdown relativo: quanto si scende sotto il benchmark?"
 TITLE335 = "📏 Tracking error: quanto si discosta la strategia dal benchmark?"
@@ -133,7 +134,7 @@ def _demo():
 class TestRegistry338:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 410
+        assert len(titoli) == len(dvars) == len(withs) == 411
         assert "tab338" in dvars
         assert "tab338" in withs
 
@@ -146,9 +147,9 @@ class TestRegistry338:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab410"
-        assert titoli[-1] == TITLE410
-        assert withs[-1] == "tab410"
+        assert dvars[-1] == "tab411"
+        assert titoli[-1] == TITLE411
+        assert withs[-1] == "tab411"
 
 
 class TestNum:

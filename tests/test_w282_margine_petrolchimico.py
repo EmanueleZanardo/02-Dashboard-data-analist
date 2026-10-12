@@ -157,6 +157,7 @@ TITLE407 = "🔄 Recovery factor: quanto rende ogni euro di drawdown"
 TITLE408 = "💢 Pain index: il dolore che serve per il rendimento"
 TITLE409 = "🛟 Sterling ratio: quanto rende contro i K peggiori drawdown"
 TITLE410 = "⚖ Gain-to-Pain ratio: quanto guadagno per ogni euro perso"
+TITLE411 = "🌊 Volatility drag: quanto rendimento mangia la volatilita'"
 TITLE281 = "🛢️ Crack spread: margine raffinazione 3-2-1"
 TITLE280 = "🚢 LNG vs gasdotto: costo delivered"
 
@@ -180,12 +181,12 @@ def _registry():
 class TestRegistryTab282:
     def test_tab282_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 410
+        assert len(titoli) == len(dvars) == len(withs) == 411
         assert TITLE282 in titoli
         assert "tab282" in dvars
         assert "tab282" in withs
         assert titoli[dvars.index("tab282")] == TITLE282
-        assert titoli[-1] == TITLE410
+        assert titoli[-1] == TITLE411
         keys = re.findall(r'key="(pc282_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

@@ -61,6 +61,7 @@ TITLE407 = "🔄 Recovery factor: quanto rende ogni euro di drawdown"
 TITLE408 = "💢 Pain index: il dolore che serve per il rendimento"
 TITLE409 = "🛟 Sterling ratio: quanto rende contro i K peggiori drawdown"
 TITLE410 = "⚖ Gain-to-Pain ratio: quanto guadagno per ogni euro perso"
+TITLE411 = "🌊 Volatility drag: quanto rendimento mangia la volatilita'"
 TITLE364 = "Kelly con vincoli multipli: cap, lotti, stop e drawdown"
 TITLE363 = "Kelly con limite di posizione: sizing con cap f_max"
 TITLE362 = "Kelly con tre esiti: sizing con vincita, perdita parziale e perdita piena"
@@ -94,7 +95,7 @@ def _registry():
 class TestRegistry365:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 410
+        assert len(titoli) == len(dvars) == len(withs) == 411
         assert "tab365" in dvars
         assert "tab365" in withs
 
@@ -109,9 +110,9 @@ class TestRegistry365:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab410"
-        assert titoli[-1] == TITLE410
-        assert withs[-1] == "tab410"
+        assert dvars[-1] == "tab411"
+        assert titoli[-1] == TITLE411
+        assert withs[-1] == "tab411"
 
 
 class TestNum:

@@ -121,6 +121,7 @@ TITLE407 = "🔄 Recovery factor: quanto rende ogni euro di drawdown"
 TITLE408 = "💢 Pain index: il dolore che serve per il rendimento"
 TITLE409 = "🛟 Sterling ratio: quanto rende contro i K peggiori drawdown"
 TITLE410 = "⚖ Gain-to-Pain ratio: quanto guadagno per ogni euro perso"
+TITLE411 = "🌊 Volatility drag: quanto rendimento mangia la volatilita'"
 TITLE309 = "🎯💥 Rho critica: a quale correlazione il VaR tocca il limite?"
 TITLE308 = "💥📈 Stress di correlazione: quanto sale il VaR se si rompono?"
 BOOK_DEMO = ("Cal-28 Baseload power;2500000;18,5;0,4;power\n"
@@ -155,7 +156,7 @@ def _registry():
 class TestRegistry310:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 410
+        assert len(titoli) == len(dvars) == len(withs) == 411
         assert TITLE310 in titoli
         assert "tab310" in dvars
         assert "    with tab310:" in src
@@ -168,8 +169,8 @@ class TestRegistry310:
 
     def test_ultima_tab(self):
         _, titoli, dvars, _ = _registry()
-        assert titoli[-1] == TITLE410
-        assert dvars[-1] == "tab410"
+        assert titoli[-1] == TITLE411
+        assert dvars[-1] == "tab411"
 
 
 class TestValidatori:
