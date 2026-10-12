@@ -147,6 +147,7 @@ TITLE406 = "📏 Tail ratio: la coda destra contro la sinistra"
 TITLE407 = "🔄 Recovery factor: quanto rende ogni euro di drawdown"
 TITLE408 = "💢 Pain index: il dolore che serve per il rendimento"
 TITLE409 = "🛟 Sterling ratio: quanto rende contro i K peggiori drawdown"
+TITLE410 = "⚖ Gain-to-Pain ratio: quanto guadagno per ogni euro perso"
 TITLE294 = "🧪📉 Backtest del VaR: il modello tiene?"
 TITLE293 = "🛡📉 Hedge ratio ottimale: quanto coprire con i futures?"
 
@@ -171,12 +172,12 @@ def _registry():
 class TestRegistryTab295:
     def test_tab295_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 409
+        assert len(titoli) == len(dvars) == len(withs) == 410
         assert TITLE295 in titoli
         assert "tab295" in dvars
         assert "tab295" in withs
         assert titoli[dvars.index("tab295")] == TITLE295
-        assert titoli[-1] == TITLE409
+        assert titoli[-1] == TITLE410
         keys = re.findall(r'key="(es295_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

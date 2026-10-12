@@ -26,6 +26,7 @@ TITLE406 = "📏 Tail ratio: la coda destra contro la sinistra"
 TITLE407 = "🔄 Recovery factor: quanto rende ogni euro di drawdown"
 TITLE408 = "💢 Pain index: il dolore che serve per il rendimento"
 TITLE409 = "🛟 Sterling ratio: quanto rende contro i K peggiori drawdown"
+TITLE410 = "⚖ Gain-to-Pain ratio: quanto guadagno per ogni euro perso"
 TITLE397 = "🔀 Entropic risk measure: avversione esponenziale al rischio"
 TITLE396 = "📊 Spectral risk measure: VaR ponderato dal tuo spettro di avversione"
 TITLE395 = "🌀 Distortion risk measures: VaR, ES e Wang da un'unica formula"
@@ -60,7 +61,7 @@ class TestRegistry398:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert len(titoli) == len(dvars) == len(withs) == 409
+        assert len(titoli) == len(dvars) == len(withs) == 410
         assert "tab398" in dvars
         assert "tab398" in withs
 
@@ -86,9 +87,9 @@ class TestRegistry398:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert dvars[-1] == "tab409"
-        assert titoli[-1] == TITLE409
-        assert withs[-1] == "tab409"
+        assert dvars[-1] == "tab410"
+        assert titoli[-1] == TITLE410
+        assert withs[-1] == "tab410"
 
 
 class TestEuler:
