@@ -1,0 +1,161 @@
+"""Test tab406 '📏 Tail ratio: la coda destra contro la sinistra': registry + funzioni pure."""
+
+import math
+import sys
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from appfuncs import load as _load
+
+_F = _load("mh406_num", "mh406_check_q", "mh406_parse_serie",
+           "mh406_percentile", "mh406_tail_ratio", "mh406_verdetto",
+           "mh406_mappa")
+
+TITLE406 = "📏 Tail ratio: la coda destra contro la sinistra"
+TITLE405 = "κ Kappa ratio: un'unica famiglia per Omega e Sortino"
+TITLE404 = "🎯 Rendimento target (TR): minima varianza a rendimento atteso fissato"
+TITLE403 = "🎯 Sharpe massimo (MS): i pesi che massimizzano il rendimento per unità di rischio"
+TITLE402 = "🛡️ Minima varianza (MV): i pesi che minimizzano la volatilità di portafoglio"
+TITLE401 = "📈 Massima diversificazione (MD): i pesi che massimizzano il rapporto DR"
+DEMO = '-2.4\n-1.9\n-1.6\n-1.2\n-0.9\n-0.7\n-0.5\n-0.3\n-0.2\n-0.1\n0.0\n0.1\n0.2\n0.4\n0.5\n0.6\n0.8\n0.9\n1.0\n1.1\n1.3\n1.4\n1.5\n1.7\n1.8\n2.0\n2.1\n2.2\n2.4\n2.5\n2.7\n2.9\n3.1\n6.4\n7.8\n9.5'
+Q = 95
+TR = 4.029850746268656
+P_UP = 6.750000000000001
+P_LO = -1.6750000000000003
+MEDIA = 1.3083333333333333
+
+
+class TestRegistry406:
+    def test_conteggi(self):
+        import re
+        src = (Path(__file__).resolve().parent.parent / "app.py"
+               ).read_text(encoding="utf-8")
+        line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
+        titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
+        dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
+        withs = re.findall(r"with (tab\d+):", src)
+        assert len(titoli) == len(dvars) == len(withs) == 406
+        assert "tab406" in dvars
+        assert "tab406" in withs
+
+    def test_titoli_allineati_401_402_403_404_405_406(self):
+        import re
+        src = (Path(__file__).resolve().parent.parent / "app.py"
+               ).read_text(encoding="utf-8")
+        line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
+        titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
+        dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
+        assert titoli[dvars.index("tab401")] == TITLE401
+        assert titoli[dvars.index("tab402")] == TITLE402
+        assert titoli[dvars.index("tab403")] == TITLE403
+        assert titoli[dvars.index("tab404")] == TITLE404
+        assert titoli[dvars.index("tab405")] == TITLE405
+        assert titoli[dvars.index("tab406")] == TITLE406
+
+    def test_ultima_tab(self):
+        import re
+        src = (Path(__file__).resolve().parent.parent / "app.py"
+               ).read_text(encoding="utf-8")
+        line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
+        titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
+        dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
+        withs = re.findall(r"with (tab\d+):", src)
+        assert dvars[-1] == "tab406"
+        assert titoli[-1] == TITLE406
+        assert withs[-1] == "tab406"
+
+
+class TestTail406:
+    def _xs(self):
+        return _F["mh406_parse_serie"](DEMO)
+
+    def test_demo_valori(self):
+        xs = self._xs()
+        assert len(xs) == 36
+        m = _F["mh406_mappa"](xs, Q)
+        assert abs(m["p_up"] - P_UP) < 1e-12
+        assert abs(m["p_lo"] - P_LO) < 1e-12
+        assert abs(m["tail_ratio"] - TR) < 1e-12
+        assert abs(m["media"] - MEDIA) < 1e-12
+        assert m["n_per"] == 36
+        assert m["verdetto"].startswith("CODA DESTRA DOMINANTE")
+
+    def test_percentile_vs_numpy(self):
+        # controllo indipendente: interpolazione lineare == np.percentile
+        xs = list(self._xs())
+        for q in (5, 25, 50, 75, 90, 95, 99):
+            mine = _F["mh406_percentile"](xs, q)
+            ref = float(np.percentile(xs, q))
+            assert abs(mine - ref) < 1e-9, q
+
+    def test_simmetria(self):
+        # campione simmetrico -> P95 = -P5 -> TR == 1
+        xs = tuple(float(i) for i in range(-12, 13))
+        assert len(xs) == 25
+        tr = _F["mh406_tail_ratio"](xs, 95.0)
+        assert abs(tr - 1.0) < 1e-9
+        assert _F["mh406_verdetto"](tr).startswith("CODE BILANCIATE")
+
+    def test_reciproco_serie_negata(self):
+        # negare la serie scambia le code: TR_neg = 1 / TR
+        xs = self._xs()
+        tr = _F["mh406_tail_ratio"](xs, 95.0)
+        tr_neg = _F["mh406_tail_ratio"](tuple(-v for v in xs), 95.0)
+        assert abs(tr_neg - 1.0 / tr) < 1e-9
+        assert tr_neg < 0.8
+        assert _F["mh406_verdetto"](tr_neg).startswith("CODA SINISTRA")
+
+    def test_casi_degeneri(self):
+        # serie costante positiva -> P5 = P95 -> TR = 1
+        xs = tuple([1.5] * 25)
+        assert _F["mh406_tail_ratio"](xs, 95.0) == 1.0
+        # P5 = 0 con P95 > 0 -> +inf (nessuna coda sinistra)
+        xs = tuple([0.0] * 20 + [2.0] * 16)
+        tr = _F["mh406_tail_ratio"](xs, 95.0)
+        assert tr == math.inf
+        assert _F["mh406_verdetto"](tr).startswith("NESSUNA CODA SINISTRA")
+        # serie piatta a 0 -> 0.0
+        assert _F["mh406_tail_ratio"](tuple([0.0] * 25), 95.0) == 0.0
+
+    def test_verdetto_stati(self):
+        assert _F["mh406_verdetto"](math.inf).startswith("NESSUNA CODA SINISTRA")
+        assert _F["mh406_verdetto"](2.5).startswith("CODA DESTRA DOMINANTE")
+        assert _F["mh406_verdetto"](1.0).startswith("CODE BILANCIATE")
+        assert _F["mh406_verdetto"](0.5).startswith("CODA SINISTRA DOMINANTE")
+        with pytest.raises(ValueError):
+            _F["mh406_verdetto"](True)
+        with pytest.raises(ValueError):
+            _F["mh406_verdetto"](float("nan"))
+
+    def test_validatori(self):
+        xs = self._xs()
+        for _bad in (lambda: _F["mh406_check_q"](50),
+                     lambda: _F["mh406_check_q"](100),
+                     lambda: _F["mh406_check_q"](40),
+                     lambda: _F["mh406_tail_ratio"](xs, 50.0),
+                     lambda: _F["mh406_tail_ratio"](xs, 99.9 + 0.2),
+                     lambda: _F["mh406_percentile"](xs, -1),
+                     lambda: _F["mh406_percentile"](xs, 101),
+                     lambda: _F["mh406_percentile"]((1.0,) * 19, 95),
+                     lambda: _F["mh406_tail_ratio"]((1.0,) * 19, 95.0),
+                     lambda: _F["mh406_parse_serie"](
+                         "\n".join(["1.0"] * 19)),
+                     lambda: _F["mh406_parse_serie"](
+                         "\n".join(["abc"] + ["1.0"] * 20)),
+                     lambda: _F["mh406_parse_serie"](None),
+                     lambda: _F["mh406_num"](True, "x"),
+                     lambda: _F["mh406_num"](float("nan"), "x"),
+                     lambda: _F["mh406_num"]("a", "x"),
+                     lambda: _F["mh406_mappa"](xs, float("nan"))):
+            with pytest.raises(ValueError):
+                _bad()
+
+    def test_mappa_stringa_input(self):
+        # mappa accetta anche il testo grezzo della text area
+        m = _F["mh406_mappa"](DEMO, Q)
+        assert abs(m["tail_ratio"] - TR) < 1e-12
+        assert m["n_per"] == 36
+

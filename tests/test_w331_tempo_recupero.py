@@ -95,6 +95,7 @@ TITLE402 = "🛡️ Minima varianza (MV): i pesi che minimizzano la volatilità 
 TITLE403 = "🎯 Sharpe massimo (MS): i pesi che massimizzano il rendimento per unità di rischio"
 TITLE404 = "🎯 Rendimento target (TR): minima varianza a rendimento atteso fissato"
 TITLE405 = "κ Kappa ratio: un'unica famiglia per Omega e Sortino"
+TITLE406 = "📏 Tail ratio: la coda destra contro la sinistra"
 TITLE330 = "🔍📉 Martin ratio: il Calmar che guarda tutto il dolore"
 TITLE329 = "🌊📉 CDaR: il drawdown medio oltre la soglia (il VaR dei drawdown)"
 TITLE328 = "🔻 Burke ratio: il drawdown penalizzato al quadrato"
@@ -132,7 +133,7 @@ def _eq_demo():
 class TestRegistry331:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 405
+        assert len(titoli) == len(dvars) == len(withs) == 406
         assert TITLE331 in titoli
         assert "tab331" in dvars
         assert "    with tab331:" in src
@@ -146,9 +147,9 @@ class TestRegistry331:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert titoli[-1] == TITLE405
-        assert dvars[-1] == "tab405"
-        assert withs[-1] == "tab405"
+        assert titoli[-1] == TITLE406
+        assert dvars[-1] == "tab406"
+        assert withs[-1] == "tab406"
 
 
 class TestNum:

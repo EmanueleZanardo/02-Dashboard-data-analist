@@ -169,6 +169,7 @@ TITLE402 = "🛡️ Minima varianza (MV): i pesi che minimizzano la volatilità 
 TITLE403 = "🎯 Sharpe massimo (MS): i pesi che massimizzano il rendimento per unità di rischio"
 TITLE404 = "🎯 Rendimento target (TR): minima varianza a rendimento atteso fissato"
 TITLE405 = "κ Kappa ratio: un'unica famiglia per Omega e Sortino"
+TITLE406 = "📏 Tail ratio: la coda destra contro la sinistra"
 TITLE262 = "\U0001F50C Gruppo elettrogeno vs blackout"
 
 # Parametri di riferimento usati nei test
@@ -199,12 +200,12 @@ def _registry():
 class TestRegistryTab263:
     def test_tab263_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 405
+        assert len(titoli) == len(dvars) == len(withs) == 406
         assert TITLE263 in titoli
         assert "tab263" in dvars
         assert "tab263" in withs
         assert titoli[dvars.index("tab263")] == TITLE263
-        assert titoli[-1] == TITLE405
+        assert titoli[-1] == TITLE406
         keys = re.findall(r'key="(fl263_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 16
 
