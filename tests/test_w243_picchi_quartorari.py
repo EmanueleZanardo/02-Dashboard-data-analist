@@ -35,7 +35,7 @@ def _registry():
 class TestRegistryTab243:
     def test_tab243_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 398
+        assert len(titoli) == len(dvars) == len(withs) == 399
         assert "⏱️ Picchi quartorari (15')" in titoli
         assert "tab243" in dvars
         assert "tab243" in withs
@@ -63,7 +63,7 @@ class TestRegistryTab243:
 
     def test_ultimo_titolo(self):
         _, titoli, _, _ = _registry()
-        assert titoli[-1] == "🎯 Contributi di rischio ES: allocazione di Eulero del portafoglio"
+        assert titoli[-1] == "🔱 Risk parity: pesi a parità di contributo di rischio (risk budgeting)"
 
     def test_helper_definiti_prima_della_ui(self):
         """Regressione bug 05/10 17:40: gli helper delle tab232-242 erano definiti

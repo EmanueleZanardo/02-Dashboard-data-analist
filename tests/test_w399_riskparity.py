@@ -1,0 +1,251 @@
+"""Test tab399 '🔱 Risk parity: pesi a parità di contributo di rischio (risk budgeting)': registry + funzioni pure."""
+
+import math
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from appfuncs import load as _load
+
+_F = _load("mh399_num", "mh399_check_vol", "mh399_check_rho",
+           "mh399_check_budgets", "mh399_covmat", "mh399_rischio",
+           "mh399_parity", "mh399_verdetto", "mh399_mappa")
+
+TITLE399 = "🔱 Risk parity: pesi a parità di contributo di rischio (risk budgeting)"
+TITLE398 = "🎯 Contributi di rischio ES: allocazione di Eulero del portafoglio"
+TITLE397 = "🔀 Entropic risk measure: avversione esponenziale al rischio"
+TITLE396 = "📊 Spectral risk measure: VaR ponderato dal tuo spettro di avversione"
+TITLE395 = "🌀 Distortion risk measures: VaR, ES e Wang da un'unica formula"
+TITLE394 = "📐⚖ Expectile: la misura di rischio elicitabile e coerente"
+V1 = 0.25
+V2 = 0.35
+V3 = 0.3
+R12 = 0.6
+R13 = 0.3
+R23 = 0.45
+B1 = 0.3333333333333333
+B2 = 0.3333333333333333
+B3 = 0.3333333333333333
+W1 = 0.3924976729098959
+W2 = 0.2619163820515359
+W3 = 0.3455859450385682
+SIGP = 0.2328782193569889
+ITER = 14
+MAXDEV = 1.9824142327706795e-12
+
+
+class TestRegistry399:
+    def test_conteggi(self):
+        import re
+        src = (Path(__file__).resolve().parent.parent / "app.py"
+               ).read_text(encoding="utf-8")
+        line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
+        titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
+        dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
+        withs = re.findall(r"with (tab\d+):", src)
+        assert len(titoli) == len(dvars) == len(withs) == 399
+        assert "tab399" in dvars
+        assert "tab399" in withs
+
+    def test_titoli_allineati_394_395_396_397_398_399(self):
+        import re
+        src = (Path(__file__).resolve().parent.parent / "app.py"
+               ).read_text(encoding="utf-8")
+        line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
+        titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
+        dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
+        assert titoli[dvars.index("tab394")] == TITLE394
+        assert titoli[dvars.index("tab395")] == TITLE395
+        assert titoli[dvars.index("tab396")] == TITLE396
+        assert titoli[dvars.index("tab397")] == TITLE397
+        assert titoli[dvars.index("tab398")] == TITLE398
+        assert titoli[dvars.index("tab399")] == TITLE399
+
+    def test_ultima_tab(self):
+        import re
+        src = (Path(__file__).resolve().parent.parent / "app.py"
+               ).read_text(encoding="utf-8")
+        line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
+        titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
+        dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
+        withs = re.findall(r"with (tab\d+):", src)
+        assert dvars[-1] == "tab399"
+        assert titoli[-1] == TITLE399
+        assert withs[-1] == "tab399"
+
+
+class TestParity:
+    def _demo(self):
+        return _F["mh399_parity"]((V1, V2, V3), R12, R13, R23,
+                                  (B1, B2, B3))
+
+    def test_demo_costanti(self):
+        p = self._demo()
+        assert p["converged"]
+        assert p["iters"] == ITER
+        for got, exp in zip(p["w"], (W1, W2, W3)):
+            assert abs(got - exp) < 1e-15
+        assert abs(p["sig"] - SIGP) / SIGP < 1e-15
+        assert abs(p["max_dev_pp"] - MAXDEV) < 1e-12
+
+    def test_parita_rc(self):
+        # i contributi realizzati eguagliano i budget target
+        p = self._demo()
+        for got, exp in zip(p["rc_pct"], p["target_pct"]):
+            assert abs(got - exp) < 1e-9
+        assert abs(sum(p["rc"]) - p["sig"]) / p["sig"] < 1e-12
+        assert abs(sum(p["rc_pct"]) - 100.0) < 1e-9
+
+    def test_somma_pesi_e_nonnegativi(self):
+        p = self._demo()
+        assert abs(sum(p["w"]) - 1.0) < 1e-12
+        assert all(_x >= 0.0 for _x in p["w"])
+
+    def test_simmetria(self):
+        p = _F["mh399_parity"]((0.3, 0.3, 0.3), 0.0, 0.0, 0.0,
+                               (1.0, 1.0, 1.0))
+        assert p["converged"]
+        for _x in p["w"]:
+            assert abs(_x - 1.0 / 3.0) < 1e-9
+
+    def test_legge_vol_inversa(self):
+        # rho=0, budget pari -> pesi proporzionali a 1/vol
+        p = _F["mh399_parity"]((0.2, 0.4, 0.8), 0.0, 0.0, 0.0,
+                               (1.0, 1.0, 1.0))
+        assert p["converged"]
+        _iv = [(1.0 / _v) for _v in (0.2, 0.4, 0.8)]
+        _s = sum(_iv)
+        for got, exp in zip(p["w"], [_x / _s for _x in _iv]):
+            assert abs(got - exp) < 1e-6
+
+    def test_budget_mirati(self):
+        # (60,30,10) con vol uguali e rho=0 -> RC% = (60,30,10)
+        p = _F["mh399_parity"]((0.3, 0.3, 0.3), 0.0, 0.0, 0.0,
+                               (60.0, 30.0, 10.0))
+        assert p["converged"]
+        for got, exp in zip(p["rc_pct"], (60.0, 30.0, 10.0)):
+            assert abs(got - exp) < 1e-6
+        # legge: w_i proporzionale a sqrt(b_i) a parita' di vol
+        _sq = [math.sqrt(_b) for _b in (0.6, 0.3, 0.1)]
+        _s = sum(_sq)
+        for got, exp in zip(p["w"], [_x / _s for _x in _sq]):
+            assert abs(got - exp) < 1e-4
+
+    def test_budget_normalizzati(self):
+        # (6,3,1) == (60,30,10): la scala dei budget non conta
+        p1 = _F["mh399_parity"]((0.25, 0.35, 0.30), 0.6, 0.3, 0.45,
+                                (6.0, 3.0, 1.0))
+        p2 = _F["mh399_parity"]((0.25, 0.35, 0.30), 0.6, 0.3, 0.45,
+                                (60.0, 30.0, 10.0))
+        for a, b in zip(p1["w"], p2["w"]):
+            assert abs(a - b) < 1e-12
+
+    def test_invarianza_scala_vol(self):
+        # vol x2 -> stessi pesi (il rischio scala, l'allocazione no)
+        p1 = self._demo()
+        p2 = _F["mh399_parity"]((2 * V1, 2 * V2, 2 * V3), R12, R13, R23,
+                                (B1, B2, B3))
+        assert p2["converged"]
+        for a, b in zip(p1["w"], p2["w"]):
+            assert abs(a - b) < 1e-9
+        assert abs(p2["sig"] - 2 * p1["sig"]) / p1["sig"] < 1e-9
+
+    def test_rho_simmetrico(self):
+        p = _F["mh399_parity"]((0.3, 0.3, 0.3), 0.5, 0.5, 0.5,
+                               (1.0, 1.0, 1.0))
+        assert p["converged"]
+        for _x in p["w"]:
+            assert abs(_x - 1.0 / 3.0) < 1e-9
+
+    def test_budget_zero(self):
+        # budget 0 -> peso 0, gli altri si spartiscono il rischio
+        p = _F["mh399_parity"]((0.25, 0.35, 0.30), 0.6, 0.3, 0.45,
+                               (50.0, 50.0, 0.0))
+        assert p["converged"]
+        assert p["w"][2] == 0.0
+        assert p["rc_pct"][2] == 0.0
+        assert abs(p["rc_pct"][0] - 50.0) < 1e-6
+        assert abs(p["rc_pct"][1] - 50.0) < 1e-6
+
+    def test_budget_pieno(self):
+        # budget 100% su un nome -> tutto il nozionale li'
+        p = _F["mh399_parity"]((0.25, 0.35, 0.30), 0.6, 0.3, 0.45,
+                               (0.0, 100.0, 0.0))
+        assert p["converged"]
+        assert p["w"] == (0.0, 1.0, 0.0)
+        assert p["iters"] == 0
+
+    def test_vol_nulla_non_ammissibile(self):
+        # vol nulla ma budget > 0: impossibile -> converged=False
+        p = _F["mh399_parity"]((0.0, 0.3, 0.3), 0.0, 0.0, 0.0,
+                               (1.0, 1.0, 1.0))
+        assert not p["converged"]
+        assert p["max_dev_pp"] > 1.0
+
+    def test_cov_psd_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh399_covmat"]((0.2, 0.2, 0.2), 0.9, 0.9, -0.9)
+        with pytest.raises(ValueError):
+            _F["mh399_parity"]((0.2, 0.2, 0.2), 0.9, 0.9, -0.9,
+                               (1.0, 1.0, 1.0))
+
+    def test_vol_tutte_zero_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh399_parity"]((0.0, 0.0, 0.0), 0.0, 0.0, 0.0,
+                               (1.0, 1.0, 1.0))
+
+    def test_num_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh399_num"](True, "x")
+        with pytest.raises(ValueError):
+            _F["mh399_num"](float("nan"), "x")
+        with pytest.raises(ValueError):
+            _F["mh399_num"](float("inf"), "x")
+        with pytest.raises(ValueError):
+            _F["mh399_check_vol"](2.5)
+        with pytest.raises(ValueError):
+            _F["mh399_check_vol"](-0.1)
+        with pytest.raises(ValueError):
+            _F["mh399_check_rho"](1.5)
+        with pytest.raises(ValueError):
+            _F["mh399_check_budgets"]((0.0, 0.0, 0.0))
+        with pytest.raises(ValueError):
+            _F["mh399_check_budgets"]((-1.0, 2.0, 3.0))
+        with pytest.raises(ValueError):
+            _F["mh399_check_budgets"]((1.0, 1.0))
+        with pytest.raises(ValueError):
+            _F["mh399_rischio"]((0.5, 0.5), ((1.0, 0.0), (0.0, 1.0)))
+        with pytest.raises(ValueError):
+            _F["mh399_mappa"]((V1, V2, V3), R12, R13, R23,
+                              (B1, B2, B3), 0.0)
+        with pytest.raises(ValueError):
+            _F["mh399_mappa"]((V1, V2, V3), R12, R13, R23,
+                              (B1, B2, B3), -2.0)
+
+    def test_verdetto_stati(self):
+        p = self._demo()
+        assert _F["mh399_verdetto"](
+            p["converged"], p["max_dev_pp"],
+            max(p["w"]) * 100.0).startswith("BILANCIATO")
+        assert _F["mh399_verdetto"](
+            False, 5.0, 30.0).startswith("NON CONVERGENTE")
+        assert _F["mh399_verdetto"](
+            True, 2.0, 30.0).startswith("NON CONVERGENTE")
+        assert _F["mh399_verdetto"](
+            True, 0.01, 65.0).startswith("CONCENTRATO")
+        assert _F["mh399_verdetto"](
+            True, 0.01, 60.0).startswith("CONCENTRATO")
+        assert _F["mh399_verdetto"](
+            True, 0.01, 59.9).startswith("BILANCIATO")
+
+    def test_mappa_demo(self):
+        m = _F["mh399_mappa"]((V1, V2, V3), R12, R13, R23,
+                              (B1, B2, B3), 5.0)
+        assert m["converged"]
+        assert abs(m["sig_eur"] - m["sig"] * 5.0e6) / m["sig_eur"] < 1e-12
+        assert abs(sum(m["w_eur"]) - 5.0e6) / 5.0e6 < 1e-12
+        assert abs(sum(m["rc_eur"]) - m["sig_eur"]) / m["sig_eur"] < 1e-12
+        assert m["verdetto"].startswith("BILANCIATO")
+        assert abs(m["max_w_pct"] - max(m["w"]) * 100.0) < 1e-12

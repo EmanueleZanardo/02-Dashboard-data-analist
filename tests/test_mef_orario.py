@@ -134,12 +134,12 @@ class TestRegistryTab228:
             encoding="utf-8")
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
-        assert len(titoli) == 398
-        assert titoli[-1] == "🎯 Contributi di rischio ES: allocazione di Eulero del portafoglio"
+        assert len(titoli) == 399
+        assert titoli[-1] == "🔱 Risk parity: pesi a parità di contributo di rischio (risk budgeting)"
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         assert "tab228" in dvars
         withs = re.findall(r"    with (tab\d+):", src)
         assert "tab228" in withs
-        assert len(withs) == len(dvars) == 398
+        assert len(withs) == len(dvars) == 399
         keys = re.findall(r'key="(ai228_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 8

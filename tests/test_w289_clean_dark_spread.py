@@ -148,6 +148,7 @@ TITLE395 = "🌀 Distortion risk measures: VaR, ES e Wang da un'unica formula"
 TITLE396 = "📊 Spectral risk measure: VaR ponderato dal tuo spettro di avversione"
 TITLE397 = "🔀 Entropic risk measure: avversione esponenziale al rischio"
 TITLE398 = "🎯 Contributi di rischio ES: allocazione di Eulero del portafoglio"
+TITLE399 = "🔱 Risk parity: pesi a parità di contributo di rischio (risk budgeting)"
 TITLE288 = "⚡🔥 Clean spark spread: margine centrale a gas"
 TITLE287 = "🚢⚡ Rigassificazione GNL: margine terminale"
 TITLE286 = "⛽ Basis gas TTF–PSV"
@@ -181,12 +182,12 @@ def _registry():
 class TestRegistryTab289:
     def test_tab289_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 398
+        assert len(titoli) == len(dvars) == len(withs) == 399
         assert TITLE289 in titoli
         assert "tab289" in dvars
         assert "tab289" in withs
         assert titoli[dvars.index("tab289")] == TITLE289
-        assert titoli[-1] == TITLE398
+        assert titoli[-1] == TITLE399
         keys = re.findall(r'key="(cds289_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
