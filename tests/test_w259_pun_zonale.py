@@ -45,12 +45,12 @@ def _registry():
 class TestRegistryTab259:
     def test_tab259_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 395
+        assert len(titoli) == len(dvars) == len(withs) == 396
         assert "🇮🇹 PUN da prezzi zonali" in titoli
         assert "tab259" in dvars
         assert "tab259" in withs
         assert titoli[dvars.index("tab259")] == "🇮🇹 PUN da prezzi zonali"
-        assert titoli[-1] == "🌀 Distortion risk measures: VaR, ES e Wang da un'unica formula"
+        assert titoli[-1] == "📊 Spectral risk measure: VaR ponderato dal tuo spettro di avversione"
         keys = re.findall(r'key="(pun259_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 8
 

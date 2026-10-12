@@ -159,6 +159,7 @@ TITLE392 = "🎯📊 Median Shortfall: la mediana della coda, robusta tra VaR ed
 TITLE393 = "🎯📉 LPM: il rischio downside contro un target"
 TITLE394 = "📐⚖ Expectile: la misura di rischio elicitabile e coerente"
 TITLE395 = "🌀 Distortion risk measures: VaR, ES e Wang da un'unica formula"
+TITLE396 = "📊 Spectral risk measure: VaR ponderato dal tuo spettro di avversione"
 TITLE270 = "🔥 Geotermia profonda: business case"
 TITLE269 = "🌊 Idroelettrico run-of-river: business case"
 
@@ -187,12 +188,12 @@ def _registry():
 class TestRegistryTab271:
     def test_tab271_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 395
+        assert len(titoli) == len(dvars) == len(withs) == 396
         assert TITLE271 in titoli
         assert "tab271" in dvars
         assert "tab271" in withs
         assert titoli[dvars.index("tab271")] == TITLE271
-        assert titoli[-1] == TITLE395
+        assert titoli[-1] == TITLE396
         keys = re.findall(r'key="(cs271_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

@@ -15,6 +15,7 @@ _F = _load("mh394_num", "mh394_check_alpha", "mh394_up_down",
 
 TITLE394 = "📐⚖ Expectile: la misura di rischio elicitabile e coerente"
 TITLE395 = "🌀 Distortion risk measures: VaR, ES e Wang da un'unica formula"
+TITLE396 = "📊 Spectral risk measure: VaR ponderato dal tuo spettro di avversione"
 TITLE393 = "🎯📉 LPM: il rischio downside contro un target"
 TITLE392 = "🎯📊 Median Shortfall: la mediana della coda, robusta tra VaR ed ES"
 TITLE391 = "🔀📊 RVaR: la media dei quantili tra VaR ed ES"
@@ -38,7 +39,7 @@ class TestRegistry394:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert len(titoli) == len(dvars) == len(withs) == 395
+        assert len(titoli) == len(dvars) == len(withs) == 396
         assert "tab394" in dvars
         assert "tab394" in withs
 
@@ -64,9 +65,9 @@ class TestRegistry394:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert dvars[-1] == "tab395"
-        assert titoli[-1] == TITLE395
-        assert withs[-1] == "tab395"
+        assert dvars[-1] == "tab396"
+        assert titoli[-1] == TITLE396
+        assert withs[-1] == "tab396"
 
 
 class TestNum:

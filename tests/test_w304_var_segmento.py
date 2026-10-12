@@ -127,6 +127,7 @@ TITLE392 = "🎯📊 Median Shortfall: la mediana della coda, robusta tra VaR ed
 TITLE393 = "🎯📉 LPM: il rischio downside contro un target"
 TITLE394 = "📐⚖ Expectile: la misura di rischio elicitabile e coerente"
 TITLE395 = "🌀 Distortion risk measures: VaR, ES e Wang da un'unica formula"
+TITLE396 = "📊 Spectral risk measure: VaR ponderato dal tuo spettro di avversione"
 TITLE303 = "🧱📉 Capacità VaR: quanto nozionale puoi ancora aggiungere?"
 TITLE302 = "✂️📉 Incremental VaR: quanto rischio togli chiudendo la posizione?"
 
@@ -166,13 +167,13 @@ def _registry():
 class TestRegistryTab304:
     def test_tab304_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 395
+        assert len(titoli) == len(dvars) == len(withs) == 396
         assert TITLE304 in titoli
         assert "tab304" in dvars
         assert "tab304" in withs
         assert titoli[dvars.index("tab304")] == TITLE304
-        assert titoli[-1] == TITLE395
-        assert dvars[-1] == "tab395"
+        assert titoli[-1] == TITLE396
+        assert dvars[-1] == "tab396"
         keys = re.findall(r'key="(st304_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

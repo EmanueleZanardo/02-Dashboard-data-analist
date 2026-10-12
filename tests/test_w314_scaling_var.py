@@ -103,6 +103,7 @@ TITLE392 = "🎯📊 Median Shortfall: la mediana della coda, robusta tra VaR ed
 TITLE393 = "🎯📉 LPM: il rischio downside contro un target"
 TITLE394 = "📐⚖ Expectile: la misura di rischio elicitabile e coerente"
 TITLE395 = "🌀 Distortion risk measures: VaR, ES e Wang da un'unica formula"
+TITLE396 = "📊 Spectral risk measure: VaR ponderato dal tuo spettro di avversione"
 TITLE313 = "📉💥 VaR rotto: la probabilita' di breccia con code grasse"
 TITLE312 = "📐🌊 Expected Shortfall con Cornish-Fisher: la coda oltre il VaR con code grasse"
 BOOK_DEMO = ("Cal-28 Baseload power;2500000;2,1;-0,15;power\n"
@@ -141,7 +142,7 @@ def _registry():
 class TestRegistry314:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 395
+        assert len(titoli) == len(dvars) == len(withs) == 396
         assert TITLE314 in titoli
         assert "tab314" in dvars
         assert "    with tab314:" in src
@@ -154,8 +155,8 @@ class TestRegistry314:
 
     def test_ultima_tab(self):
         _, titoli, dvars, _ = _registry()
-        assert titoli[-1] == TITLE395
-        assert dvars[-1] == "tab395"
+        assert titoli[-1] == TITLE396
+        assert dvars[-1] == "tab396"
 
 
 class TestValidatori:
