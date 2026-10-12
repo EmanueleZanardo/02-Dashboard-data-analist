@@ -37,12 +37,12 @@ def _registry():
 class TestRegistryTab251:
     def test_tab251_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 415
+        assert len(titoli) == len(dvars) == len(withs) == 416
         assert "⚡ Energia reattiva & penali cosφ" in titoli
         assert "tab251" in dvars
         assert "tab251" in withs
         assert titoli[dvars.index("tab251")] == "⚡ Energia reattiva & penali cosφ"
-        assert titoli[-1] == "🎯 Deflated Sharpe ratio: lo Sharpe sopravvive ai backtest multipli?"
+        assert titoli[-1] == "🎚️ Kappa ratio: Omega e Sortino sono lo stesso strumento"
         keys = re.findall(r'key="(r251_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 10
 

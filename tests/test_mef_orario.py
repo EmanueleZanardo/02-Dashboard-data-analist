@@ -134,12 +134,12 @@ class TestRegistryTab228:
             encoding="utf-8")
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
-        assert len(titoli) == 415
-        assert titoli[-1] == "🎯 Deflated Sharpe ratio: lo Sharpe sopravvive ai backtest multipli?"
+        assert len(titoli) == 416
+        assert titoli[-1] == "🎚️ Kappa ratio: Omega e Sortino sono lo stesso strumento"
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         assert "tab228" in dvars
         withs = re.findall(r"    with (tab\d+):", src)
         assert "tab228" in withs
-        assert len(withs) == len(dvars) == 415
+        assert len(withs) == len(dvars) == 416
         keys = re.findall(r'key="(ai228_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 8

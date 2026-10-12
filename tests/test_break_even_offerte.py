@@ -204,15 +204,15 @@ class TestRegistry:
                                 and node.value.args and hasattr(node.value.args[0], "elts")):
                 titoli = [t.value for t in node.value.args[0].elts]
         assert titoli is not None
-        assert len(titoli) == 415
-        assert titoli[-1] == "🎯 Deflated Sharpe ratio: lo Sharpe sopravvive ai backtest multipli?"
+        assert len(titoli) == 416
+        assert titoli[-1] == "🎚️ Kappa ratio: Omega e Sortino sono lo stesso strumento"
         m = re.search(r"((?:tab\d+, )+tab\d+) = st.tabs\(\[", src)
         assert m is not None
         vars_tab = [v.strip() for v in m.group(1).split(",")]
-        assert len(vars_tab) == 415
+        assert len(vars_tab) == 416
         assert "tab216" in vars_tab
         withs = re.findall(r"^\s*with (tab\d+):", src, re.M)
-        assert len(withs) == len(vars_tab) == 415
+        assert len(withs) == len(vars_tab) == 416
         assert "tab217" in withs
         # key widget univoche della tab217
         keys = re.findall(r'key="(be217_[^"]+)"', src)

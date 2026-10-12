@@ -121,6 +121,7 @@ TITLE410 = "⚖ Gain-to-Pain ratio: quanto guadagno per ogni euro perso"
 TITLE411 = "🌊 Volatility drag: quanto rendimento mangia la volatilita'"
 TITLE412 = "🎯 Omega ratio: quanto upside prendi per ogni euro di downside"
 TITLE414 = "🎯 Probabilistic Sharpe ratio: lo Sharpe e' davvero significativo?"
+TITLE416 = "🎚️ Kappa ratio: Omega e Sortino sono lo stesso strumento"
 TITLE413 = "📐 Sharpe corretto: il rendimento per unita' di rischio con code grasse"
 TITLE415 = "🎯 Deflated Sharpe ratio: lo Sharpe sopravvive ai backtest multipli?"
 TITLE314 = "⏳📉 VaR multi-orizzonte: lo scaling con autocorrelazione dei rendimenti"
@@ -161,7 +162,7 @@ def _pareto(n=2000, xi=0.4):
 class TestRegistry315:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 415
+        assert len(titoli) == len(dvars) == len(withs) == 416
         assert TITLE315 in titoli
         assert "tab315" in dvars
         assert "    with tab315:" in src
@@ -174,8 +175,8 @@ class TestRegistry315:
 
     def test_ultima_tab(self):
         _, titoli, dvars, _ = _registry()
-        assert titoli[-1] == TITLE415
-        assert dvars[-1] == "tab415"
+        assert titoli[-1] == TITLE416
+        assert dvars[-1] == "tab416"
 
 
 class TestValidatori:
