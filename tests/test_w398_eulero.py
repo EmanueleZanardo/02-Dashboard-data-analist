@@ -1,0 +1,194 @@
+"""Test tab398 '🎯 Contributi di rischio ES: allocazione di Eulero del portafoglio': registry + funzioni pure."""
+
+import math
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from appfuncs import load as _load
+
+_F = _load("mh398_num", "mh398_check_w", "mh398_check_vol",
+           "mh398_check_rho", "mh398_check_alpha", "mh398_cov",
+           "mh398_es_chiusa", "mh398_euler", "mh398_verdetto",
+           "mh398_mappa")
+
+TITLE398 = "🎯 Contributi di rischio ES: allocazione di Eulero del portafoglio"
+TITLE397 = "🔀 Entropic risk measure: avversione esponenziale al rischio"
+TITLE396 = "📊 Spectral risk measure: VaR ponderato dal tuo spettro di avversione"
+TITLE395 = "🌀 Distortion risk measures: VaR, ES e Wang da un'unica formula"
+TITLE394 = "📐⚖ Expectile: la misura di rischio elicitabile e coerente"
+TITLE393 = "🎯📉 LPM: il rischio downside contro un target"
+W1 = 1.5
+W2 = 1.0
+W3 = 0.8
+V1 = 0.25
+V2 = 0.35
+V3 = 0.3
+R12 = 0.6
+R13 = 0.3
+R23 = 0.45
+ALPHA = 0.975
+ES = 1822624.28409285
+RC1 = 738780.1719135869
+RC2 = 716815.4240322394
+RC3 = 367028.688147024
+PCT1 = 40.533870768724555
+PCT2 = 39.328754164438784
+PCT3 = 20.137375066836675
+BEN = 0.19209189313314545
+
+
+class TestRegistry398:
+    def test_conteggi(self):
+        import re
+        src = (Path(__file__).resolve().parent.parent / "app.py"
+               ).read_text(encoding="utf-8")
+        line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
+        titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
+        dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
+        withs = re.findall(r"with (tab\d+):", src)
+        assert len(titoli) == len(dvars) == len(withs) == 398
+        assert "tab398" in dvars
+        assert "tab398" in withs
+
+    def test_titoli_allineati_393_394_395_396_397_398(self):
+        import re
+        src = (Path(__file__).resolve().parent.parent / "app.py"
+               ).read_text(encoding="utf-8")
+        line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
+        titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
+        dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
+        assert titoli[dvars.index("tab393")] == TITLE393
+        assert titoli[dvars.index("tab394")] == TITLE394
+        assert titoli[dvars.index("tab395")] == TITLE395
+        assert titoli[dvars.index("tab396")] == TITLE396
+        assert titoli[dvars.index("tab397")] == TITLE397
+        assert titoli[dvars.index("tab398")] == TITLE398
+
+    def test_ultima_tab(self):
+        import re
+        src = (Path(__file__).resolve().parent.parent / "app.py"
+               ).read_text(encoding="utf-8")
+        line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
+        titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
+        dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
+        withs = re.findall(r"with (tab\d+):", src)
+        assert dvars[-1] == "tab398"
+        assert titoli[-1] == TITLE398
+        assert withs[-1] == "tab398"
+
+
+class TestEuler:
+    def _demo(self):
+        return _F["mh398_euler"]((W1, W2, W3), (V1, V2, V3),
+                                 R12, R13, R23, ALPHA)
+
+    def test_somma_rc_uguale_es(self):
+        # teorema di Eulero: Σ RC_i == ES (1-omogeneita')
+        e = self._demo()
+        assert abs(sum(e["rc"]) - e["es"]) / e["es"] < 1e-12
+
+    def test_rc_pct_somma_100(self):
+        e = self._demo()
+        assert abs(sum(e["rc_pct"]) - 100.0) < 1e-9
+
+    def test_demo_costanti(self):
+        e = self._demo()
+        assert abs(e["es"] - ES) / ES < 1e-12
+        for got, exp in zip(e["rc"], (RC1, RC2, RC3)):
+            assert abs(got - exp) / ES < 1e-12
+        for got, exp in zip(e["rc_pct"], (PCT1, PCT2, PCT3)):
+            assert abs(got - exp) < 1e-9
+        assert abs(e["benefit"] - BEN) < 1e-12
+
+    def test_omogeneita(self):
+        # scala nozionali x2 -> RC x2, RC% invariati
+        e1 = self._demo()
+        e2 = _F["mh398_euler"]((2 * W1, 2 * W2, 2 * W3),
+                               (V1, V2, V3), R12, R13, R23, ALPHA)
+        assert abs(e2["es"] - 2 * e1["es"]) / e1["es"] < 1e-12
+        for a, b in zip(e2["rc"], e1["rc"]):
+            assert abs(a - 2 * b) / e1["es"] < 1e-12
+        for a, b in zip(e2["rc_pct"], e1["rc_pct"]):
+            assert abs(a - b) < 1e-9
+
+    def test_simmetria_indipendente(self):
+        # rho=0, tutto uguale -> 1/3 ciascuno
+        e = _F["mh398_euler"]((1.0, 1.0, 1.0), (0.2, 0.2, 0.2),
+                              0.0, 0.0, 0.0, 0.975)
+        for p in e["rc_pct"]:
+            assert abs(p - 100.0 / 3.0) < 1e-9
+
+    def test_singolo_asset(self):
+        # una sola posizione -> tutto il rischio e' suo
+        e = _F["mh398_euler"]((2.0, 0.0, 0.0), (0.3, 0.3, 0.3),
+                              0.5, 0.5, 0.5, 0.975)
+        assert abs(e["rc"][0] - e["es"]) / e["es"] < 1e-12
+        assert e["rc"][1] == 0.0 and e["rc"][2] == 0.0
+        assert abs(e["rc_pct"][0] - 100.0) < 1e-9
+
+    def test_beneficio_non_negativo(self):
+        # subadditivita': il beneficio non e' mai negativo
+        e = self._demo()
+        assert e["benefit"] >= -1e-12
+        assert e["es"] <= e["standalone"] * (1.0 + 1e-12)
+
+    def test_hedge_rc_negativo(self):
+        # asset 3 anti-correlato -> contributo negativo (hedge)
+        e = _F["mh398_euler"]((1.0, 1.0, 1.0), (0.2, 0.2, 0.2),
+                              0.9, -0.6, -0.6, 0.975)
+        assert e["rc"][2] < 0.0
+        assert abs(sum(e["rc"]) - e["es"]) / e["es"] < 1e-12
+
+    def test_cov_psd_ko(self):
+        # matrice non PSD -> ValueError
+        with pytest.raises(ValueError):
+            _F["mh398_cov"]((1.0, 1.0, 1.0), 0.9, 0.9, -0.9)
+        with pytest.raises(ValueError):
+            _F["mh398_euler"]((1.0, 1.0, 1.0), (0.2, 0.2, 0.2),
+                              0.9, 0.9, -0.9, 0.975)
+
+    def test_verdetto_stati(self):
+        e = self._demo()
+        assert _F["mh398_verdetto"](e["rc_pct"], 0).startswith("MODERATO")
+        e1 = _F["mh398_euler"]((2.0, 0.0, 0.0), (0.3, 0.3, 0.3),
+                               0.5, 0.5, 0.5, 0.975)
+        assert _F["mh398_verdetto"](e1["rc_pct"], 0).startswith(
+            "CONCENTRATO")
+        e2 = _F["mh398_euler"]((1.0, 1.0, 1.0), (0.2, 0.2, 0.2),
+                               0.0, 0.0, 0.0, 0.975)
+        assert _F["mh398_verdetto"](e2["rc_pct"], 0).startswith(
+            "DIVERSIFICATO")
+        eh = _F["mh398_euler"]((1.0, 1.0, 1.0), (0.2, 0.2, 0.2),
+                               0.9, -0.6, -0.6, 0.975)
+        _vh = _F["mh398_verdetto"](
+            eh["rc_pct"], sum(1 for _x in eh["rc"] if _x < 0.0))
+        assert "hedge" in _vh
+
+    def test_num_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh398_num"](True, "x")
+        with pytest.raises(ValueError):
+            _F["mh398_num"](float("nan"), "x")
+        with pytest.raises(ValueError):
+            _F["mh398_num"](float("inf"), "x")
+        with pytest.raises(ValueError):
+            _F["mh398_check_w"](-0.5)
+        with pytest.raises(ValueError):
+            _F["mh398_check_vol"](2.5)
+        with pytest.raises(ValueError):
+            _F["mh398_check_rho"](1.5)
+        with pytest.raises(ValueError):
+            _F["mh398_check_alpha"](1.0)
+        with pytest.raises(ValueError):
+            _F["mh398_es_chiusa"](-1.0, 0.975)
+
+    def test_mappa_demo(self):
+        b = _F["mh398_mappa"]((W1, W2, W3), (V1, V2, V3),
+                              R12, R13, R23, ALPHA)
+        assert abs(b["es"] - ES) / ES < 1e-12
+        assert b["n_hedge"] == 0
+        assert b["verdetto"].startswith("MODERATO")
+        assert b["rho"] == (R12, R13, R23)
