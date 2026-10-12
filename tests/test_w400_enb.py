@@ -19,6 +19,7 @@ TITLE401 = "📈 Massima diversificazione (MD): i pesi che massimizzano il rappo
 TITLE402 = "🛡️ Minima varianza (MV): i pesi che minimizzano la volatilità di portafoglio"
 TITLE403 = "🎯 Sharpe massimo (MS): i pesi che massimizzano il rendimento per unità di rischio"
 TITLE404 = "🎯 Rendimento target (TR): minima varianza a rendimento atteso fissato"
+TITLE405 = "κ Kappa ratio: un'unica famiglia per Omega e Sortino"
 TITLE399 = "🔱 Risk parity: pesi a parità di contributo di rischio (risk budgeting)"
 TITLE398 = "🎯 Contributi di rischio ES: allocazione di Eulero del portafoglio"
 TITLE397 = "🔀 Entropic risk measure: avversione esponenziale al rischio"
@@ -49,7 +50,7 @@ class TestRegistry400:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert len(titoli) == len(dvars) == len(withs) == 404
+        assert len(titoli) == len(dvars) == len(withs) == 405
         assert "tab400" in dvars
         assert "tab400" in withs
 
@@ -75,9 +76,9 @@ class TestRegistry400:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert dvars[-1] == "tab404"
-        assert titoli[-1] == TITLE404
-        assert withs[-1] == "tab404"
+        assert dvars[-1] == "tab405"
+        assert titoli[-1] == TITLE405
+        assert withs[-1] == "tab405"
 
 
 class TestEnb400:

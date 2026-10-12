@@ -57,6 +57,7 @@ TITLE401 = "📈 Massima diversificazione (MD): i pesi che massimizzano il rappo
 TITLE402 = "🛡️ Minima varianza (MV): i pesi che minimizzano la volatilità di portafoglio"
 TITLE403 = "🎯 Sharpe massimo (MS): i pesi che massimizzano il rendimento per unità di rischio"
 TITLE404 = "🎯 Rendimento target (TR): minima varianza a rendimento atteso fissato"
+TITLE405 = "κ Kappa ratio: un'unica famiglia per Omega e Sortino"
 TITLE361 = "Rischio di rovina (risk of ruin): probabilita' di rovina prima del target"
 TITLE360 = "Kelly frazionario (fractional Kelly): λ·f*"
 TITLE359 = "Kelly con take-profit: sizing con vincita troncata"
@@ -89,7 +90,7 @@ def _registry():
 class TestRegistry362:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 404
+        assert len(titoli) == len(dvars) == len(withs) == 405
         assert "tab362" in dvars
         assert "tab362" in withs
 
@@ -103,9 +104,9 @@ class TestRegistry362:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab404"
-        assert titoli[-1] == TITLE404
-        assert withs[-1] == "tab404"
+        assert dvars[-1] == "tab405"
+        assert titoli[-1] == TITLE405
+        assert withs[-1] == "tab405"
 
 
 class TestNum:

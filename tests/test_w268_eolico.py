@@ -170,6 +170,7 @@ TITLE401 = "📈 Massima diversificazione (MD): i pesi che massimizzano il rappo
 TITLE402 = "🛡️ Minima varianza (MV): i pesi che minimizzano la volatilità di portafoglio"
 TITLE403 = "🎯 Sharpe massimo (MS): i pesi che massimizzano il rendimento per unità di rischio"
 TITLE404 = "🎯 Rendimento target (TR): minima varianza a rendimento atteso fissato"
+TITLE405 = "κ Kappa ratio: un'unica famiglia per Omega e Sortino"
 TITLE267 = "🟢 Biometano: business case"
 
 POT = 10.0
@@ -198,12 +199,12 @@ def _registry():
 class TestRegistryTab268:
     def test_tab268_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 404
+        assert len(titoli) == len(dvars) == len(withs) == 405
         assert TITLE268 in titoli
         assert "tab268" in dvars
         assert "tab268" in withs
         assert titoli[dvars.index("tab268")] == TITLE268
-        assert titoli[-1] == TITLE404
+        assert titoli[-1] == TITLE405
         keys = re.findall(r'key="(eo268_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

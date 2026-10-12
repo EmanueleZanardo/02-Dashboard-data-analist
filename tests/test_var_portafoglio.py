@@ -162,12 +162,12 @@ class TestRegistryTab198:
         src = Path(__file__).parent.parent.joinpath("app.py").read_text()
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
-        assert len(titoli) == 404
-        assert titoli[-1] == "🎯 Rendimento target (TR): minima varianza a rendimento atteso fissato"
+        assert len(titoli) == 405
+        assert titoli[-1] == "κ Kappa ratio: un'unica famiglia per Omega e Sortino"
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         assert "tab198" in dvars
         withs = re.findall(r"    with (tab\d+):", src)
         assert "tab198" in withs
-        assert len(withs) == len(dvars) == 404
+        assert len(withs) == len(dvars) == 405
         keys = re.findall(r'key="(var198_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 7

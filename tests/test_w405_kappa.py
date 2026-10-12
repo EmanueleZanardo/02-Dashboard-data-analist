@@ -1,0 +1,180 @@
+"""Test tab405 'κ Kappa ratio: un'unica famiglia per Omega e Sortino': registry + funzioni pure."""
+
+import math
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from appfuncs import load as _load
+
+_F = _load("mh405_num", "mh405_check_n", "mh405_parse_serie",
+           "mh405_media", "mh405_lpm", "mh405_upm", "mh405_kappa",
+           "mh405_omega", "mh405_sortino", "mh405_verdetto",
+           "mh405_mappa")
+
+TITLE405 = "κ Kappa ratio: un'unica famiglia per Omega e Sortino"
+TITLE404 = "🎯 Rendimento target (TR): minima varianza a rendimento atteso fissato"
+TITLE403 = "🎯 Sharpe massimo (MS): i pesi che massimizzano il rendimento per unità di rischio"
+TITLE402 = "🛡️ Minima varianza (MV): i pesi che minimizzano la volatilità di portafoglio"
+TITLE401 = "📈 Massima diversificazione (MD): i pesi che massimizzano il rapporto DR"
+TITLE400 = "🎯 Numero effettivo di scommesse (ENB): quante posizioni indipendenti hai davvero?"
+DEMO = '1.2\n-0.8\n2.1\n0.5\n-1.5\n3.2\n0.8\n-2.2\n1.7\n5.4\n0.3\n-1.1\n2.6\n1.1\n-0.6\n4.1\n0.9\n-1.8\n2.3\n0.4\n6.2\n-0.9\n1.5\n2.8\n-2.5\n1.0\n0.7\n-1.2\n3.6\n1.4\n-0.4\n2.0\n0.6\n-1.6\n4.8\n1.9'
+MEDIA = 1.0694444444444444
+K1 = 2.636986301369863
+K2 = 1.3163951118623083
+K3 = 0.9990697758646013
+K4 = 0.852015661478278
+LPM1 = 0.40555555555555556
+LPM2 = 0.66
+UPM1 = 1.475
+OMEGA = 3.636986301369863
+SORTINO = 1.3163951118623083
+
+
+class TestRegistry405:
+    def test_conteggi(self):
+        import re
+        src = (Path(__file__).resolve().parent.parent / "app.py"
+               ).read_text(encoding="utf-8")
+        line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
+        titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
+        dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
+        withs = re.findall(r"with (tab\d+):", src)
+        assert len(titoli) == len(dvars) == len(withs) == 405
+        assert "tab405" in dvars
+        assert "tab405" in withs
+
+    def test_titoli_allineati_400_401_402_403_404_405(self):
+        import re
+        src = (Path(__file__).resolve().parent.parent / "app.py"
+               ).read_text(encoding="utf-8")
+        line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
+        titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
+        dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
+        assert titoli[dvars.index("tab400")] == TITLE400
+        assert titoli[dvars.index("tab401")] == TITLE401
+        assert titoli[dvars.index("tab402")] == TITLE402
+        assert titoli[dvars.index("tab403")] == TITLE403
+        assert titoli[dvars.index("tab404")] == TITLE404
+        assert titoli[dvars.index("tab405")] == TITLE405
+
+    def test_ultima_tab(self):
+        import re
+        src = (Path(__file__).resolve().parent.parent / "app.py"
+               ).read_text(encoding="utf-8")
+        line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
+        titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
+        dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
+        withs = re.findall(r"with (tab\d+):", src)
+        assert dvars[-1] == "tab405"
+        assert titoli[-1] == TITLE405
+        assert withs[-1] == "tab405"
+
+
+class TestKappa405:
+    def _xs(self):
+        return _F["mh405_parse_serie"](DEMO)
+
+    def test_demo_valori(self):
+        xs = self._xs()
+        assert len(xs) == 36
+        m = _F["mh405_mappa"](xs, 0.0, 2)
+        assert abs(m["media"] - MEDIA) < 1e-12
+        assert abs(m["kappa"] - K2) < 1e-12
+        assert abs(m["lpm"] - LPM2) < 1e-12
+        assert abs(m["omega"] - OMEGA) < 1e-12
+        assert abs(m["sortino"] - SORTINO) < 1e-12
+        for _i, _e in zip((1, 2, 3, 4), (K1, K2, K3, K4)):
+            assert abs(m["famiglia"][_i] - _e) < 1e-12, _i
+        assert m["verdetto"].startswith("SOPRA SOGLIA")
+
+    def test_kappa1_uguale_omega_meno_1(self):
+        # n=1: Kappa_1(T) = Omega(T) - 1 (controllo indipendente)
+        xs = self._xs()
+        k1 = _F["mh405_kappa"](xs, 0.0, 1)
+        om = _F["mh405_omega"](xs, 0.0)
+        assert abs(k1 - (om - 1.0)) < 1e-9
+        assert abs(k1 - K1) < 1e-12
+
+    def test_kappa2_uguale_sortino(self):
+        # n=2: Kappa_2(T) = Sortino(T) (controllo indipendente)
+        xs = self._xs()
+        k2 = _F["mh405_kappa"](xs, 0.0, 2)
+        so = _F["mh405_sortino"](xs, 0.0)
+        assert abs(k2 - so) < 1e-12
+        assert abs(k2 - K2) < 1e-12
+
+    def test_monotonia_demo(self):
+        # la serie demo ha skew positiva: ordini piu' alti penalizzano
+        # le code -> Kappa decrescente in n
+        xs = self._xs()
+        ks = [_F["mh405_kappa"](xs, 0.0, i) for i in (1, 2, 3, 4)]
+        assert ks[0] > ks[1] > ks[2] > ks[3] > 0.0
+
+    def test_casi_degeneri(self):
+        # serie costante sopra T -> nessun downside -> +inf
+        xs = tuple([1.5] * 25)
+        assert _F["mh405_kappa"](xs, 0.0, 2) == math.inf
+        assert _F["mh405_sortino"](xs, 0.0) == math.inf
+        # serie costante uguale a T -> excess 0, LPM 0 -> 0.0
+        xs = tuple([0.0] * 25)
+        assert _F["mh405_kappa"](xs, 0.0, 2) == 0.0
+        # media sotto T -> Kappa negativo
+        xs = tuple([-0.5] * 20 + [0.2] * 10)
+        k = _F["mh405_kappa"](xs, 0.0, 2)
+        assert k < 0.0
+        assert _F["mh405_verdetto"](k).startswith("SOTTO SOGLIA")
+        # soglia alta: media - T < 0 ma LPM piccolo
+        xs = self._xs()
+        k = _F["mh405_kappa"](xs, 6.5, 2)
+        assert k < 0.0
+
+    def test_parse_serie(self):
+        xs = self._xs()
+        assert len(xs) == 36
+        assert abs(sum(xs) / len(xs) - MEDIA) < 1e-12
+        # la virgola vale come separatore decimale
+        xs2 = _F["mh405_parse_serie"](
+            "\n".join(["1,5", "-0,25"] + ["0.0"] * 18))
+        assert abs(xs2[0] - 1.5) < 1e-12
+        assert abs(xs2[1] + 0.25) < 1e-12
+
+    def test_verdetto_stati(self):
+        assert _F["mh405_verdetto"](math.inf).startswith("PERFETTO")
+        assert _F["mh405_verdetto"](1.5).startswith("SOPRA SOGLIA")
+        assert _F["mh405_verdetto"](0.0).startswith("SULLA SOGLIA")
+        assert _F["mh405_verdetto"](-0.7).startswith("SOTTO SOGLIA")
+        with pytest.raises(ValueError):
+            _F["mh405_verdetto"](True)
+
+    def test_validatori(self):
+        xs = self._xs()
+        for _bad in (lambda: _F["mh405_check_n"](0),
+                     lambda: _F["mh405_check_n"](5),
+                     lambda: _F["mh405_check_n"](2.5),
+                     lambda: _F["mh405_kappa"](xs, 0.0, 5),
+                     lambda: _F["mh405_lpm"](xs, 0.0, 0),
+                     lambda: _F["mh405_kappa"]((1.0,) * 19, 0.0, 2),
+                     lambda: _F["mh405_media"]((1.0,) * 19),
+                     lambda: _F["mh405_parse_serie"](
+                         "\n".join(["1.0"] * 19)),
+                     lambda: _F["mh405_parse_serie"](
+                         "\n".join(["abc"] + ["1.0"] * 20)),
+                     lambda: _F["mh405_parse_serie"](
+                         "\n".join(["nan"] + ["1.0"] * 20)),
+                     lambda: _F["mh405_parse_serie"](None),
+                     lambda: _F["mh405_num"](True, "x"),
+                     lambda: _F["mh405_num"](float("nan"), "x"),
+                     lambda: _F["mh405_num"]("a", "x"),
+                     lambda: _F["mh405_mappa"](xs, float("nan"), 2)):
+            with pytest.raises(ValueError):
+                _bad()
+
+    def test_mappa_stringa_input(self):
+        # mappa accetta anche il testo grezzo della text area
+        m = _F["mh405_mappa"](DEMO, 0.0, 2)
+        assert abs(m["kappa"] - K2) < 1e-12
+        assert m["n_per"] == 36
+
