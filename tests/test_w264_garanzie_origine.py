@@ -178,6 +178,7 @@ TITLE414 = "🎯 Probabilistic Sharpe ratio: lo Sharpe e' davvero significativo?
 TITLE416 = "🎚️ Kappa ratio: Omega e Sortino sono lo stesso strumento"
 TITLE413 = "📐 Sharpe corretto: il rendimento per unita' di rischio con code grasse"
 TITLE415 = "🎯 Deflated Sharpe ratio: lo Sharpe sopravvive ai backtest multipli?"
+TITLE417 = "🔺 Farinelli-Tibiletti: Omega e upside potential in un'unica formula"
 TITLE263 = "\U0001F697 Flotta aziendale: TCO diesel vs elettrico"
 
 CONSUMI_TXT = "85\n78\n82\n75\n70\n65\n60\n62\n68\n75\n82\n90"
@@ -196,12 +197,12 @@ def _registry():
 class TestRegistryTab264:
     def test_tab264_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 416
+        assert len(titoli) == len(dvars) == len(withs) == 417
         assert TITLE264 in titoli
         assert "tab264" in dvars
         assert "tab264" in withs
         assert titoli[dvars.index("tab264")] == TITLE264
-        assert titoli[-1] == TITLE416
+        assert titoli[-1] == TITLE417
         keys = re.findall(r'key="(go264_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

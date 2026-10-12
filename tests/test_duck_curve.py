@@ -116,12 +116,12 @@ class TestRegistryTab227:
             encoding="utf-8")
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
-        assert len(titoli) == 416
-        assert titoli[-1] == "🎚️ Kappa ratio: Omega e Sortino sono lo stesso strumento"
+        assert len(titoli) == 417
+        assert titoli[-1] == "🔺 Farinelli-Tibiletti: Omega e upside potential in un'unica formula"
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         assert "tab227" in dvars
         withs = re.findall(r"    with (tab\d+):", src)
         assert "tab227" in withs
-        assert len(withs) == len(dvars) == 416
+        assert len(withs) == len(dvars) == 417
         keys = re.findall(r'key="(ai227_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 6

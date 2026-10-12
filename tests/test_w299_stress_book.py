@@ -147,6 +147,7 @@ TITLE414 = "🎯 Probabilistic Sharpe ratio: lo Sharpe e' davvero significativo?
 TITLE416 = "🎚️ Kappa ratio: Omega e Sortino sono lo stesso strumento"
 TITLE413 = "📐 Sharpe corretto: il rendimento per unita' di rischio con code grasse"
 TITLE415 = "🎯 Deflated Sharpe ratio: lo Sharpe sopravvive ai backtest multipli?"
+TITLE417 = "🔺 Farinelli-Tibiletti: Omega e upside potential in un'unica formula"
 TITLE298 = "🚦📏 Limite VaR: quanto margine resta?"
 TITLE297 = "➕📊 Marginal VaR: quanto rischio aggiunge il nuovo trade?"
 
@@ -186,12 +187,12 @@ def _registry():
 class TestRegistryTab299:
     def test_tab299_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 416
+        assert len(titoli) == len(dvars) == len(withs) == 417
         assert TITLE299 in titoli
         assert "tab299" in dvars
         assert "tab299" in withs
         assert titoli[dvars.index("tab299")] == TITLE299
-        assert titoli[-1] == TITLE416
+        assert titoli[-1] == TITLE417
         keys = re.findall(r'key="(st299_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

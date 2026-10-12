@@ -62,6 +62,7 @@ TITLE414 = "🎯 Probabilistic Sharpe ratio: lo Sharpe e' davvero significativo?
 TITLE416 = "🎚️ Kappa ratio: Omega e Sortino sono lo stesso strumento"
 TITLE413 = "📐 Sharpe corretto: il rendimento per unita' di rischio con code grasse"
 TITLE415 = "🎯 Deflated Sharpe ratio: lo Sharpe sopravvive ai backtest multipli?"
+TITLE417 = "🔺 Farinelli-Tibiletti: Omega e upside potential in un'unica formula"
 TITLE369 = "Kelly con costi di transazione: f* netto = (μ-c)/σ²"
 TITLE368 = "Kelly su ritorni continui: f* = μ/σ² e volatility drag"
 TITLE367 = "Kelly: mappa di sensibilità f* e crescita su (p, b)"
@@ -92,7 +93,7 @@ def _registry():
 class TestRegistry370:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 416
+        assert len(titoli) == len(dvars) == len(withs) == 417
         assert "tab370" in dvars
         assert "tab370" in withs
 
@@ -107,9 +108,9 @@ class TestRegistry370:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab416"
-        assert titoli[-1] == TITLE416
-        assert withs[-1] == "tab416"
+        assert dvars[-1] == "tab417"
+        assert titoli[-1] == TITLE417
+        assert withs[-1] == "tab417"
 
 
 class TestNum:

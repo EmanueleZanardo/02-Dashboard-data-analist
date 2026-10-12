@@ -28,6 +28,7 @@ TITLE414 = "🎯 Probabilistic Sharpe ratio: lo Sharpe e' davvero significativo?
 TITLE416 = "🎚️ Kappa ratio: Omega e Sortino sono lo stesso strumento"
 TITLE413 = "📐 Sharpe corretto: il rendimento per unita' di rischio con code grasse"
 TITLE415 = "🎯 Deflated Sharpe ratio: lo Sharpe sopravvive ai backtest multipli?"
+TITLE417 = "🔺 Farinelli-Tibiletti: Omega e upside potential in un'unica formula"
 TITLE403 = "🎯 Sharpe massimo (MS): i pesi che massimizzano il rendimento per unità di rischio"
 TITLE402 = "🛡️ Minima varianza (MV): i pesi che minimizzano la volatilità di portafoglio"
 TITLE401 = "📈 Massima diversificazione (MD): i pesi che massimizzano il rapporto DR"
@@ -64,7 +65,7 @@ class TestRegistry404:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert len(titoli) == len(dvars) == len(withs) == 416
+        assert len(titoli) == len(dvars) == len(withs) == 417
         assert "tab404" in dvars
         assert "tab404" in withs
 
@@ -90,9 +91,9 @@ class TestRegistry404:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert dvars[-1] == "tab416"
-        assert titoli[-1] == TITLE416
-        assert withs[-1] == "tab416"
+        assert dvars[-1] == "tab417"
+        assert titoli[-1] == TITLE417
+        assert withs[-1] == "tab417"
 
 
 class TestTargetReturn404:
