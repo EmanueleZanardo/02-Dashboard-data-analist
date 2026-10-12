@@ -101,6 +101,7 @@ TITLE408 = "💢 Pain index: il dolore che serve per il rendimento"
 TITLE409 = "🛟 Sterling ratio: quanto rende contro i K peggiori drawdown"
 TITLE410 = "⚖ Gain-to-Pain ratio: quanto guadagno per ogni euro perso"
 TITLE411 = "🌊 Volatility drag: quanto rendimento mangia la volatilita'"
+TITLE412 = "🎯 Omega ratio: quanto upside prendi per ogni euro di downside"
 TITLE330 = "🔍📉 Martin ratio: il Calmar che guarda tutto il dolore"
 TITLE329 = "🌊📉 CDaR: il drawdown medio oltre la soglia (il VaR dei drawdown)"
 TITLE328 = "🔻 Burke ratio: il drawdown penalizzato al quadrato"
@@ -138,7 +139,7 @@ def _eq_demo():
 class TestRegistry331:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 411
+        assert len(titoli) == len(dvars) == len(withs) == 412
         assert TITLE331 in titoli
         assert "tab331" in dvars
         assert "    with tab331:" in src
@@ -152,9 +153,9 @@ class TestRegistry331:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert titoli[-1] == TITLE411
-        assert dvars[-1] == "tab411"
-        assert withs[-1] == "tab411"
+        assert titoli[-1] == TITLE412
+        assert dvars[-1] == "tab412"
+        assert withs[-1] == "tab412"
 
 
 class TestNum:

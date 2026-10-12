@@ -14,6 +14,7 @@ _F = _load("mh411_num", "mh411_parse_serie", "mh411_equity",
            "mh411_drag", "mh411_verdetto", "mh411_mappa")
 
 TITLE411 = "🌊 Volatility drag: quanto rendimento mangia la volatilita'"
+TITLE412 = "🎯 Omega ratio: quanto upside prendi per ogni euro di downside"
 TITLE410 = "⚖ Gain-to-Pain ratio: quanto guadagno per ogni euro perso"
 TITLE409 = "🛟 Sterling ratio: quanto rende contro i K peggiori drawdown"
 TITLE408 = "💢 Pain index: il dolore che serve per il rendimento"
@@ -39,7 +40,7 @@ class TestRegistry411:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert len(titoli) == len(dvars) == len(withs) == 411
+        assert len(titoli) == len(dvars) == len(withs) == 412
         assert "tab411" in dvars
         assert "tab411" in withs
 
@@ -65,9 +66,9 @@ class TestRegistry411:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert dvars[-1] == "tab411"
-        assert titoli[-1] == TITLE411
-        assert withs[-1] == "tab411"
+        assert dvars[-1] == "tab412"
+        assert titoli[-1] == TITLE412
+        assert withs[-1] == "tab412"
 
 
 class TestVolDrag411:
