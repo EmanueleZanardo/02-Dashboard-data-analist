@@ -157,6 +157,7 @@ TITLE404 = "🎯 Rendimento target (TR): minima varianza a rendimento atteso fis
 TITLE405 = "κ Kappa ratio: un'unica famiglia per Omega e Sortino"
 TITLE406 = "📏 Tail ratio: la coda destra contro la sinistra"
 TITLE407 = "🔄 Recovery factor: quanto rende ogni euro di drawdown"
+TITLE408 = "💢 Pain index: il dolore che serve per il rendimento"
 TITLE288 = "⚡🔥 Clean spark spread: margine centrale a gas"
 TITLE287 = "🚢⚡ Rigassificazione GNL: margine terminale"
 TITLE286 = "⛽ Basis gas TTF–PSV"
@@ -190,12 +191,12 @@ def _registry():
 class TestRegistryTab289:
     def test_tab289_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 407
+        assert len(titoli) == len(dvars) == len(withs) == 408
         assert TITLE289 in titoli
         assert "tab289" in dvars
         assert "tab289" in withs
         assert titoli[dvars.index("tab289")] == TITLE289
-        assert titoli[-1] == TITLE407
+        assert titoli[-1] == TITLE408
         keys = re.findall(r'key="(cds289_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

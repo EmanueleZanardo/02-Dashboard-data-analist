@@ -65,6 +65,7 @@ TITLE404 = "🎯 Rendimento target (TR): minima varianza a rendimento atteso fis
 TITLE405 = "κ Kappa ratio: un'unica famiglia per Omega e Sortino"
 TITLE406 = "📏 Tail ratio: la coda destra contro la sinistra"
 TITLE407 = "🔄 Recovery factor: quanto rende ogni euro di drawdown"
+TITLE408 = "💢 Pain index: il dolore che serve per il rendimento"
 TITLE356 = "Kelly bayesiano: sizing con win-rate posterior"
 TITLE355 = "Kelly con target di volatilità: sizing riscalato sulla vol"
 TITLE354 = "Kelly con controllo drawdown: sizing frazionato al drawdown"
@@ -100,7 +101,7 @@ def _registry():
 class TestRegistry357:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 407
+        assert len(titoli) == len(dvars) == len(withs) == 408
         assert "tab357" in dvars
         assert "tab357" in withs
 
@@ -114,9 +115,9 @@ class TestRegistry357:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab407"
-        assert titoli[-1] == TITLE407
-        assert withs[-1] == "tab407"
+        assert dvars[-1] == "tab408"
+        assert titoli[-1] == TITLE408
+        assert withs[-1] == "tab408"
 
 
 class TestNum:
