@@ -124,6 +124,7 @@ TITLE411 = "🌊 Volatility drag: quanto rendimento mangia la volatilita'"
 TITLE412 = "🎯 Omega ratio: quanto upside prendi per ogni euro di downside"
 TITLE414 = "🎯 Probabilistic Sharpe ratio: lo Sharpe e' davvero significativo?"
 TITLE413 = "📐 Sharpe corretto: il rendimento per unita' di rischio con code grasse"
+TITLE415 = "🎯 Deflated Sharpe ratio: lo Sharpe sopravvive ai backtest multipli?"
 TITLE310 = "💧📉 LVaR: il VaR corretto per il costo di liquidazione"
 TITLE309 = "🎯💥 Rho critica: a quale correlazione il VaR tocca il limite?"
 BOOK_DEMO = ("Cal-28 Baseload power;2500000;18,5;-0,8;4,0;power\n"
@@ -160,7 +161,7 @@ def _registry():
 class TestRegistry311:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 414
+        assert len(titoli) == len(dvars) == len(withs) == 415
         assert TITLE311 in titoli
         assert "tab311" in dvars
         assert "    with tab311:" in src
@@ -173,8 +174,8 @@ class TestRegistry311:
 
     def test_ultima_tab(self):
         _, titoli, dvars, _ = _registry()
-        assert titoli[-1] == TITLE414
-        assert dvars[-1] == "tab414"
+        assert titoli[-1] == TITLE415
+        assert dvars[-1] == "tab415"
 
 
 class TestValidatori:

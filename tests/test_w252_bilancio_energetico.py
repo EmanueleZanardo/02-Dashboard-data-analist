@@ -35,12 +35,12 @@ def _registry():
 class TestRegistryTab252:
     def test_tab252_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 414
+        assert len(titoli) == len(dvars) == len(withs) == 415
         assert "⚖️ Bilancio energetico" in titoli
         assert "tab252" in dvars
         assert "tab252" in withs
         assert titoli[dvars.index("tab252")] == "⚖️ Bilancio energetico"
-        assert titoli[-1] == "🎯 Probabilistic Sharpe ratio: lo Sharpe e' davvero significativo?"
+        assert titoli[-1] == "🎯 Deflated Sharpe ratio: lo Sharpe sopravvive ai backtest multipli?"
         keys = re.findall(r'key="(b252_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 10
 
