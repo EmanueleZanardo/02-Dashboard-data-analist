@@ -50,6 +50,7 @@ TITLE396 = "📊 Spectral risk measure: VaR ponderato dal tuo spettro di avversi
 TITLE397 = "🔀 Entropic risk measure: avversione esponenziale al rischio"
 TITLE398 = "🎯 Contributi di rischio ES: allocazione di Eulero del portafoglio"
 TITLE399 = "🔱 Risk parity: pesi a parità di contributo di rischio (risk budgeting)"
+TITLE400 = "🎯 Numero effettivo di scommesse (ENB): quante posizioni indipendenti hai davvero?"
 TITLE364 = "Kelly con vincoli multipli: cap, lotti, stop e drawdown"
 TITLE363 = "Kelly con limite di posizione: sizing con cap f_max"
 TITLE362 = "Kelly con tre esiti: sizing con vincita, perdita parziale e perdita piena"
@@ -83,7 +84,7 @@ def _registry():
 class TestRegistry365:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 399
+        assert len(titoli) == len(dvars) == len(withs) == 400
         assert "tab365" in dvars
         assert "tab365" in withs
 
@@ -98,9 +99,9 @@ class TestRegistry365:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab399"
-        assert titoli[-1] == TITLE399
-        assert withs[-1] == "tab399"
+        assert dvars[-1] == "tab400"
+        assert titoli[-1] == TITLE400
+        assert withs[-1] == "tab400"
 
 
 class TestNum:

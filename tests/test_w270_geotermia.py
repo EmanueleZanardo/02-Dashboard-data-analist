@@ -164,6 +164,7 @@ TITLE396 = "📊 Spectral risk measure: VaR ponderato dal tuo spettro di avversi
 TITLE397 = "🔀 Entropic risk measure: avversione esponenziale al rischio"
 TITLE398 = "🎯 Contributi di rischio ES: allocazione di Eulero del portafoglio"
 TITLE399 = "🔱 Risk parity: pesi a parità di contributo di rischio (risk budgeting)"
+TITLE400 = "🎯 Numero effettivo di scommesse (ENB): quante posizioni indipendenti hai davvero?"
 TITLE269 = "🌊 Idroelettrico run-of-river: business case"
 
 POT = 5.0
@@ -191,12 +192,12 @@ def _registry():
 class TestRegistryTab270:
     def test_tab270_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 399
+        assert len(titoli) == len(dvars) == len(withs) == 400
         assert TITLE270 in titoli
         assert "tab270" in dvars
         assert "tab270" in withs
         assert titoli[dvars.index("tab270")] == TITLE270
-        assert titoli[-1] == TITLE399
+        assert titoli[-1] == TITLE400
         keys = re.findall(r'key="(gt270_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

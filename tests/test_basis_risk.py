@@ -115,12 +115,12 @@ class TestRegistryTab199:
         src = Path(__file__).parent.parent.joinpath("app.py").read_text()
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
-        assert len(titoli) == 399
-        assert titoli[-1] == "🔱 Risk parity: pesi a parità di contributo di rischio (risk budgeting)"
+        assert len(titoli) == 400
+        assert titoli[-1] == "🎯 Numero effettivo di scommesse (ENB): quante posizioni indipendenti hai davvero?"
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         assert "tab199" in dvars
         withs = re.findall(r"    with (tab\d+):", src)
         assert "tab199" in withs
-        assert len(withs) == len(dvars) == 399
+        assert len(withs) == len(dvars) == 400
         keys = re.findall(r'key="(br199_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 7
