@@ -87,6 +87,7 @@ TITLE398 = "🎯 Contributi di rischio ES: allocazione di Eulero del portafoglio
 TITLE399 = "🔱 Risk parity: pesi a parità di contributo di rischio (risk budgeting)"
 TITLE400 = "🎯 Numero effettivo di scommesse (ENB): quante posizioni indipendenti hai davvero?"
 TITLE401 = "📈 Massima diversificazione (MD): i pesi che massimizzano il rapporto DR"
+TITLE402 = "🛡️ Minima varianza (MV): i pesi che minimizzano la volatilità di portafoglio"
 TITLE335 = "📏 Tracking error: quanto si discosta la strategia dal benchmark?"
 TITLE334 = "🎯 Hit rate: quanto spesso la strategia batte il benchmark?"
 TITLE333 = "📊 Capture ratio: quanto cattura la strategia nei mercati su e giù?"
@@ -124,7 +125,7 @@ def _demo():
 class TestRegistry336:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 401
+        assert len(titoli) == len(dvars) == len(withs) == 402
         assert "tab336" in dvars
         assert "tab336" in withs
 
@@ -137,9 +138,9 @@ class TestRegistry336:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab401"
-        assert titoli[-1] == TITLE401
-        assert withs[-1] == "tab401"
+        assert dvars[-1] == "tab402"
+        assert titoli[-1] == TITLE402
+        assert withs[-1] == "tab402"
 
 
 class TestNum:

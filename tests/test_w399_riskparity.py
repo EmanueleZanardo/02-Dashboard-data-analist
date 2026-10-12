@@ -16,6 +16,7 @@ _F = _load("mh399_num", "mh399_check_vol", "mh399_check_rho",
 TITLE399 = "🔱 Risk parity: pesi a parità di contributo di rischio (risk budgeting)"
 TITLE400 = "🎯 Numero effettivo di scommesse (ENB): quante posizioni indipendenti hai davvero?"
 TITLE401 = "📈 Massima diversificazione (MD): i pesi che massimizzano il rapporto DR"
+TITLE402 = "🛡️ Minima varianza (MV): i pesi che minimizzano la volatilità di portafoglio"
 TITLE398 = "🎯 Contributi di rischio ES: allocazione di Eulero del portafoglio"
 TITLE397 = "🔀 Entropic risk measure: avversione esponenziale al rischio"
 TITLE396 = "📊 Spectral risk measure: VaR ponderato dal tuo spettro di avversione"
@@ -47,7 +48,7 @@ class TestRegistry399:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert len(titoli) == len(dvars) == len(withs) == 401
+        assert len(titoli) == len(dvars) == len(withs) == 402
         assert "tab399" in dvars
         assert "tab399" in withs
 
@@ -73,9 +74,9 @@ class TestRegistry399:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert dvars[-1] == "tab401"
-        assert titoli[-1] == TITLE401
-        assert withs[-1] == "tab401"
+        assert dvars[-1] == "tab402"
+        assert titoli[-1] == TITLE402
+        assert withs[-1] == "tab402"
 
 
 class TestParity:
