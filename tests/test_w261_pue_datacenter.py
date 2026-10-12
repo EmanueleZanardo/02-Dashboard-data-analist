@@ -163,6 +163,7 @@ TITLE390 = "🎯📈 EVaR: il bound di Chernoff piu' conservativo"
 TITLE391 = "🔀📊 RVaR: la media dei quantili tra VaR ed ES"
 TITLE392 = "🎯📊 Median Shortfall: la mediana della coda, robusta tra VaR ed ES"
 TITLE393 = "🎯📉 LPM: il rischio downside contro un target"
+TITLE394 = "📐⚖ Expectile: la misura di rischio elicitabile e coerente"
 TITLE260 = "❄️ Pompa di calore vs caldaia"
 
 
@@ -178,12 +179,12 @@ def _registry():
 class TestRegistryTab261:
     def test_tab261_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 393
+        assert len(titoli) == len(dvars) == len(withs) == 394
         assert TITLE261 in titoli
         assert "tab261" in dvars
         assert "tab261" in withs
         assert titoli[dvars.index("tab261")] == TITLE261
-        assert titoli[-1] == TITLE393
+        assert titoli[-1] == TITLE394
         keys = re.findall(r'key="(pue261_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 8
 

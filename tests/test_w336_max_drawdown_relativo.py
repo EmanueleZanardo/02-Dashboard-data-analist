@@ -79,6 +79,7 @@ TITLE390 = "🎯📈 EVaR: il bound di Chernoff piu' conservativo"
 TITLE391 = "🔀📊 RVaR: la media dei quantili tra VaR ed ES"
 TITLE392 = "🎯📊 Median Shortfall: la mediana della coda, robusta tra VaR ed ES"
 TITLE393 = "🎯📉 LPM: il rischio downside contro un target"
+TITLE394 = "📐⚖ Expectile: la misura di rischio elicitabile e coerente"
 TITLE335 = "📏 Tracking error: quanto si discosta la strategia dal benchmark?"
 TITLE334 = "🎯 Hit rate: quanto spesso la strategia batte il benchmark?"
 TITLE333 = "📊 Capture ratio: quanto cattura la strategia nei mercati su e giù?"
@@ -116,7 +117,7 @@ def _demo():
 class TestRegistry336:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 393
+        assert len(titoli) == len(dvars) == len(withs) == 394
         assert "tab336" in dvars
         assert "tab336" in withs
 
@@ -129,9 +130,9 @@ class TestRegistry336:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab393"
-        assert titoli[-1] == TITLE393
-        assert withs[-1] == "tab393"
+        assert dvars[-1] == "tab394"
+        assert titoli[-1] == TITLE394
+        assert withs[-1] == "tab394"
 
 
 class TestNum:
