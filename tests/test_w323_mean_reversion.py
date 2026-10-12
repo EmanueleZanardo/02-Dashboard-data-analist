@@ -91,6 +91,7 @@ TITLE393 = "🎯📉 LPM: il rischio downside contro un target"
 TITLE394 = "📐⚖ Expectile: la misura di rischio elicitabile e coerente"
 TITLE395 = "🌀 Distortion risk measures: VaR, ES e Wang da un'unica formula"
 TITLE396 = "📊 Spectral risk measure: VaR ponderato dal tuo spettro di avversione"
+TITLE397 = "🔀 Entropic risk measure: avversione esponenziale al rischio"
 TITLE322 = "🎯📉 Convergenza forward: il forward indovina lo spot?"
 TITLE321 = "🧪📉 Backtest VaR: il modello resiste al tempo?"
 SERIE_DEMO = '79.81\n81.48\n93.40\n95.39\n90.10\n86.24\n96.97\n94.32\n87.08\n85.19\n80.96\n87.50\n90.32\n83.94\n85.56\n86.96\n93.54\n99.15\n88.03\n86.26\n88.44\n95.28\n99.54\n86.99\n89.42\n85.97\n89.25\n96.91\n102.51\n102.44\n95.33\n90.81\n85.86\n80.26\n85.01\n91.36\n103.15\n97.06\n102.36\n96.99\n89.46\n82.88\n76.32\n75.04\n75.33\n80.15\n69.20\n72.93'
@@ -124,7 +125,7 @@ def _ris_demo():
 class TestRegistry323:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 396
+        assert len(titoli) == len(dvars) == len(withs) == 397
         assert TITLE323 in titoli
         assert "tab323" in dvars
         assert "    with tab323:" in src
@@ -137,8 +138,8 @@ class TestRegistry323:
 
     def test_ultima_tab(self):
         _, titoli, dvars, _ = _registry()
-        assert titoli[-1] == TITLE396
-        assert dvars[-1] == "tab396"
+        assert titoli[-1] == TITLE397
+        assert dvars[-1] == "tab397"
 
 
 class TestValidatori:

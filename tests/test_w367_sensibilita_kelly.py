@@ -44,6 +44,7 @@ TITLE393 = "🎯📉 LPM: il rischio downside contro un target"
 TITLE394 = "📐⚖ Expectile: la misura di rischio elicitabile e coerente"
 TITLE395 = "🌀 Distortion risk measures: VaR, ES e Wang da un'unica formula"
 TITLE396 = "📊 Spectral risk measure: VaR ponderato dal tuo spettro di avversione"
+TITLE397 = "🔀 Entropic risk measure: avversione esponenziale al rischio"
 TITLE366 = "Kelly su N trade: raddoppio, dimezzamento e crescita attesa"
 TITLE365 = "Kelly con incertezza: haircut bayesiano sulla p stimata"
 TITLE364 = "Kelly con vincoli multipli: cap, lotti, stop e drawdown"
@@ -71,7 +72,7 @@ def _registry():
 class TestRegistry367:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 396
+        assert len(titoli) == len(dvars) == len(withs) == 397
         assert "tab367" in dvars
         assert "tab367" in withs
 
@@ -86,9 +87,9 @@ class TestRegistry367:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab396"
-        assert titoli[-1] == TITLE396
-        assert withs[-1] == "tab396"
+        assert dvars[-1] == "tab397"
+        assert titoli[-1] == TITLE397
+        assert withs[-1] == "tab397"
 
 
 class TestNum:

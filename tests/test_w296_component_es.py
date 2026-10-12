@@ -125,6 +125,7 @@ TITLE393 = "🎯📉 LPM: il rischio downside contro un target"
 TITLE394 = "📐⚖ Expectile: la misura di rischio elicitabile e coerente"
 TITLE395 = "🌀 Distortion risk measures: VaR, ES e Wang da un'unica formula"
 TITLE396 = "📊 Spectral risk measure: VaR ponderato dal tuo spettro di avversione"
+TITLE397 = "🔀 Entropic risk measure: avversione esponenziale al rischio"
 TITLE295 = "🧪🛡 Backtest dell'ES: la coda e' sottostimata?"
 TITLE294 = "🧪📉 Backtest del VaR: il modello tiene?"
 
@@ -203,12 +204,12 @@ def _registry():
 class TestRegistryTab296:
     def test_tab296_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 396
+        assert len(titoli) == len(dvars) == len(withs) == 397
         assert TITLE296 in titoli
         assert "tab296" in dvars
         assert "tab296" in withs
         assert titoli[dvars.index("tab296")] == TITLE296
-        assert titoli[-1] == TITLE396
+        assert titoli[-1] == TITLE397
         keys = re.findall(r'key="(ce296_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
