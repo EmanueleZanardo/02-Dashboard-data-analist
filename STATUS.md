@@ -142,7 +142,13 @@
 
 # STATUS.md — 02-Dashboard-data-analist (Singularity Quant ETRM)
 
-**Ultimo aggiornamento: 11/10/2026 ~02:10 CEST**
+**Ultimo aggiornamento: 12/10/2026 ~02:05 CEST**
+
+## 12/10/2026 ~02:05 CEST — aggiornamento documentale giornaliero
+- **Ciclo QA 00:06 — tab392 "Median Shortfall: mediana della coda oltre il VaR" (commit `b43d6d440b036c94e2bc8af964be541a9f9825df`, 196 file, push verificato):** forma chiusa normale mu+sig*Phi^-1(1-(1-alpha)/2); sandwich VaR<=MS<=ES (demo ratio MS/ES=0.959); robustezza spike +150k -> MS +25 EUR vs ES +2473 EUR. 49 test nuovi verdi, regressione tab391 OK, collect-only 6513 righe OK, bump registry 391->392 su 194 file. Nota: primo lancio fallito per `from appfuncs import load` (sys.path[0]=dir script) — fix PYTHONPATH=.
+- **Ciclo QA 00:40 — tab393 "LPM: il rischio downside contro un target" (commit `a36cecd2ecba33037a0fe88793d065f02c708cba`, 197 file, push verificato):** Lower Partial Moments n=0..3 con forme chiuse normali, specchio upside UPM_1, quota downside, verdetto a 3 stati, curva vs tau, barre, tabella, 2 export CSV. Demo mu=0 sig=10k tau=0 n=2 -> LPM_2=5e7 EUR^2, downside-std 7071 EUR, P(sforamento) 50% -> BILANCIATO. 61 test nuovi verdi, regressione tab392 OK, collect-only 6574 righe OK, bump registry 392->393 su 195 file. Lezione gen: lo shift meccanico \bNNN\b non tocca i token letter-attached (mh/tab/TITLE/T*_LIT) — serve secondo passaggio dedicato + grep prima del lancio.
+- **Streamlit keepalive 00:17:** https://czpox8o8x6arnxw96txnvt.streamlit.app/ 303 -> auth handshake -> 200 (shell Streamlit, 9782 byte); nessuna stringa di sleep né boot — app sveglia, nessun intervento.
+- Blocchi: vecchia chiave ENTSO-E resta nella storia git (da ruotare); app non pubblica — serve suo gesto su share.streamlit.io (Settings -> Sharing -> Public).
 
 ## 11/10/2026 ~02:10 CEST — aggiornamento documentale giornaliero
 - **Ciclo QA 00:40 — tab369 "Kelly con costi di transazione: f*_netto = (mu-c)/sigma^2" (commit `29073e9`, 175 file, push verificato):** breakeven mu_min=c, edge tax c/mu, curve g lorda/netta, sizing frazionato, export CSV. Demo mu=2% sigma=10% c=0.3% cap=100% -> f*_lordo=200%, f*_netto=170% CAP VINCOLANTE, g*_netta=1.445%/trade. 51 test nuovi verdi, regressione tab368 OK, collect-only 5450 righe OK, bump registry 368->369 su 173 file. Nota: primo run fallito su assert posizionamento max curva (griglia 0.03125) — fix tolleranza griglia + resume, pattern invariato.
