@@ -65,6 +65,7 @@ TITLE409 = "🛟 Sterling ratio: quanto rende contro i K peggiori drawdown"
 TITLE410 = "⚖ Gain-to-Pain ratio: quanto guadagno per ogni euro perso"
 TITLE411 = "🌊 Volatility drag: quanto rendimento mangia la volatilita'"
 TITLE412 = "🎯 Omega ratio: quanto upside prendi per ogni euro di downside"
+TITLE413 = "📐 Sharpe corretto: il rendimento per unita' di rischio con code grasse"
 TITLE360 = "Kelly frazionario (fractional Kelly): λ·f*"
 TITLE359 = "Kelly con take-profit: sizing con vincita troncata"
 TITLE358 = "Kelly con stop-loss: sizing con perdita troncata"
@@ -98,7 +99,7 @@ def _registry():
 class TestRegistry361:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 412
+        assert len(titoli) == len(dvars) == len(withs) == 413
         assert "tab361" in dvars
         assert "tab361" in withs
 
@@ -112,9 +113,9 @@ class TestRegistry361:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab412"
-        assert titoli[-1] == TITLE412
-        assert withs[-1] == "tab412"
+        assert dvars[-1] == "tab413"
+        assert titoli[-1] == TITLE413
+        assert withs[-1] == "tab413"
 
 
 class TestNum:

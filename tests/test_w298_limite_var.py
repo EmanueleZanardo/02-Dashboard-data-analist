@@ -148,6 +148,7 @@ TITLE409 = "🛟 Sterling ratio: quanto rende contro i K peggiori drawdown"
 TITLE410 = "⚖ Gain-to-Pain ratio: quanto guadagno per ogni euro perso"
 TITLE411 = "🌊 Volatility drag: quanto rendimento mangia la volatilita'"
 TITLE412 = "🎯 Omega ratio: quanto upside prendi per ogni euro di downside"
+TITLE413 = "📐 Sharpe corretto: il rendimento per unita' di rischio con code grasse"
 TITLE297 = "➕📊 Marginal VaR: quanto rischio aggiunge il nuovo trade?"
 TITLE296 = "🪓🛡 Component ES: chi contribuisce alla coda?"
 
@@ -183,12 +184,12 @@ def _registry():
 class TestRegistryTab298:
     def test_tab298_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 412
+        assert len(titoli) == len(dvars) == len(withs) == 413
         assert TITLE298 in titoli
         assert "tab298" in dvars
         assert "tab298" in withs
         assert titoli[dvars.index("tab298")] == TITLE298
-        assert titoli[-1] == TITLE412
+        assert titoli[-1] == TITLE413
         keys = re.findall(r'key="(rb298_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

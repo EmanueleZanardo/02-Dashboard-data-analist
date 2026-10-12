@@ -176,15 +176,15 @@ class TestRegistry:
                                 and node.value.args and hasattr(node.value.args[0], "elts")):
                 titoli = [t.value for t in node.value.args[0].elts]
         assert titoli is not None
-        assert len(titoli) == 412
-        assert titoli[-1] == "🎯 Omega ratio: quanto upside prendi per ogni euro di downside"
+        assert len(titoli) == 413
+        assert titoli[-1] == "📐 Sharpe corretto: il rendimento per unita' di rischio con code grasse"
         m = re.search(r"((?:tab\d+, )+tab\d+) = st.tabs\(\[", src)
         assert m is not None
         vars_tab = [v.strip() for v in m.group(1).split(",")]
-        assert len(vars_tab) == 412
+        assert len(vars_tab) == 413
         assert "tab215" in vars_tab
         withs = re.findall(r"^\s*with (tab\d+):", src, re.M)
-        assert len(withs) == len(vars_tab) == 412
+        assert len(withs) == len(vars_tab) == 413
         assert "tab216" in withs
         # key widget univoche della tab216
         keys = re.findall(r'key="(van216_[^"]+)"', src)
