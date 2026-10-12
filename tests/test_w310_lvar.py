@@ -114,6 +114,7 @@ TITLE400 = "🎯 Numero effettivo di scommesse (ENB): quante posizioni indipende
 TITLE401 = "📈 Massima diversificazione (MD): i pesi che massimizzano il rapporto DR"
 TITLE402 = "🛡️ Minima varianza (MV): i pesi che minimizzano la volatilità di portafoglio"
 TITLE403 = "🎯 Sharpe massimo (MS): i pesi che massimizzano il rendimento per unità di rischio"
+TITLE404 = "🎯 Rendimento target (TR): minima varianza a rendimento atteso fissato"
 TITLE309 = "🎯💥 Rho critica: a quale correlazione il VaR tocca il limite?"
 TITLE308 = "💥📈 Stress di correlazione: quanto sale il VaR se si rompono?"
 BOOK_DEMO = ("Cal-28 Baseload power;2500000;18,5;0,4;power\n"
@@ -148,7 +149,7 @@ def _registry():
 class TestRegistry310:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 403
+        assert len(titoli) == len(dvars) == len(withs) == 404
         assert TITLE310 in titoli
         assert "tab310" in dvars
         assert "    with tab310:" in src
@@ -161,8 +162,8 @@ class TestRegistry310:
 
     def test_ultima_tab(self):
         _, titoli, dvars, _ = _registry()
-        assert titoli[-1] == TITLE403
-        assert dvars[-1] == "tab403"
+        assert titoli[-1] == TITLE404
+        assert dvars[-1] == "tab404"
 
 
 class TestValidatori:

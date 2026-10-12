@@ -50,6 +50,7 @@ TITLE400 = "🎯 Numero effettivo di scommesse (ENB): quante posizioni indipende
 TITLE401 = "📈 Massima diversificazione (MD): i pesi che massimizzano il rapporto DR"
 TITLE402 = "🛡️ Minima varianza (MV): i pesi che minimizzano la volatilità di portafoglio"
 TITLE403 = "🎯 Sharpe massimo (MS): i pesi che massimizzano il rendimento per unità di rischio"
+TITLE404 = "🎯 Rendimento target (TR): minima varianza a rendimento atteso fissato"
 TITLE367 = "Kelly: mappa di sensibilità f* e crescita su (p, b)"
 TITLE366 = "Kelly su N trade: raddoppio, dimezzamento e crescita attesa"
 TITLE365 = "Kelly con incertezza: haircut bayesiano sulla p stimata"
@@ -81,7 +82,7 @@ def _registry():
 class TestRegistry368:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 403
+        assert len(titoli) == len(dvars) == len(withs) == 404
         assert "tab368" in dvars
         assert "tab368" in withs
 
@@ -96,9 +97,9 @@ class TestRegistry368:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab403"
-        assert titoli[-1] == TITLE403
-        assert withs[-1] == "tab403"
+        assert dvars[-1] == "tab404"
+        assert titoli[-1] == TITLE404
+        assert withs[-1] == "tab404"
 
 
 class TestNum:

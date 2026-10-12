@@ -93,6 +93,7 @@ TITLE400 = "🎯 Numero effettivo di scommesse (ENB): quante posizioni indipende
 TITLE401 = "📈 Massima diversificazione (MD): i pesi che massimizzano il rapporto DR"
 TITLE402 = "🛡️ Minima varianza (MV): i pesi che minimizzano la volatilità di portafoglio"
 TITLE403 = "🎯 Sharpe massimo (MS): i pesi che massimizzano il rendimento per unità di rischio"
+TITLE404 = "🎯 Rendimento target (TR): minima varianza a rendimento atteso fissato"
 TITLE330 = "🔍📉 Martin ratio: il Calmar che guarda tutto il dolore"
 TITLE329 = "🌊📉 CDaR: il drawdown medio oltre la soglia (il VaR dei drawdown)"
 TITLE328 = "🔻 Burke ratio: il drawdown penalizzato al quadrato"
@@ -130,7 +131,7 @@ def _eq_demo():
 class TestRegistry331:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 403
+        assert len(titoli) == len(dvars) == len(withs) == 404
         assert TITLE331 in titoli
         assert "tab331" in dvars
         assert "    with tab331:" in src
@@ -144,9 +145,9 @@ class TestRegistry331:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert titoli[-1] == TITLE403
-        assert dvars[-1] == "tab403"
-        assert withs[-1] == "tab403"
+        assert titoli[-1] == TITLE404
+        assert dvars[-1] == "tab404"
+        assert withs[-1] == "tab404"
 
 
 class TestNum:

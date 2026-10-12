@@ -157,6 +157,7 @@ TITLE400 = "🎯 Numero effettivo di scommesse (ENB): quante posizioni indipende
 TITLE401 = "📈 Massima diversificazione (MD): i pesi che massimizzano il rapporto DR"
 TITLE402 = "🛡️ Minima varianza (MV): i pesi che minimizzano la volatilità di portafoglio"
 TITLE403 = "🎯 Sharpe massimo (MS): i pesi che massimizzano il rendimento per unità di rischio"
+TITLE404 = "🎯 Rendimento target (TR): minima varianza a rendimento atteso fissato"
 TITLE278 = "\U0001f321\ufe0f Stress climatico: domanda e prezzo"
 TITLE277 = "\u26a1 Aste MI: scostamenti vs MGP"
 
@@ -177,12 +178,12 @@ def _registry():
 class TestRegistryTab279:
     def test_tab279_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 403
+        assert len(titoli) == len(dvars) == len(withs) == 404
         assert TITLE279 in titoli
         assert "tab279" in dvars
         assert "tab279" in withs
         assert titoli[dvars.index("tab279")] == TITLE279
-        assert titoli[-1] == TITLE403
+        assert titoli[-1] == TITLE404
         keys = re.findall(r'key="(wd279_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

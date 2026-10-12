@@ -134,6 +134,7 @@ TITLE400 = "🎯 Numero effettivo di scommesse (ENB): quante posizioni indipende
 TITLE401 = "📈 Massima diversificazione (MD): i pesi che massimizzano il rapporto DR"
 TITLE402 = "🛡️ Minima varianza (MV): i pesi che minimizzano la volatilità di portafoglio"
 TITLE403 = "🎯 Sharpe massimo (MS): i pesi che massimizzano il rendimento per unità di rischio"
+TITLE404 = "🎯 Rendimento target (TR): minima varianza a rendimento atteso fissato"
 TITLE305 = "🎯🛡 Risk budgeting: il book rispetta i target?"
 TITLE304 = "🗂️📊 VaR per segmento: dove si concentra il rischio?"
 
@@ -172,13 +173,13 @@ def _registry():
 class TestRegistryTab306:
     def test_tab306_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 403
+        assert len(titoli) == len(dvars) == len(withs) == 404
         assert TITLE306 in titoli
         assert "tab306" in dvars
         assert "tab306" in withs
         assert titoli[dvars.index("tab306")] == TITLE306
-        assert titoli[-1] == TITLE403
-        assert dvars[-1] == "tab403"
+        assert titoli[-1] == TITLE404
+        assert dvars[-1] == "tab404"
         keys = re.findall(r'key="(st306_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
