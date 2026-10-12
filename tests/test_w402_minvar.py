@@ -21,6 +21,7 @@ TITLE405 = "κ Kappa ratio: un'unica famiglia per Omega e Sortino"
 TITLE406 = "📏 Tail ratio: la coda destra contro la sinistra"
 TITLE407 = "🔄 Recovery factor: quanto rende ogni euro di drawdown"
 TITLE408 = "💢 Pain index: il dolore che serve per il rendimento"
+TITLE409 = "🛟 Sterling ratio: quanto rende contro i K peggiori drawdown"
 TITLE401 = "📈 Massima diversificazione (MD): i pesi che massimizzano il rapporto DR"
 TITLE400 = "🎯 Numero effettivo di scommesse (ENB): quante posizioni indipendenti hai davvero?"
 TITLE399 = "🔱 Risk parity: pesi a parità di contributo di rischio (risk budgeting)"
@@ -53,7 +54,7 @@ class TestRegistry402:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert len(titoli) == len(dvars) == len(withs) == 408
+        assert len(titoli) == len(dvars) == len(withs) == 409
         assert "tab402" in dvars
         assert "tab402" in withs
 
@@ -79,9 +80,9 @@ class TestRegistry402:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert dvars[-1] == "tab408"
-        assert titoli[-1] == TITLE408
-        assert withs[-1] == "tab408"
+        assert dvars[-1] == "tab409"
+        assert titoli[-1] == TITLE409
+        assert withs[-1] == "tab409"
 
 
 class TestMinvar402:

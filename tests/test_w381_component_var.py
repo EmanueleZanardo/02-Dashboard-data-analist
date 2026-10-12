@@ -42,6 +42,7 @@ TITLE405 = "κ Kappa ratio: un'unica famiglia per Omega e Sortino"
 TITLE406 = "📏 Tail ratio: la coda destra contro la sinistra"
 TITLE407 = "🔄 Recovery factor: quanto rende ogni euro di drawdown"
 TITLE408 = "💢 Pain index: il dolore che serve per il rendimento"
+TITLE409 = "🛟 Sterling ratio: quanto rende contro i K peggiori drawdown"
 TITLE380 = "Liquidity-adjusted VaR: VaR + costo di liquidazione"
 TITLE379 = "Mappa di rottura: superficie VaR su shock congiunti vol+corr"
 TITLE378 = "Reverse stress test: quanto shock regge il limite?"
@@ -73,7 +74,7 @@ def _registry():
 class TestRegistry381:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 408
+        assert len(titoli) == len(dvars) == len(withs) == 409
         assert "tab381" in dvars
         assert "tab381" in withs
 
@@ -88,9 +89,9 @@ class TestRegistry381:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab408"
-        assert titoli[-1] == TITLE408
-        assert withs[-1] == "tab408"
+        assert dvars[-1] == "tab409"
+        assert titoli[-1] == TITLE409
+        assert withs[-1] == "tab409"
 
 
 class TestNum:

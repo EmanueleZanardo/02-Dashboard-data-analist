@@ -141,6 +141,7 @@ TITLE405 = "κ Kappa ratio: un'unica famiglia per Omega e Sortino"
 TITLE406 = "📏 Tail ratio: la coda destra contro la sinistra"
 TITLE407 = "🔄 Recovery factor: quanto rende ogni euro di drawdown"
 TITLE408 = "💢 Pain index: il dolore che serve per il rendimento"
+TITLE409 = "🛟 Sterling ratio: quanto rende contro i K peggiori drawdown"
 TITLE299 = "🧪⚡ Stress test: quanto perde il book negli scenari?"
 TITLE298 = "🚦📏 Limite VaR: quanto margine resta?"
 
@@ -167,12 +168,12 @@ def _registry():
 class TestRegistryTab300:
     def test_tab300_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 408
+        assert len(titoli) == len(dvars) == len(withs) == 409
         assert TITLE300 in titoli
         assert "tab300" in dvars
         assert "tab300" in withs
         assert titoli[dvars.index("tab300")] == TITLE300
-        assert titoli[-1] == TITLE408
+        assert titoli[-1] == TITLE409
         keys = re.findall(r'key="(st300_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

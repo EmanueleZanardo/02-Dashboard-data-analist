@@ -118,6 +118,7 @@ TITLE405 = "κ Kappa ratio: un'unica famiglia per Omega e Sortino"
 TITLE406 = "📏 Tail ratio: la coda destra contro la sinistra"
 TITLE407 = "🔄 Recovery factor: quanto rende ogni euro di drawdown"
 TITLE408 = "💢 Pain index: il dolore che serve per il rendimento"
+TITLE409 = "🛟 Sterling ratio: quanto rende contro i K peggiori drawdown"
 TITLE312 = "📐🌊 Expected Shortfall con Cornish-Fisher: la coda oltre il VaR con code grasse"
 TITLE311 = "📐📉 Cornish-Fisher: il VaR corretto per skew e code grasse"
 BOOK_DEMO = ("Cal-28 Baseload power;2500000;18,5;-0,8;4,0;power\n"
@@ -161,7 +162,7 @@ def _registry():
 class TestRegistry313:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 408
+        assert len(titoli) == len(dvars) == len(withs) == 409
         assert TITLE313 in titoli
         assert "tab313" in dvars
         assert "    with tab313:" in src
@@ -174,8 +175,8 @@ class TestRegistry313:
 
     def test_ultima_tab(self):
         _, titoli, dvars, _ = _registry()
-        assert titoli[-1] == TITLE408
-        assert dvars[-1] == "tab408"
+        assert titoli[-1] == TITLE409
+        assert dvars[-1] == "tab409"
 
 
 class TestValidatori:
