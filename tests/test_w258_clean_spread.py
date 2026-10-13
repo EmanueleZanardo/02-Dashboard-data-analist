@@ -37,12 +37,12 @@ def _registry():
 class TestRegistryTab258:
     def test_tab258_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 420
+        assert len(titoli) == len(dvars) == len(withs) == 421
         assert "🌿 Clean spread (con CO₂)" in titoli
         assert "tab258" in dvars
         assert "tab258" in withs
         assert titoli[dvars.index("tab258")] == "🌿 Clean spread (con CO₂)"
-        assert titoli[-1] == "📈 Gain-Loss ratio: guadagno atteso contro perdita attesa"
+        assert titoli[-1] == "📉 Ulcer Performance Index (Martin ratio): il rischio drawdown contro il rendimento"
         keys = re.findall(r'key="(cs258_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 8
 

@@ -78,6 +78,7 @@ TITLE413 = "📐 Sharpe corretto: il rendimento per unita' di rischio con code g
 TITLE415 = "🎯 Deflated Sharpe ratio: lo Sharpe sopravvive ai backtest multipli?"
 TITLE417 = "🔺 Farinelli-Tibiletti: Omega e upside potential in un'unica formula"
 TITLE419 = "⭐ STAR ratio: il rendimento medio contro la perdita attesa di coda"
+TITLE421 = "📉 Ulcer Performance Index (Martin ratio): il rischio drawdown contro il rendimento"
 TITLE356 = "Kelly bayesiano: sizing con win-rate posterior"
 TITLE355 = "Kelly con target di volatilità: sizing riscalato sulla vol"
 TITLE354 = "Kelly con controllo drawdown: sizing frazionato al drawdown"
@@ -113,7 +114,7 @@ def _registry():
 class TestRegistry357:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 420
+        assert len(titoli) == len(dvars) == len(withs) == 421
         assert "tab357" in dvars
         assert "tab357" in withs
 
@@ -127,9 +128,9 @@ class TestRegistry357:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab420"
-        assert titoli[-1] == TITLE420
-        assert withs[-1] == "tab420"
+        assert dvars[-1] == "tab421"
+        assert titoli[-1] == TITLE421
+        assert withs[-1] == "tab421"
 
 
 class TestNum:
