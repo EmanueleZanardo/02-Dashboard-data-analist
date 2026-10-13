@@ -142,7 +142,14 @@
 
 # STATUS.md — 02-Dashboard-data-analist (Singularity Quant ETRM)
 
-**Ultimo aggiornamento: 12/10/2026 ~02:05 CEST**
+**Ultimo aggiornamento: 13/10/2026 ~02:05 CEST**
+
+## 13/10/2026 ~02:05 CEST — aggiornamento documentale giornaliero
+- **Ciclo QA 00:39 — tab417 "Farinelli-Tibiletti: Omega e upside potential in un'unica formula" (commit `abfc71d1`, 221 file, push verificato):** FT_{p,q} = UPM_p^(1/p)/LPM_q^(1/q); p=q=1 -> Omega esatto, p=1,q=2 -> upside potential ratio. Demo FT=0.7374 NEGATIVO vs Omega 1.8734 ACCETTABILE. 13 test nuovi verdi, regressione tab416 OK, collect-only 7178 righe OK, bump registry 416->417 su 219 file. Fix gen: loop p/q separati per DID NOT RAISE.
+- **Ciclo QA 01:39 — tab418 "Rachev ratio: tutta la coda destra contro tutta la coda sinistra" (commit `97f1ac1`, 222 file, push verificato):** Biglova-Ortobelli-Rachev-Stoyanov 2004, R(a,b)=ETG_a/ETL_b. Demo ETG 4.90%, ETL 12.10%, Rachev 0.4050 NEGATIVO; cross-check tab406 (Tail ratio P95 0.4884, stessa direzione, Rachev più severo). Bug nel gen fixato: `etl <= 0.0` -> +inf (la serie tutta positiva non è "nessuna perdita"). 12 test nuovi verdi, regressione tab417 OK, collect-only 7190 righe OK, bump 417->418 su 220 file.
+- Cicli tab394-416 del 12/10 pushati regolarmente (Expectile, tab395, Spectral risk measure, tab398, Risk parity, ENB, MD, MV, tab403, tab404, Kappa, Tail ratio, Recovery factor, Pain index, Sterling, Gain-to-Pain, Volatility drag, Omega, Sharpe corretto, PSR, DSR, Kappa n=1..4).
+- **Streamlit keepalive 00:20:** app trovata in SLEEP page -> click "Yes, get this app back up" -> boot completato <10 min -> **APP SVEGLIA** (gate app-level "SINGULARITY OS"/biometrica mostra che l'app gira). Nessun allarme.
+- Blocchi: vecchia chiave ENTSO-E resta nella storia git (da ruotare); app non pubblica — serve suo gesto su share.streamlit.io (Settings -> Sharing -> Public).
 
 ## 12/10/2026 ~02:05 CEST — aggiornamento documentale giornaliero
 - **Ciclo QA 00:06 — tab392 "Median Shortfall: mediana della coda oltre il VaR" (commit `b43d6d440b036c94e2bc8af964be541a9f9825df`, 196 file, push verificato):** forma chiusa normale mu+sig*Phi^-1(1-(1-alpha)/2); sandwich VaR<=MS<=ES (demo ratio MS/ES=0.959); robustezza spike +150k -> MS +25 EUR vs ES +2473 EUR. 49 test nuovi verdi, regressione tab391 OK, collect-only 6513 righe OK, bump registry 391->392 su 194 file. Nota: primo lancio fallito per `from appfuncs import load` (sys.path[0]=dir script) — fix PYTHONPATH=.
