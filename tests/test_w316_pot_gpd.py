@@ -127,6 +127,7 @@ TITLE422 = "🎯 Calmar ratio: il rendimento medio contro il peggior drawdown"
 TITLE424 = "🤕 Pain ratio: il rendimento medio contro il drawdown medio"
 TITLE426 = "🔀 Sequence risk: l'ordine dei rendimenti cambia il drawdown"
 TITLE428 = "⏱️ Tempo sott'acqua: durata dei drawdown e recupero"
+TITLE430 = "🔄 Recupero dal drawdown: quanto rimbalzo serve per tornare al picco"
 TITLE413 = "📐 Sharpe corretto: il rendimento per unita' di rischio con code grasse"
 TITLE415 = "🎯 Deflated Sharpe ratio: lo Sharpe sopravvive ai backtest multipli?"
 TITLE417 = "🔺 Farinelli-Tibiletti: Omega e upside potential in un'unica formula"
@@ -190,7 +191,7 @@ def _ris_demo():
 class TestRegistry316:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 429
+        assert len(titoli) == len(dvars) == len(withs) == 430
         assert TITLE316 in titoli
         assert "tab316" in dvars
         assert "    with tab316:" in src
@@ -203,8 +204,8 @@ class TestRegistry316:
 
     def test_ultima_tab(self):
         _, titoli, dvars, _ = _registry()
-        assert titoli[-1] == TITLE429
-        assert dvars[-1] == "tab429"
+        assert titoli[-1] == TITLE430
+        assert dvars[-1] == "tab430"
 
 
 class TestValidatori:
