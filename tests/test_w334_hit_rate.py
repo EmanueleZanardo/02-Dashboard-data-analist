@@ -121,6 +121,7 @@ TITLE427 = "🛡 CDaR: la perdita media dei peggiori drawdown"
 TITLE429 = "🎯 Attribuzione del drawdown: chi ha causato il peggior calo"
 TITLE431 = "📐 Calmar ratio: rendimento per unita' di peggior perdita"
 TITLE433 = "🧮 Omega ratio: guadagni pesati contro perdite pesate"
+TITLE435 = "🎯 Kappa ratio (Kappa-3): rendimento per unita' di coda cubica"
 TITLE333 = "📊 Capture ratio: quanto cattura la strategia nei mercati su e giù?"
 TITLE332 = "🎯 Information ratio: la strategia batte davvero il benchmark?"
 TITLE331 = "⛵ Tempo di recupero: quanto resta sott'acqua l'equity"
@@ -161,7 +162,7 @@ def _demo():
 class TestRegistry334:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 434
+        assert len(titoli) == len(dvars) == len(withs) == 435
         assert "tab334" in dvars
         assert "tab334" in withs
 
@@ -174,9 +175,9 @@ class TestRegistry334:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab434"
-        assert titoli[-1] == TITLE434
-        assert withs[-1] == "tab434"
+        assert dvars[-1] == "tab435"
+        assert titoli[-1] == TITLE435
+        assert withs[-1] == "tab435"
 
 
 class TestNum:

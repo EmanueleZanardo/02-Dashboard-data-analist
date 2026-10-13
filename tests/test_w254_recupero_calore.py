@@ -39,12 +39,12 @@ def _registry():
 class TestRegistryTab254:
     def test_tab254_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 434
+        assert len(titoli) == len(dvars) == len(withs) == 435
         assert "♨️ Recupero calore di scarto" in titoli
         assert "tab254" in dvars
         assert "tab254" in withs
         assert titoli[dvars.index("tab254")] == "♨️ Recupero calore di scarto"
-        assert titoli[-1] == "📉 Burke ratio: rendimento per unita' di drawdown quadratico"
+        assert titoli[-1] == "🎯 Kappa ratio (Kappa-3): rendimento per unita' di coda cubica"
         keys = re.findall(r'key="(wh254_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 10
 
