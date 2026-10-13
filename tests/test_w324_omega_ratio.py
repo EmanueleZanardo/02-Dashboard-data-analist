@@ -119,6 +119,7 @@ TITLE417 = "🔺 Farinelli-Tibiletti: Omega e upside potential in un'unica formu
 TITLE419 = "⭐ STAR ratio: il rendimento medio contro la perdita attesa di coda"
 TITLE421 = "📉 Ulcer Performance Index (Martin ratio): il rischio drawdown contro il rendimento"
 TITLE423 = "🔃 MAR ratio: il rendimento composto contro il peggior drawdown"
+TITLE425 = "🚀 Upside Potential ratio: il guadagno atteso contro la downside deviation"
 TITLE323 = "🔄📉 Half-life di mean reversion: lo spot torna alla media?"
 TITLE322 = "🎯📉 Convergenza forward: il forward indovina lo spot?"
 SERIE_DEMO = '1.2\n-0.8\n2.1\n0.5\n-1.5\n3.2\n0.8\n-2.2\n1.7\n5.4\n0.3\n-1.1\n2.6\n1.1\n-0.6\n4.1\n0.9\n-1.8\n2.3\n0.4\n6.2\n-0.9\n1.5\n2.8\n-2.5\n1.0\n0.7\n-1.2\n3.6\n1.4\n-0.4\n2.0\n0.6\n-1.6\n4.8\n1.9'
@@ -153,7 +154,7 @@ def _rets_demo():
 class TestRegistry324:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 424
+        assert len(titoli) == len(dvars) == len(withs) == 425
         assert TITLE324 in titoli
         assert "tab324" in dvars
         assert "    with tab324:" in src
@@ -166,8 +167,8 @@ class TestRegistry324:
 
     def test_ultima_tab(self):
         _, titoli, dvars, _ = _registry()
-        assert titoli[-1] == TITLE424
-        assert dvars[-1] == "tab424"
+        assert titoli[-1] == TITLE425
+        assert dvars[-1] == "tab425"
 
 
 class TestValidatori:

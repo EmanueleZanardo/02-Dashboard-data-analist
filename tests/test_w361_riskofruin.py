@@ -77,6 +77,7 @@ TITLE417 = "🔺 Farinelli-Tibiletti: Omega e upside potential in un'unica formu
 TITLE419 = "⭐ STAR ratio: il rendimento medio contro la perdita attesa di coda"
 TITLE421 = "📉 Ulcer Performance Index (Martin ratio): il rischio drawdown contro il rendimento"
 TITLE423 = "🔃 MAR ratio: il rendimento composto contro il peggior drawdown"
+TITLE425 = "🚀 Upside Potential ratio: il guadagno atteso contro la downside deviation"
 TITLE360 = "Kelly frazionario (fractional Kelly): λ·f*"
 TITLE359 = "Kelly con take-profit: sizing con vincita troncata"
 TITLE358 = "Kelly con stop-loss: sizing con perdita troncata"
@@ -110,7 +111,7 @@ def _registry():
 class TestRegistry361:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 424
+        assert len(titoli) == len(dvars) == len(withs) == 425
         assert "tab361" in dvars
         assert "tab361" in withs
 
@@ -124,9 +125,9 @@ class TestRegistry361:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab424"
-        assert titoli[-1] == TITLE424
-        assert withs[-1] == "tab424"
+        assert dvars[-1] == "tab425"
+        assert titoli[-1] == TITLE425
+        assert withs[-1] == "tab425"
 
 
 class TestNum:
