@@ -167,6 +167,7 @@ TITLE420 = "📈 Gain-Loss ratio: guadagno atteso contro perdita attesa"
 TITLE422 = "🎯 Calmar ratio: il rendimento medio contro il peggior drawdown"
 TITLE424 = "🤕 Pain ratio: il rendimento medio contro il drawdown medio"
 TITLE426 = "🔀 Sequence risk: l'ordine dei rendimenti cambia il drawdown"
+TITLE428 = "⏱️ Tempo sott'acqua: durata dei drawdown e recupero"
 TITLE413 = "📐 Sharpe corretto: il rendimento per unita' di rischio con code grasse"
 TITLE415 = "🎯 Deflated Sharpe ratio: lo Sharpe sopravvive ai backtest multipli?"
 TITLE417 = "🔺 Farinelli-Tibiletti: Omega e upside potential in un'unica formula"
@@ -196,12 +197,12 @@ def _registry():
 class TestRegistryTab280:
     def test_tab280_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 427
+        assert len(titoli) == len(dvars) == len(withs) == 428
         assert TITLE280 in titoli
         assert "tab280" in dvars
         assert "tab280" in withs
         assert titoli[dvars.index("tab280")] == TITLE280
-        assert titoli[-1] == TITLE427
+        assert titoli[-1] == TITLE428
         keys = re.findall(r'key="(lg280_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
