@@ -176,14 +176,14 @@ class TestRegistry:
                                 and node.value.args and hasattr(node.value.args[0], "elts")):
                 titoli = [t.value for t in node.value.args[0].elts]
         assert titoli is not None
-        assert len(titoli) == 441
-        assert titoli[-1] == "📈 Recovery Factor: profitto totale per unita' di peggior drawdown"
+        assert len(titoli) == 442
+        assert titoli[-1] == "📐 Calmar geometrico: CAGR composto per unita' di peggior drawdown"
         # variabili tabN: devono essere 204 e tab203 presente (non più ultima)
         import re as _re
         m = _re.search(r"((?:tab\d+, )+tab\d+) = st.tabs\(\[", src)
         assert m is not None
         vars_tab = [v.strip() for v in m.group(1).split(",")]
-        assert len(vars_tab) == 441
+        assert len(vars_tab) == 442
         assert "tab203" in vars_tab
         # key widget uniche
         keys = _re.findall(r'key="(liq203_[^"]+)"', src)
