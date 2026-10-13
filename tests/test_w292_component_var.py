@@ -167,6 +167,7 @@ TITLE415 = "🎯 Deflated Sharpe ratio: lo Sharpe sopravvive ai backtest multipl
 TITLE417 = "🔺 Farinelli-Tibiletti: Omega e upside potential in un'unica formula"
 TITLE419 = "⭐ STAR ratio: il rendimento medio contro la perdita attesa di coda"
 TITLE421 = "📉 Ulcer Performance Index (Martin ratio): il rischio drawdown contro il rendimento"
+TITLE423 = "🔃 MAR ratio: il rendimento composto contro il peggior drawdown"
 TITLE291 = "📊💹 Sharpe & Sortino: la strategia rende davvero?"
 TITLE290 = "🔀💰 PTR transfrontaliero: vale il prezzo d'asta?"
 
@@ -187,12 +188,12 @@ def _registry():
 class TestRegistryTab292:
     def test_tab292_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 422
+        assert len(titoli) == len(dvars) == len(withs) == 423
         assert TITLE292 in titoli
         assert "tab292" in dvars
         assert "tab292" in withs
         assert titoli[dvars.index("tab292")] == TITLE292
-        assert titoli[-1] == TITLE422
+        assert titoli[-1] == TITLE423
         keys = re.findall(r'key="(cv292_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

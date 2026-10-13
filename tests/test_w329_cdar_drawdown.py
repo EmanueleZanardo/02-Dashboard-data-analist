@@ -113,6 +113,7 @@ TITLE415 = "🎯 Deflated Sharpe ratio: lo Sharpe sopravvive ai backtest multipl
 TITLE417 = "🔺 Farinelli-Tibiletti: Omega e upside potential in un'unica formula"
 TITLE419 = "⭐ STAR ratio: il rendimento medio contro la perdita attesa di coda"
 TITLE421 = "📉 Ulcer Performance Index (Martin ratio): il rischio drawdown contro il rendimento"
+TITLE423 = "🔃 MAR ratio: il rendimento composto contro il peggior drawdown"
 TITLE328 = "🔻 Burke ratio: il drawdown penalizzato al quadrato"
 TITLE327 = "🛟 Sterling ratio: il Calmar mediato sui peggiori drawdown"
 TITLE326 = "🩹 Pain index e Pain ratio: il dolore medio oltre il peggio"
@@ -152,7 +153,7 @@ def _eq_demo():
 class TestRegistry329:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 422
+        assert len(titoli) == len(dvars) == len(withs) == 423
         assert TITLE329 in titoli
         assert "tab329" in dvars
         assert "    with tab329:" in src
@@ -166,8 +167,8 @@ class TestRegistry329:
 
     def test_ultima_tab(self):
         _, titoli, dvars, _ = _registry()
-        assert titoli[-1] == TITLE422
-        assert dvars[-1] == "tab422"
+        assert titoli[-1] == TITLE423
+        assert dvars[-1] == "tab423"
 
 
 class TestValidatori:

@@ -120,6 +120,7 @@ TITLE415 = "🎯 Deflated Sharpe ratio: lo Sharpe sopravvive ai backtest multipl
 TITLE417 = "🔺 Farinelli-Tibiletti: Omega e upside potential in un'unica formula"
 TITLE419 = "⭐ STAR ratio: il rendimento medio contro la perdita attesa di coda"
 TITLE421 = "📉 Ulcer Performance Index (Martin ratio): il rischio drawdown contro il rendimento"
+TITLE423 = "🔃 MAR ratio: il rendimento composto contro il peggior drawdown"
 TITLE321 = "🧪📉 Backtest VaR: il modello resiste al tempo?"
 TITLE320 = "⚙️📉 GARCH(1,1): la volatilita' che ricorda"
 COPPIE_DEMO = '106.93;116.98\n107.84;99.26\n101.46;97.31\n88.64;90.64\n78.61;68.61\n67.77;69.39\n70.00;69.14\n68.48;69.67\n78.87;85.82\n92.17;86.39\n104.68;98.48\n105.29;108.10\n107.33;106.83\n106.99;117.16\n98.01;90.92\n95.39;75.36\n80.48;82.50\n68.78;53.28\n67.03;47.34\n71.72;65.30\n76.58;63.33\n94.04;69.27\n100.38;106.04\n106.42;102.37'
@@ -152,7 +153,7 @@ def _ris_demo():
 class TestRegistry322:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 422
+        assert len(titoli) == len(dvars) == len(withs) == 423
         assert TITLE322 in titoli
         assert "tab322" in dvars
         assert "    with tab322:" in src
@@ -165,8 +166,8 @@ class TestRegistry322:
 
     def test_ultima_tab(self):
         _, titoli, dvars, _ = _registry()
-        assert titoli[-1] == TITLE422
-        assert dvars[-1] == "tab422"
+        assert titoli[-1] == TITLE423
+        assert dvars[-1] == "tab423"
 
 
 class TestValidatori:
