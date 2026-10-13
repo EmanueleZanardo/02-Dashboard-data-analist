@@ -26,13 +26,13 @@ class TestRegistryTab237:
         src = APP.read_text(encoding="utf-8")
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
-        assert len(titoli) == 435
+        assert len(titoli) == 436
         assert "⚡ Flessibilità implicita" in titoli
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         assert "tab237" in dvars
         withs = re.findall(r"    with (tab\d+):", src)
         assert "tab237" in withs
-        assert len(withs) == len(dvars) == 435
+        assert len(withs) == len(dvars) == 436
         keys = re.findall(r'key="(t237_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 10
 
@@ -40,7 +40,7 @@ class TestRegistryTab237:
         src = APP.read_text(encoding="utf-8")
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
-        assert titoli[-1] == "🎯 Kappa ratio (Kappa-3): rendimento per unita' di coda cubica"
+        assert titoli[-1] == "📈 Martin ratio: rendimento per unita' di Ulcer Index"
 
 
 class TestPureFlessibilitaImplicita:

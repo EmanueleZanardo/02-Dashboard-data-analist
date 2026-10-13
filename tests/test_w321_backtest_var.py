@@ -124,6 +124,7 @@ TITLE428 = "⏱️ Tempo sott'acqua: durata dei drawdown e recupero"
 TITLE430 = "🔄 Recupero dal drawdown: quanto rimbalzo serve per tornare al picco"
 TITLE432 = "⚖️ Sortino ratio: rendimento per unita' di volatilita' negativa"
 TITLE434 = "📉 Burke ratio: rendimento per unita' di drawdown quadratico"
+TITLE436 = "📈 Martin ratio: rendimento per unita' di Ulcer Index"
 TITLE413 = "📐 Sharpe corretto: il rendimento per unita' di rischio con code grasse"
 TITLE415 = "🎯 Deflated Sharpe ratio: lo Sharpe sopravvive ai backtest multipli?"
 TITLE417 = "🔺 Farinelli-Tibiletti: Omega e upside potential in un'unica formula"
@@ -177,7 +178,7 @@ def _ris_demo():
 class TestRegistry321:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 435
+        assert len(titoli) == len(dvars) == len(withs) == 436
         assert TITLE321 in titoli
         assert "tab321" in dvars
         assert "    with tab321:" in src
@@ -190,8 +191,8 @@ class TestRegistry321:
 
     def test_ultima_tab(self):
         _, titoli, dvars, _ = _registry()
-        assert titoli[-1] == TITLE435
-        assert dvars[-1] == "tab435"
+        assert titoli[-1] == TITLE436
+        assert dvars[-1] == "tab436"
 
 
 class TestValidatori:
