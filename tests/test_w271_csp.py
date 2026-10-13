@@ -194,6 +194,7 @@ TITLE423 = "🔃 MAR ratio: il rendimento composto contro il peggior drawdown"
 TITLE425 = "🚀 Upside Potential ratio: il guadagno atteso contro la downside deviation"
 TITLE427 = "🛡 CDaR: la perdita media dei peggiori drawdown"
 TITLE429 = "🎯 Attribuzione del drawdown: chi ha causato il peggior calo"
+TITLE431 = "📐 Calmar ratio: rendimento per unita' di peggior perdita"
 TITLE270 = "🔥 Geotermia profonda: business case"
 TITLE269 = "🌊 Idroelettrico run-of-river: business case"
 
@@ -222,12 +223,12 @@ def _registry():
 class TestRegistryTab271:
     def test_tab271_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 430
+        assert len(titoli) == len(dvars) == len(withs) == 431
         assert TITLE271 in titoli
         assert "tab271" in dvars
         assert "tab271" in withs
         assert titoli[dvars.index("tab271")] == TITLE271
-        assert titoli[-1] == TITLE430
+        assert titoli[-1] == TITLE431
         keys = re.findall(r'key="(cs271_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
