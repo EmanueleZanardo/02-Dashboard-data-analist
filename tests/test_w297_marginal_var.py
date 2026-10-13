@@ -158,6 +158,7 @@ TITLE430 = "🔄 Recupero dal drawdown: quanto rimbalzo serve per tornare al pic
 TITLE432 = "⚖️ Sortino ratio: rendimento per unita' di volatilita' negativa"
 TITLE434 = "📉 Burke ratio: rendimento per unita' di drawdown quadratico"
 TITLE436 = "📈 Martin ratio: rendimento per unita' di Ulcer Index"
+TITLE438 = "🩹 Pain ratio: rendimento per unita' di dolore medio (Pain Index)"
 TITLE413 = "📐 Sharpe corretto: il rendimento per unita' di rischio con code grasse"
 TITLE415 = "🎯 Deflated Sharpe ratio: lo Sharpe sopravvive ai backtest multipli?"
 TITLE417 = "🔺 Farinelli-Tibiletti: Omega e upside potential in un'unica formula"
@@ -201,12 +202,12 @@ def _registry():
 class TestRegistryTab297:
     def test_tab297_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 437
+        assert len(titoli) == len(dvars) == len(withs) == 438
         assert TITLE297 in titoli
         assert "tab297" in dvars
         assert "tab297" in withs
         assert titoli[dvars.index("tab297")] == TITLE297
-        assert titoli[-1] == TITLE437
+        assert titoli[-1] == TITLE438
         keys = re.findall(r'key="(mv297_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

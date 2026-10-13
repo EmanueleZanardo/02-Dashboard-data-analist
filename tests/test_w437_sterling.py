@@ -48,6 +48,7 @@ _F = _load("mh437_num", "mh437_parse_serie", "mh437_equity",
 
 TITLE437 = "📈 Sterling ratio: rendimento per unita' di drawdown medio annuo"
 TITLE436 = "📈 Martin ratio: rendimento per unita' di Ulcer Index"
+TITLE438 = "🩹 Pain ratio: rendimento per unita' di dolore medio (Pain Index)"
 TITLE435 = "🎯 Kappa ratio (Kappa-3): rendimento per unita' di coda cubica"
 TITLE434 = "📉 Burke ratio: rendimento per unita' di drawdown quadratico"
 TITLE433 = "🧮 Omega ratio: guadagni pesati contro perdite pesate"
@@ -91,7 +92,7 @@ class TestRegistry437:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert len(titoli) == len(dvars) == len(withs) == 437
+        assert len(titoli) == len(dvars) == len(withs) == 438
         assert "tab437" in dvars
         assert "tab437" in withs
 
@@ -121,9 +122,9 @@ class TestRegistry437:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert dvars[-1] == "tab437"
-        assert titoli[-1] == TITLE437
-        assert withs[-1] == "tab437"
+        assert dvars[-1] == "tab438"
+        assert titoli[-1] == TITLE438
+        assert withs[-1] == "tab438"
 
 
 class TestSterling437:

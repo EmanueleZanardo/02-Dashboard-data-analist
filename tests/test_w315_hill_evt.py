@@ -132,6 +132,7 @@ TITLE430 = "🔄 Recupero dal drawdown: quanto rimbalzo serve per tornare al pic
 TITLE432 = "⚖️ Sortino ratio: rendimento per unita' di volatilita' negativa"
 TITLE434 = "📉 Burke ratio: rendimento per unita' di drawdown quadratico"
 TITLE436 = "📈 Martin ratio: rendimento per unita' di Ulcer Index"
+TITLE438 = "🩹 Pain ratio: rendimento per unita' di dolore medio (Pain Index)"
 TITLE413 = "📐 Sharpe corretto: il rendimento per unita' di rischio con code grasse"
 TITLE415 = "🎯 Deflated Sharpe ratio: lo Sharpe sopravvive ai backtest multipli?"
 TITLE417 = "🔺 Farinelli-Tibiletti: Omega e upside potential in un'unica formula"
@@ -183,7 +184,7 @@ def _pareto(n=2000, xi=0.4):
 class TestRegistry315:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 437
+        assert len(titoli) == len(dvars) == len(withs) == 438
         assert TITLE315 in titoli
         assert "tab315" in dvars
         assert "    with tab315:" in src
@@ -196,8 +197,8 @@ class TestRegistry315:
 
     def test_ultima_tab(self):
         _, titoli, dvars, _ = _registry()
-        assert titoli[-1] == TITLE437
-        assert dvars[-1] == "tab437"
+        assert titoli[-1] == TITLE438
+        assert dvars[-1] == "tab438"
 
 
 class TestValidatori:
