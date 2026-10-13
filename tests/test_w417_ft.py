@@ -29,6 +29,7 @@ TITLE424 = "🤕 Pain ratio: il rendimento medio contro il drawdown medio"
 TITLE426 = "🔀 Sequence risk: l'ordine dei rendimenti cambia il drawdown"
 TITLE428 = "⏱️ Tempo sott'acqua: durata dei drawdown e recupero"
 TITLE430 = "🔄 Recupero dal drawdown: quanto rimbalzo serve per tornare al picco"
+TITLE432 = "⚖️ Sortino ratio: rendimento per unita' di volatilita' negativa"
 TITLE415 = "🎯 Deflated Sharpe ratio: lo Sharpe sopravvive ai backtest multipli?"
 TITLE414 = "🎯 Probabilistic Sharpe ratio: lo Sharpe e' davvero significativo?"
 TITLE413 = "📐 Sharpe corretto: il rendimento per unita' di rischio con code grasse"
@@ -53,7 +54,7 @@ class TestRegistry417:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert len(titoli) == len(dvars) == len(withs) == 431
+        assert len(titoli) == len(dvars) == len(withs) == 432
         assert "tab417" in dvars
         assert "tab417" in withs
 
@@ -79,9 +80,9 @@ class TestRegistry417:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert dvars[-1] == "tab431"
-        assert titoli[-1] == TITLE431
-        assert withs[-1] == "tab431"
+        assert dvars[-1] == "tab432"
+        assert titoli[-1] == TITLE432
+        assert withs[-1] == "tab432"
 
 
 class TestFT417:
