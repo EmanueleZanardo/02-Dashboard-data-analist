@@ -67,6 +67,7 @@ TITLE419 = "⭐ STAR ratio: il rendimento medio contro la perdita attesa di coda
 TITLE421 = "📉 Ulcer Performance Index (Martin ratio): il rischio drawdown contro il rendimento"
 TITLE423 = "🔃 MAR ratio: il rendimento composto contro il peggior drawdown"
 TITLE425 = "🚀 Upside Potential ratio: il guadagno atteso contro la downside deviation"
+TITLE427 = "🛡 CDaR: la perdita media dei peggiori drawdown"
 TITLE374 = "Component VaR: contributo al rischio per posizione"
 TITLE373 = "Kelly con limite VaR: sizing con vincolo di perdita massima"
 TITLE372 = "Monte Carlo: VaR e Expected Shortfall di una posizione power"
@@ -125,7 +126,7 @@ def _registry():
 class TestRegistry375:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 426
+        assert len(titoli) == len(dvars) == len(withs) == 427
         assert "tab375" in dvars
         assert "tab375" in withs
 
@@ -140,9 +141,9 @@ class TestRegistry375:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab426"
-        assert titoli[-1] == TITLE426
-        assert withs[-1] == "tab426"
+        assert dvars[-1] == "tab427"
+        assert titoli[-1] == TITLE427
+        assert withs[-1] == "tab427"
 
 
 class TestNum:
