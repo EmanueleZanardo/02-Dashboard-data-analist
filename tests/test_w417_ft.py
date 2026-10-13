@@ -14,6 +14,7 @@ _F = _load("mh417_num", "mh417_parse_serie", "mh417_upm", "mh417_lpm",
            "mh412_num")
 
 TITLE417 = "🔺 Farinelli-Tibiletti: Omega e upside potential in un'unica formula"
+TITLE419 = "⭐ STAR ratio: il rendimento medio contro la perdita attesa di coda"
 TITLE416 = "🎚️ Kappa ratio: Omega e Sortino sono lo stesso strumento"
 TITLE418 = "📊 Rachev ratio: tutta la coda destra contro tutta la coda sinistra"
 TITLE415 = "🎯 Deflated Sharpe ratio: lo Sharpe sopravvive ai backtest multipli?"
@@ -40,7 +41,7 @@ class TestRegistry417:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert len(titoli) == len(dvars) == len(withs) == 418
+        assert len(titoli) == len(dvars) == len(withs) == 419
         assert "tab417" in dvars
         assert "tab417" in withs
 
@@ -66,9 +67,9 @@ class TestRegistry417:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert dvars[-1] == "tab418"
-        assert titoli[-1] == TITLE418
-        assert withs[-1] == "tab418"
+        assert dvars[-1] == "tab419"
+        assert titoli[-1] == TITLE419
+        assert withs[-1] == "tab419"
 
 
 class TestFT417:

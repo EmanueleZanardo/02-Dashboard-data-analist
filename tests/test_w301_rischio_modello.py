@@ -160,6 +160,7 @@ TITLE418 = "📊 Rachev ratio: tutta la coda destra contro tutta la coda sinistr
 TITLE413 = "📐 Sharpe corretto: il rendimento per unita' di rischio con code grasse"
 TITLE415 = "🎯 Deflated Sharpe ratio: lo Sharpe sopravvive ai backtest multipli?"
 TITLE417 = "🔺 Farinelli-Tibiletti: Omega e upside potential in un'unica formula"
+TITLE419 = "⭐ STAR ratio: il rendimento medio contro la perdita attesa di coda"
 TITLE300 = "🧮📊 Rapporto di diversificazione: quanto rischio risparmia il book?"
 TITLE299 = "🧪⚡ Stress test: quanto perde il book negli scenari?"
 
@@ -180,12 +181,12 @@ def _registry():
 class TestRegistryTab301:
     def test_tab301_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 418
+        assert len(titoli) == len(dvars) == len(withs) == 419
         assert TITLE301 in titoli
         assert "tab301" in dvars
         assert "tab301" in withs
         assert titoli[dvars.index("tab301")] == TITLE301
-        assert titoli[-1] == TITLE418
+        assert titoli[-1] == TITLE419
         keys = re.findall(r'key="(st301_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

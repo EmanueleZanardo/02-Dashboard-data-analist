@@ -113,6 +113,7 @@ TITLE418 = "📊 Rachev ratio: tutta la coda destra contro tutta la coda sinistr
 TITLE413 = "📐 Sharpe corretto: il rendimento per unita' di rischio con code grasse"
 TITLE415 = "🎯 Deflated Sharpe ratio: lo Sharpe sopravvive ai backtest multipli?"
 TITLE417 = "🔺 Farinelli-Tibiletti: Omega e upside potential in un'unica formula"
+TITLE419 = "⭐ STAR ratio: il rendimento medio contro la perdita attesa di coda"
 TITLE323 = "🔄📉 Half-life di mean reversion: lo spot torna alla media?"
 TITLE322 = "🎯📉 Convergenza forward: il forward indovina lo spot?"
 SERIE_DEMO = '1.2\n-0.8\n2.1\n0.5\n-1.5\n3.2\n0.8\n-2.2\n1.7\n5.4\n0.3\n-1.1\n2.6\n1.1\n-0.6\n4.1\n0.9\n-1.8\n2.3\n0.4\n6.2\n-0.9\n1.5\n2.8\n-2.5\n1.0\n0.7\n-1.2\n3.6\n1.4\n-0.4\n2.0\n0.6\n-1.6\n4.8\n1.9'
@@ -147,7 +148,7 @@ def _rets_demo():
 class TestRegistry324:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 418
+        assert len(titoli) == len(dvars) == len(withs) == 419
         assert TITLE324 in titoli
         assert "tab324" in dvars
         assert "    with tab324:" in src
@@ -160,8 +161,8 @@ class TestRegistry324:
 
     def test_ultima_tab(self):
         _, titoli, dvars, _ = _registry()
-        assert titoli[-1] == TITLE418
-        assert dvars[-1] == "tab418"
+        assert titoli[-1] == TITLE419
+        assert dvars[-1] == "tab419"
 
 
 class TestValidatori:
