@@ -126,6 +126,7 @@ TITLE418 = "📊 Rachev ratio: tutta la coda destra contro tutta la coda sinistr
 TITLE420 = "📈 Gain-Loss ratio: guadagno atteso contro perdita attesa"
 TITLE422 = "🎯 Calmar ratio: il rendimento medio contro il peggior drawdown"
 TITLE424 = "🤕 Pain ratio: il rendimento medio contro il drawdown medio"
+TITLE426 = "🔀 Sequence risk: l'ordine dei rendimenti cambia il drawdown"
 TITLE413 = "📐 Sharpe corretto: il rendimento per unita' di rischio con code grasse"
 TITLE415 = "🎯 Deflated Sharpe ratio: lo Sharpe sopravvive ai backtest multipli?"
 TITLE417 = "🔺 Farinelli-Tibiletti: Omega e upside potential in un'unica formula"
@@ -171,7 +172,7 @@ def _pareto(n=2000, xi=0.4):
 class TestRegistry315:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 425
+        assert len(titoli) == len(dvars) == len(withs) == 426
         assert TITLE315 in titoli
         assert "tab315" in dvars
         assert "    with tab315:" in src
@@ -184,8 +185,8 @@ class TestRegistry315:
 
     def test_ultima_tab(self):
         _, titoli, dvars, _ = _registry()
-        assert titoli[-1] == TITLE425
-        assert dvars[-1] == "tab425"
+        assert titoli[-1] == TITLE426
+        assert dvars[-1] == "tab426"
 
 
 class TestValidatori:

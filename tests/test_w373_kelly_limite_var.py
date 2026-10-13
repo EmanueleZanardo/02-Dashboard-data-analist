@@ -60,6 +60,7 @@ TITLE418 = "📊 Rachev ratio: tutta la coda destra contro tutta la coda sinistr
 TITLE420 = "📈 Gain-Loss ratio: guadagno atteso contro perdita attesa"
 TITLE422 = "🎯 Calmar ratio: il rendimento medio contro il peggior drawdown"
 TITLE424 = "🤕 Pain ratio: il rendimento medio contro il drawdown medio"
+TITLE426 = "🔀 Sequence risk: l'ordine dei rendimenti cambia il drawdown"
 TITLE413 = "📐 Sharpe corretto: il rendimento per unita' di rischio con code grasse"
 TITLE415 = "🎯 Deflated Sharpe ratio: lo Sharpe sopravvive ai backtest multipli?"
 TITLE417 = "🔺 Farinelli-Tibiletti: Omega e upside potential in un'unica formula"
@@ -103,7 +104,7 @@ def _registry():
 class TestRegistry373:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 425
+        assert len(titoli) == len(dvars) == len(withs) == 426
         assert "tab373" in dvars
         assert "tab373" in withs
 
@@ -118,9 +119,9 @@ class TestRegistry373:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab425"
-        assert titoli[-1] == TITLE425
-        assert withs[-1] == "tab425"
+        assert dvars[-1] == "tab426"
+        assert titoli[-1] == TITLE426
+        assert withs[-1] == "tab426"
 
 
 class TestNum:
