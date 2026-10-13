@@ -169,6 +169,7 @@ TITLE429 = "🎯 Attribuzione del drawdown: chi ha causato il peggior calo"
 TITLE431 = "📐 Calmar ratio: rendimento per unita' di peggior perdita"
 TITLE433 = "🧮 Omega ratio: guadagni pesati contro perdite pesate"
 TITLE435 = "🎯 Kappa ratio (Kappa-3): rendimento per unita' di coda cubica"
+TITLE437 = "📈 Sterling ratio: rendimento per unita' di drawdown medio annuo"
 TITLE306 = "💎📊 RAROC: il rendimento ripaga il rischio?"
 TITLE305 = "🎯🛡 Risk budgeting: il book rispetta i target?"
 
@@ -208,13 +209,13 @@ def _registry():
 class TestRegistryTab307:
     def test_tab307_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 436
+        assert len(titoli) == len(dvars) == len(withs) == 437
         assert TITLE307 in titoli
         assert "tab307" in dvars
         assert "tab307" in withs
         assert titoli[dvars.index("tab307")] == TITLE307
-        assert titoli[-1] == TITLE436
-        assert dvars[-1] == "tab436"
+        assert titoli[-1] == TITLE437
+        assert dvars[-1] == "tab437"
         keys = re.findall(r'key="(st307_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

@@ -147,6 +147,7 @@ TITLE429 = "🎯 Attribuzione del drawdown: chi ha causato il peggior calo"
 TITLE431 = "📐 Calmar ratio: rendimento per unita' di peggior perdita"
 TITLE433 = "🧮 Omega ratio: guadagni pesati contro perdite pesate"
 TITLE435 = "🎯 Kappa ratio (Kappa-3): rendimento per unita' di coda cubica"
+TITLE437 = "📈 Sterling ratio: rendimento per unita' di drawdown medio annuo"
 TITLE308 = "💥📈 Stress di correlazione: quanto sale il VaR se si rompono?"
 TITLE307 = "🌊📉 Expected Shortfall: la perdita oltre il VaR"
 BOOK_DEMO = ("Cal-28 Baseload power;2500000;18,5;power\n"
@@ -184,7 +185,7 @@ def _registry():
 class TestRegistry309:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 436
+        assert len(titoli) == len(dvars) == len(withs) == 437
         assert TITLE309 in titoli
         assert "tab309" in dvars
         assert "    with tab309:" in src
@@ -197,8 +198,8 @@ class TestRegistry309:
 
     def test_ultima_tab(self):
         _, titoli, dvars, _ = _registry()
-        assert titoli[-1] == TITLE436
-        assert dvars[-1] == "tab436"
+        assert titoli[-1] == TITLE437
+        assert dvars[-1] == "tab437"
 
 
 class TestValidatori:

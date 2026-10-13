@@ -182,6 +182,7 @@ TITLE429 = "🎯 Attribuzione del drawdown: chi ha causato il peggior calo"
 TITLE431 = "📐 Calmar ratio: rendimento per unita' di peggior perdita"
 TITLE433 = "🧮 Omega ratio: guadagni pesati contro perdite pesate"
 TITLE435 = "🎯 Kappa ratio (Kappa-3): rendimento per unita' di coda cubica"
+TITLE437 = "📈 Sterling ratio: rendimento per unita' di drawdown medio annuo"
 TITLE290 = "🔀💰 PTR transfrontaliero: vale il prezzo d'asta?"
 TITLE289 = "⚫🔥 Clean dark spread: margine centrale a carbone"
 TITLE288 = "⚡🔥 Clean spark spread: margine centrale a gas"
@@ -202,12 +203,12 @@ def _registry():
 class TestRegistryTab291:
     def test_tab291_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 436
+        assert len(titoli) == len(dvars) == len(withs) == 437
         assert TITLE291 in titoli
         assert "tab291" in dvars
         assert "tab291" in withs
         assert titoli[dvars.index("tab291")] == TITLE291
-        assert titoli[-1] == TITLE436
+        assert titoli[-1] == TITLE437
         keys = re.findall(r'key="(ss291_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
