@@ -125,13 +125,13 @@ class TestRegistryTab223:
             encoding="utf-8")
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
-        assert len(titoli) == 439
-        assert titoli[-1] == "📉 CDaR ratio: rendimento per unita' di coda media (Conditional Drawdown-at-Risk)"
+        assert len(titoli) == 440
+        assert titoli[-1] == "🎯 Drawdown-at-Risk (DaR): la soglia di drawdown superata solo nell'alpha% dei casi"
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         assert "tab223" in dvars
         withs = re.findall(r"    with (tab\d+):", src)
         assert "tab223" in withs
-        assert len(withs) == len(dvars) == 439
+        assert len(withs) == len(dvars) == 440
         keys = re.findall(r'key="(tm223_[^"]+)"', src)
         dyn_keys = re.findall(r'key=_pfx223 \+ "([^"]+)"', src)
         # le key dinamiche sono prefissate a runtime con tm223_bt_/tm223_mt_
