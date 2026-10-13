@@ -149,6 +149,7 @@ TITLE414 = "🎯 Probabilistic Sharpe ratio: lo Sharpe e' davvero significativo?
 TITLE416 = "🎚️ Kappa ratio: Omega e Sortino sono lo stesso strumento"
 TITLE418 = "📊 Rachev ratio: tutta la coda destra contro tutta la coda sinistra"
 TITLE420 = "📈 Gain-Loss ratio: guadagno atteso contro perdita attesa"
+TITLE422 = "🎯 Calmar ratio: il rendimento medio contro il peggior drawdown"
 TITLE413 = "📐 Sharpe corretto: il rendimento per unita' di rischio con code grasse"
 TITLE415 = "🎯 Deflated Sharpe ratio: lo Sharpe sopravvive ai backtest multipli?"
 TITLE417 = "🔺 Farinelli-Tibiletti: Omega e upside potential in un'unica formula"
@@ -194,13 +195,13 @@ def _registry():
 class TestRegistryTab303:
     def test_tab303_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 421
+        assert len(titoli) == len(dvars) == len(withs) == 422
         assert TITLE303 in titoli
         assert "tab303" in dvars
         assert "tab303" in withs
         assert titoli[dvars.index("tab303")] == TITLE303
-        assert titoli[-1] == TITLE421
-        assert dvars[-1] == "tab421"
+        assert titoli[-1] == TITLE422
+        assert dvars[-1] == "tab422"
         keys = re.findall(r'key="(st303_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

@@ -19,6 +19,7 @@ TITLE419 = "⭐ STAR ratio: il rendimento medio contro la perdita attesa di coda
 TITLE421 = "📉 Ulcer Performance Index (Martin ratio): il rischio drawdown contro il rendimento"
 TITLE418 = "📊 Rachev ratio: tutta la coda destra contro tutta la coda sinistra"
 TITLE420 = "📈 Gain-Loss ratio: guadagno atteso contro perdita attesa"
+TITLE422 = "🎯 Calmar ratio: il rendimento medio contro il peggior drawdown"
 TITLE417 = "🔺 Farinelli-Tibiletti: Omega e upside potential in un'unica formula"
 TITLE416 = "🎚️ Kappa ratio: Omega e Sortino sono lo stesso strumento"
 TITLE415 = "🎯 Deflated Sharpe ratio: lo Sharpe sopravvive ai backtest multipli?"
@@ -39,7 +40,7 @@ class TestRegistry419:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert len(titoli) == len(dvars) == len(withs) == 421
+        assert len(titoli) == len(dvars) == len(withs) == 422
         assert "tab419" in dvars
         assert "tab419" in withs
 
@@ -65,9 +66,9 @@ class TestRegistry419:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert dvars[-1] == "tab421"
-        assert titoli[-1] == TITLE421
-        assert withs[-1] == "tab421"
+        assert dvars[-1] == "tab422"
+        assert titoli[-1] == TITLE422
+        assert withs[-1] == "tab422"
 
 
 class TestStar419:
