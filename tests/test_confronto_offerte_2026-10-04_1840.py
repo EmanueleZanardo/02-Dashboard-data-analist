@@ -195,16 +195,16 @@ class TestRegistry:
                                 and node.value.args and hasattr(node.value.args[0], "elts")):
                 titoli = [t.value for t in node.value.args[0].elts]
         assert titoli is not None
-        assert len(titoli) == 419
-        assert titoli[-1] == "⭐ STAR ratio: il rendimento medio contro la perdita attesa di coda"
+        assert len(titoli) == 420
+        assert titoli[-1] == "📈 Gain-Loss ratio: guadagno atteso contro perdita attesa"
         # variabili tabN: devono essere 217 e tab216 presente (non più ultima)
         m = re.search(r"((?:tab\d+, )+tab\d+) = st.tabs\(\[", src)
         assert m is not None
         vars_tab = [v.strip() for v in m.group(1).split(",")]
-        assert len(vars_tab) == 419
+        assert len(vars_tab) == 420
         assert "tab212" in vars_tab and "tab213" in vars_tab
         withs = re.findall(r"^\s*with (tab\d+):", src, re.M)
-        assert len(withs) == len(vars_tab) == 419
+        assert len(withs) == len(vars_tab) == 420
         assert "tab213" in withs and "tab214" in withs
         # key widget uniche: 2 letterali + 5 template f-string (x3 offerte)
         keys = re.findall(r'key=f?"(cfo213_[^"]+)"', src)
