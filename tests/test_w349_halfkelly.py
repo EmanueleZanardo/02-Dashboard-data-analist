@@ -93,6 +93,7 @@ TITLE421 = "📉 Ulcer Performance Index (Martin ratio): il rischio drawdown con
 TITLE423 = "🔃 MAR ratio: il rendimento composto contro il peggior drawdown"
 TITLE425 = "🚀 Upside Potential ratio: il guadagno atteso contro la downside deviation"
 TITLE427 = "🛡 CDaR: la perdita media dei peggiori drawdown"
+TITLE429 = "🎯 Attribuzione del drawdown: chi ha causato il peggior calo"
 TITLE348 = "Kelly con costi di trading: sizing netto"
 TITLE347 = "VaR & Expected Shortfall del P&L dopo N trade"
 TITLE346 = "📊 Monte Carlo: distribuzione del capitale dopo N trade"
@@ -132,7 +133,7 @@ def _registry():
 class TestRegistry349:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 428
+        assert len(titoli) == len(dvars) == len(withs) == 429
         assert "tab349" in dvars
         assert "tab349" in withs
 
@@ -145,9 +146,9 @@ class TestRegistry349:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab428"
-        assert titoli[-1] == TITLE428
-        assert withs[-1] == "tab428"
+        assert dvars[-1] == "tab429"
+        assert titoli[-1] == TITLE429
+        assert withs[-1] == "tab429"
 
 
 class TestNum:

@@ -17,6 +17,7 @@ _F = _load("mh425_num", "mh425_parse_serie", "mh425_updown",
 
 TITLE425 = "🚀 Upside Potential ratio: il guadagno atteso contro la downside deviation"
 TITLE427 = "🛡 CDaR: la perdita media dei peggiori drawdown"
+TITLE429 = "🎯 Attribuzione del drawdown: chi ha causato il peggior calo"
 TITLE424 = "🤕 Pain ratio: il rendimento medio contro il drawdown medio"
 TITLE426 = "🔀 Sequence risk: l'ordine dei rendimenti cambia il drawdown"
 TITLE428 = "⏱️ Tempo sott'acqua: durata dei drawdown e recupero"
@@ -42,7 +43,7 @@ class TestRegistry425:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert len(titoli) == len(dvars) == len(withs) == 428
+        assert len(titoli) == len(dvars) == len(withs) == 429
         assert "tab425" in dvars
         assert "tab425" in withs
 
@@ -69,9 +70,9 @@ class TestRegistry425:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert dvars[-1] == "tab428"
-        assert titoli[-1] == TITLE428
-        assert withs[-1] == "tab428"
+        assert dvars[-1] == "tab429"
+        assert titoli[-1] == TITLE429
+        assert withs[-1] == "tab429"
 
 
 class TestUPR425:
