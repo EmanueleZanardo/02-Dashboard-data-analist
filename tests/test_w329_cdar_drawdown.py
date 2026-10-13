@@ -123,6 +123,7 @@ TITLE425 = "🚀 Upside Potential ratio: il guadagno atteso contro la downside d
 TITLE427 = "🛡 CDaR: la perdita media dei peggiori drawdown"
 TITLE429 = "🎯 Attribuzione del drawdown: chi ha causato il peggior calo"
 TITLE431 = "📐 Calmar ratio: rendimento per unita' di peggior perdita"
+TITLE433 = "🧮 Omega ratio: guadagni pesati contro perdite pesate"
 TITLE328 = "🔻 Burke ratio: il drawdown penalizzato al quadrato"
 TITLE327 = "🛟 Sterling ratio: il Calmar mediato sui peggiori drawdown"
 TITLE326 = "🩹 Pain index e Pain ratio: il dolore medio oltre il peggio"
@@ -162,7 +163,7 @@ def _eq_demo():
 class TestRegistry329:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 432
+        assert len(titoli) == len(dvars) == len(withs) == 433
         assert TITLE329 in titoli
         assert "tab329" in dvars
         assert "    with tab329:" in src
@@ -176,8 +177,8 @@ class TestRegistry329:
 
     def test_ultima_tab(self):
         _, titoli, dvars, _ = _registry()
-        assert titoli[-1] == TITLE432
-        assert dvars[-1] == "tab432"
+        assert titoli[-1] == TITLE433
+        assert dvars[-1] == "tab433"
 
 
 class TestValidatori:

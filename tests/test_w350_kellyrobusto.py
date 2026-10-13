@@ -96,6 +96,7 @@ TITLE425 = "🚀 Upside Potential ratio: il guadagno atteso contro la downside d
 TITLE427 = "🛡 CDaR: la perdita media dei peggiori drawdown"
 TITLE429 = "🎯 Attribuzione del drawdown: chi ha causato il peggior calo"
 TITLE431 = "📐 Calmar ratio: rendimento per unita' di peggior perdita"
+TITLE433 = "🧮 Omega ratio: guadagni pesati contro perdite pesate"
 TITLE349 = "Frazione di Kelly: half-Kelly e trade-off crescita/volatilità"
 TITLE348 = "Kelly con costi di trading: sizing netto"
 TITLE347 = "VaR & Expected Shortfall del P&L dopo N trade"
@@ -130,7 +131,7 @@ def _registry():
 class TestRegistry350:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 432
+        assert len(titoli) == len(dvars) == len(withs) == 433
         assert "tab350" in dvars
         assert "tab350" in withs
 
@@ -143,9 +144,9 @@ class TestRegistry350:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab432"
-        assert titoli[-1] == TITLE432
-        assert withs[-1] == "tab432"
+        assert dvars[-1] == "tab433"
+        assert titoli[-1] == TITLE433
+        assert withs[-1] == "tab433"
 
 
 class TestNum:
