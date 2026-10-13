@@ -72,6 +72,7 @@ TITLE431 = "📐 Calmar ratio: rendimento per unita' di peggior perdita"
 TITLE433 = "🧮 Omega ratio: guadagni pesati contro perdite pesate"
 TITLE435 = "🎯 Kappa ratio (Kappa-3): rendimento per unita' di coda cubica"
 TITLE437 = "📈 Sterling ratio: rendimento per unita' di drawdown medio annuo"
+TITLE439 = "📉 CDaR ratio: rendimento per unita' di coda media (Conditional Drawdown-at-Risk)"
 TITLE382 = "Hedge VaR: copertura ottimale con futures"
 TITLE381 = "Component VaR: attribution del VaR per asset"
 TITLE380 = "Liquidity-adjusted VaR: VaR + costo di liquidazione"
@@ -111,7 +112,7 @@ def _registry():
 class TestRegistry383:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 438
+        assert len(titoli) == len(dvars) == len(withs) == 439
         assert "tab383" in dvars
         assert "tab383" in withs
 
@@ -126,9 +127,9 @@ class TestRegistry383:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab438"
-        assert titoli[-1] == TITLE438
-        assert withs[-1] == "tab438"
+        assert dvars[-1] == "tab439"
+        assert titoli[-1] == TITLE439
+        assert withs[-1] == "tab439"
 
 
 class TestNum:
