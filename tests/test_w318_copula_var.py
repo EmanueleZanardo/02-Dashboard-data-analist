@@ -155,6 +155,7 @@ TITLE445 = "🌀 Rolling drawdown: il peggior calo in ogni finestra"
 TITLE447 = "⛓️ Johansen: power e gas cointegrati?"
 TITLE449 = "💥 Risposta allo shock: di quanto uno shock del gas muove power?"
 TITLE451 = "🌊 Spillover gas↔power: chi trasmette e chi riceve gli shock?"
+TITLE453 = "📊 Backtest VECM(1): il modello batte il random walk?"
 TITLE317 = "🧠📉 CAViaR: il VaR adattivo che impara dai rendimenti"
 TITLE316 = "🌊📉 POT-GPD: il VaR dalla coda paretiana oltre soglia"
 BOOK_DEMO = 'Gas TTF front-month;2500000;3,2;gas\nPower DE baseload Q1-27;1800000;2,8;power\nCO2 EUA Dic-26;900000;2,5;co2\nSpread PSV-TTF;600000;4,1;basis\nSpark spread CCGT 55%;1200000;3,6;power\nCarbone API2 ARA;700000;3,0;coal'
@@ -196,7 +197,7 @@ def _ris_demo():
 class TestRegistry318:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 452
+        assert len(titoli) == len(dvars) == len(withs) == 453
         assert TITLE318 in titoli
         assert "tab318" in dvars
         assert "    with tab318:" in src
@@ -209,8 +210,8 @@ class TestRegistry318:
 
     def test_ultima_tab(self):
         _, titoli, dvars, _ = _registry()
-        assert titoli[-1] == TITLE452
-        assert dvars[-1] == "tab452"
+        assert titoli[-1] == TITLE453
+        assert dvars[-1] == "tab453"
 
 
 class TestValidatori:

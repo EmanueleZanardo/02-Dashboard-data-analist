@@ -129,6 +129,7 @@ TITLE445 = "🌀 Rolling drawdown: il peggior calo in ogni finestra"
 TITLE447 = "⛓️ Johansen: power e gas cointegrati?"
 TITLE449 = "💥 Risposta allo shock: di quanto uno shock del gas muove power?"
 TITLE451 = "🌊 Spillover gas↔power: chi trasmette e chi riceve gli shock?"
+TITLE453 = "📊 Backtest VECM(1): il modello batte il random walk?"
 TITLE345 = "🎯 Sizing anti-rovina: f massima con ROR vincolato"
 TITLE344 = "🎲 Risk of ruin: probabilita' di toccare una barriera di drawdown"
 TITLE343 = "📐 Kelly criterion: il sizing ottimale dall'edge stimato"
@@ -186,7 +187,7 @@ def _registry():
 class TestRegistry346:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 452
+        assert len(titoli) == len(dvars) == len(withs) == 453
         assert "tab346" in dvars
         assert "tab346" in withs
 
@@ -199,9 +200,9 @@ class TestRegistry346:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab452"
-        assert titoli[-1] == TITLE452
-        assert withs[-1] == "tab452"
+        assert dvars[-1] == "tab453"
+        assert titoli[-1] == TITLE453
+        assert withs[-1] == "tab453"
 
 
 class TestNum:

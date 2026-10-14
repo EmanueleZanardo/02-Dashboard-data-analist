@@ -26,6 +26,7 @@ _F = _load("mh452_num", "mh452_parse_serie", "mh452_forecast",
 
 TITLE452 = "📈 Previsione VECM(1): dove vanno power e gas nei prossimi H giorni?"
 TITLE451 = "🌊 Spillover gas↔power: chi trasmette e chi riceve gli shock?"
+TITLE453 = "📊 Backtest VECM(1): il modello batte il random walk?"
 TITLE450 = "📜 Scomposizione storica: cosa ha mosso davvero il prezzo power?"
 TITLE449 = "💥 Risposta allo shock: di quanto uno shock del gas muove power?"
 TITLE448 = "🔗 ECM: quanto in fretta power torna all'equilibrio col gas?"
@@ -52,20 +53,20 @@ A10 = 0.4763066844678583
 A11 = 0.7395246551912972
 C_G = 0.04760932469821068
 C_P = 0.08448960998283102
-PT_P_01 = 109.03658544552552
-PT_G_01 = 48.38532685681418
+PT_P_01 = 120.06937659896988
+PT_G_01 = 42.85655948189263
 HW95_P_01 = 2.799507219891737
 HW95_G_01 = 0.9151631137478162
-PT_P_05 = 99.32426198198398
-PT_G_05 = 53.61217515295808
-PT_P_20 = 99.93655659714565
-PT_G_20 = 54.65457434107598
-LO95_P_20 = 90.67976492126488
-HI95_P_20 = 109.19334827302643
-LO95_G_20 = 49.895084790742935
-HI95_G_20 = 59.41406389140902
-CHG_P_20 = -0.16472925265126395
-CHG_G_20 = 0.2716599625527132
+PT_P_05 = 120.73034487049344
+PT_G_05 = 42.88512965260805
+PT_P_20 = 122.03912563225387
+PT_G_20 = 43.57850475145941
+LO95_P_20 = 112.7823339563731
+HI95_P_20 = 131.29591730813465
+LO95_G_20 = 38.81901520112637
+HI95_G_20 = 48.337994301792456
+CHG_P_20 = 0.020004242126853766
+CHG_G_20 = 0.013950623318551719
 W95_P_20 = 0.1547367162615513
 W95_G_20 = 0.22148017348285487
 A15Y = -0.30346693792017626
@@ -114,7 +115,7 @@ class TestRegistry452:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert len(titoli) == len(dvars) == len(withs) == 452
+        assert len(titoli) == len(dvars) == len(withs) == 453
         assert "tab452" in dvars
         assert "tab452" in withs
 
@@ -144,9 +145,9 @@ class TestRegistry452:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert dvars[-1] == "tab452"
-        assert titoli[-1] == TITLE452
-        assert withs[-1] == "tab452"
+        assert dvars[-1] == "tab453"
+        assert titoli[-1] == TITLE453
+        assert withs[-1] == "tab453"
 
 
 class TestForecast452:
@@ -191,19 +192,19 @@ class TestForecast452:
         assert abs(m["pw_pt"][4] - PT_P_05) < 1e-9
         assert abs(m["gs_pt"][4] - PT_G_05) < 1e-9
         assert abs(m["pw_pt"][19] - PT_P_20) < 1e-9
-        assert abs(m["pw_pt"][19] - 99.94) < 1e-2
+        assert abs(m["pw_pt"][19] - 122.04) < 1e-2
         assert abs(m["gs_pt"][19] - PT_G_20) < 1e-9
         assert abs(m["pw_lo95"][19] - LO95_P_20) < 1e-9
         assert abs(m["pw_hi95"][19] - HI95_P_20) < 1e-9
         assert abs(m["gs_lo95"][19] - LO95_G_20) < 1e-9
         assert abs(m["gs_hi95"][19] - HI95_G_20) < 1e-9
         assert abs(m["chg_pw"] - CHG_P_20) < 1e-12
-        assert abs(m["chg_pw"] - (-0.1647)) < 1e-3
+        assert abs(m["chg_pw"] - (0.0200)) < 1e-3
         assert abs(m["chg_gs"] - CHG_G_20) < 1e-12
         assert abs(m["w95_pw"] - W95_P_20) < 1e-12
         assert abs(m["w95_gs"] - W95_G_20) < 1e-12
-        assert m["verdetto"].startswith("RIBASSO FORTE")
-        assert "16.5%" in m["verdetto"]
+        assert m["verdetto"].startswith("RIALZO")
+        assert "+2.0%" in m["verdetto"]
         # in QUESTO campione alpha_gas ha t > 2 (stesso rumore di
         # tab448/449/450/451) -> flag False
         assert T_G > 2.0
@@ -239,7 +240,9 @@ class TestForecast452:
         assert abs(al["gas"] - ALPHA_G) < 1e-9
         A = [[1.0 - al["gas"] * BETA, al["gas"]],
              [-al["power"] * BETA, 1.0 + al["power"]]]
-        c = [cs["gas"], cs["power"]]
+        # l'ec e' demeaned (media mu): la costante del VAR(1) in livelli
+        # compensa con -alpha*mu (fix 14/10/2026, come nell'helper)
+        c = [cs["gas"] - al["gas"] * mu, cs["power"] - al["power"] * mu]
         assert abs(A[0][0] - A00) < 1e-9
         assert abs(A[1][1] - A11) < 1e-9
         # previsione puntuale ricorsiva esplicita
@@ -351,8 +354,8 @@ class TestForecast452:
         assert v(-0.01).startswith("RIBASSO")
         assert v(-0.0499).startswith("RIBASSO")
         assert v(-0.05).startswith("RIBASSO FORTE")
-        assert v(-0.1647).startswith("RIBASSO FORTE")
-        assert "16.5%" in v(-0.164729)
+        assert v(0.0200).startswith("RIALZO")
+        assert "+2.0%" in v(0.020004)
         for bad in (lambda: v(float("nan")),
                     lambda: v(float("inf")),
                     lambda: v("x"),
