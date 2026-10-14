@@ -182,6 +182,7 @@ TITLE439 = "📉 CDaR ratio: rendimento per unita' di coda media (Conditional Dr
 TITLE441 = "📈 Recovery Factor: profitto totale per unita' di peggior drawdown"
 TITLE443 = "💹 Gain-to-Pain ratio: guadagni totali per ogni punto perso"
 TITLE445 = "🌀 Rolling drawdown: il peggior calo in ogni finestra"
+TITLE447 = "⛓️ Johansen: power e gas cointegrati?"
 TITLE293 = "🛡📉 Hedge ratio ottimale: quanto coprire con i futures?"
 TITLE292 = "🪓📊 Component VaR: quale posizione tagliare per prima?"
 
@@ -206,12 +207,12 @@ def _registry():
 class TestRegistryTab294:
     def test_tab294_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 446
+        assert len(titoli) == len(dvars) == len(withs) == 447
         assert TITLE294 in titoli
         assert "tab294" in dvars
         assert "tab294" in withs
         assert titoli[dvars.index("tab294")] == TITLE294
-        assert titoli[-1] == TITLE446
+        assert titoli[-1] == TITLE447
         keys = re.findall(r'key="(bv294_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

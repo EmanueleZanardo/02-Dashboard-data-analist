@@ -139,6 +139,7 @@ TITLE439 = "📉 CDaR ratio: rendimento per unita' di coda media (Conditional Dr
 TITLE441 = "📈 Recovery Factor: profitto totale per unita' di peggior drawdown"
 TITLE443 = "💹 Gain-to-Pain ratio: guadagni totali per ogni punto perso"
 TITLE445 = "🌀 Rolling drawdown: il peggior calo in ogni finestra"
+TITLE447 = "⛓️ Johansen: power e gas cointegrati?"
 TITLE325 = "📈📉 Calmar ratio: il rendimento che paga il drawdown"
 TITLE324 = "Ω📊 Omega ratio: oltre Sharpe e Sortino"
 SERIE_DEMO = '100\n103\n106\n109\n112\n115\n118\n121\n124\n127\n130\n128\n124\n119\n114\n112\n105\n110\n116\n122\n128\n134\n138\n136\n132\n128\n124\n120\n116\n112\n116\n122\n128\n134\n140\n146\n152\n158\n156\n152\n148\n144\n146\n150\n154\n158\n161\n164'
@@ -174,7 +175,7 @@ def _eq_demo():
 class TestRegistry326:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 446
+        assert len(titoli) == len(dvars) == len(withs) == 447
         assert TITLE326 in titoli
         assert "tab326" in dvars
         assert "    with tab326:" in src
@@ -187,8 +188,8 @@ class TestRegistry326:
 
     def test_ultima_tab(self):
         _, titoli, dvars, _ = _registry()
-        assert titoli[-1] == TITLE446
-        assert dvars[-1] == "tab446"
+        assert titoli[-1] == TITLE447
+        assert dvars[-1] == "tab447"
 
 
 class TestValidatori:

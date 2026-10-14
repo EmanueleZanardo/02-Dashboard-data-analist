@@ -34,7 +34,7 @@ def _registry():
 class TestRegistryTab248:
     def test_tab248_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 446
+        assert len(titoli) == len(dvars) == len(withs) == 447
         assert "💲 Interessi moratori & ritardo pagamenti" in titoli
         assert "tab248" in dvars
         assert "tab248" in withs

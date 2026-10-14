@@ -157,6 +157,7 @@ TITLE439 = "📉 CDaR ratio: rendimento per unita' di coda media (Conditional Dr
 TITLE441 = "📈 Recovery Factor: profitto totale per unita' di peggior drawdown"
 TITLE443 = "💹 Gain-to-Pain ratio: guadagni totali per ogni punto perso"
 TITLE445 = "🌀 Rolling drawdown: il peggior calo in ogni finestra"
+TITLE447 = "⛓️ Johansen: power e gas cointegrati?"
 TITLE311 = "📐📉 Cornish-Fisher: il VaR corretto per skew e code grasse"
 TITLE310 = "💧📉 LVaR: il VaR corretto per il costo di liquidazione"
 BOOK_DEMO = ("Cal-28 Baseload power;2500000;18,5;-0,8;4,0;power\n"
@@ -195,7 +196,7 @@ def _registry():
 class TestRegistry312:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 446
+        assert len(titoli) == len(dvars) == len(withs) == 447
         assert TITLE312 in titoli
         assert "tab312" in dvars
         assert "    with tab312:" in src
@@ -208,8 +209,8 @@ class TestRegistry312:
 
     def test_ultima_tab(self):
         _, titoli, dvars, _ = _registry()
-        assert titoli[-1] == TITLE446
-        assert dvars[-1] == "tab446"
+        assert titoli[-1] == TITLE447
+        assert dvars[-1] == "tab447"
 
 
 class TestValidatori:
