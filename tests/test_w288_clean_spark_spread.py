@@ -176,6 +176,7 @@ TITLE440 = "🎯 Drawdown-at-Risk (DaR): la soglia di drawdown superata solo nel
 TITLE442 = "📐 Calmar geometrico: CAGR composto per unita' di peggior drawdown"
 TITLE444 = "🏞️ Lake ratio: l'area del dolore sotto il picco"
 TITLE446 = "📏 Variance ratio: il prezzo segue un random walk?"
+TITLE448 = "🔗 ECM: quanto in fretta power torna all'equilibrio col gas?"
 TITLE413 = "📐 Sharpe corretto: il rendimento per unita' di rischio con code grasse"
 TITLE415 = "🎯 Deflated Sharpe ratio: lo Sharpe sopravvive ai backtest multipli?"
 TITLE417 = "🔺 Farinelli-Tibiletti: Omega e upside potential in un'unica formula"
@@ -223,12 +224,12 @@ def _registry():
 class TestRegistryTab288:
     def test_tab288_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 447
+        assert len(titoli) == len(dvars) == len(withs) == 448
         assert TITLE288 in titoli
         assert "tab288" in dvars
         assert "tab288" in withs
         assert titoli[dvars.index("tab288")] == TITLE288
-        assert titoli[-1] == TITLE447
+        assert titoli[-1] == TITLE448
         keys = re.findall(r'key="(css288_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

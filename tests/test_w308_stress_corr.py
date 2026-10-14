@@ -140,6 +140,7 @@ TITLE440 = "🎯 Drawdown-at-Risk (DaR): la soglia di drawdown superata solo nel
 TITLE442 = "📐 Calmar geometrico: CAGR composto per unita' di peggior drawdown"
 TITLE444 = "🏞️ Lake ratio: l'area del dolore sotto il picco"
 TITLE446 = "📏 Variance ratio: il prezzo segue un random walk?"
+TITLE448 = "🔗 ECM: quanto in fretta power torna all'equilibrio col gas?"
 TITLE413 = "📐 Sharpe corretto: il rendimento per unita' di rischio con code grasse"
 TITLE415 = "🎯 Deflated Sharpe ratio: lo Sharpe sopravvive ai backtest multipli?"
 TITLE417 = "🔺 Farinelli-Tibiletti: Omega e upside potential in un'unica formula"
@@ -197,7 +198,7 @@ def _registry():
 class TestRegistry308:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 447
+        assert len(titoli) == len(dvars) == len(withs) == 448
         assert TITLE308 in titoli
         assert "tab308" in dvars
         assert "    with tab308:" in src
@@ -210,8 +211,8 @@ class TestRegistry308:
 
     def test_ultima_tab(self):
         _, titoli, dvars, _ = _registry()
-        assert titoli[-1] == TITLE447
-        assert dvars[-1] == "tab447"
+        assert titoli[-1] == TITLE448
+        assert dvars[-1] == "tab448"
 
 
 class TestValidatori:
