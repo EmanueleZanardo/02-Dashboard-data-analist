@@ -135,6 +135,7 @@ TITLE449 = "💥 Risposta allo shock: di quanto uno shock del gas muove power?"
 TITLE451 = "🌊 Spillover gas↔power: chi trasmette e chi riceve gli shock?"
 TITLE453 = "📊 Backtest VECM(1): il modello batte il random walk?"
 TITLE455 = "🔮 Quando rientra lo spread? Forecast mean-reversion"
+TITLE457 = "📐 Quanto puntare sul rientro? Sizing Kelly del trade"
 TITLE342 = "🎯 Volatilità target: il sizing a volatilità costante"
 TITLE341 = "📐 K-ratio: la regolarità della crescita dell'equity"
 TITLE340 = "📉 Calmar ratio: il rendimento annuo per unità di max drawdown"
@@ -164,7 +165,7 @@ def _registry():
 class TestRegistry343:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 456
+        assert len(titoli) == len(dvars) == len(withs) == 457
         assert "tab343" in dvars
         assert "tab343" in withs
 
@@ -177,9 +178,9 @@ class TestRegistry343:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab456"
-        assert titoli[-1] == TITLE456
-        assert withs[-1] == "tab456"
+        assert dvars[-1] == "tab457"
+        assert titoli[-1] == TITLE457
+        assert withs[-1] == "tab457"
 
 
 class TestNum:

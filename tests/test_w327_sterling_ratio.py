@@ -148,6 +148,7 @@ TITLE449 = "💥 Risposta allo shock: di quanto uno shock del gas muove power?"
 TITLE451 = "🌊 Spillover gas↔power: chi trasmette e chi riceve gli shock?"
 TITLE453 = "📊 Backtest VECM(1): il modello batte il random walk?"
 TITLE455 = "🔮 Quando rientra lo spread? Forecast mean-reversion"
+TITLE457 = "📐 Quanto puntare sul rientro? Sizing Kelly del trade"
 TITLE326 = "🩹 Pain index e Pain ratio: il dolore medio oltre il peggio"
 TITLE325 = "📈📉 Calmar ratio: il rendimento che paga il drawdown"
 SERIE_DEMO = '100\n103\n106\n109\n112\n115\n118\n121\n124\n127\n130\n126\n121\n116\n111\n107\n105\n110\n116\n122\n128\n132\n135\n131\n127\n123\n119\n115\n111\n109\n115\n121\n127\n133\n140\n145\n141\n137\n133\n130\n136\n142\n148\n154\n160\n164\n166\n168'
@@ -182,7 +183,7 @@ def _eq_demo():
 class TestRegistry327:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 456
+        assert len(titoli) == len(dvars) == len(withs) == 457
         assert TITLE327 in titoli
         assert "tab327" in dvars
         assert "    with tab327:" in src
@@ -195,8 +196,8 @@ class TestRegistry327:
 
     def test_ultima_tab(self):
         _, titoli, dvars, _ = _registry()
-        assert titoli[-1] == TITLE456
-        assert dvars[-1] == "tab456"
+        assert titoli[-1] == TITLE457
+        assert dvars[-1] == "tab457"
 
 
 class TestValidatori:
