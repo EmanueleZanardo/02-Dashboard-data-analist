@@ -201,6 +201,7 @@ TITLE441 = "📈 Recovery Factor: profitto totale per unita' di peggior drawdown
 TITLE443 = "💹 Gain-to-Pain ratio: guadagni totali per ogni punto perso"
 TITLE445 = "🌀 Rolling drawdown: il peggior calo in ogni finestra"
 TITLE447 = "⛓️ Johansen: power e gas cointegrati?"
+TITLE449 = "💥 Risposta allo shock: di quanto uno shock del gas muove power?"
 TITLE275 = "📊 Posizione vs limiti di rischio"
 
 CSV_FLUSSI = ("mese,flusso_eur\n"
@@ -219,12 +220,12 @@ def _registry():
 class TestRegistryTab276:
     def test_tab276_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 448
+        assert len(titoli) == len(dvars) == len(withs) == 449
         assert TITLE276 in titoli
         assert "tab276" in dvars
         assert "tab276" in withs
         assert titoli[dvars.index("tab276")] == TITLE276
-        assert titoli[-1] == TITLE448
+        assert titoli[-1] == TITLE449
         keys = re.findall(r'key="(cf276_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

@@ -108,6 +108,7 @@ TITLE441 = "📈 Recovery Factor: profitto totale per unita' di peggior drawdown
 TITLE443 = "💹 Gain-to-Pain ratio: guadagni totali per ogni punto perso"
 TITLE445 = "🌀 Rolling drawdown: il peggior calo in ogni finestra"
 TITLE447 = "⛓️ Johansen: power e gas cointegrati?"
+TITLE449 = "💥 Risposta allo shock: di quanto uno shock del gas muove power?"
 TITLE353 = "Kelly adattivo: win-rate rolling e size dinamica"
 TITLE352 = "Kelly con correlazione: due posizioni correlate"
 TITLE351 = "Kelly con portafoglio: due posizioni simultanee"
@@ -139,7 +140,7 @@ def _registry():
 class TestRegistry354:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 448
+        assert len(titoli) == len(dvars) == len(withs) == 449
         assert "tab354" in dvars
         assert "tab354" in withs
 
@@ -153,9 +154,9 @@ class TestRegistry354:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab448"
-        assert titoli[-1] == TITLE448
-        assert withs[-1] == "tab448"
+        assert dvars[-1] == "tab449"
+        assert titoli[-1] == TITLE449
+        assert withs[-1] == "tab449"
 
 
 class TestNum:
