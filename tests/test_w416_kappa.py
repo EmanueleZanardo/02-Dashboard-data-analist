@@ -33,6 +33,7 @@ TITLE450 = "📜 Scomposizione storica: cosa ha mosso davvero il prezzo power?"
 TITLE452 = "📈 Previsione VECM(1): dove vanno power e gas nei prossimi H giorni?"
 TITLE454 = "⚖️ Lo spread è stazionario? Test ADF"
 TITLE456 = "💰 Vale la pena tradare il rientro? P&L atteso del trade"
+TITLE458 = "⚠️ Quanto posso perdere? VaR del trade dimensionato"
 TITLE415 = "🎯 Deflated Sharpe ratio: lo Sharpe sopravvive ai backtest multipli?"
 TITLE417 = "🔺 Farinelli-Tibiletti: Omega e upside potential in un'unica formula"
 TITLE419 = "⭐ STAR ratio: il rendimento medio contro la perdita attesa di coda"
@@ -78,7 +79,7 @@ class TestRegistry416:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert len(titoli) == len(dvars) == len(withs) == 457
+        assert len(titoli) == len(dvars) == len(withs) == 458
         assert "tab416" in dvars
         assert "tab416" in withs
 
@@ -104,9 +105,9 @@ class TestRegistry416:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert dvars[-1] == "tab457"
-        assert titoli[-1] == TITLE457
-        assert withs[-1] == "tab457"
+        assert dvars[-1] == "tab458"
+        assert titoli[-1] == TITLE458
+        assert withs[-1] == "tab458"
 
 
 class TestKappa416:
