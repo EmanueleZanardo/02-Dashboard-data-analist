@@ -92,6 +92,7 @@ TITLE447 = "⛓️ Johansen: power e gas cointegrati?"
 TITLE449 = "💥 Risposta allo shock: di quanto uno shock del gas muove power?"
 TITLE451 = "🌊 Spillover gas↔power: chi trasmette e chi riceve gli shock?"
 TITLE453 = "📊 Backtest VECM(1): il modello batte il random walk?"
+TITLE455 = "🔮 Quando rientra lo spread? Forecast mean-reversion"
 TITLE378 = "Reverse stress test: quanto shock regge il limite?"
 TITLE377 = "Backtest VaR di Kupiec: copertura e likelihood ratio"
 TITLE376 = "Shock correlazioni: stress test sul rischio di coda"
@@ -130,7 +131,7 @@ def _registry():
 class TestRegistry379:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 454
+        assert len(titoli) == len(dvars) == len(withs) == 455
         assert "tab379" in dvars
         assert "tab379" in withs
 
@@ -145,9 +146,9 @@ class TestRegistry379:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab454"
-        assert titoli[-1] == TITLE454
-        assert withs[-1] == "tab454"
+        assert dvars[-1] == "tab455"
+        assert titoli[-1] == TITLE455
+        assert withs[-1] == "tab455"
 
 
 class TestNum:

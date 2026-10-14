@@ -190,6 +190,7 @@ TITLE447 = "⛓️ Johansen: power e gas cointegrati?"
 TITLE449 = "💥 Risposta allo shock: di quanto uno shock del gas muove power?"
 TITLE451 = "🌊 Spillover gas↔power: chi trasmette e chi riceve gli shock?"
 TITLE453 = "📊 Backtest VECM(1): il modello batte il random walk?"
+TITLE455 = "🔮 Quando rientra lo spread? Forecast mean-reversion"
 TITLE304 = "🗂️📊 VaR per segmento: dove si concentra il rischio?"
 TITLE303 = "🧱📉 Capacità VaR: quanto nozionale puoi ancora aggiungere?"
 
@@ -229,13 +230,13 @@ def _registry():
 class TestRegistryTab305:
     def test_tab305_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 454
+        assert len(titoli) == len(dvars) == len(withs) == 455
         assert TITLE305 in titoli
         assert "tab305" in dvars
         assert "tab305" in withs
         assert titoli[dvars.index("tab305")] == TITLE305
-        assert titoli[-1] == TITLE454
-        assert dvars[-1] == "tab454"
+        assert titoli[-1] == TITLE455
+        assert dvars[-1] == "tab455"
         keys = re.findall(r'key="(st305_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

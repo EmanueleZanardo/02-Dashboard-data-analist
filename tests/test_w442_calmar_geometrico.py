@@ -82,6 +82,7 @@ TITLE447 = "⛓️ Johansen: power e gas cointegrati?"
 TITLE449 = "💥 Risposta allo shock: di quanto uno shock del gas muove power?"
 TITLE451 = "🌊 Spillover gas↔power: chi trasmette e chi riceve gli shock?"
 TITLE453 = "📊 Backtest VECM(1): il modello batte il random walk?"
+TITLE455 = "🔮 Quando rientra lo spread? Forecast mean-reversion"
 TITLE440 = "🎯 Drawdown-at-Risk (DaR): la soglia di drawdown superata solo nell'alpha% dei casi"
 TITLE439 = "📉 CDaR ratio: rendimento per unita' di coda media (Conditional Drawdown-at-Risk)"
 TITLE438 = "🩹 Pain ratio: rendimento per unita' di dolore medio (Pain Index)"
@@ -143,7 +144,7 @@ class TestRegistry442:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert len(titoli) == len(dvars) == len(withs) == 454
+        assert len(titoli) == len(dvars) == len(withs) == 455
         assert "tab442" in dvars
         assert "tab442" in withs
 
@@ -173,9 +174,9 @@ class TestRegistry442:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert dvars[-1] == "tab454"
-        assert titoli[-1] == TITLE454
-        assert withs[-1] == "tab454"
+        assert dvars[-1] == "tab455"
+        assert titoli[-1] == TITLE455
+        assert withs[-1] == "tab455"
 
 
 class TestGeoCalmar442:

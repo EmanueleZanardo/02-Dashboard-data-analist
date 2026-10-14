@@ -165,6 +165,7 @@ TITLE447 = "⛓️ Johansen: power e gas cointegrati?"
 TITLE449 = "💥 Risposta allo shock: di quanto uno shock del gas muove power?"
 TITLE451 = "🌊 Spillover gas↔power: chi trasmette e chi riceve gli shock?"
 TITLE453 = "📊 Backtest VECM(1): il modello batte il random walk?"
+TITLE455 = "🔮 Quando rientra lo spread? Forecast mean-reversion"
 TITLE311 = "📐📉 Cornish-Fisher: il VaR corretto per skew e code grasse"
 TITLE310 = "💧📉 LVaR: il VaR corretto per il costo di liquidazione"
 BOOK_DEMO = ("Cal-28 Baseload power;2500000;18,5;-0,8;4,0;power\n"
@@ -203,7 +204,7 @@ def _registry():
 class TestRegistry312:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 454
+        assert len(titoli) == len(dvars) == len(withs) == 455
         assert TITLE312 in titoli
         assert "tab312" in dvars
         assert "    with tab312:" in src
@@ -216,8 +217,8 @@ class TestRegistry312:
 
     def test_ultima_tab(self):
         _, titoli, dvars, _ = _registry()
-        assert titoli[-1] == TITLE454
-        assert dvars[-1] == "tab454"
+        assert titoli[-1] == TITLE455
+        assert dvars[-1] == "tab455"
 
 
 class TestValidatori:

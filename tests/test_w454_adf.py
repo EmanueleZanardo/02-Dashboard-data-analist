@@ -20,6 +20,7 @@ _F = _load("mh454_num", "mh454_parse_serie", "mh454_adf",
 
 TITLE454 = "⚖️ Lo spread è stazionario? Test ADF"
 TITLE453 = "📊 Backtest VECM(1): il modello batte il random walk?"
+TITLE455 = "🔮 Quando rientra lo spread? Forecast mean-reversion"
 TITLE452 = "📈 Previsione VECM(1): dove vanno power e gas nei prossimi H giorni?"
 TITLE451 = "🌊 Spillover gas↔power: chi trasmette e chi riceve gli shock?"
 TITLE450 = "📜 Scomposizione storica: cosa ha mosso davvero il prezzo power?"
@@ -67,7 +68,7 @@ class TestRegistry454:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert len(titoli) == len(dvars) == len(withs) == 454
+        assert len(titoli) == len(dvars) == len(withs) == 455
         assert "tab454" in dvars
         assert "tab454" in withs
 
@@ -97,9 +98,9 @@ class TestRegistry454:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert dvars[-1] == "tab454"
-        assert titoli[-1] == TITLE454
-        assert withs[-1] == "tab454"
+        assert dvars[-1] == "tab455"
+        assert titoli[-1] == TITLE455
+        assert withs[-1] == "tab455"
 
 
 class TestADF454:

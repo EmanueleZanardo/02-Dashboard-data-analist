@@ -203,6 +203,7 @@ TITLE447 = "⛓️ Johansen: power e gas cointegrati?"
 TITLE449 = "💥 Risposta allo shock: di quanto uno shock del gas muove power?"
 TITLE451 = "🌊 Spillover gas↔power: chi trasmette e chi riceve gli shock?"
 TITLE453 = "📊 Backtest VECM(1): il modello batte il random walk?"
+TITLE455 = "🔮 Quando rientra lo spread? Forecast mean-reversion"
 TITLE284 = "\U0001F3ED Unit commitment CCGT: accendere o no?"
 TITLE283 = "\U0001F6E2\uFE0F Carry petrolio: contango & stoccaggio fisico"
 
@@ -231,12 +232,12 @@ def _registry():
 class TestRegistryTab285:
     def test_tab285_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 454
+        assert len(titoli) == len(dvars) == len(withs) == 455
         assert TITLE285 in titoli
         assert "tab285" in dvars
         assert "tab285" in withs
         assert titoli[dvars.index("tab285")] == TITLE285
-        assert titoli[-1] == TITLE454
+        assert titoli[-1] == TITLE455
         keys = re.findall(r'key="(gd285_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
