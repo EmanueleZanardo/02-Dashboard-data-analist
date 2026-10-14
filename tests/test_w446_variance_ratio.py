@@ -24,6 +24,7 @@ _F = _load("mh446_num", "mh446_parse_serie", "mh446_mean",
 
 TITLE446 = "📏 Variance ratio: il prezzo segue un random walk?"
 TITLE448 = "🔗 ECM: quanto in fretta power torna all'equilibrio col gas?"
+TITLE450 = "📜 Scomposizione storica: cosa ha mosso davvero il prezzo power?"
 TITLE445 = "🌀 Rolling drawdown: il peggior calo in ogni finestra"
 TITLE447 = "⛓️ Johansen: power e gas cointegrati?"
 TITLE449 = "💥 Risposta allo shock: di quanto uno shock del gas muove power?"
@@ -117,7 +118,7 @@ class TestRegistry446:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert len(titoli) == len(dvars) == len(withs) == 449
+        assert len(titoli) == len(dvars) == len(withs) == 450
         assert "tab446" in dvars
         assert "tab446" in withs
 
@@ -147,9 +148,9 @@ class TestRegistry446:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert dvars[-1] == "tab449"
-        assert titoli[-1] == TITLE449
-        assert withs[-1] == "tab449"
+        assert dvars[-1] == "tab450"
+        assert titoli[-1] == TITLE450
+        assert withs[-1] == "tab450"
 
 
 class TestVarianceRatio446:
