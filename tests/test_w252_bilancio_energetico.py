@@ -35,12 +35,12 @@ def _registry():
 class TestRegistryTab252:
     def test_tab252_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 458
+        assert len(titoli) == len(dvars) == len(withs) == 459
         assert "⚖️ Bilancio energetico" in titoli
         assert "tab252" in dvars
         assert "tab252" in withs
         assert titoli[dvars.index("tab252")] == "⚖️ Bilancio energetico"
-        assert titoli[-1] == "⚠️ Quanto posso perdere? VaR del trade dimensionato"
+        assert titoli[-1] == "🧪⚠️ Stress test del trade: VaR sotto shock"
         keys = re.findall(r'key="(b252_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 10
 
