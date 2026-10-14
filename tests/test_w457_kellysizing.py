@@ -24,6 +24,7 @@ _F = _load("mh457_num", "mh457_mills", "mh457_winloss", "mh457_kelly",
 
 TITLE457 = "📐 Quanto puntare sul rientro? Sizing Kelly del trade"
 TITLE456 = "💰 Vale la pena tradare il rientro? P&L atteso del trade"
+TITLE463 = "🔀 Scale-out: tutto insieme o a pezzi?"
 TITLE462 = "⏳ Time stop: uscire se non succede niente"
 TITLE461 = "🧭 Ottimizza stop/target: i migliori k"
 TITLE460 = "🛑 Stop & target: dove chiudere il trade"
@@ -89,7 +90,7 @@ class TestRegistry457:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert len(titoli) == len(dvars) == len(withs) == 462
+        assert len(titoli) == len(dvars) == len(withs) == 463
         assert "tab457" in dvars
         assert "tab457" in withs
 
@@ -120,9 +121,9 @@ class TestRegistry457:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert dvars[-1] == "tab462"
-        assert titoli[-1] == TITLE462
-        assert withs[-1] == "tab462"
+        assert dvars[-1] == "tab463"
+        assert titoli[-1] == TITLE463
+        assert withs[-1] == "tab463"
 
 
 class TestKellySizing457:
