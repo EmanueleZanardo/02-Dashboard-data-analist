@@ -70,6 +70,7 @@ _F = _load("mh442_num", "mh442_parse_serie", "mh442_equity",
 
 TITLE442 = "📐 Calmar geometrico: CAGR composto per unita' di peggior drawdown"
 TITLE444 = "🏞️ Lake ratio: l'area del dolore sotto il picco"
+TITLE446 = "📏 Variance ratio: il prezzo segue un random walk?"
 TITLE441 = "📈 Recovery Factor: profitto totale per unita' di peggior drawdown"
 TITLE443 = "💹 Gain-to-Pain ratio: guadagni totali per ogni punto perso"
 TITLE445 = "🌀 Rolling drawdown: il peggior calo in ogni finestra"
@@ -134,7 +135,7 @@ class TestRegistry442:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert len(titoli) == len(dvars) == len(withs) == 445
+        assert len(titoli) == len(dvars) == len(withs) == 446
         assert "tab442" in dvars
         assert "tab442" in withs
 
@@ -164,9 +165,9 @@ class TestRegistry442:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert dvars[-1] == "tab445"
-        assert titoli[-1] == TITLE445
-        assert withs[-1] == "tab445"
+        assert dvars[-1] == "tab446"
+        assert titoli[-1] == TITLE446
+        assert withs[-1] == "tab446"
 
 
 class TestGeoCalmar442:

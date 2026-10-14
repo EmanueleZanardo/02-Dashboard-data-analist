@@ -35,7 +35,7 @@ def _registry():
 class TestRegistryTab242:
     def test_tab242_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 445
+        assert len(titoli) == len(dvars) == len(withs) == 446
         assert "⚡ Potenza impegnata ottimale" in titoli
         assert "tab242" in dvars
         assert "tab242" in withs
