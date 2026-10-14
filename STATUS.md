@@ -142,7 +142,13 @@
 
 # STATUS.md — 02-Dashboard-data-analist (Singularity Quant ETRM)
 
-**Ultimo aggiornamento: 13/10/2026 ~02:05 CEST**
+**Ultimo aggiornamento: 14/10/2026 ~02:00 CEST**
+
+## 14/10/2026 ~02:00 CEST — aggiornamento documentale giornaliero
+- **24 nuove tab dalla base di ieri (tab418 -> tab442), famiglia coda-drawdown.** Swarm 13/10 ~16:37: tab431 Calmar (`fdfc92f4`), tab432 Sortino (`a31ed3d5`), tab433 Omega (`c212a473`), tab434 Burke (`92b37d0b`). Cicli orari: tab438 "Pain ratio" (`e077dbf`, Pain ratio 3.6939 OTTIMO, chiave A/B 16.0541 vs 0.9444), tab441 "Recovery Factor" (commit `b9cd10e6`, 23:40 13/10, 245 file: RF 1.2340 DISCRETO, chiavi stesso maxDD / stesso Calmar / orizzonte / crash), tab442 "Calmar geometrico: CAGR composto per unita' di peggior drawdown" (commit `88a726e7`, 00:39 14/10: GeoCalmar 0.3533 DEBOLE vs Calmar 0.3928, misura PIU' SEVERA su serie drag-heavy; primo run crashato in step 4 per PYTHONPATH sbagliato, recuperato con resume + bumponly — lezione "crash prima del bump -> bumponly").
+- **Hardening 13/10 23:16 (HEAD attuale `afbf686`):** `.streamlit/config.toml` (XSRF on, upload max 10MB, niente telemetria/dettagli errore); devcontainer senza enableXsrfProtection=false.
+- **Streamlit keepalive 00:17 14/10:** primo hit 303 verso share.streamlit.io (redirect normale senza cookie); con cookie jar -> HTTP 200, shell Streamlit, zero "gone to sleep"/"get this app back up" -> **APP SVEGLIA**, nessun intervento. Nota: /tmp azzerato a meta' ciclo (file ka scomparso) — output spostato in hidden_files del goal.
+- Blocchi: vecchia chiave ENTSO-E resta nella storia git (da ruotare); app non pubblica — serve suo gesto su share.streamlit.io (Settings -> Sharing -> Public).
 
 ## 13/10/2026 ~02:05 CEST — aggiornamento documentale giornaliero
 - **Ciclo QA 00:39 — tab417 "Farinelli-Tibiletti: Omega e upside potential in un'unica formula" (commit `abfc71d1`, 221 file, push verificato):** FT_{p,q} = UPM_p^(1/p)/LPM_q^(1/q); p=q=1 -> Omega esatto, p=1,q=2 -> upside potential ratio. Demo FT=0.7374 NEGATIVO vs Omega 1.8734 ACCETTABILE. 13 test nuovi verdi, regressione tab416 OK, collect-only 7178 righe OK, bump registry 416->417 su 219 file. Fix gen: loop p/q separati per DID NOT RAISE.
