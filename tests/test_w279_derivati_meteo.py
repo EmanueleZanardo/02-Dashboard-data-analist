@@ -196,6 +196,7 @@ TITLE435 = "🎯 Kappa ratio (Kappa-3): rendimento per unita' di coda cubica"
 TITLE437 = "📈 Sterling ratio: rendimento per unita' di drawdown medio annuo"
 TITLE439 = "📉 CDaR ratio: rendimento per unita' di coda media (Conditional Drawdown-at-Risk)"
 TITLE441 = "📈 Recovery Factor: profitto totale per unita' di peggior drawdown"
+TITLE443 = "💹 Gain-to-Pain ratio: guadagni totali per ogni punto perso"
 TITLE278 = "\U0001f321\ufe0f Stress climatico: domanda e prezzo"
 TITLE277 = "\u26a1 Aste MI: scostamenti vs MGP"
 
@@ -216,12 +217,12 @@ def _registry():
 class TestRegistryTab279:
     def test_tab279_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 442
+        assert len(titoli) == len(dvars) == len(withs) == 443
         assert TITLE279 in titoli
         assert "tab279" in dvars
         assert "tab279" in withs
         assert titoli[dvars.index("tab279")] == TITLE279
-        assert titoli[-1] == TITLE442
+        assert titoli[-1] == TITLE443
         keys = re.findall(r'key="(wd279_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

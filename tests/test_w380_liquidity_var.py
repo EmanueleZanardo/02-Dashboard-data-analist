@@ -77,6 +77,7 @@ TITLE435 = "🎯 Kappa ratio (Kappa-3): rendimento per unita' di coda cubica"
 TITLE437 = "📈 Sterling ratio: rendimento per unita' di drawdown medio annuo"
 TITLE439 = "📉 CDaR ratio: rendimento per unita' di coda media (Conditional Drawdown-at-Risk)"
 TITLE441 = "📈 Recovery Factor: profitto totale per unita' di peggior drawdown"
+TITLE443 = "💹 Gain-to-Pain ratio: guadagni totali per ogni punto perso"
 TITLE379 = "Mappa di rottura: superficie VaR su shock congiunti vol+corr"
 TITLE378 = "Reverse stress test: quanto shock regge il limite?"
 TITLE377 = "Backtest VaR di Kupiec: copertura e likelihood ratio"
@@ -115,7 +116,7 @@ def _registry():
 class TestRegistry380:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 442
+        assert len(titoli) == len(dvars) == len(withs) == 443
         assert "tab380" in dvars
         assert "tab380" in withs
 
@@ -130,9 +131,9 @@ class TestRegistry380:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab442"
-        assert titoli[-1] == TITLE442
-        assert withs[-1] == "tab442"
+        assert dvars[-1] == "tab443"
+        assert titoli[-1] == TITLE443
+        assert withs[-1] == "tab443"
 
 
 class TestNum:

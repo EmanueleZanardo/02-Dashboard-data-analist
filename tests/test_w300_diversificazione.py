@@ -175,6 +175,7 @@ TITLE435 = "🎯 Kappa ratio (Kappa-3): rendimento per unita' di coda cubica"
 TITLE437 = "📈 Sterling ratio: rendimento per unita' di drawdown medio annuo"
 TITLE439 = "📉 CDaR ratio: rendimento per unita' di coda media (Conditional Drawdown-at-Risk)"
 TITLE441 = "📈 Recovery Factor: profitto totale per unita' di peggior drawdown"
+TITLE443 = "💹 Gain-to-Pain ratio: guadagni totali per ogni punto perso"
 TITLE299 = "🧪⚡ Stress test: quanto perde il book negli scenari?"
 TITLE298 = "🚦📏 Limite VaR: quanto margine resta?"
 
@@ -201,12 +202,12 @@ def _registry():
 class TestRegistryTab300:
     def test_tab300_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 442
+        assert len(titoli) == len(dvars) == len(withs) == 443
         assert TITLE300 in titoli
         assert "tab300" in dvars
         assert "tab300" in withs
         assert titoli[dvars.index("tab300")] == TITLE300
-        assert titoli[-1] == TITLE442
+        assert titoli[-1] == TITLE443
         keys = re.findall(r'key="(st300_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 
