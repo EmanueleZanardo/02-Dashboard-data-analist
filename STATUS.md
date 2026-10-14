@@ -142,12 +142,13 @@
 
 # STATUS.md — 02-Dashboard-data-analist (Singularity Quant ETRM)
 
-**Ultimo aggiornamento: 14/10/2026 ~02:00 CEST**
+**Ultimo aggiornamento: 14/10/2026 ~08:45 CEST**
 
 ## 14/10/2026 ~02:00 CEST — aggiornamento documentale giornaliero
 - **24 nuove tab dalla base di ieri (tab418 -> tab442), famiglia coda-drawdown.** Swarm 13/10 ~16:37: tab431 Calmar (`fdfc92f4`), tab432 Sortino (`a31ed3d5`), tab433 Omega (`c212a473`), tab434 Burke (`92b37d0b`). Cicli orari: tab438 "Pain ratio" (`e077dbf`, Pain ratio 3.6939 OTTIMO, chiave A/B 16.0541 vs 0.9444), tab441 "Recovery Factor" (commit `b9cd10e6`, 23:40 13/10, 245 file: RF 1.2340 DISCRETO, chiavi stesso maxDD / stesso Calmar / orizzonte / crash), tab442 "Calmar geometrico: CAGR composto per unita' di peggior drawdown" (commit `88a726e7`, 00:39 14/10: GeoCalmar 0.3533 DEBOLE vs Calmar 0.3928, misura PIU' SEVERA su serie drag-heavy; primo run crashato in step 4 per PYTHONPATH sbagliato, recuperato con resume + bumponly — lezione "crash prima del bump -> bumponly").
 - **Hardening 13/10 23:16 (HEAD attuale `afbf686`):** `.streamlit/config.toml` (XSRF on, upload max 10MB, niente telemetria/dettagli errore); devcontainer senza enableXsrfProtection=false.
 - **Streamlit keepalive 00:17 14/10:** primo hit 303 verso share.streamlit.io (redirect normale senza cookie); con cookie jar -> HTTP 200, shell Streamlit, zero "gone to sleep"/"get this app back up" -> **APP SVEGLIA**, nessun intervento. Nota: /tmp azzerato a meta' ciclo (file ka scomparso) — output spostato in hidden_files del goal.
+- **Ciclo QA 08:39 — tab449 "💥 Risposta allo shock: di quanto uno shock del gas muove power?"** (commit `35315da0`, 253 file, push verificato): IRF da VECM(1) [gas, power] con Cholesky gas-primo — Johansen (tab447) dice SE c'e' cointegrazione, ECM (tab448) QUANTO IN FRETTA si torna, questa DI QUANTO si muove power dopo uno shock gas. Demo: shock +0.4669 €/MWh, impatto contemporaneo 0.8466, LR 0.8504, FEVD gas a H=24 65.7% -> IL GAS GUIDA IL POWER. Chiavi: LR_power/LR_gas = beta ESATTO (1.8286 a 1e-6); l'ordinamento cambia il breve non il lungo ([power,gas]: impatto 0.0000, stesso rapporto); GIRF = Cholesky per lo shock ordinato primo (identita' esatta); beta vera 1.5 -> LR/LR_gas = 1.5000 esatto e alpha_power = -0.3035 (cross-check tab448); senza cointegrazione niente IRF (rango 0/2 -> ValueError). 15 test nuovi verdi, regressione tab448 OK, collect-only 7581 righe OK, bump registry 448->449 su 251 file. Fix gen: chiusura transitiva _load (mh447_rango vuole mh447_trace/max/critico/lam_T) — fix nel template + checkout app.py + rerun full mode (lezione 13/10 07:39).
 - Blocchi: vecchia chiave ENTSO-E resta nella storia git (da ruotare); app non pubblica — serve suo gesto su share.streamlit.io (Settings -> Sharing -> Public).
 
 ## 13/10/2026 ~02:05 CEST — aggiornamento documentale giornaliero
