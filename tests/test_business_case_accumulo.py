@@ -178,12 +178,12 @@ class TestBusinessCaseAccumulo:
         src = Path(__file__).parent.parent.joinpath("app.py").read_text()
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
-        assert len(titoli) == 459
-        assert titoli[-1] == "🧪⚠️ Stress test del trade: VaR sotto shock"
+        assert len(titoli) == 460
+        assert titoli[-1] == "🛑 Stop & target: dove chiudere il trade"
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         assert "tab196" in dvars
         withs = re.findall(r"    with (tab\d+):", src)
         assert "tab196" in withs
-        assert len(withs) == len(dvars) == 459
+        assert len(withs) == len(dvars) == 460
         keys = re.findall(r'key="(bac196_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 12
