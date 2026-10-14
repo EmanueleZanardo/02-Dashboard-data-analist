@@ -128,6 +128,7 @@ TITLE450 = "📜 Scomposizione storica: cosa ha mosso davvero il prezzo power?"
 TITLE452 = "📈 Previsione VECM(1): dove vanno power e gas nei prossimi H giorni?"
 TITLE454 = "⚖️ Lo spread è stazionario? Test ADF"
 TITLE456 = "💰 Vale la pena tradare il rientro? P&L atteso del trade"
+TITLE462 = "⏳ Time stop: uscire se non succede niente"
 TITLE461 = "🧭 Ottimizza stop/target: i migliori k"
 TITLE460 = "🛑 Stop & target: dove chiudere il trade"
 TITLE459 = "🧪⚠️ Stress test del trade: VaR sotto shock"
@@ -188,7 +189,7 @@ def _eq_demo():
 class TestRegistry325:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 461
+        assert len(titoli) == len(dvars) == len(withs) == 462
         assert TITLE325 in titoli
         assert "tab325" in dvars
         assert "    with tab325:" in src
@@ -201,8 +202,8 @@ class TestRegistry325:
 
     def test_ultima_tab(self):
         _, titoli, dvars, _ = _registry()
-        assert titoli[-1] == TITLE461
-        assert dvars[-1] == "tab461"
+        assert titoli[-1] == TITLE462
+        assert dvars[-1] == "tab462"
 
 
 class TestValidatori:
