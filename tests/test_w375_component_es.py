@@ -72,6 +72,7 @@ TITLE444 = "🏞️ Lake ratio: l'area del dolore sotto il picco"
 TITLE446 = "📏 Variance ratio: il prezzo segue un random walk?"
 TITLE448 = "🔗 ECM: quanto in fretta power torna all'equilibrio col gas?"
 TITLE450 = "📜 Scomposizione storica: cosa ha mosso davvero il prezzo power?"
+TITLE452 = "📈 Previsione VECM(1): dove vanno power e gas nei prossimi H giorni?"
 TITLE413 = "📐 Sharpe corretto: il rendimento per unita' di rischio con code grasse"
 TITLE415 = "🎯 Deflated Sharpe ratio: lo Sharpe sopravvive ai backtest multipli?"
 TITLE417 = "🔺 Farinelli-Tibiletti: Omega e upside potential in un'unica formula"
@@ -150,7 +151,7 @@ def _registry():
 class TestRegistry375:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 451
+        assert len(titoli) == len(dvars) == len(withs) == 452
         assert "tab375" in dvars
         assert "tab375" in withs
 
@@ -165,9 +166,9 @@ class TestRegistry375:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab451"
-        assert titoli[-1] == TITLE451
-        assert withs[-1] == "tab451"
+        assert dvars[-1] == "tab452"
+        assert titoli[-1] == TITLE452
+        assert withs[-1] == "tab452"
 
 
 class TestNum:
