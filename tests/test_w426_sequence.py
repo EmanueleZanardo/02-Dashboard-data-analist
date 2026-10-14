@@ -45,6 +45,7 @@ TITLE443 = "💹 Gain-to-Pain ratio: guadagni totali per ogni punto perso"
 TITLE445 = "🌀 Rolling drawdown: il peggior calo in ogni finestra"
 TITLE447 = "⛓️ Johansen: power e gas cointegrati?"
 TITLE449 = "💥 Risposta allo shock: di quanto uno shock del gas muove power?"
+TITLE451 = "🌊 Spillover gas↔power: chi trasmette e chi riceve gli shock?"
 TITLE424 = "🤕 Pain ratio: il rendimento medio contro il drawdown medio"
 TITLE423 = "🔃 MAR ratio: il rendimento composto contro il peggior drawdown"
 TITLE422 = "🎯 Calmar ratio: il rendimento medio contro il peggior drawdown"
@@ -76,7 +77,7 @@ class TestRegistry426:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert len(titoli) == len(dvars) == len(withs) == 450
+        assert len(titoli) == len(dvars) == len(withs) == 451
         assert "tab426" in dvars
         assert "tab426" in withs
 
@@ -103,9 +104,9 @@ class TestRegistry426:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert dvars[-1] == "tab450"
-        assert titoli[-1] == TITLE450
-        assert withs[-1] == "tab450"
+        assert dvars[-1] == "tab451"
+        assert titoli[-1] == TITLE451
+        assert withs[-1] == "tab451"
 
 
 class TestSeq426:
