@@ -84,6 +84,7 @@ TITLE436 = "📈 Martin ratio: rendimento per unita' di Ulcer Index"
 TITLE438 = "🩹 Pain ratio: rendimento per unita' di dolore medio (Pain Index)"
 TITLE440 = "🎯 Drawdown-at-Risk (DaR): la soglia di drawdown superata solo nell'alpha% dei casi"
 TITLE442 = "📐 Calmar geometrico: CAGR composto per unita' di peggior drawdown"
+TITLE444 = "🏞️ Lake ratio: l'area del dolore sotto il picco"
 TITLE413 = "📐 Sharpe corretto: il rendimento per unita' di rischio con code grasse"
 TITLE415 = "🎯 Deflated Sharpe ratio: lo Sharpe sopravvive ai backtest multipli?"
 TITLE417 = "🔺 Farinelli-Tibiletti: Omega e upside potential in un'unica formula"
@@ -135,7 +136,7 @@ def _registry():
 class TestRegistry358:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 443
+        assert len(titoli) == len(dvars) == len(withs) == 444
         assert "tab358" in dvars
         assert "tab358" in withs
 
@@ -149,9 +150,9 @@ class TestRegistry358:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab443"
-        assert titoli[-1] == TITLE443
-        assert withs[-1] == "tab443"
+        assert dvars[-1] == "tab444"
+        assert titoli[-1] == TITLE444
+        assert withs[-1] == "tab444"
 
 
 class TestNum:

@@ -60,6 +60,7 @@ _F = _load("mh440_num", "mh440_parse_serie", "mh440_equity",
 
 TITLE440 = "🎯 Drawdown-at-Risk (DaR): la soglia di drawdown superata solo nell'alpha% dei casi"
 TITLE442 = "📐 Calmar geometrico: CAGR composto per unita' di peggior drawdown"
+TITLE444 = "🏞️ Lake ratio: l'area del dolore sotto il picco"
 TITLE439 = "📉 CDaR ratio: rendimento per unita' di coda media (Conditional Drawdown-at-Risk)"
 TITLE441 = "📈 Recovery Factor: profitto totale per unita' di peggior drawdown"
 TITLE443 = "💹 Gain-to-Pain ratio: guadagni totali per ogni punto perso"
@@ -119,7 +120,7 @@ class TestRegistry440:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert len(titoli) == len(dvars) == len(withs) == 443
+        assert len(titoli) == len(dvars) == len(withs) == 444
         assert "tab440" in dvars
         assert "tab440" in withs
 
@@ -149,9 +150,9 @@ class TestRegistry440:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert dvars[-1] == "tab443"
-        assert titoli[-1] == TITLE443
-        assert withs[-1] == "tab443"
+        assert dvars[-1] == "tab444"
+        assert titoli[-1] == TITLE444
+        assert withs[-1] == "tab444"
 
 
 class TestDaR440:
