@@ -134,6 +134,7 @@ TITLE437 = "📈 Sterling ratio: rendimento per unita' di drawdown medio annuo"
 TITLE439 = "📉 CDaR ratio: rendimento per unita' di coda media (Conditional Drawdown-at-Risk)"
 TITLE441 = "📈 Recovery Factor: profitto totale per unita' di peggior drawdown"
 TITLE443 = "💹 Gain-to-Pain ratio: guadagni totali per ogni punto perso"
+TITLE445 = "🌀 Rolling drawdown: il peggior calo in ogni finestra"
 TITLE329 = "🌊📉 CDaR: il drawdown medio oltre la soglia (il VaR dei drawdown)"
 TITLE328 = "🔻 Burke ratio: il drawdown penalizzato al quadrato"
 TITLE327 = "🛟 Sterling ratio: il Calmar mediato sui peggiori drawdown"
@@ -166,7 +167,7 @@ def _eq_demo():
 class TestRegistry330:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 444
+        assert len(titoli) == len(dvars) == len(withs) == 445
         assert TITLE330 in titoli
         assert "tab330" in dvars
         assert "    with tab330:" in src
@@ -180,9 +181,9 @@ class TestRegistry330:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert titoli[-1] == TITLE444
-        assert dvars[-1] == "tab444"
-        assert withs[-1] == "tab444"
+        assert titoli[-1] == TITLE445
+        assert dvars[-1] == "tab445"
+        assert withs[-1] == "tab445"
 
 
 class TestNum:

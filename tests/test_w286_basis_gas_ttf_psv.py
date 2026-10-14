@@ -190,6 +190,7 @@ TITLE437 = "📈 Sterling ratio: rendimento per unita' di drawdown medio annuo"
 TITLE439 = "📉 CDaR ratio: rendimento per unita' di coda media (Conditional Drawdown-at-Risk)"
 TITLE441 = "📈 Recovery Factor: profitto totale per unita' di peggior drawdown"
 TITLE443 = "💹 Gain-to-Pain ratio: guadagni totali per ogni punto perso"
+TITLE445 = "🌀 Rolling drawdown: il peggior calo in ogni finestra"
 TITLE285 = "\U0001F6DB\uFE0F Differenziali greggio: sweet vs sour"
 TITLE284 = "\U0001F3ED Unit commitment CCGT: accendere o no?"
 TITLE283 = "\U0001F6E2\uFE0F Carry petrolio: contango & stoccaggio fisico"
@@ -217,12 +218,12 @@ def _registry():
 class TestRegistryTab286:
     def test_tab286_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 444
+        assert len(titoli) == len(dvars) == len(withs) == 445
         assert TITLE286 in titoli
         assert "tab286" in dvars
         assert "tab286" in withs
         assert titoli[dvars.index("tab286")] == TITLE286
-        assert titoli[-1] == TITLE444
+        assert titoli[-1] == TITLE445
         keys = re.findall(r'key="(bn286_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

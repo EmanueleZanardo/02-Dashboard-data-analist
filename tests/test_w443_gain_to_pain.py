@@ -79,6 +79,7 @@ _F = _load("mh443_num", "mh443_parse_serie", "mh443_equity",
            "mh421_ulcer", "mh421_martin")
 
 TITLE443 = "💹 Gain-to-Pain ratio: guadagni totali per ogni punto perso"
+TITLE445 = "🌀 Rolling drawdown: il peggior calo in ogni finestra"
 TITLE442 = "📐 Calmar geometrico: CAGR composto per unita' di peggior drawdown"
 TITLE444 = "🏞️ Lake ratio: l'area del dolore sotto il picco"
 TITLE441 = "📈 Recovery Factor: profitto totale per unita' di peggior drawdown"
@@ -138,7 +139,7 @@ class TestRegistry443:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert len(titoli) == len(dvars) == len(withs) == 444
+        assert len(titoli) == len(dvars) == len(withs) == 445
         assert "tab443" in dvars
         assert "tab443" in withs
 
@@ -168,9 +169,9 @@ class TestRegistry443:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert dvars[-1] == "tab444"
-        assert titoli[-1] == TITLE444
-        assert withs[-1] == "tab444"
+        assert dvars[-1] == "tab445"
+        assert titoli[-1] == TITLE445
+        assert withs[-1] == "tab445"
 
 
 class TestGainToPain443:
