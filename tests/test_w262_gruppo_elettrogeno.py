@@ -201,6 +201,7 @@ TITLE450 = "📜 Scomposizione storica: cosa ha mosso davvero il prezzo power?"
 TITLE452 = "📈 Previsione VECM(1): dove vanno power e gas nei prossimi H giorni?"
 TITLE454 = "⚖️ Lo spread è stazionario? Test ADF"
 TITLE456 = "💰 Vale la pena tradare il rientro? P&L atteso del trade"
+TITLE472 = "🔔 Drift dei budget: quando ribilanciare?"
 TITLE471 = "🎯 Risk budgeting: ogni segnale si guadagna il suo capitale"
 TITLE470 = "📈 Expected Shortfall: quanto perdi quando perdi?"
 TITLE469 = "📊 VaR per segnale: chi mangia il capitale?"
@@ -260,12 +261,12 @@ def _registry():
 class TestRegistryTab262:
     def test_tab262_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 471
+        assert len(titoli) == len(dvars) == len(withs) == 472
         assert TITLE262 in titoli
         assert "tab262" in dvars
         assert "tab262" in withs
         assert titoli[dvars.index("tab262")] == TITLE262
-        assert titoli[-1] == TITLE471
+        assert titoli[-1] == TITLE472
         keys = re.findall(r'key="(gen262_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 10
 
