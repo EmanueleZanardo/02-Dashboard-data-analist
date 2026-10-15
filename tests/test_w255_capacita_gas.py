@@ -39,12 +39,12 @@ def _registry():
 class TestRegistryTab255:
     def test_tab255_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 467
+        assert len(titoli) == len(dvars) == len(withs) == 468
         assert "⛽ Capacità gas giornaliera" in titoli
         assert "tab255" in dvars
         assert "tab255" in withs
         assert titoli[dvars.index("tab255")] == "⛽ Capacità gas giornaliera"
-        assert titoli[-1] == "📅 L'edge annualizzato: il trade si ripete?"
+        assert titoli[-1] == "📉 VaR annuale: quanto capitale di rischio?"
         keys = re.findall(r'key="(cg255_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 10
 

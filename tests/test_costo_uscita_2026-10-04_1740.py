@@ -136,12 +136,12 @@ class TestRegistryTab212:
         src = APP.read_text(encoding="utf-8")
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
-        assert len(titoli) == 467
-        assert titoli[-1] == "📅 L'edge annualizzato: il trade si ripete?"
+        assert len(titoli) == 468
+        assert titoli[-1] == "📉 VaR annuale: quanto capitale di rischio?"
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         assert "tab212" in dvars
         withs = re.findall(r"    with (tab\d+):", src)
         assert "tab212" in withs
-        assert len(withs) == len(dvars) == 467
+        assert len(withs) == len(dvars) == 468
         keys = re.findall(r'key="(usc212_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 7

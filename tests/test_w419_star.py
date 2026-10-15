@@ -55,6 +55,7 @@ TITLE450 = "📜 Scomposizione storica: cosa ha mosso davvero il prezzo power?"
 TITLE452 = "📈 Previsione VECM(1): dove vanno power e gas nei prossimi H giorni?"
 TITLE454 = "⚖️ Lo spread è stazionario? Test ADF"
 TITLE456 = "💰 Vale la pena tradare il rientro? P&L atteso del trade"
+TITLE468 = "📉 VaR annuale: quanto capitale di rischio?"
 TITLE467 = "📅 L'edge annualizzato: il trade si ripete?"
 TITLE466 = "💸 Costi veri: l'edge sopravvive al netto?"
 TITLE465 = "📐 Correlazione: la diversificazione è reale?"
@@ -85,7 +86,7 @@ class TestRegistry419:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert len(titoli) == len(dvars) == len(withs) == 467
+        assert len(titoli) == len(dvars) == len(withs) == 468
         assert "tab419" in dvars
         assert "tab419" in withs
 
@@ -111,9 +112,9 @@ class TestRegistry419:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert dvars[-1] == "tab467"
-        assert titoli[-1] == TITLE467
-        assert withs[-1] == "tab467"
+        assert dvars[-1] == "tab468"
+        assert titoli[-1] == TITLE468
+        assert withs[-1] == "tab468"
 
 
 class TestStar419:
