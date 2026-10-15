@@ -12,7 +12,7 @@ from appfuncs import load as _load
 _F = _load("mh477_num", "mh477_parametri", "mh477_traiettoria",
            "mh477_frontiera", "mh477_vwap", "mh477_verdetto")
 
-TITLE479 = "🏦 Costo del margine: il capitale fermo al clearing"
+TITLE480 = "📞 Margin call: variazione margine e buffer di liquidità"
 TITLE477 = "⏳ Scheduling di esecuzione"
 TITLE476 = "🎯 Calibrazione: previsto vs realizzato"
 
@@ -51,7 +51,7 @@ def _par():
     return _F["mh477_parametri"](X, SG, ADV, SP, CI, ORE, NB)
 
 
-class TestRegistry479:
+class TestRegistry480:
     def test_conteggi(self):
         import re
         src = (Path(__file__).resolve().parent.parent / "app.py"
@@ -60,7 +60,7 @@ class TestRegistry479:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert len(titoli) == len(dvars) == len(withs) == 479
+        assert len(titoli) == len(dvars) == len(withs) == 480
 
     def test_ultima_tab(self):
         import re
@@ -69,10 +69,10 @@ class TestRegistry479:
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
-        assert titoli[-1] == TITLE479
+        assert titoli[-1] == TITLE480
         assert titoli[-2] == TITLE477
-        assert dvars[-1] == "tab479"
-        assert f"with tab479:" in src
+        assert dvars[-1] == "tab480"
+        assert f"with tab480:" in src
 
     def test_chiavi_univoche(self):
         import re

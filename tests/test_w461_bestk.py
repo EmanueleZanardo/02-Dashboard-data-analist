@@ -29,7 +29,7 @@ _F = _load("mh461_num", "mh461_asse", "mh461_ottimo", "mh461_verdetto",
 
 TITLE461 = "🧭 Ottimizza stop/target: i migliori k"
 TITLE460 = "🛑 Stop & target: dove chiudere il trade"
-TITLE479 = "🏦 Costo del margine: il capitale fermo al clearing"
+TITLE480 = "📞 Margin call: variazione margine e buffer di liquidità"
 TITLE459 = "🧪⚠️ Stress test del trade: VaR sotto shock"
 TITLE458 = "⚠️ Quanto posso perdere? VaR del trade dimensionato"
 TITLE475 = "💰 Costo di esecuzione: quanto costa davvero ruotare"
@@ -87,7 +87,7 @@ class TestRegistry461:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert len(titoli) == len(dvars) == len(withs) == 479
+        assert len(titoli) == len(dvars) == len(withs) == 480
         assert "tab461" in dvars
         assert "tab461" in withs
 
