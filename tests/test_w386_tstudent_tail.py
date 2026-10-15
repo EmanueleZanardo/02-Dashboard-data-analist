@@ -131,7 +131,7 @@ class TestRegistry386:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert len(titoli) == len(dvars) == len(withs) == 482
+        assert len(titoli) == len(dvars) == len(withs) == 483
         assert "tab386" in dvars
         assert "tab386" in withs
 
@@ -157,8 +157,8 @@ class TestRegistry386:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert dvars[-1] == "tab482"
-        assert titoli[-1] == TITLE482
+        assert "tab482" in dvars
+        assert TITLE482 in titoli
         assert "tab478" in withs  # il blocco UI esiste (non deve essere l'ultimo: le tab si accumulano)
 
 

@@ -49,7 +49,7 @@ class TestRegistry481:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"    with (tab\d+):", src)
-        assert len(titoli) == len(dvars) == len(withs) == 482
+        assert len(titoli) == len(dvars) == len(withs) == 483
 
     def test_ultima_tab(self):
         import re
@@ -58,9 +58,9 @@ class TestRegistry481:
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
-        assert titoli[-1] == TITLE482
+        assert TITLE482 in titoli
         assert TITLE479 in titoli  # membership (non [-2]: la posizione scorre a ogni ciclo)
-        assert dvars[-1] == "tab482"
+        assert "tab482" in dvars
         assert f"with tab482:" in src
 
     def test_chiavi_univoche(self):

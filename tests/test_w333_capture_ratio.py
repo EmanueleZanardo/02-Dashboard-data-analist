@@ -202,7 +202,7 @@ def _demo():
 class TestRegistry333:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 482
+        assert len(titoli) == len(dvars) == len(withs) == 483
         assert "tab333" in dvars
         assert "tab333" in withs
 
@@ -215,8 +215,8 @@ class TestRegistry333:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab482"
-        assert titoli[-1] == TITLE482
+        assert "tab482" in dvars
+        assert TITLE482 in titoli
         assert "tab478" in withs  # il blocco UI esiste (non deve essere l'ultimo: le tab si accumulano)
 
 

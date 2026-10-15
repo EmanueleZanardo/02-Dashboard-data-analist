@@ -73,7 +73,7 @@ class TestRegistry481:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"    with (tab\d+):", src)
-        assert len(titoli) == len(dvars) == len(withs) == 482
+        assert len(titoli) == len(dvars) == len(withs) == 483
 
     def test_ultima_tab(self):
         import re
@@ -82,9 +82,9 @@ class TestRegistry481:
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
-        assert titoli[-1] == TITLE482
-        assert titoli[-2] == TITLE481
-        assert dvars[-1] == "tab482"
+        assert TITLE482 in titoli
+        assert TITLE481 in titoli
+        assert "tab482" in dvars
 
     def test_ui_indentata(self):
         src = (Path(__file__).resolve().parent.parent / "app.py"
