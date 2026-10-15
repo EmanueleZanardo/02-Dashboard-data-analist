@@ -27,7 +27,7 @@ _F = _load("mh460_num", "mh460_piani", "mh460_verdetto", "mh460_mappa",
            "_mh447_mul", "_mh447_transp", "_mh447_ols")
 
 TITLE460 = "🛑 Stop & target: dove chiudere il trade"
-TITLE481 = "📏 DV01 del portafoglio forward: sensibilità del MtM a uno shift parallelo della curva"
+TITLE482 = "🗓️ Ladder delle scadenze: profilo temporale di volumi, MtM e DV01"
 TITLE459 = "🧪⚠️ Stress test del trade: VaR sotto shock"
 TITLE458 = "⚠️ Quanto posso perdere? VaR del trade dimensionato"
 TITLE475 = "💰 Costo di esecuzione: quanto costa davvero ruotare"
@@ -88,7 +88,7 @@ class TestRegistry460:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert len(titoli) == len(dvars) == len(withs) == 481
+        assert len(titoli) == len(dvars) == len(withs) == 482
         assert "tab460" in dvars
         assert "tab460" in withs
 
@@ -119,9 +119,9 @@ class TestRegistry460:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert dvars[-1] == "tab481"
-        assert titoli[-1] == TITLE481
-        assert withs[-1] == "tab478"
+        assert dvars[-1] == "tab482"
+        assert titoli[-1] == TITLE482
+        assert "tab478" in withs  # il blocco UI esiste (non deve essere l'ultimo: le tab si accumulano)
 
 
 class TestStopTarget460:

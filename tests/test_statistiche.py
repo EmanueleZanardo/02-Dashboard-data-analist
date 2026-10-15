@@ -410,7 +410,7 @@ class TestPnlPosizioneAperta:
         r = calcola_pnl_posizione_aperta(piatta(5 * 24), 2.0, 110.0,
                                          ruolo="acquisto")
         # (110-100) * 2 MW * 24h = 480 €/giorno
-        assert (r["serie_giornaliera"] == 481.0).all()
+        assert (r["serie_giornaliera"] == 480.0).all()
         assert r["pnl_totale"] == pytest.approx(2400.0)
 
     def test_vendita_specchio(self):

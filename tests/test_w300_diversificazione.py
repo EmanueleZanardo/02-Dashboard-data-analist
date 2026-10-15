@@ -182,7 +182,7 @@ TITLE463 = "🔀 Scale-out: tutto insieme o a pezzi?"
 TITLE462 = "⏳ Time stop: uscire se non succede niente"
 TITLE461 = "🧭 Ottimizza stop/target: i migliori k"
 TITLE460 = "🛑 Stop & target: dove chiudere il trade"
-TITLE481 = "📏 DV01 del portafoglio forward: sensibilità del MtM a uno shift parallelo della curva"
+TITLE482 = "🗓️ Ladder delle scadenze: profilo temporale di volumi, MtM e DV01"
 TITLE459 = "🧪⚠️ Stress test del trade: VaR sotto shock"
 TITLE458 = "⚠️ Quanto posso perdere? VaR del trade dimensionato"
 TITLE475 = "💰 Costo di esecuzione: quanto costa davvero ruotare"
@@ -235,12 +235,12 @@ def _registry():
 class TestRegistryTab300:
     def test_tab300_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 481
+        assert len(titoli) == len(dvars) == len(withs) == 482
         assert TITLE300 in titoli
         assert "tab300" in dvars
         assert "tab300" in withs
         assert titoli[dvars.index("tab300")] == TITLE300
-        assert titoli[-1] == TITLE481
+        assert titoli[-1] == TITLE482
         keys = re.findall(r'key="(st300_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 5
 

@@ -14,6 +14,7 @@ _F = _load("mh481_num", "mh481_segno", "mh481_mese", "mh481_posizione",
            "mh481_scenario", "mh481_verdetto")
 
 TITLE481 = "📏 DV01 del portafoglio forward: sensibilità del MtM a uno shift parallelo della curva"
+TITLE482 = "🗓️ Ladder delle scadenze: profilo temporale di volumi, MtM e DV01"
 TITLE480 = "📞 Margin call: variazione margine e buffer di liquidità"
 
 # Demo A (singola): TTF gas 100'000 MWh long, 95.00 -> 92.00
@@ -72,7 +73,7 @@ class TestRegistry481:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"    with (tab\d+):", src)
-        assert len(titoli) == len(dvars) == len(withs) == 481
+        assert len(titoli) == len(dvars) == len(withs) == 482
 
     def test_ultima_tab(self):
         import re
@@ -81,14 +82,14 @@ class TestRegistry481:
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
-        assert titoli[-1] == TITLE481
-        assert titoli[-2] == TITLE480
-        assert dvars[-1] == "tab481"
+        assert titoli[-1] == TITLE482
+        assert titoli[-2] == TITLE481
+        assert dvars[-1] == "tab482"
 
     def test_ui_indentata(self):
         src = (Path(__file__).resolve().parent.parent / "app.py"
                ).read_text(encoding="utf-8")
-        assert "    with tab481:" in src
+        assert "    with tab482:" in src
 
 
 class TestNum481:

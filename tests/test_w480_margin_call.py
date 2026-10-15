@@ -13,7 +13,7 @@ _F = _load("mh480_num", "mh480_mtm_linea", "mh480_mtm_totale",
            "mh480_margine_richiesto", "mh480_equity", "mh480_call_margine",
            "mh480_shock_mtm", "mh480_copertura_liquidita", "mh480_verdetto")
 
-TITLE481 = "📏 DV01 del portafoglio forward: sensibilità del MtM a uno shift parallelo della curva"
+TITLE482 = "🗓️ Ladder delle scadenze: profilo temporale di volumi, MtM e DV01"
 TITLE480 = "📞 Margin call: variazione margine e buffer di liquidità"
 TITLE479 = "🏦 Costo del margine: il capitale fermo al clearing"
 
@@ -54,7 +54,7 @@ class TestRegistry481:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"    with (tab\d+):", src)
-        assert len(titoli) == len(dvars) == len(withs) == 481
+        assert len(titoli) == len(dvars) == len(withs) == 482
 
     def test_ultima_tab(self):
         import re
@@ -63,9 +63,9 @@ class TestRegistry481:
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
-        assert titoli[-1] == TITLE481
-        assert titoli[-2] == TITLE480
-        assert dvars[-1] == "tab481"
+        assert titoli[-1] == TITLE482
+        assert TITLE480 in titoli  # membership (non [-2]: la posizione scorre a ogni ciclo)
+        assert dvars[-1] == "tab482"
 
     def test_ui_indentata(self):
         src = (Path(__file__).resolve().parent.parent / "app.py"

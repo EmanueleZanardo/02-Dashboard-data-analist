@@ -12,7 +12,7 @@ from appfuncs import load as _load
 _F = _load("mh477_num", "mh477_parametri", "mh477_traiettoria",
            "mh477_frontiera", "mh477_vwap", "mh477_verdetto")
 
-TITLE481 = "📏 DV01 del portafoglio forward: sensibilità del MtM a uno shift parallelo della curva"
+TITLE482 = "🗓️ Ladder delle scadenze: profilo temporale di volumi, MtM e DV01"
 TITLE477 = "⏳ Scheduling di esecuzione"
 TITLE476 = "🎯 Calibrazione: previsto vs realizzato"
 
@@ -60,7 +60,7 @@ class TestRegistry481:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert len(titoli) == len(dvars) == len(withs) == 481
+        assert len(titoli) == len(dvars) == len(withs) == 482
 
     def test_ultima_tab(self):
         import re
@@ -69,10 +69,10 @@ class TestRegistry481:
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
-        assert titoli[-1] == TITLE481
-        assert titoli[-2] == TITLE477
-        assert dvars[-1] == "tab481"
-        assert f"with tab481:" in src
+        assert titoli[-1] == TITLE482
+        assert TITLE477 in titoli  # membership (non [-2]: la posizione scorre a ogni ciclo)
+        assert dvars[-1] == "tab482"
+        assert f"with tab482:" in src
 
     def test_chiavi_univoche(self):
         import re
