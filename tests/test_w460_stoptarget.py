@@ -27,6 +27,7 @@ _F = _load("mh460_num", "mh460_piani", "mh460_verdetto", "mh460_mappa",
            "_mh447_mul", "_mh447_transp", "_mh447_ols")
 
 TITLE460 = "🛑 Stop & target: dove chiudere il trade"
+TITLE476 = "🎯 Calibrazione: previsto vs realizzato"
 TITLE459 = "🧪⚠️ Stress test del trade: VaR sotto shock"
 TITLE458 = "⚠️ Quanto posso perdere? VaR del trade dimensionato"
 TITLE475 = "💰 Costo di esecuzione: quanto costa davvero ruotare"
@@ -87,7 +88,7 @@ class TestRegistry460:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert len(titoli) == len(dvars) == len(withs) == 475
+        assert len(titoli) == len(dvars) == len(withs) == 476
         assert "tab460" in dvars
         assert "tab460" in withs
 
@@ -118,9 +119,9 @@ class TestRegistry460:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert dvars[-1] == "tab475"
-        assert titoli[-1] == TITLE475
-        assert withs[-1] == "tab475"
+        assert dvars[-1] == "tab476"
+        assert titoli[-1] == TITLE476
+        assert withs[-1] == "tab476"
 
 
 class TestStopTarget460:

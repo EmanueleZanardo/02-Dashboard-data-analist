@@ -66,6 +66,7 @@ TITLE463 = "🔀 Scale-out: tutto insieme o a pezzi?"
 TITLE462 = "⏳ Time stop: uscire se non succede niente"
 TITLE461 = "🧭 Ottimizza stop/target: i migliori k"
 TITLE460 = "🛑 Stop & target: dove chiudere il trade"
+TITLE476 = "🎯 Calibrazione: previsto vs realizzato"
 TITLE459 = "🧪⚠️ Stress test del trade: VaR sotto shock"
 TITLE458 = "⚠️ Quanto posso perdere? VaR del trade dimensionato"
 TITLE475 = "💰 Costo di esecuzione: quanto costa davvero ruotare"
@@ -126,7 +127,7 @@ class TestRegistry398:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert len(titoli) == len(dvars) == len(withs) == 475
+        assert len(titoli) == len(dvars) == len(withs) == 476
         assert "tab398" in dvars
         assert "tab398" in withs
 
@@ -152,9 +153,9 @@ class TestRegistry398:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert dvars[-1] == "tab475"
-        assert titoli[-1] == TITLE475
-        assert withs[-1] == "tab475"
+        assert dvars[-1] == "tab476"
+        assert titoli[-1] == TITLE476
+        assert withs[-1] == "tab476"
 
 
 class TestEuler:
