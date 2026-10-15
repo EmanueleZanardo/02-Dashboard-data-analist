@@ -50985,6 +50985,415 @@ def mh456_mappa(power, gas, beta=None, z_entry=1.0, costo=0.20, H=10):
 # W464 (15/10/2026) - tab464 "🧺 Portafoglio: quanti trade insieme?"
 # ===========================================================================
 
+# ===========================================================================
+# W465 (15/10/2026) - tab465 "📐 Correlazione: la diversificazione è reale?"
+# ===========================================================================
+
+def mh465_num(x, nome):
+    import math
+    import numbers
+    if isinstance(x, bool) or not isinstance(x, numbers.Real):
+        raise ValueError(f"{nome}: deve essere un numero")
+    if math.isnan(x) or math.isinf(x):
+        raise ValueError(f"{nome}: NaN/inf non ammessi")
+    return float(x)
+
+
+def mh465_dspread(seed_gas, seed_spread, beta, direzione, n=60):
+    """Driver del P&L per-step di una coppia: direzione * Delta(spread).
+
+    spread_t = power_t - beta * gas_t con le serie deterministiche di
+    mh464_serie(seed_gas, seed_spread, n); direzione "long ..."/"short ..."
+    (stringa di mh463_mappa: segno +1/-1). Ritorna la tupla di n-1
+    valori dir * (spread_t - spread_{t-1}): a meno di costanti positive
+    (h*, size) e' il P&L incrementale del trade, quindi la correlazione
+    tra queste serie e' la correlazione tra i P&L dei trade.
+    Nota onesta: ignora il profilo di uscita a tranche (tab463) — stima
+    il comovimento del driver dominante, non del P&L realizzato."""
+    _power, _gas = mh464_serie(seed_gas, seed_spread, n=n)
+    _b = mh465_num(beta, "beta")
+    if not isinstance(direzione, str):
+        raise ValueError(f"dspread: direzione non valida {direzione!r}")
+    if direzione.startswith("long"):
+        _d = 1.0
+    elif direzione.startswith("short"):
+        _d = -1.0
+    else:
+        raise ValueError("dspread: direzione deve iniziare con "
+                         f"'long'/'short' (trovato {direzione!r})")
+    _sp = [_p - _b * _g for _p, _g in zip(_power, _gas)]
+    return tuple(_d * (_sp[_t] - _sp[_t - 1])
+                 for _t in range(1, len(_sp)))
+
+
+def mh465_corr(series):
+    """Matrice di correlazione di Pearson tra serie.
+
+    series: lista non vuota di tuple di uguale lunghezza (>= 2 punti).
+    Ritorna la matrice n x n come lista di liste (diagonale 1.0,
+    simmetrica). Serie a varianza nulla -> ValueError (correlazione non
+    definita)."""
+    if not isinstance(series, (list, tuple)) or len(series) == 0:
+        raise ValueError("corr: serve una lista non vuota di serie")
+    import math
+    _ss = [list(_s) for _s in series]
+    _n = len(_ss[0])
+    if _n < 2:
+        raise ValueError("corr: ogni serie deve avere almeno 2 punti")
+    for _i, _s in enumerate(_ss):
+        if len(_s) != _n:
+            raise ValueError(f"corr: serie {_i} di lunghezza "
+                             f"diversa ({len(_s)} != {_n})")
+        for _x in _s:
+            mh465_num(_x, f"serie[{_i}]")
+    _m = len(_ss)
+    _mean = [sum(_s) / _n for _s in _ss]
+    _dev = [[_x - _mu for _x in _s] for _s, _mu in zip(_ss, _mean)]
+    _var = [sum(_d * _d for _d in _dd) for _dd in _dev]
+    for _i, _vv in enumerate(_var):
+        if _vv <= 0.0:
+            raise ValueError(f"corr: serie {_i} a varianza nulla")
+    _C = [[0.0] * _m for _ in range(_m)]
+    for _i in range(_m):
+        for _j in range(_m):
+            _cv = sum(_a * _b for _a, _b in zip(_dev[_i], _dev[_j]))
+            _C[_i][_j] = _cv / math.sqrt(_var[_i] * _var[_j])
+    return _C
+
+
+def _mh465_chol(A, b):
+    """Risolve A x = b con Cholesky (A simmetrica definita positiva,
+    lista di liste n x n). Solleva ValueError se A non e' d.p."""
+    import math
+    _n = len(A)
+    _L = [[0.0] * _n for _ in range(_n)]
+    for _i in range(_n):
+        for _j in range(_i + 1):
+            _s = A[_i][_j] - sum(_L[_i][_k] * _L[_j][_k]
+                                 for _k in range(_j))
+            if _i == _j:
+                if _s <= 0.0:
+                    raise ValueError("chol: matrice non definita positiva")
+                _L[_i][_j] = math.sqrt(_s)
+            else:
+                _L[_i][_j] = _s / _L[_j][_j]
+    _y = [0.0] * _n
+    for _i in range(_n):
+        _y[_i] = (b[_i] - sum(_L[_i][_k] * _y[_k]
+                               for _k in range(_i))) / _L[_i][_i]
+    _x = [0.0] * _n
+    for _i in range(_n - 1, -1, -1):
+        _x[_i] = (_y[_i] - sum(_L[_k][_i] * _x[_k]
+                               for _k in range(_i + 1, _n))) / _L[_i][_i]
+    return _x
+
+
+def _mh465_S(u, C, eps):
+    """Covarianza in EUR^2: S_ij = u_i u_j C~_ij con
+    C~ = (1-eps) C + eps I (ridge: resta definita positiva anche con
+    driver quasi-identici, es. stessa seed di spread)."""
+    _n = len(u)
+    return [[u[_i] * u[_j] * ((1.0 - eps) * C[_i][_j]
+                              + (eps if _i == _j else 0.0))
+             for _j in range(_n)] for _i in range(_n)]
+
+
+def mh465_alloc(mus, sigmas, f_apps, corr, K, rb, f_max, eps=1e-6):
+    """Allocazione mean-variance con covarianza PIENA e cap per trade.
+
+    Massimizza l'edge atteso Σ g_i e_i sotto il budget di rischio
+    g' S g <= (rb K)^2 e 0 <= g_i <= f_max, dove g_i e' la frazione di
+    capitale K sul trade i, e_i = mu_i / f_app_i l'edge in EUR per
+    unita' di g, S_ij = u_i u_j C~_ij la covarianza in EUR^2 con
+    u_i = sigma_i / f_app_i e C~ la correlazione con ridge eps
+    (u_i e' la vol in EUR per unita' di g).
+    Risoluzione per enumerazione dei pattern (ogni trade libero / a 0 /
+    a f_max: 3^n): sul free set la forma e' chiusa (completamento del
+    quadrato per il budget residuo, Cholesky), e il miglior punto del
+    pattern dentro i bound e' un candidato ammissibile. Il vero ottimo
+    del QP convesso appartiene al suo pattern e la forma chiusa lo
+    restituisce esattamente -> il max sui candidati E' l'ottimo
+    globale (nessuna euristica greedy: anche i bound "spuri",
+    che nel rilassato sembrano violati solo per via dell'hedge,
+    vengono risolti dal pattern corretto).
+    Con corr = I coincide con mh464_alloc (chiave di coerenza, 1e-12).
+    Tutti i mu devono essere > 0 (l'edge negativo non si alloca mai).
+    Ritorna dict: righe (una per trade: mu, sigma, f_app, g, eur,
+    edge, capped, floored), edge_tot, var_tot, rb_usato, sharpe,
+    n_capped, n_floored."""
+    _n = len(mus)
+    for _v, _nn in ((mus, "mus"), (sigmas, "sigmas"),
+                    (f_apps, "f_apps")):
+        if not isinstance(_v, (list, tuple)) or len(_v) == 0:
+            raise ValueError(f"alloc: {_nn} deve essere una lista non vuota")
+    if not (len(sigmas) == _n and len(f_apps) == _n):
+        raise ValueError("alloc: mus, sigmas e f_apps devono avere la "
+                         "stessa lunghezza")
+    if _n > 10:
+        raise ValueError("alloc: troppe coppie per l'enumerazione "
+                         f"(3^{_n} pattern, max 10)")
+    if not isinstance(corr, (list, tuple)) or len(corr) != _n:
+        raise ValueError("alloc: corr deve essere una matrice n x n")
+    for _i, _row in enumerate(corr):
+        if not isinstance(_row, (list, tuple)) or len(_row) != _n:
+            raise ValueError(f"alloc: riga corr {_i} non n x n")
+    _K = mh465_num(K, "K")
+    if _K <= 0.0:
+        raise ValueError(f"alloc: K deve essere > 0 (trovato {_K})")
+    _rb = mh465_num(rb, "rb")
+    if _rb <= 0.0 or _rb > 1.0:
+        raise ValueError(f"alloc: rb deve stare in (0, 1] (trovato {_rb})")
+    _fm = mh465_num(f_max, "f_max")
+    if _fm <= 0.0 or _fm > 1.0:
+        raise ValueError(f"alloc: f_max deve stare in (0, 1] "
+                         f"(trovato {_fm})")
+    _ep = mh465_num(eps, "eps")
+    if _ep <= 0.0 or _ep > 0.01:
+        raise ValueError(f"alloc: eps deve stare in (0, 0.01] "
+                         f"(trovato {_ep})")
+    _mu = [mh465_num(_x, f"mu[{_i}]") for _i, _x in enumerate(mus)]
+    _sg = [mh465_num(_x, f"sigma[{_i}]") for _i, _x in enumerate(sigmas)]
+    _fa = [mh465_num(_x, f"f_app[{_i}]") for _i, _x in enumerate(f_apps)]
+    _C = [[mh465_num(_c, f"corr[{_i}][{_j}]")
+           for _j, _c in enumerate(_row)] for _i, _row in enumerate(corr)]
+    for _i in range(_n):
+        if _mu[_i] <= 0.0:
+            raise ValueError(f"alloc: mu[{_i}] deve essere > 0 "
+                             f"(trovato {_mu[_i]})")
+        if _sg[_i] <= 0.0:
+            raise ValueError(f"alloc: sigma[{_i}] deve essere > 0 "
+                             f"(trovato {_sg[_i]})")
+        if _fa[_i] <= 0.0:
+            raise ValueError(f"alloc: f_app[{_i}] deve essere > 0 "
+                             f"(trovato {_fa[_i]})")
+        for _j in range(_n):
+            if abs(_C[_i][_j]) > 1.0 + 1e-12:
+                raise ValueError(f"alloc: |corr[{_i}][{_j}]| > 1 "
+                                 f"(trovato {_C[_i][_j]})")
+    import math
+    _u = [_sg[_i] / _fa[_i] for _i in range(_n)]
+    _e = [_mu[_i] / _fa[_i] for _i in range(_n)]
+    _S = _mh465_S(_u, _C, _ep)
+    _B = _rb * _K
+    _B2 = _B * _B
+    _tol_b = 1e-9
+    _best = None  # (edge, g, capped, floored)
+    for _pat in range(3 ** _n):
+        _tmp = _pat
+        _st = []
+        for _i in range(_n):
+            _st.append(_tmp % 3)
+            _tmp //= 3
+        # _st: 0 = libero, 1 = fissato a 0, 2 = fissato a f_max
+        _free = [_i for _i in range(_n) if _st[_i] == 0]
+        _fx = {_i: (0.0 if _st[_i] == 1 else _fm)
+               for _i in range(_n) if _st[_i] != 0}
+        if not _free:
+            _g = [_fx[_i] for _i in range(_n)]
+            _var = sum(_g[_i] * _S[_i][_j] * _g[_j]
+                       for _i in range(_n) for _j in range(_n))
+            if _var > _B2 * (1.0 + 1e-9):
+                continue
+            _edge = sum(_g[_i] * _e[_i] for _i in range(_n))
+            if _best is None or _edge > _best[0]:
+                _best = (_edge, _g,
+                         [_st[_i] == 2 for _i in range(_n)],
+                         [_st[_i] == 1 for _i in range(_n)])
+            continue
+        _m = len(_free)
+        _Aff = [[_S[_free[_a]][_free[_b]]
+                 for _b in range(_m)] for _a in range(_m)]
+        _ef = [_e[_free[_a]] for _a in range(_m)]
+        _v = [sum(_S[_free[_a]][_k] * _gv for _k, _gv in _fx.items())
+              for _a in range(_m)]
+        try:
+            _w = _mh465_chol(_Aff, _v) if any(_v) else [0.0] * _m
+        except ValueError:
+            continue
+        _c0 = sum(_fx[_k] * _S[_k][_l] * _fx[_l]
+                  for _k in _fx for _l in _fx)
+        _B2p = _B2 - _c0 + sum(_vv * _ww for _vv, _ww in zip(_v, _w))
+        if _B2p <= 1e-12 * _B2:
+            # i fissati saturano (quasi) da soli il budget: unico punto
+            # ammissibile del pattern = min-risk point g_free = -w
+            _gf = [-_x for _x in _w]
+        else:
+            _Bp = math.sqrt(_B2p)
+            try:
+                _y = _mh465_chol(_Aff, _ef)
+            except ValueError:
+                continue
+            _den2 = sum(_ee * _yy for _ee, _yy in zip(_ef, _y))
+            if _den2 <= 0.0:
+                continue
+            _den = math.sqrt(_den2)
+            _h = [_Bp * _yy / _den for _yy in _y]
+            _gf = [_hh - _ww for _hh, _ww in zip(_h, _w)]
+        if any(_x < -_tol_b or _x > _fm + _tol_b for _x in _gf):
+            continue  # bound del free violato: il punto sta nel pattern
+            # con quei var fissati, gia' enumerato
+        _g = [0.0] * _n
+        for _a in range(_m):
+            _g[_free[_a]] = min(max(_gf[_a], 0.0), _fm)
+        for _i, _vv in _fx.items():
+            _g[_i] = _vv
+        _var = sum(_g[_i] * _S[_i][_j] * _g[_j]
+                   for _i in range(_n) for _j in range(_n))
+        if _var > _B2 * (1.0 + 1e-9):
+            continue
+        _edge = sum(_g[_i] * _e[_i] for _i in range(_n))
+        if _best is None or _edge > _best[0]:
+            _best = (_edge, _g,
+                     [_st[_i] == 2 for _i in range(_n)],
+                     [_st[_i] == 1 for _i in range(_n)])
+    if _best is None:
+        raise ValueError("alloc: nessun pattern ammissibile")
+    _edge, _g, _capped, _floored = _best
+    _var = sum(_g[_i] * _S[_i][_j] * _g[_j]
+               for _i in range(_n) for _j in range(_n))
+    assert _var <= _B2 * (1.0 + 1e-9), "alloc: invariante budget violata"
+    _righe = [{"mu": _mu[_i], "sigma": _sg[_i], "f_app": _fa[_i],
+               "g": _g[_i], "eur": _g[_i] * _K,
+               "edge": _g[_i] * _e[_i],
+               "capped": _capped[_i], "floored": _floored[_i]}
+              for _i in range(_n)]
+    return {"righe": _righe, "edge_tot": _edge, "var_tot": _var,
+            "rb_usato": math.sqrt(_var) / _K,
+            "sharpe": _edge / math.sqrt(_var) if _var > 0.0 else 0.0,
+            "n_capped": sum(1 for _c in _capped if _c),
+            "n_floored": sum(1 for _f in _floored if _f)}
+
+
+def mh465_verdetto(mappa):
+    """Verdetto a 3 stati sulla correlazione dei trade:
+    NESSUN TRADE (mappa None: nessuna coppia con trade allocabile),
+    CORRELATI (max |rho| >= soglia_corr oppure il rischio vero
+    dell'allocazione tab464 supera soglia_rischio x il budget: la
+    diversificazione di tab464 e' illusoria su questi driver),
+    INDIPENDENTI (correlazioni basse e rischio vero in linea col
+    budget: l'ipotesi di indipendenza di tab464 regge).
+    mappa: dict di mh465_mappa (o None)."""
+    if mappa is None:
+        return ("NESSUN TRADE — nessuna coppia con un trade allocabile: "
+                "il desk non misura correlazioni sul vuoto.")
+    if not isinstance(mappa, dict):
+        raise ValueError("verdetto: mappa deve essere il dict di "
+                         "mh465_mappa (o None)")
+    if mappa.get("alloc_corr") is None:
+        return ("NESSUN TRADE — nessuna coppia con un trade allocabile: "
+                "il desk non misura correlazioni sul vuoto.")
+    _cm = mappa["corr_max"]
+    _rp = mappa["rapporto"]
+    _sc = mappa["soglia_corr"]
+    _sr = mappa["soglia_rischio"]
+    if _cm >= _sc or _rp >= _sr:
+        return (f"CORRELATI — max |rho| = {_cm:.2f} (soglia {_sc:.2f}), "
+                f"rischio vero dell'allocazione tab464 = {_rp:.2f}x il "
+                f"budget (soglia {_sr:.2f}x): i trade si muovono insieme, "
+                f"la diversificazione e' illusoria — usare l'allocazione "
+                f"corretta qui sotto.")
+    return (f"INDIPENDENTI — max |rho| = {_cm:.2f} < {_sc:.2f}, rischio "
+            f"vero = {_rp:.2f}x il budget: l'ipotesi di indipendenza di "
+            f"tab464 regge, la diversificazione e' reale.")
+
+
+def mh465_mappa(coppie, K=1000000.0, rb=0.05, f_max=0.25,
+                z_entry=1.0, costo=0.20, H=10,
+                soglia_corr=0.5, soglia_rischio=1.15, eps=1e-6):
+    """Mappa completa: correlazione tra i trade + allocazione corretta.
+
+    coppie: lista non vuota di (nome, seed_gas, seed_spread) con nomi
+    unici. Per ciascuna la pipeline tab463 (mh464_coppia, nessun
+    duplicato); sulle eligibili: serie driver via mh465_dspread,
+    matrice di correlazione (mh465_corr), allocazione diagonale tab464
+    (mh464_alloc, riusata), rischio vero dell'allocazione diagonale
+    sotto la covarianza piena, allocazione con covarianza piena
+    (mh465_alloc).
+    Ritorna dict: coppie (righe mh464_coppia), eligibili (nomi), corr
+    (matrice), corr_max, alloc_diag (mh464_alloc con 'nome' per riga),
+    rischio_vero, rapporto (= rischio_vero / (rb K)), alloc_corr
+    (mh465_alloc con 'nome' per riga, o None), soglia_corr,
+    soglia_rischio, verdetto (mh465_verdetto)."""
+    if not isinstance(coppie, (list, tuple)) or len(coppie) == 0:
+        raise ValueError("mappa: serve una lista non vuota di "
+                         "(nome, seed_gas, seed_spread)")
+    _nomi = []
+    for _i, _c in enumerate(coppie):
+        try:
+            _nm, _sg, _ss = _c
+        except (TypeError, ValueError):
+            raise ValueError(f"mappa: coppia {_i} malformata "
+                             f"(serve (nome, seed_gas, seed_spread))")
+        if not isinstance(_nm, str) or not _nm.strip():
+            raise ValueError(f"mappa: nome coppia {_i} non valido")
+        if _nm in _nomi:
+            raise ValueError(f"mappa: nome coppia duplicato {_nm!r}")
+        _nomi.append(_nm)
+    _K = mh465_num(K, "K")
+    if _K <= 0.0:
+        raise ValueError(f"mappa: K deve essere > 0 (trovato {_K})")
+    _rb = mh465_num(rb, "rb")
+    if _rb <= 0.0 or _rb > 1.0:
+        raise ValueError(f"mappa: rb deve stare in (0, 1] (trovato {_rb})")
+    _fm = mh465_num(f_max, "f_max")
+    if _fm <= 0.0 or _fm > 1.0:
+        raise ValueError(f"mappa: f_max deve stare in (0, 1] "
+                         f"(trovato {_fm})")
+    _sc = mh465_num(soglia_corr, "soglia_corr")
+    if _sc <= 0.0 or _sc >= 1.0:
+        raise ValueError(f"mappa: soglia_corr deve stare in (0, 1) "
+                         f"(trovato {_sc})")
+    _sr = mh465_num(soglia_rischio, "soglia_rischio")
+    if _sr < 1.0:
+        raise ValueError(f"mappa: soglia_rischio deve essere >= 1 "
+                         f"(trovato {_sr})")
+    _ep = mh465_num(eps, "eps")
+    if _ep <= 0.0 or _ep > 0.01:
+        raise ValueError(f"mappa: eps deve stare in (0, 0.01] "
+                         f"(trovato {_ep})")
+    _righe = [mh464_coppia(_nm, _sg, _ss, K=_K, z_entry=z_entry,
+                           costo=costo, H=H, f_max=_fm)
+              for _nm, _sg, _ss in coppie]
+    _elig = [_r for _r in _righe if _r["eligibile"] and _r["mu"] > 0.0]
+    _base = {"coppie": _righe, "eligibili": [],
+             "corr": None, "corr_max": 0.0, "alloc_diag": None,
+             "rischio_vero": 0.0, "rapporto": 1.0, "alloc_corr": None,
+             "soglia_corr": _sc, "soglia_rischio": _sr, "verdetto": ""}
+    if not _elig:
+        _base["verdetto"] = mh465_verdetto(None)
+        return _base
+    _enomi = [_r["nome"] for _r in _elig]
+    _seed = {_nm: (_sg, _ss) for _nm, _sg, _ss in coppie}
+    _series = [mh465_dspread(_seed[_nm][0], _seed[_nm][1],
+                             _r["beta"], _r["direzione"])
+               for _r, _nm in zip(_elig, _enomi)]
+    _corr = mh465_corr(_series)
+    _ne = len(_elig)
+    _cm = max(abs(_corr[_i][_j])
+              for _i in range(_ne) for _j in range(_ne)
+              if _i != _j) if _ne > 1 else 0.0
+    _mus = [_r["mu"] for _r in _elig]
+    _sgs = [_r["sigma"] for _r in _elig]
+    _fas = [_r["f_app"] for _r in _elig]
+    _adiag = mh464_alloc(_mus, _sgs, _fas, _K, _rb, _fm)
+    _u = [_sgs[_i] / _fas[_i] for _i in range(_ne)]
+    _S = _mh465_S(_u, _corr, _ep)
+    import math
+    _gd = [_r["g"] for _r in _adiag["righe"]]
+    _rv = math.sqrt(sum(_gd[_i] * _S[_i][_j] * _gd[_j]
+                        for _i in range(_ne) for _j in range(_ne)))
+    _acorr = mh465_alloc(_mus, _sgs, _fas, _corr, _K, _rb, _fm,
+                         eps=_ep)
+    for _r, _nm in zip(_adiag["righe"], _enomi):
+        _r["nome"] = _nm
+    for _r, _nm in zip(_acorr["righe"], _enomi):
+        _r["nome"] = _nm
+    _base.update({"eligibili": _enomi, "corr": _corr, "corr_max": _cm,
+                  "alloc_diag": _adiag, "rischio_vero": _rv,
+                  "rapporto": _rv / (_rb * _K), "alloc_corr": _acorr})
+    _base["verdetto"] = mh465_verdetto(_base)
+    return _base
+
 def mh464_num(x, nome):
     import math
     import numbers
@@ -75924,7 +76333,7 @@ elif workspace == _('ws8'):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256, tab257, tab258, tab259, tab260, tab261, tab262, tab263, tab264, tab265, tab266, tab267, tab268, tab269, tab270, tab271, tab272, tab273, tab274, tab275, tab276, tab277, tab278, tab279, tab280, tab281, tab282, tab283, tab284, tab285, tab286, tab287, tab288, tab289, tab290, tab291, tab292, tab293, tab294, tab295, tab296, tab297, tab298, tab299, tab300, tab301, tab302, tab303, tab304, tab305, tab306, tab307, tab308, tab309, tab310, tab311, tab312, tab313, tab314, tab315, tab316, tab317, tab318, tab319, tab320, tab321, tab322, tab323, tab324, tab325, tab326, tab327, tab328, tab329, tab330, tab331, tab332, tab333, tab334, tab335, tab336, tab337, tab338, tab339, tab340, tab341, tab342, tab343, tab344, tab345, tab346, tab347, tab348, tab349, tab350, tab351, tab352, tab353, tab354, tab355, tab356, tab357, tab358, tab359, tab360, tab361, tab362, tab363, tab364, tab365, tab366, tab367, tab368, tab369, tab370, tab371, tab372, tab373, tab374, tab375, tab376, tab377, tab378, tab379, tab380, tab381, tab382, tab383, tab384, tab385, tab386, tab387, tab388, tab389, tab390, tab391, tab392, tab393, tab394, tab395, tab396, tab397, tab398, tab399, tab400, tab401, tab402, tab403, tab404, tab405, tab406, tab407, tab408, tab409, tab410, tab411, tab412, tab413, tab414, tab415, tab416, tab417, tab418, tab419, tab420, tab421, tab422, tab423, tab424, tab425, tab426, tab427, tab428, tab429, tab430, tab431, tab432, tab433, tab434, tab435, tab436, tab437, tab438, tab439, tab440, tab441, tab442, tab443, tab444, tab445, tab446, tab447, tab448, tab449, tab450, tab451, tab452, tab453, tab454, tab455, tab456, tab457, tab458, tab459, tab460, tab461, tab462, tab463, tab464 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete", "🔥 Teleriscaldamento vs caldaia", "🌿 Clean spread (con CO₂)", "🇮🇹 PUN da prezzi zonali", "❄️ Pompa di calore vs caldaia", "🏢 PUE & costo data center", "🔌 Gruppo elettrogeno vs blackout", "🚗 Flotta aziendale: TCO diesel vs elettrico", "📜 Garanzie di origine: costo del 100% rinnovabile", "♻️ Fine vita FV: revamping vs dismissione", "🌾️ Agrivoltaico: doppio reddito", "🟢 Biometano: business case", "🌬️ Eolico onshore: business case", "🌊 Idroelettrico run-of-river: business case", "🔥 Geotermia profonda: business case", "☀️ Solare termodinamico (CSP): business case", "🌬️ Eolico offshore: business case", "☀️ Fotovoltaico utility-scale: business case", "⚛️ Nucleare SMR: business case", "📊 Posizione vs limiti di rischio", "💧 Cash flow at risk (CFaR)", "⚡ Aste MI: scostamenti vs MGP", "🌡️ Stress climatico: domanda e prezzo", "🌪️ Derivati meteo: pricing HDD/CDD", "🚢 LNG vs gasdotto: costo delivered", "🛢️ Crack spread: margine raffinazione 3-2-1", "🧪 Margine petrolchimico: nafta → etilene", "🛢️ Carry petrolio: contango & stoccaggio fisico", "🏭 Unit commitment CCGT: accendere o no?", "🛛️ Differenziali greggio: sweet vs sour", "⛽ Basis gas TTF–PSV", "🚢⚡ Rigassificazione GNL: margine terminale", "⚡🔥 Clean spark spread: margine centrale a gas", "⚫🔥 Clean dark spread: margine centrale a carbone", "🔀💰 PTR transfrontaliero: vale il prezzo d'asta?", "📊💹 Sharpe & Sortino: la strategia rende davvero?", "🪓📊 Component VaR: quale posizione tagliare per prima?", "🛡📉 Hedge ratio ottimale: quanto coprire con i futures?", "🧪📉 Backtest del VaR: il modello tiene?", "🧪🛡 Backtest dell'ES: la coda e' sottostimata?", "🪓🛡 Component ES: chi contribuisce alla coda?", "➕📊 Marginal VaR: quanto rischio aggiunge il nuovo trade?", "🚦📏 Limite VaR: quanto margine resta?", "🧪⚡ Stress test: quanto perde il book negli scenari?", "🧮📊 Rapporto di diversificazione: quanto rischio risparmia il book?", "🛡️🔍 Rischio di modello: quale VaR credere?", "✂️📉 Incremental VaR: quanto rischio togli chiudendo la posizione?", "🧱📉 Capacità VaR: quanto nozionale puoi ancora aggiungere?", "🗂️📊 VaR per segmento: dove si concentra il rischio?", "🎯🛡 Risk budgeting: il book rispetta i target?", "💎📊 RAROC: il rendimento ripaga il rischio?", "🌊📉 Expected Shortfall: la perdita oltre il VaR", "💥📈 Stress di correlazione: quanto sale il VaR se si rompono?", "🎯💥 Rho critica: a quale correlazione il VaR tocca il limite?", "💧📉 LVaR: il VaR corretto per il costo di liquidazione", "📐📉 Cornish-Fisher: il VaR corretto per skew e code grasse", "📐🌊 Expected Shortfall con Cornish-Fisher: la coda oltre il VaR con code grasse", "📉💥 VaR rotto: la probabilita' di breccia con code grasse", "⏳📉 VaR multi-orizzonte: lo scaling con autocorrelazione dei rendimenti", "🏔️📉 Valori estremi (Hill): il VaR oltre il massimo storico", "🌊📉 POT-GPD: il VaR dalla coda paretiana oltre soglia", "🧠📉 CAViaR: il VaR adattivo che impara dai rendimenti", "🌀📉 Copula t-Student: il VaR che vede le code muoversi insieme", "🎛📉 FHS: il VaR con la volatilita' di oggi", "⚙️📉 GARCH(1,1): la volatilita' che ricorda", "🧪📉 Backtest VaR: il modello resiste al tempo?", "🎯📉 Convergenza forward: il forward indovina lo spot?", "🔄📉 Half-life di mean reversion: lo spot torna alla media?", "Ω📊 Omega ratio: oltre Sharpe e Sortino", "📈📉 Calmar ratio: il rendimento che paga il drawdown", "🩹 Pain index e Pain ratio: il dolore medio oltre il peggio", "🛟 Sterling ratio: il Calmar mediato sui peggiori drawdown", "🔻 Burke ratio: il drawdown penalizzato al quadrato", "🌊📉 CDaR: il drawdown medio oltre la soglia (il VaR dei drawdown)", "🔍📉 Martin ratio: il Calmar che guarda tutto il dolore", "⛵ Tempo di recupero: quanto resta sott'acqua l'equity", "🎯 Information ratio: la strategia batte davvero il benchmark?", "📊 Capture ratio: quanto cattura la strategia nei mercati su e giù?", "🎯 Hit rate: quanto spesso la strategia batte il benchmark?", "📏 Tracking error: quanto si discosta la strategia dal benchmark?", "📉 Max drawdown relativo: quanto si scende sotto il benchmark?", "📐 Treynor & Jensen: il premio per unita' di rischio sistematico", "⚖️ M² Modigliani: il rendimento a parita' di rischio col benchmark", "📉 Sortino ratio: il rendimento per unità di rischio al ribasso", "📉 Calmar ratio: il rendimento annuo per unità di max drawdown", "📐 K-ratio: la regolarità della crescita dell'equity", "🎯 Volatilità target: il sizing a volatilità costante", "📐 Kelly criterion: il sizing ottimale dall'edge stimato", "🎲 Risk of ruin: probabilita' di toccare una barriera di drawdown", "🎯 Sizing anti-rovina: f massima con ROR vincolato", "📊 Monte Carlo: distribuzione del capitale dopo N trade", "VaR & Expected Shortfall del P&L dopo N trade", "Kelly con costi di trading: sizing netto", "Frazione di Kelly: half-Kelly e trade-off crescita/volatilità", "Kelly robusto: sizing con edge incerta", "Kelly con portafoglio: due posizioni simultanee", "Kelly con correlazione: due posizioni correlate", "Kelly adattivo: win-rate rolling e size dinamica", "Kelly con controllo drawdown: sizing frazionato al drawdown", "Kelly con target di volatilità: sizing riscalato sulla vol", "Kelly bayesiano: sizing con win-rate posterior", "Kelly con lotti interi: sizing discreto e drag di arrotondamento", "Kelly con stop-loss: sizing con perdita troncata", "Kelly con take-profit: sizing con vincita troncata", "Kelly frazionario (fractional Kelly): λ·f*", "Rischio di rovina (risk of ruin): probabilita' di rovina prima del target", "Kelly con tre esiti: sizing con vincita, perdita parziale e perdita piena", "Kelly con limite di posizione: sizing con cap f_max", "Kelly con vincoli multipli: cap, lotti, stop e drawdown", "Kelly con incertezza: haircut bayesiano sulla p stimata", "Kelly su N trade: raddoppio, dimezzamento e crescita attesa", "Kelly: mappa di sensibilità f* e crescita su (p, b)", "Kelly su ritorni continui: f* = μ/σ² e volatility drag", "Kelly con costi di transazione: f* netto = (μ-c)/σ²", "Kelly e drawdown: probabilità di toccare un max drawdown", "Kelly frazionario: frazione ottima per un budget di volatilità", "Monte Carlo: VaR e Expected Shortfall di una posizione power", "Kelly con limite VaR: sizing con vincolo di perdita massima", "Component VaR: contributo al rischio per posizione", "Component ES: contributo al rischio di coda per posizione", "Shock correlazioni: stress test sul rischio di coda", "Backtest VaR di Kupiec: copertura e likelihood ratio", "Reverse stress test: quanto shock regge il limite?", "Mappa di rottura: superficie VaR su shock congiunti vol+corr", "Liquidity-adjusted VaR: VaR + costo di liquidazione", "Component VaR: attribution del VaR per asset", "Hedge VaR: copertura ottimale con futures", "Jump VaR: VaR con salti di prezzo (Merton)", "Delta-Gamma VaR: VaR parametrico di una posizione con opzioni", "Expected Shortfall: misura di rischio coerente", "VaR ed ES con code pesanti (t-Student)", "🌈📉 Misura spettrale: l'ES pesato con l'avversione al rischio", "🧲📈 Misura entropica: rischio con avversione costante (CARA)", "🌀📈 Wang transform: misura distorsiva del rischio", "🎯📈 EVaR: il bound di Chernoff piu' conservativo", "🔀📊 RVaR: la media dei quantili tra VaR ed ES", "🎯📊 Median Shortfall: la mediana della coda, robusta tra VaR ed ES", "🎯📉 LPM: il rischio downside contro un target", "📐⚖ Expectile: la misura di rischio elicitabile e coerente", "🌀 Distortion risk measures: VaR, ES e Wang da un'unica formula", "📊 Spectral risk measure: VaR ponderato dal tuo spettro di avversione", "🔀 Entropic risk measure: avversione esponenziale al rischio", "🎯 Contributi di rischio ES: allocazione di Eulero del portafoglio", "🔱 Risk parity: pesi a parità di contributo di rischio (risk budgeting)", "🎯 Numero effettivo di scommesse (ENB): quante posizioni indipendenti hai davvero?", "📈 Massima diversificazione (MD): i pesi che massimizzano il rapporto DR", "🛡️ Minima varianza (MV): i pesi che minimizzano la volatilità di portafoglio", "🎯 Sharpe massimo (MS): i pesi che massimizzano il rendimento per unità di rischio", "🎯 Rendimento target (TR): minima varianza a rendimento atteso fissato", "κ Kappa ratio: un'unica famiglia per Omega e Sortino", "📏 Tail ratio: la coda destra contro la sinistra", "🔄 Recovery factor: quanto rende ogni euro di drawdown", "💢 Pain index: il dolore che serve per il rendimento", "🛟 Sterling ratio: quanto rende contro i K peggiori drawdown", "⚖ Gain-to-Pain ratio: quanto guadagno per ogni euro perso", "🌊 Volatility drag: quanto rendimento mangia la volatilita'", "🎯 Omega ratio: quanto upside prendi per ogni euro di downside", "📐 Sharpe corretto: il rendimento per unita' di rischio con code grasse", "🎯 Probabilistic Sharpe ratio: lo Sharpe e' davvero significativo?", "🎯 Deflated Sharpe ratio: lo Sharpe sopravvive ai backtest multipli?", "🎚️ Kappa ratio: Omega e Sortino sono lo stesso strumento", "🔺 Farinelli-Tibiletti: Omega e upside potential in un'unica formula", "📊 Rachev ratio: tutta la coda destra contro tutta la coda sinistra", "⭐ STAR ratio: il rendimento medio contro la perdita attesa di coda", "📈 Gain-Loss ratio: guadagno atteso contro perdita attesa", "📉 Ulcer Performance Index (Martin ratio): il rischio drawdown contro il rendimento", "🎯 Calmar ratio: il rendimento medio contro il peggior drawdown", "🔃 MAR ratio: il rendimento composto contro il peggior drawdown", "🤕 Pain ratio: il rendimento medio contro il drawdown medio", "🚀 Upside Potential ratio: il guadagno atteso contro la downside deviation", "🔀 Sequence risk: l'ordine dei rendimenti cambia il drawdown", "🛡 CDaR: la perdita media dei peggiori drawdown", "⏱️ Tempo sott'acqua: durata dei drawdown e recupero", "🎯 Attribuzione del drawdown: chi ha causato il peggior calo", "🔄 Recupero dal drawdown: quanto rimbalzo serve per tornare al picco", "📐 Calmar ratio: rendimento per unita' di peggior perdita", "⚖️ Sortino ratio: rendimento per unita' di volatilita' negativa", "🧮 Omega ratio: guadagni pesati contro perdite pesate", "📉 Burke ratio: rendimento per unita' di drawdown quadratico", "🎯 Kappa ratio (Kappa-3): rendimento per unita' di coda cubica", "📈 Martin ratio: rendimento per unita' di Ulcer Index", "📈 Sterling ratio: rendimento per unita' di drawdown medio annuo", "🩹 Pain ratio: rendimento per unita' di dolore medio (Pain Index)", "📉 CDaR ratio: rendimento per unita' di coda media (Conditional Drawdown-at-Risk)", "🎯 Drawdown-at-Risk (DaR): la soglia di drawdown superata solo nell'alpha% dei casi", "📈 Recovery Factor: profitto totale per unita' di peggior drawdown", "📐 Calmar geometrico: CAGR composto per unita' di peggior drawdown", "💹 Gain-to-Pain ratio: guadagni totali per ogni punto perso", "🏞️ Lake ratio: l'area del dolore sotto il picco", "🌀 Rolling drawdown: il peggior calo in ogni finestra", "📏 Variance ratio: il prezzo segue un random walk?", "⛓️ Johansen: power e gas cointegrati?", "🔗 ECM: quanto in fretta power torna all'equilibrio col gas?", "💥 Risposta allo shock: di quanto uno shock del gas muove power?", "📜 Scomposizione storica: cosa ha mosso davvero il prezzo power?", "🌊 Spillover gas↔power: chi trasmette e chi riceve gli shock?", "📈 Previsione VECM(1): dove vanno power e gas nei prossimi H giorni?", "📊 Backtest VECM(1): il modello batte il random walk?", "⚖️ Lo spread è stazionario? Test ADF", "🔮 Quando rientra lo spread? Forecast mean-reversion", "💰 Vale la pena tradare il rientro? P&L atteso del trade", "📐 Quanto puntare sul rientro? Sizing Kelly del trade", "⚠️ Quanto posso perdere? VaR del trade dimensionato", "🧪⚠️ Stress test del trade: VaR sotto shock", "🛑 Stop & target: dove chiudere il trade", "🧭 Ottimizza stop/target: i migliori k", "⏳ Time stop: uscire se non succede niente", "🔀 Scale-out: tutto insieme o a pezzi?", "🧺 Portafoglio: quanti trade insieme?"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256, tab257, tab258, tab259, tab260, tab261, tab262, tab263, tab264, tab265, tab266, tab267, tab268, tab269, tab270, tab271, tab272, tab273, tab274, tab275, tab276, tab277, tab278, tab279, tab280, tab281, tab282, tab283, tab284, tab285, tab286, tab287, tab288, tab289, tab290, tab291, tab292, tab293, tab294, tab295, tab296, tab297, tab298, tab299, tab300, tab301, tab302, tab303, tab304, tab305, tab306, tab307, tab308, tab309, tab310, tab311, tab312, tab313, tab314, tab315, tab316, tab317, tab318, tab319, tab320, tab321, tab322, tab323, tab324, tab325, tab326, tab327, tab328, tab329, tab330, tab331, tab332, tab333, tab334, tab335, tab336, tab337, tab338, tab339, tab340, tab341, tab342, tab343, tab344, tab345, tab346, tab347, tab348, tab349, tab350, tab351, tab352, tab353, tab354, tab355, tab356, tab357, tab358, tab359, tab360, tab361, tab362, tab363, tab364, tab365, tab366, tab367, tab368, tab369, tab370, tab371, tab372, tab373, tab374, tab375, tab376, tab377, tab378, tab379, tab380, tab381, tab382, tab383, tab384, tab385, tab386, tab387, tab388, tab389, tab390, tab391, tab392, tab393, tab394, tab395, tab396, tab397, tab398, tab399, tab400, tab401, tab402, tab403, tab404, tab405, tab406, tab407, tab408, tab409, tab410, tab411, tab412, tab413, tab414, tab415, tab416, tab417, tab418, tab419, tab420, tab421, tab422, tab423, tab424, tab425, tab426, tab427, tab428, tab429, tab430, tab431, tab432, tab433, tab434, tab435, tab436, tab437, tab438, tab439, tab440, tab441, tab442, tab443, tab444, tab445, tab446, tab447, tab448, tab449, tab450, tab451, tab452, tab453, tab454, tab455, tab456, tab457, tab458, tab459, tab460, tab461, tab462, tab463, tab464, tab465 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete", "🔥 Teleriscaldamento vs caldaia", "🌿 Clean spread (con CO₂)", "🇮🇹 PUN da prezzi zonali", "❄️ Pompa di calore vs caldaia", "🏢 PUE & costo data center", "🔌 Gruppo elettrogeno vs blackout", "🚗 Flotta aziendale: TCO diesel vs elettrico", "📜 Garanzie di origine: costo del 100% rinnovabile", "♻️ Fine vita FV: revamping vs dismissione", "🌾️ Agrivoltaico: doppio reddito", "🟢 Biometano: business case", "🌬️ Eolico onshore: business case", "🌊 Idroelettrico run-of-river: business case", "🔥 Geotermia profonda: business case", "☀️ Solare termodinamico (CSP): business case", "🌬️ Eolico offshore: business case", "☀️ Fotovoltaico utility-scale: business case", "⚛️ Nucleare SMR: business case", "📊 Posizione vs limiti di rischio", "💧 Cash flow at risk (CFaR)", "⚡ Aste MI: scostamenti vs MGP", "🌡️ Stress climatico: domanda e prezzo", "🌪️ Derivati meteo: pricing HDD/CDD", "🚢 LNG vs gasdotto: costo delivered", "🛢️ Crack spread: margine raffinazione 3-2-1", "🧪 Margine petrolchimico: nafta → etilene", "🛢️ Carry petrolio: contango & stoccaggio fisico", "🏭 Unit commitment CCGT: accendere o no?", "🛛️ Differenziali greggio: sweet vs sour", "⛽ Basis gas TTF–PSV", "🚢⚡ Rigassificazione GNL: margine terminale", "⚡🔥 Clean spark spread: margine centrale a gas", "⚫🔥 Clean dark spread: margine centrale a carbone", "🔀💰 PTR transfrontaliero: vale il prezzo d'asta?", "📊💹 Sharpe & Sortino: la strategia rende davvero?", "🪓📊 Component VaR: quale posizione tagliare per prima?", "🛡📉 Hedge ratio ottimale: quanto coprire con i futures?", "🧪📉 Backtest del VaR: il modello tiene?", "🧪🛡 Backtest dell'ES: la coda e' sottostimata?", "🪓🛡 Component ES: chi contribuisce alla coda?", "➕📊 Marginal VaR: quanto rischio aggiunge il nuovo trade?", "🚦📏 Limite VaR: quanto margine resta?", "🧪⚡ Stress test: quanto perde il book negli scenari?", "🧮📊 Rapporto di diversificazione: quanto rischio risparmia il book?", "🛡️🔍 Rischio di modello: quale VaR credere?", "✂️📉 Incremental VaR: quanto rischio togli chiudendo la posizione?", "🧱📉 Capacità VaR: quanto nozionale puoi ancora aggiungere?", "🗂️📊 VaR per segmento: dove si concentra il rischio?", "🎯🛡 Risk budgeting: il book rispetta i target?", "💎📊 RAROC: il rendimento ripaga il rischio?", "🌊📉 Expected Shortfall: la perdita oltre il VaR", "💥📈 Stress di correlazione: quanto sale il VaR se si rompono?", "🎯💥 Rho critica: a quale correlazione il VaR tocca il limite?", "💧📉 LVaR: il VaR corretto per il costo di liquidazione", "📐📉 Cornish-Fisher: il VaR corretto per skew e code grasse", "📐🌊 Expected Shortfall con Cornish-Fisher: la coda oltre il VaR con code grasse", "📉💥 VaR rotto: la probabilita' di breccia con code grasse", "⏳📉 VaR multi-orizzonte: lo scaling con autocorrelazione dei rendimenti", "🏔️📉 Valori estremi (Hill): il VaR oltre il massimo storico", "🌊📉 POT-GPD: il VaR dalla coda paretiana oltre soglia", "🧠📉 CAViaR: il VaR adattivo che impara dai rendimenti", "🌀📉 Copula t-Student: il VaR che vede le code muoversi insieme", "🎛📉 FHS: il VaR con la volatilita' di oggi", "⚙️📉 GARCH(1,1): la volatilita' che ricorda", "🧪📉 Backtest VaR: il modello resiste al tempo?", "🎯📉 Convergenza forward: il forward indovina lo spot?", "🔄📉 Half-life di mean reversion: lo spot torna alla media?", "Ω📊 Omega ratio: oltre Sharpe e Sortino", "📈📉 Calmar ratio: il rendimento che paga il drawdown", "🩹 Pain index e Pain ratio: il dolore medio oltre il peggio", "🛟 Sterling ratio: il Calmar mediato sui peggiori drawdown", "🔻 Burke ratio: il drawdown penalizzato al quadrato", "🌊📉 CDaR: il drawdown medio oltre la soglia (il VaR dei drawdown)", "🔍📉 Martin ratio: il Calmar che guarda tutto il dolore", "⛵ Tempo di recupero: quanto resta sott'acqua l'equity", "🎯 Information ratio: la strategia batte davvero il benchmark?", "📊 Capture ratio: quanto cattura la strategia nei mercati su e giù?", "🎯 Hit rate: quanto spesso la strategia batte il benchmark?", "📏 Tracking error: quanto si discosta la strategia dal benchmark?", "📉 Max drawdown relativo: quanto si scende sotto il benchmark?", "📐 Treynor & Jensen: il premio per unita' di rischio sistematico", "⚖️ M² Modigliani: il rendimento a parita' di rischio col benchmark", "📉 Sortino ratio: il rendimento per unità di rischio al ribasso", "📉 Calmar ratio: il rendimento annuo per unità di max drawdown", "📐 K-ratio: la regolarità della crescita dell'equity", "🎯 Volatilità target: il sizing a volatilità costante", "📐 Kelly criterion: il sizing ottimale dall'edge stimato", "🎲 Risk of ruin: probabilita' di toccare una barriera di drawdown", "🎯 Sizing anti-rovina: f massima con ROR vincolato", "📊 Monte Carlo: distribuzione del capitale dopo N trade", "VaR & Expected Shortfall del P&L dopo N trade", "Kelly con costi di trading: sizing netto", "Frazione di Kelly: half-Kelly e trade-off crescita/volatilità", "Kelly robusto: sizing con edge incerta", "Kelly con portafoglio: due posizioni simultanee", "Kelly con correlazione: due posizioni correlate", "Kelly adattivo: win-rate rolling e size dinamica", "Kelly con controllo drawdown: sizing frazionato al drawdown", "Kelly con target di volatilità: sizing riscalato sulla vol", "Kelly bayesiano: sizing con win-rate posterior", "Kelly con lotti interi: sizing discreto e drag di arrotondamento", "Kelly con stop-loss: sizing con perdita troncata", "Kelly con take-profit: sizing con vincita troncata", "Kelly frazionario (fractional Kelly): λ·f*", "Rischio di rovina (risk of ruin): probabilita' di rovina prima del target", "Kelly con tre esiti: sizing con vincita, perdita parziale e perdita piena", "Kelly con limite di posizione: sizing con cap f_max", "Kelly con vincoli multipli: cap, lotti, stop e drawdown", "Kelly con incertezza: haircut bayesiano sulla p stimata", "Kelly su N trade: raddoppio, dimezzamento e crescita attesa", "Kelly: mappa di sensibilità f* e crescita su (p, b)", "Kelly su ritorni continui: f* = μ/σ² e volatility drag", "Kelly con costi di transazione: f* netto = (μ-c)/σ²", "Kelly e drawdown: probabilità di toccare un max drawdown", "Kelly frazionario: frazione ottima per un budget di volatilità", "Monte Carlo: VaR e Expected Shortfall di una posizione power", "Kelly con limite VaR: sizing con vincolo di perdita massima", "Component VaR: contributo al rischio per posizione", "Component ES: contributo al rischio di coda per posizione", "Shock correlazioni: stress test sul rischio di coda", "Backtest VaR di Kupiec: copertura e likelihood ratio", "Reverse stress test: quanto shock regge il limite?", "Mappa di rottura: superficie VaR su shock congiunti vol+corr", "Liquidity-adjusted VaR: VaR + costo di liquidazione", "Component VaR: attribution del VaR per asset", "Hedge VaR: copertura ottimale con futures", "Jump VaR: VaR con salti di prezzo (Merton)", "Delta-Gamma VaR: VaR parametrico di una posizione con opzioni", "Expected Shortfall: misura di rischio coerente", "VaR ed ES con code pesanti (t-Student)", "🌈📉 Misura spettrale: l'ES pesato con l'avversione al rischio", "🧲📈 Misura entropica: rischio con avversione costante (CARA)", "🌀📈 Wang transform: misura distorsiva del rischio", "🎯📈 EVaR: il bound di Chernoff piu' conservativo", "🔀📊 RVaR: la media dei quantili tra VaR ed ES", "🎯📊 Median Shortfall: la mediana della coda, robusta tra VaR ed ES", "🎯📉 LPM: il rischio downside contro un target", "📐⚖ Expectile: la misura di rischio elicitabile e coerente", "🌀 Distortion risk measures: VaR, ES e Wang da un'unica formula", "📊 Spectral risk measure: VaR ponderato dal tuo spettro di avversione", "🔀 Entropic risk measure: avversione esponenziale al rischio", "🎯 Contributi di rischio ES: allocazione di Eulero del portafoglio", "🔱 Risk parity: pesi a parità di contributo di rischio (risk budgeting)", "🎯 Numero effettivo di scommesse (ENB): quante posizioni indipendenti hai davvero?", "📈 Massima diversificazione (MD): i pesi che massimizzano il rapporto DR", "🛡️ Minima varianza (MV): i pesi che minimizzano la volatilità di portafoglio", "🎯 Sharpe massimo (MS): i pesi che massimizzano il rendimento per unità di rischio", "🎯 Rendimento target (TR): minima varianza a rendimento atteso fissato", "κ Kappa ratio: un'unica famiglia per Omega e Sortino", "📏 Tail ratio: la coda destra contro la sinistra", "🔄 Recovery factor: quanto rende ogni euro di drawdown", "💢 Pain index: il dolore che serve per il rendimento", "🛟 Sterling ratio: quanto rende contro i K peggiori drawdown", "⚖ Gain-to-Pain ratio: quanto guadagno per ogni euro perso", "🌊 Volatility drag: quanto rendimento mangia la volatilita'", "🎯 Omega ratio: quanto upside prendi per ogni euro di downside", "📐 Sharpe corretto: il rendimento per unita' di rischio con code grasse", "🎯 Probabilistic Sharpe ratio: lo Sharpe e' davvero significativo?", "🎯 Deflated Sharpe ratio: lo Sharpe sopravvive ai backtest multipli?", "🎚️ Kappa ratio: Omega e Sortino sono lo stesso strumento", "🔺 Farinelli-Tibiletti: Omega e upside potential in un'unica formula", "📊 Rachev ratio: tutta la coda destra contro tutta la coda sinistra", "⭐ STAR ratio: il rendimento medio contro la perdita attesa di coda", "📈 Gain-Loss ratio: guadagno atteso contro perdita attesa", "📉 Ulcer Performance Index (Martin ratio): il rischio drawdown contro il rendimento", "🎯 Calmar ratio: il rendimento medio contro il peggior drawdown", "🔃 MAR ratio: il rendimento composto contro il peggior drawdown", "🤕 Pain ratio: il rendimento medio contro il drawdown medio", "🚀 Upside Potential ratio: il guadagno atteso contro la downside deviation", "🔀 Sequence risk: l'ordine dei rendimenti cambia il drawdown", "🛡 CDaR: la perdita media dei peggiori drawdown", "⏱️ Tempo sott'acqua: durata dei drawdown e recupero", "🎯 Attribuzione del drawdown: chi ha causato il peggior calo", "🔄 Recupero dal drawdown: quanto rimbalzo serve per tornare al picco", "📐 Calmar ratio: rendimento per unita' di peggior perdita", "⚖️ Sortino ratio: rendimento per unita' di volatilita' negativa", "🧮 Omega ratio: guadagni pesati contro perdite pesate", "📉 Burke ratio: rendimento per unita' di drawdown quadratico", "🎯 Kappa ratio (Kappa-3): rendimento per unita' di coda cubica", "📈 Martin ratio: rendimento per unita' di Ulcer Index", "📈 Sterling ratio: rendimento per unita' di drawdown medio annuo", "🩹 Pain ratio: rendimento per unita' di dolore medio (Pain Index)", "📉 CDaR ratio: rendimento per unita' di coda media (Conditional Drawdown-at-Risk)", "🎯 Drawdown-at-Risk (DaR): la soglia di drawdown superata solo nell'alpha% dei casi", "📈 Recovery Factor: profitto totale per unita' di peggior drawdown", "📐 Calmar geometrico: CAGR composto per unita' di peggior drawdown", "💹 Gain-to-Pain ratio: guadagni totali per ogni punto perso", "🏞️ Lake ratio: l'area del dolore sotto il picco", "🌀 Rolling drawdown: il peggior calo in ogni finestra", "📏 Variance ratio: il prezzo segue un random walk?", "⛓️ Johansen: power e gas cointegrati?", "🔗 ECM: quanto in fretta power torna all'equilibrio col gas?", "💥 Risposta allo shock: di quanto uno shock del gas muove power?", "📜 Scomposizione storica: cosa ha mosso davvero il prezzo power?", "🌊 Spillover gas↔power: chi trasmette e chi riceve gli shock?", "📈 Previsione VECM(1): dove vanno power e gas nei prossimi H giorni?", "📊 Backtest VECM(1): il modello batte il random walk?", "⚖️ Lo spread è stazionario? Test ADF", "🔮 Quando rientra lo spread? Forecast mean-reversion", "💰 Vale la pena tradare il rientro? P&L atteso del trade", "📐 Quanto puntare sul rientro? Sizing Kelly del trade", "⚠️ Quanto posso perdere? VaR del trade dimensionato", "🧪⚠️ Stress test del trade: VaR sotto shock", "🛑 Stop & target: dove chiudere il trade", "🧭 Ottimizza stop/target: i migliori k", "⏳ Time stop: uscire se non succede niente", "🔀 Scale-out: tutto insieme o a pezzi?", "🧺 Portafoglio: quanti trade insieme?", "📐 Correlazione: la diversificazione è reale?"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -121689,6 +122098,191 @@ Spark spread;1200000;4,0"""
                         mime="text/csv", key="st464_dl2")
         except ValueError as e464:
             st.error(f"Dati non validi: {e464}")
+    with tab465:
+        st.subheader("📐 Correlazione: la diversificazione è reale?")
+        st.caption(
+            "Dopo tab464 (QUANTI trade puntare insieme) la domanda del desk e': "
+            "la diversificazione e' REALE? tab464 assume i trade indipendenti "
+            "(covarianza diagonale): qui si stima la correlazione tra i P&L dei "
+            "trade dalla serie driver dir*Delta(spread) di ciascuna coppia, si "
+            "misura il rischio VERO dell'allocazione tab464 sotto la covarianza "
+            "piena e si ricalcola l'allocazione ottima con la correlazione. "
+            "Verdetto: NESSUN TRADE / CORRELATI / INDIPENDENTI. "
+            "Note oneste: la correlazione e' stimata sul driver dominante del "
+            "P&L per-step (ignora il profilo di uscita a tranche di tab463); "
+            "matrice regolarizzata con ridge 1e-6 (resta definita positiva "
+            "anche con driver quasi-identici); le correlazioni non sono "
+            "stazionarie — sotto stress tendono a 1. Serie demo deterministiche "
+            "(stesso generatore di tab464): A e C condividono il driver di "
+            "spread (stesso seed spread 555).")
+        _cp465 = (("A", 31, 555), ("B", 345, 7), ("C", 12, 555))
+        _cc465 = st.columns(3)
+        _on465 = []
+        for _i465, (_nm465, _sg465, _ss465) in enumerate(_cp465):
+            if _cc465[_i465].checkbox(
+                    f"Coppia {_nm465} (seed gas {_sg465} / spread {_ss465})",
+                    value=True, key=f"st465_cp{_i465}",
+                    help="Coppia candidata: se la pipeline tab463 non trova "
+                         "un trade allocabile viene esclusa. A e C "
+                         "condividono il driver di spread."):
+                _on465.append((_nm465, _sg465, _ss465))
+        c465a, c465b, c465c, c465d = st.columns(4)
+        K465 = c465a.number_input("Capitale (EUR)",
+                                 min_value=10000.0, max_value=100000000.0,
+                                 value=1000000.0, step=50000.0, key="st465_K",
+                                 help="Capitale di riferimento. Default 1M EUR.")
+        rb465 = c465b.slider("Budget di rischio (% del capitale)",
+                             min_value=1.0, max_value=20.0, value=5.0,
+                             step=0.5, key="st465_rb",
+                             help="Volatilita' massima del portafoglio in "
+                                  "frazione del capitale. Default 5%.")
+        fm465 = c465c.number_input("Cap f_max per coppia (frazione)",
+                                  min_value=0.01, max_value=1.0, value=0.25,
+                                  step=0.01, key="st465_fm",
+                                  help="Frazione massima di capitale per singola "
+                                       "coppia. Default 0.25.")
+        sc465 = c465d.slider("Soglia correlazione",
+                             min_value=0.30, max_value=0.90, value=0.50,
+                             step=0.05, key="st465_sc",
+                             help="Soglia di max |rho| per il verdetto CORRELATI. "
+                                  "Default 0.50.")
+        c465e, c465f, c465g, c465h = st.columns(4)
+        sr465 = c465e.slider("Soglia rischio vero",
+                             min_value=1.05, max_value=1.50, value=1.15,
+                             step=0.05, key="st465_sr",
+                             help="Soglia del rapporto rischio-vero/budget per "
+                                  "il verdetto CORRELATI. Default 1.15x.")
+        ze465 = c465f.number_input("Soglia |z| per il segnale",
+                                  min_value=0.5, max_value=3.0, value=1.0,
+                                  step=0.1, key="st465_ze",
+                                  help="Segnale di trade solo se |z-score| >= soglia. Default 1.0.")
+        co465 = c465g.number_input("Costo round-trip (€/MWh per unita' di spread)",
+                                  min_value=0.0, max_value=5.0, value=0.20,
+                                  step=0.05, key="st465_co",
+                                  help="Costi totali andata+ritorno per unita' di spread. Default 0.20.")
+        H465 = c465h.number_input("Orizzonte H (giorni)",
+                                 min_value=1, max_value=30, value=10,
+                                 step=1, key="st465_H",
+                                 help="Orizzonte entro cui cercare l'uscita ottimale h*. Default 10.")
+        try:
+            if not _on465:
+                raise ValueError("seleziona almeno una coppia candidata")
+            m465 = mh465_mappa(_on465, K=float(K465),
+                              rb=float(rb465) / 100.0, f_max=float(fm465),
+                              z_entry=float(ze465), costo=float(co465),
+                              H=int(H465), soglia_corr=float(sc465),
+                              soglia_rischio=float(sr465))
+            a465 = m465["alloc_corr"]
+            d465 = m465["alloc_diag"]
+            k465m = st.columns(4)
+            if a465 is None:
+                for _k465 in range(4):
+                    k465m[_k465].metric(
+                        ("Max |rho|", "Rischio vero vs budget",
+                         "Edge totale (correlata)", "Sharpe (correlata)")[_k465],
+                        "—")
+            else:
+                k465m[0].metric(
+                    "Max |rho|",
+                    f"{m465['corr_max']:.2f}",
+                    f"soglia {float(sc465):.2f}",
+                    help="Massima correlazione assoluta tra coppie (fuori diagonale).")
+                k465m[1].metric(
+                    "Rischio vero vs budget",
+                    f"{m465['rapporto']:.2f}x",
+                    f"{m465['rischio_vero']:,.0f} EUR veri vs "
+                    f"{float(rb465) / 100.0 * float(K465):,.0f} EUR budget",
+                    help="Rischio dell'allocazione tab464 sotto la covarianza "
+                         "piena, in multipli del budget.")
+                k465m[2].metric(
+                    "Edge totale (correlata)",
+                    f"{a465['edge_tot']:,.0f} EUR",
+                    f"tab464: {d465['edge_tot']:,.0f} EUR",
+                    help="Edge atteso dell'allocazione con covarianza piena "
+                         "vs quella diagonale di tab464.")
+                k465m[3].metric(
+                    "Sharpe (correlata)",
+                    f"{a465['sharpe']:.2f}",
+                    f"{a465['n_floored']} azzerati" if a465["n_floored"]
+                    else "nessun azzeramento",
+                    help="Edge / rischio dell'allocazione corretta. Gli "
+                         "azzeramenti sono trade dominati da un driver comune.")
+            v465 = m465["verdetto"]
+            if v465.startswith("NESSUN TRADE"):
+                st.info(v465)
+            elif v465.startswith("CORRELATI"):
+                st.warning(v465)
+            else:
+                st.success(v465)
+            if a465 is not None:
+                _nomi465 = m465["eligibili"]
+                _cm465 = m465["corr"]
+                _dfc465 = pd.DataFrame(
+                    [[round(_cm465[_i465][_j465], 4)
+                      for _j465 in range(len(_nomi465))]
+                     for _i465 in range(len(_nomi465))],
+                    index=_nomi465, columns=_nomi465)
+                with st.expander("Matrice di correlazione tra i trade"):
+                    st.dataframe(_dfc465, use_container_width=True)
+                    st.caption(
+                        "Pearson sul driver dir*Delta(spread) per coppia "
+                        "(59 punti demo). Diagonale 1 per costruzione.")
+                _nomiA465 = [_r["nome"] for _r in d465["righe"]]
+                _gD465 = [_r["g"] * 100.0 for _r in d465["righe"]]
+                _gC465 = [_r["g"] * 100.0 for _r in a465["righe"]]
+                fig465 = go.Figure()
+                fig465.add_trace(go.Bar(
+                    x=_nomiA465, y=_gD465, name="tab464 (indipendenti)",
+                    marker_color="#1f77b4",
+                    hovertemplate="%{x}<br>%{y:.2f}% del capitale<extra></extra>"))
+                fig465.add_trace(go.Bar(
+                    x=_nomiA465, y=_gC465, name="tab465 (correlata)",
+                    marker_color="#d62728",
+                    hovertemplate="%{x}<br>%{y:.2f}% del capitale<extra></extra>"))
+                fig465.update_layout(
+                    title="Allocazione per coppia: diagonale vs correlata "
+                          "(% del capitale)",
+                    xaxis_title="coppia", yaxis_title="%",
+                    barmode="group", height=420)
+                st.plotly_chart(fig465, use_container_width=True)
+                _dfa465 = pd.DataFrame([{
+                    "coppia": _r["nome"],
+                    "g tab464 (% cap.)": round(_rd["g"] * 100.0, 2),
+                    "g tab465 (% cap.)": round(_r["g"] * 100.0, 2),
+                    "EUR impiegati": round(_r["eur"]),
+                    "edge atteso (EUR)": round(_r["edge"]),
+                    "azzerato": "si" if _r["floored"] else "no",
+                    "cap vincolante": "si" if _r["capped"] else "no",
+                } for _r, _rd in zip(a465["righe"], d465["righe"])])
+                with st.expander("Confronto allocazioni + export CSV"):
+                    st.dataframe(_dfa465, use_container_width=True)
+                    st.download_button(
+                        "Export CSV confronto",
+                        data=_dfa465.to_csv(index=False, sep=";").encode(
+                            "utf-8"),
+                        file_name="correlazione_allocazioni.csv",
+                        mime="text/csv", key="st465_dl")
+            _det465 = [dict(_r) for _r in m465["coppie"]]
+            _df465 = pd.DataFrame([{
+                "coppia": _r["nome"],
+                "eligibile": "si" if _r["eligibile"] else "no",
+                "beta": round(_r["beta"], 4),
+                "z": round(_r["z"], 2),
+                "h* (giorni)": _r["h_star"],
+                "edge netto (EUR)": round(_r["mu"]),
+                "sigma (EUR)": round(_r["sigma"]),
+                "direzione": _r["direzione"] or "—",
+                "motivo": _r["motivo"] or "",
+            } for _r in _det465])
+            with st.expander("Coppie candidate: pipeline tab463 + export CSV"):
+                st.dataframe(_df465, use_container_width=True)
+                st.download_button(
+                    "Export CSV coppie",
+                    data=_df465.to_csv(index=False, sep=";").encode("utf-8"),
+                    file_name="correlazione_coppie.csv",
+                    mime="text/csv", key="st465_dl2")
+        except ValueError as e465:
+            st.error(f"Dati non validi: {e465}")
 
 # Footer
 

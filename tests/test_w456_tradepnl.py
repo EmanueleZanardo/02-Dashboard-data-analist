@@ -22,6 +22,7 @@ _F = _load("mh456_num", "mh456_parse_serie", "mh456_phi",
            "_mh447_transp", "_mh447_ols")
 
 TITLE456 = "💰 Vale la pena tradare il rientro? P&L atteso del trade"
+TITLE465 = "📐 Correlazione: la diversificazione è reale?"
 TITLE464 = "🧺 Portafoglio: quanti trade insieme?"
 TITLE463 = "🔀 Scale-out: tutto insieme o a pezzi?"
 TITLE462 = "⏳ Time stop: uscire se non succede niente"
@@ -82,7 +83,7 @@ class TestRegistry456:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert len(titoli) == len(dvars) == len(withs) == 464
+        assert len(titoli) == len(dvars) == len(withs) == 465
         assert "tab456" in dvars
         assert "tab456" in withs
 
@@ -112,9 +113,9 @@ class TestRegistry456:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert dvars[-1] == "tab464"
-        assert titoli[-1] == TITLE464
-        assert withs[-1] == "tab464"
+        assert dvars[-1] == "tab465"
+        assert titoli[-1] == TITLE465
+        assert withs[-1] == "tab465"
 
 
 class TestTradeRientro456:
