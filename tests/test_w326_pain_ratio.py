@@ -128,6 +128,7 @@ TITLE452 = "📈 Previsione VECM(1): dove vanno power e gas nei prossimi H giorn
 TITLE454 = "⚖️ Lo spread è stazionario? Test ADF"
 TITLE456 = "💰 Vale la pena tradare il rientro? P&L atteso del trade"
 TITLE473 = "🔁 Ribilanciare: i nuovi pesi post-shock"
+TITLE474 = "⏰ Frequenza di ribilanciamento"
 TITLE472 = "🔔 Drift dei budget: quando ribilanciare?"
 TITLE471 = "🎯 Risk budgeting: ogni segnale si guadagna il suo capitale"
 TITLE470 = "📈 Expected Shortfall: quanto perdi quando perdi?"
@@ -201,7 +202,7 @@ def _eq_demo():
 class TestRegistry326:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 473
+        assert len(titoli) == len(dvars) == len(withs) == 474
         assert TITLE326 in titoli
         assert "tab326" in dvars
         assert "    with tab326:" in src
@@ -214,8 +215,8 @@ class TestRegistry326:
 
     def test_ultima_tab(self):
         _, titoli, dvars, _ = _registry()
-        assert titoli[-1] == TITLE473
-        assert dvars[-1] == "tab473"
+        assert titoli[-1] == TITLE474
+        assert dvars[-1] == "tab474"
 
 
 class TestValidatori:

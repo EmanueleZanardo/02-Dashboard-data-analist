@@ -17,6 +17,7 @@ _F = _load("mh473_num", "mh473_ribilancia", "mh473_verdetto",
            "mh468_num", "mh468_phi_inv")
 
 TITLE473 = "🔁 Ribilanciare: i nuovi pesi post-shock"
+TITLE474 = "⏰ Frequenza di ribilanciamento"
 TITLE472 = "🔔 Drift dei budget: quando ribilanciare?"
 TITLE471 = "🎯 Risk budgeting: ogni segnale si guadagna il suo capitale"
 TITLE470 = "📈 Expected Shortfall: quanto perdi quando perdi?"
@@ -79,7 +80,7 @@ class TestRegistry473:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert len(titoli) == len(dvars) == len(withs) == 473
+        assert len(titoli) == len(dvars) == len(withs) == 474
         assert "tab473" in dvars
         assert "tab473" in withs
 
