@@ -24,6 +24,7 @@ TITLE455 = "🔮 Quando rientra lo spread? Forecast mean-reversion"
 TITLE457 = "📐 Quanto puntare sul rientro? Sizing Kelly del trade"
 TITLE454 = "⚖️ Lo spread è stazionario? Test ADF"
 TITLE456 = "💰 Vale la pena tradare il rientro? P&L atteso del trade"
+TITLE466 = "💸 Costi veri: l'edge sopravvive al netto?"
 TITLE465 = "📐 Correlazione: la diversificazione è reale?"
 TITLE464 = "🧺 Portafoglio: quanti trade insieme?"
 TITLE463 = "🔀 Scale-out: tutto insieme o a pezzi?"
@@ -82,7 +83,7 @@ class TestRegistry455:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert len(titoli) == len(dvars) == len(withs) == 465
+        assert len(titoli) == len(dvars) == len(withs) == 466
         assert "tab455" in dvars
         assert "tab455" in withs
 
@@ -112,9 +113,9 @@ class TestRegistry455:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert dvars[-1] == "tab465"
-        assert titoli[-1] == TITLE465
-        assert withs[-1] == "tab465"
+        assert dvars[-1] == "tab466"
+        assert titoli[-1] == TITLE466
+        assert withs[-1] == "tab466"
 
 
 class TestSpreadForecast455:

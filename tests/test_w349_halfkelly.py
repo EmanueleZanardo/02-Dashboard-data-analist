@@ -99,6 +99,7 @@ TITLE450 = "📜 Scomposizione storica: cosa ha mosso davvero il prezzo power?"
 TITLE452 = "📈 Previsione VECM(1): dove vanno power e gas nei prossimi H giorni?"
 TITLE454 = "⚖️ Lo spread è stazionario? Test ADF"
 TITLE456 = "💰 Vale la pena tradare il rientro? P&L atteso del trade"
+TITLE466 = "💸 Costi veri: l'edge sopravvive al netto?"
 TITLE465 = "📐 Correlazione: la diversificazione è reale?"
 TITLE464 = "🧺 Portafoglio: quanti trade insieme?"
 TITLE463 = "🔀 Scale-out: tutto insieme o a pezzi?"
@@ -169,7 +170,7 @@ def _registry():
 class TestRegistry349:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 465
+        assert len(titoli) == len(dvars) == len(withs) == 466
         assert "tab349" in dvars
         assert "tab349" in withs
 
@@ -182,9 +183,9 @@ class TestRegistry349:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab465"
-        assert titoli[-1] == TITLE465
-        assert withs[-1] == "tab465"
+        assert dvars[-1] == "tab466"
+        assert titoli[-1] == TITLE466
+        assert withs[-1] == "tab466"
 
 
 class TestNum:
