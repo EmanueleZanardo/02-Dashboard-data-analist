@@ -36,6 +36,7 @@ TITLE459 = "🧪⚠️ Stress test del trade: VaR sotto shock"
 TITLE458 = "⚠️ Quanto posso perdere? VaR del trade dimensionato"
 TITLE457 = "📐 Quanto puntare sul rientro? Sizing Kelly del trade"
 TITLE456 = "💰 Vale la pena tradare il rientro? P&L atteso del trade"
+TITLE467 = "📅 L'edge annualizzato: il trade si ripete?"
 TITLE466 = "💸 Costi veri: l'edge sopravvive al netto?"
 TITLE465 = "📐 Correlazione: la diversificazione è reale?"
 TITLE464 = "🧺 Portafoglio: quanti trade insieme?"
@@ -79,7 +80,7 @@ class TestRegistry462:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert len(titoli) == len(dvars) == len(withs) == 466
+        assert len(titoli) == len(dvars) == len(withs) == 467
         assert "tab462" in dvars
         assert "tab462" in withs
 
