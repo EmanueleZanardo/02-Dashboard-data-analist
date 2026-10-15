@@ -279,7 +279,7 @@ def test_registry_titolo_e_tab():
     assert TITLE483 in src
     # commento header W483 + lista titoli + H1 nella UI
     assert src.count(TITLE483) == 3
-    assert "tab481, tab482, tab483, tab484 = st.tabs([" in src
+    assert "tab481, tab482, tab483, tab484, tab485 = st.tabs([" in src
     assert "    with tab483:" in src
 
 
