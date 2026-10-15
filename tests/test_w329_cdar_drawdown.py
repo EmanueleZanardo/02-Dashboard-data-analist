@@ -142,6 +142,7 @@ TITLE461 = "🧭 Ottimizza stop/target: i migliori k"
 TITLE460 = "🛑 Stop & target: dove chiudere il trade"
 TITLE459 = "🧪⚠️ Stress test del trade: VaR sotto shock"
 TITLE458 = "⚠️ Quanto posso perdere? VaR del trade dimensionato"
+TITLE475 = "💰 Costo di esecuzione: quanto costa davvero ruotare"
 TITLE413 = "📐 Sharpe corretto: il rendimento per unita' di rischio con code grasse"
 TITLE415 = "🎯 Deflated Sharpe ratio: lo Sharpe sopravvive ai backtest multipli?"
 TITLE417 = "🔺 Farinelli-Tibiletti: Omega e upside potential in un'unica formula"
@@ -204,7 +205,7 @@ def _eq_demo():
 class TestRegistry329:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 474
+        assert len(titoli) == len(dvars) == len(withs) == 475
         assert TITLE329 in titoli
         assert "tab329" in dvars
         assert "    with tab329:" in src
@@ -218,8 +219,8 @@ class TestRegistry329:
 
     def test_ultima_tab(self):
         _, titoli, dvars, _ = _registry()
-        assert titoli[-1] == TITLE474
-        assert dvars[-1] == "tab474"
+        assert titoli[-1] == TITLE475
+        assert dvars[-1] == "tab475"
 
 
 class TestValidatori:
