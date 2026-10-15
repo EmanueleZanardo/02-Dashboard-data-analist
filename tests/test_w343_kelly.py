@@ -128,7 +128,7 @@ TITLE463 = "🔀 Scale-out: tutto insieme o a pezzi?"
 TITLE462 = "⏳ Time stop: uscire se non succede niente"
 TITLE461 = "🧭 Ottimizza stop/target: i migliori k"
 TITLE460 = "🛑 Stop & target: dove chiudere il trade"
-TITLE480 = "📞 Margin call: variazione margine e buffer di liquidità"
+TITLE481 = "📏 DV01 del portafoglio forward: sensibilità del MtM a uno shift parallelo della curva"
 TITLE459 = "🧪⚠️ Stress test del trade: VaR sotto shock"
 TITLE458 = "⚠️ Quanto posso perdere? VaR del trade dimensionato"
 TITLE475 = "💰 Costo di esecuzione: quanto costa davvero ruotare"
@@ -184,7 +184,7 @@ def _registry():
 class TestRegistry343:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 480
+        assert len(titoli) == len(dvars) == len(withs) == 481
         assert "tab343" in dvars
         assert "tab343" in withs
 
@@ -197,8 +197,8 @@ class TestRegistry343:
 
     def test_ultima_tab(self):
         _, titoli, dvars, withs = _registry()
-        assert dvars[-1] == "tab480"
-        assert titoli[-1] == TITLE480
+        assert dvars[-1] == "tab481"
+        assert titoli[-1] == TITLE481
         assert withs[-1] == "tab478"
 
 
