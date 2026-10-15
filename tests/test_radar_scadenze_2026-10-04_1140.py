@@ -221,12 +221,12 @@ class TestRegistryTab201:
         src = Path(__file__).parent.parent.joinpath("app.py").read_text()
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
-        assert len(titoli) == 463
-        assert titoli[-1] == "🔀 Scale-out: tutto insieme o a pezzi?"
+        assert len(titoli) == 464
+        assert titoli[-1] == "🧺 Portafoglio: quanti trade insieme?"
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         assert "tab201" in dvars
         withs = re.findall(r"    with (tab\d+):", src)
         assert "tab201" in withs
-        assert len(withs) == len(dvars) == 463
+        assert len(withs) == len(dvars) == 464
         keys = re.findall(r'key="(rs201_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 4
