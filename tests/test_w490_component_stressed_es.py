@@ -17,7 +17,6 @@ _F = _load("mh490_num", "mh490_segno", "mh490_mese", "mh490_z",
            "mh490_taglio")
 
 TITLE490 = "🪓🌊 Component Stressed ES: chi alimenta la coda sotto stress?"
-TITLE489 = "🪓🌪️ Component Stressed VaR: quale linea tagliare sotto stress?"
 
 Z99 = 2.3263478740408408
 LAMBDA99 = 2.665214220345806
@@ -67,10 +66,9 @@ class TestRegistry490:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"    with (tab\d+):", src)
-        assert len(titoli) == len(dvars) == len(withs) == 490
-        assert titoli[-1] == TITLE490
-        assert titoli[-2] == TITLE489
-        assert dvars[-1] == "tab490"
+        assert len(titoli) == len(dvars) == len(withs) == 491
+        assert TITLE490 in titoli
+        assert "tab491" in dvars
 
     def test_ui_indentata(self):
         src = self._src()
@@ -83,7 +81,7 @@ class TestRegistry490:
 
     def test_dvar_line(self):
         src = self._src()
-        assert "tab486, tab487, tab488, tab489, tab490 = st.tabs([" in src
+        assert "tab486, tab487, tab488, tab489, tab490, tab491 = st.tabs([" in src
 
     def test_chiavi_univoche(self):
         src = self._src()
