@@ -1,0 +1,217 @@
+"""Test tab503 '📦 Cost-of-carry: scomponi il premio del forward': registry + funzioni pure."""
+
+import math
+import re
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from appfuncs import load as _load
+
+_F = _load("mh503_num", "mh503_str", "mh503_ge0", "mh503_pos", "mh503_pct",
+           "mh503_contratto", "mh503_carry", "mh503_riepilogo")
+
+TITLE503 = "📦 Cost-of-carry: scomponi il premio del forward"
+TITLE502 = "⚖️ Ribilanciamento: aggiustare l'hedge ratio senza de-designare"
+
+R_TTF = 3.0   # tasso %
+U_GAS = 6.0   # stoccaggio %
+
+
+def _ct(nome, spot, fwd, giorni):
+    return _F["mh503_contratto"](nome, spot, fwd, giorni)
+
+
+def _cy(nome, spot, fwd, giorni, r=R_TTF, u=U_GAS, stocc=True):
+    return _F["mh503_carry"](_ct(nome, spot, fwd, giorni), r, u, stocc)
+
+
+# Demo: un verdetto per tipo (stessi valori della UI)
+D_EQ = _ct("TTF Q1-27 (gas)", 39.0, 40.0, 120.0)
+D_BW = _ct("Power Cal-27 DE", 88.0, 81.0, 440.0)
+D_AN = _ct("PSV baseload IT", 39.2, 42.5, 60.0)
+
+
+class TestW503Validatori:
+    def test_num_ok(self):
+        assert _F["mh503_num"](3, "x") == 3.0
+        assert _F["mh503_num"](-2.5, "x") == -2.5
+
+    def test_num_ko(self):
+        for bad in (True, "3", None, float("nan"), float("inf")):
+            with pytest.raises(ValueError):
+                _F["mh503_num"](bad, "x")
+
+    def test_str_ok(self):
+        assert _F["mh503_str"]("  TTF  ", "x") == "TTF"
+
+    def test_str_ko(self):
+        for bad in ("", "   ", None, 5):
+            with pytest.raises(ValueError):
+                _F["mh503_str"](bad, "x")
+
+    def test_ge0_ok(self):
+        assert _F["mh503_ge0"](0, "x") == 0.0
+        assert _F["mh503_ge0"](12.5, "x") == 12.5
+
+    def test_ge0_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh503_ge0"](-0.01, "x")
+
+    def test_pos_ok(self):
+        assert _F["mh503_pos"](0.01, "x") == 0.01
+        assert _F["mh503_pos"](100, "x") == 100.0
+
+    def test_pos_ko(self):
+        for bad in (0, -1.0, "5"):
+            with pytest.raises(ValueError):
+                _F["mh503_pos"](bad, "x")
+
+    def test_pct_ok(self):
+        assert _F["mh503_pct"](0, "x") == 0.0
+        assert _F["mh503_pct"](100, "x") == 100.0
+
+    def test_pct_ko(self):
+        for bad in (-0.1, 100.1, float("nan")):
+            with pytest.raises(ValueError):
+                _F["mh503_pct"](bad, "x")
+
+
+class TestW503Contratto:
+    def test_ok(self):
+        c = _ct("TTF", 39.0, 40.0, 120.0)
+        assert c == {"nome": "TTF", "spot": 39.0, "fwd": 40.0, "giorni": 120.0}
+
+    def test_ko(self):
+        with pytest.raises(ValueError):
+            _ct("TTF", 0.0, 40.0, 120.0)     # spot nullo
+        with pytest.raises(ValueError):
+            _ct("TTF", -5.0, 40.0, 120.0)    # spot negativo
+        with pytest.raises(ValueError):
+            _ct("TTF", 39.0, -1.0, 120.0)    # forward negativo
+        with pytest.raises(ValueError):
+            _ct("TTF", 39.0, 40.0, 0.0)       # scadenza nulla
+        with pytest.raises(ValueError):
+            _ct("  ", 39.0, 40.0, 120.0)     # nome vuoto
+
+
+class TestW503Carry:
+    def test_contango_equo(self):
+        v = _cy("TTF Q1-27 (gas)", 39.0, 40.0, 120.0)
+        assert v["verdetto"] == "CONTANGO_EQUO"
+        # carry = ln(40/39)/(120/365) ~= 7.7%
+        assert v["carry_netto_annuo"] == pytest.approx(math.log(40.0 / 39.0) / (120.0 / 365.0))
+        # r+u = ln(1.03)+0.06 ~= 8.96% > carry -> y > 0
+        assert v["convenience_yield"] > 0.0
+
+    def test_backwardation(self):
+        v = _cy("Power Cal-27 DE", 88.0, 81.0, 440.0, stocc=False)
+        assert v["verdetto"] == "BACKWARDATION"
+        assert v["carry_netto_annuo"] < 0.0
+        assert v["premio_eur_mwh"] == pytest.approx(-7.0)
+
+    def test_contango_anomalo(self):
+        v = _cy("PSV baseload IT", 39.2, 42.5, 60.0)
+        assert v["verdetto"] == "CONTANGO_ANOMALO"
+        assert v["convenience_yield"] < 0.0  # y negativa = anomalia
+
+    def test_bordo_carry_zero(self):
+        v = _cy("X", 40.0, 40.0, 120.0)  # F == S -> c = 0 -> non < -EPS
+        assert v["verdetto"] == "CONTANGO_EQUO"
+        assert v["carry_netto_annuo"] == pytest.approx(0.0)
+
+    def test_bordo_r_piu_u(self):
+        # F = S*e^((r+u)*T) esatto -> residuo nullo, c == r+u -> EQUO
+        r_c = math.log1p(R_TTF / 100.0)
+        T = 120.0 / 365.0
+        f = 39.0 * math.exp((r_c + U_GAS / 100.0) * T)
+        v = _cy("X", 39.0, f, 120.0)
+        assert v["verdetto"] == "CONTANGO_EQUO"
+        assert v["comp_convenience_eur_mwh"] == pytest.approx(0.0, abs=1e-9)
+
+    def test_componenti_sommano_premio(self):
+        v = _cy("TTF Q1-27 (gas)", 39.0, 40.0, 120.0)
+        somma = (v["comp_tasso_eur_mwh"] + v["comp_stoccaggio_eur_mwh"]
+                 + v["comp_convenience_eur_mwh"])
+        assert somma == pytest.approx(v["premio_eur_mwh"], rel=1e-9)
+
+    def test_power_stoccaggio_forzato_zero(self):
+        v = _cy("Power Cal-27 DE", 88.0, 81.0, 440.0, u=U_GAS, stocc=False)
+        assert v["comp_stoccaggio_eur_mwh"] == pytest.approx(0.0)
+        # con u=0 il teorico usa solo r
+        T = 440.0 / 365.0
+        r_c = math.log1p(R_TTF / 100.0)
+        assert v["f_teorico"] == pytest.approx(88.0 * math.exp(r_c * T))
+
+    def test_carry_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh503_carry"](D_EQ, -1.0, U_GAS, True)   # tasso negativo
+        with pytest.raises(ValueError):
+            _F["mh503_carry"](D_EQ, R_TTF, -0.5, True)   # stoccaggio negativo
+        with pytest.raises(ValueError):
+            _F["mh503_carry"](D_EQ, R_TTF, U_GAS, "si")  # stoccabile non bool
+
+
+class TestW503Riepilogo:
+    def _rie(self):
+        contratti = [D_EQ, D_BW, _ct("CO2 Dec-26 EUA", 74.0, 75.8, 410.0),
+                     D_AN, _ct("TTF Wk-52 (gas)", 38.0, 36.5, 20.0)]
+        stocc = [True, False, False, True, True]
+        return _F["mh503_riepilogo"](contratti, R_TTF, U_GAS, stocc)
+
+    def test_conteggi_e_complessivo(self):
+        rie = self._rie()
+        assert rie["n_contratti"] == 5
+        assert rie["conteggi"] == {"BACKWARDATION": 2, "CONTANGO_EQUO": 2,
+                                   "CONTANGO_ANOMALO": 1}
+        assert rie["verdetto_complessivo"] == "CONTANGO_ANOMALO"
+
+    def test_severita_backwardation_sopra_equo(self):
+        rie = _F["mh503_riepilogo"]([D_EQ, D_BW], R_TTF, U_GAS, [True, False])
+        assert rie["verdetto_complessivo"] == "BACKWARDATION"
+
+    def test_tutti_equi(self):
+        rie = _F["mh503_riepilogo"]([D_EQ], R_TTF, U_GAS, [True])
+        assert rie["verdetto_complessivo"] == "CONTANGO_EQUO"
+
+    def test_y_media_e_residuo(self):
+        rie = self._rie()
+        ys = [r["convenience_yield"] for r in rie["righe"]]
+        assert rie["convenience_yield_media"] == pytest.approx(sum(ys) / len(ys))
+        assert rie["max_residuo_eur_mwh"] == pytest.approx(
+            max(abs(r["comp_convenience_eur_mwh"]) for r in rie["righe"]))
+
+    def test_riepilogo_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh503_riepilogo"]([], R_TTF, U_GAS, [])
+        with pytest.raises(ValueError):
+            _F["mh503_riepilogo"]([D_EQ], R_TTF, U_GAS, [True, False])
+
+
+def test_registry_tab503():
+    src = Path(__file__).resolve().parent.parent.joinpath("app.py").read_text(encoding="utf-8")
+    line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
+    titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
+    assert len(titoli) == 503
+    assert TITLE503 in titoli
+    assert src.count(TITLE503) == 3
+    assert "tab499, tab500, tab501, tab502, tab503 = st.tabs([" in src
+    assert "    with tab503:" in src
+    dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
+    assert "tab503" in dvars
+    withs = re.findall(r"    with (tab\d+):", src)
+    assert "tab503" in withs
+    assert len(withs) == len(dvars) == 503
+    # ordine: tab503 dopo tab502
+    _decl503 = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
+    assert _decl503.index(f'"{TITLE502}"') < _decl503.index(f'"{TITLE503}"')
+    assert titoli[dvars.index("tab503")] == TITLE503
+
+
+def test_chiavi_st503_uniche():
+    src = Path(__file__).resolve().parent.parent.joinpath("app.py").read_text(encoding="utf-8")
+    keys = re.findall(r'key="(st503_[^"]+)"', src) + re.findall(
+        r'key=f"(st503_[^"]+)"', src)
+    assert len(keys) == len(set(keys)) > 5
