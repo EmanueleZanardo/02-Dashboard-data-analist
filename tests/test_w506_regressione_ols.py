@@ -1,0 +1,192 @@
+"""Test tab506 '📉 Regressione di efficacia (OLS)': registry + funzioni pure."""
+
+import re
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from appfuncs import load as _load
+
+_F = _load("mh506_num", "mh506_str", "mh506_serie", "mh506_ols",
+           "mh506_test", "mh506_riepilogo")
+
+TITLE506 = "📉 Regressione di efficacia (OLS)"
+TITLE505 = "♻️ Recycling OCI: rilascio della riserva a P&L"
+
+
+def _demo_xy():
+    x = [120000.0, -80000.0, 45000.0, -60000.0, 90000.0, -30000.0]
+    y = [-125800.0, 84200.0, -47100.0, 62900.0, -94100.0, 31400.0]
+    return x, y
+
+
+def _demo_lab():
+    return ["Gen-Feb", "Mar", "Apr", "Mag", "Giu", "Lug"]
+
+
+class TestW506Validatori:
+    def test_num_ok(self):
+        assert _F["mh506_num"](3, "x") == 3.0
+        assert _F["mh506_num"](-2.5, "x") == -2.5
+
+    def test_num_ko(self):
+        for bad in (True, "3", None, float("nan"), float("inf")):
+            with pytest.raises(ValueError):
+                _F["mh506_num"](bad, "x")
+
+    def test_str_ok(self):
+        assert _F["mh506_str"]("  Gen-Feb  ", "x") == "Gen-Feb"
+
+    def test_str_ko(self):
+        for bad in ("", "   ", None, 5):
+            with pytest.raises(ValueError):
+                _F["mh506_str"](bad, "x")
+
+    def test_serie_ok(self):
+        assert _F["mh506_serie"]((1, 2, 3), "x") == [1.0, 2.0, 3.0]
+
+    def test_serie_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh506_serie"]([1.0, 2.0], "x")  # < 3 osservazioni
+        with pytest.raises(ValueError):
+            _F["mh506_serie"]([1.0, 2.0, float("nan")], "x")
+        with pytest.raises(ValueError):
+            _F["mh506_serie"]("abc", "x")
+
+
+class TestW506Ols:
+    def test_demo(self):
+        x, y = _demo_xy()
+        st = _F["mh506_ols"](x, y)
+        assert st["n"] == 6
+        assert st["slope"] == pytest.approx(-1.048564, abs=1e-5)
+        assert st["intercept"] == pytest.approx(104.66, abs=0.5)
+        assert st["r2"] == pytest.approx(0.999997, abs=1e-5)
+        assert st["se_slope"] == pytest.approx(0.000929, abs=1e-5)
+        assert st["t_stat"] == pytest.approx(-52.2554, abs=1e-2)
+        assert 0.0 < st["p_value"] < 1e-4
+
+    def test_retta_esatta(self):
+        # y = -1.1*x + 500 -> slope -1.1, R2 = 1, se = 0
+        x = [100.0, 200.0, 300.0, 400.0]
+        y = [-1.1 * v + 500.0 for v in x]
+        st = _F["mh506_ols"](x, y)
+        assert st["slope"] == pytest.approx(-1.1)
+        assert st["intercept"] == pytest.approx(500.0)
+        assert st["r2"] == pytest.approx(1.0)
+        assert st["se_slope"] == 0.0
+
+    def test_varianza_x_nulla(self):
+        with pytest.raises(ValueError):
+            _F["mh506_ols"]([5.0, 5.0, 5.0], [1.0, 2.0, 3.0])
+
+    def test_lunghezze_diverse(self):
+        with pytest.raises(ValueError):
+            _F["mh506_ols"]([1.0, 2.0, 3.0], [1.0, 2.0])
+
+    def test_poche_osservazioni(self):
+        with pytest.raises(ValueError):
+            _F["mh506_ols"]([1.0, 2.0], [1.0, 2.0])
+
+    def test_nan_vietato(self):
+        with pytest.raises(ValueError):
+            _F["mh506_ols"]([1.0, 2.0, float("nan")], [1.0, 2.0, 3.0])
+
+
+class TestW506Verdetti:
+    def test_efficace(self):
+        x, y = _demo_xy()
+        st = _F["mh506_test"](x, y)
+        assert st["verdetto"] == "EFFICACE"
+        assert st["h0_non_rifiutata"] is False  # se piccolissimo
+
+    def test_con_riserva_fit_debole(self):
+        # slope in banda ma R2 basso: punti rumorosi attorno a b=-1
+        x = [100.0, -80.0, 60.0, -40.0, 90.0, -30.0, 50.0, -70.0]
+        y = [-130.0, 30.0, -20.0, 70.0, -40.0, -10.0, -90.0, 110.0]
+        st = _F["mh506_test"](x, y)
+        assert 0.8 <= abs(st["slope"]) <= 1.25
+        assert st["r2"] < 0.8
+        assert st["verdetto"] == "EFFICACE_CON_RISERVA"
+
+    def test_inefficace_segno_errato(self):
+        # strumento che amplifica: slope positiva
+        x = [100.0, -80.0, 60.0, -40.0, 90.0]
+        y = [105.0, -84.0, 63.0, -42.0, 95.0]
+        st = _F["mh506_test"](x, y)
+        assert st["slope"] > 0
+        assert st["verdetto"] == "INEFFICACE"
+
+    def test_inefficace_fuori_banda(self):
+        # sottocopertura: slope -0.5
+        x = [100.0, -80.0, 60.0, -40.0, 90.0, -30.0]
+        y = [-50.0, 40.0, -30.0, 20.0, -45.0, 15.0]
+        st = _F["mh506_test"](x, y)
+        assert abs(st["slope"]) == pytest.approx(0.5, abs=0.01)
+        assert st["verdetto"] == "INEFFICACE"
+
+    def test_bordi_banda(self):
+        # slope esattamente -0.8 -> EFFICACE (bordo incluso)
+        x = [100.0, -80.0, 60.0, -40.0, 90.0, -30.0]
+        y = [-80.0, 64.0, -48.0, 32.0, -72.0, 24.0]
+        st = _F["mh506_test"](x, y)
+        assert st["slope"] == pytest.approx(-0.8)
+        assert st["verdetto"] == "EFFICACE"
+
+    def test_parametri_ko(self):
+        x, y = _demo_xy()
+        with pytest.raises(ValueError):
+            _F["mh506_test"](x, y, banda_inf=1.3, banda_sup=1.0)
+        with pytest.raises(ValueError):
+            _F["mh506_test"](x, y, r2_min=1.5)
+        with pytest.raises(ValueError):
+            _F["mh506_test"](x, y, banda_inf=0.0)
+
+
+class TestW506Riepilogo:
+    def test_demo(self):
+        x, y = _demo_xy()
+        s = _F["mh506_riepilogo"](_demo_lab(), x, y)
+        assert s["n_periodi"] == 6
+        assert s["verdetto"] == "EFFICACE"
+        assert s["slope"] == pytest.approx(-1.048564, abs=1e-5)
+        assert s["r2"] == pytest.approx(0.999997, abs=1e-5)
+        assert s["banda"] == (0.8, 1.25)
+        assert s["r2_min"] == 0.8
+        assert len(s["righe"]) == 6
+        assert s["righe"][0]["periodo"] == "Gen-Feb"
+        assert s["righe"][0]["offset_eur"] == pytest.approx(-5800.0)
+
+    def test_etichette_ko(self):
+        x, y = _demo_xy()
+        with pytest.raises(ValueError):
+            _F["mh506_riepilogo"](["solo", "due"], x, y)
+
+
+def test_registry_tab506():
+    src = Path(__file__).resolve().parent.parent.joinpath("app.py").read_text(encoding="utf-8")
+    line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
+    titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
+    assert len(titoli) == 506
+    assert TITLE506 in titoli
+    assert src.count(TITLE506) == 3
+    assert "tab504, tab505, tab506 = st.tabs([" in src
+    assert "    with tab506:" in src
+    dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
+    assert "tab506" in dvars
+    withs = re.findall(r"    with (tab\d+):", src)
+    assert "tab506" in withs
+    assert len(withs) == len(dvars) == 506
+    # ordine: tab506 dopo tab505
+    _decl506 = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
+    assert _decl506.index(f'"{TITLE505}"') < _decl506.index(f'"{TITLE506}"')
+    assert titoli[dvars.index("tab506")] == TITLE506
+
+
+def test_chiavi_st506_uniche():
+    src = Path(__file__).resolve().parent.parent.joinpath("app.py").read_text(encoding="utf-8")
+    keys = re.findall(r'key="(st506_[^"]+)"', src) + re.findall(
+        r'key=f"(st506_[^"]+)"', src)
+    assert len(keys) == len(set(keys)) > 5
