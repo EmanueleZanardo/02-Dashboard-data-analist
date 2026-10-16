@@ -72,10 +72,9 @@ class TestRegistry487:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"    with (tab\d+):", src)
-        assert len(titoli) == len(dvars) == len(withs) == 487
-        assert titoli[-1] == TITLE487
-        assert titoli[-2] == TITLE486
-        assert dvars[-1] == "tab487"
+        assert len(titoli) == len(dvars) == len(withs) == 488
+        assert TITLE487 in titoli
+        assert "tab488" in dvars
 
     def test_ui_indentata(self):
         src = self._src()
@@ -88,7 +87,7 @@ class TestRegistry487:
 
     def test_dvar_line(self):
         src = self._src()
-        assert "tab485, tab486, tab487 = st.tabs([" in src
+        assert "tab485, tab486, tab487, tab488 = st.tabs([" in src
 
 
 class TestNum487:
