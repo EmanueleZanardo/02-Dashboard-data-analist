@@ -76,7 +76,7 @@ def test_registry_tab497():
     src = Path(__file__).resolve().parent.parent.joinpath("app.py").read_text()
     line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
     titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
-    assert len(titoli) == 498
+    assert len(titoli) == 499
     assert TITLE497 in titoli
     assert src.count(TITLE497) == 3
     assert "tab497, tab498 = st.tabs([" in src
@@ -85,7 +85,7 @@ def test_registry_tab497():
     assert "tab497" in dvars
     withs = re.findall(r"    with (tab\d+):", src)
     assert "tab497" in withs
-    assert len(withs) == len(dvars) == 498
+    assert len(withs) == len(dvars) == 499
     # ordine: tab497 dopo tab496 nella dichiarazione delle tab
     _decl497 = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
     assert _decl497.index(f'"{TITLE496}"') < _decl497.index(f'"{TITLE497}"')
