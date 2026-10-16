@@ -65,7 +65,7 @@ def _pf_b():
 def test_registry_tab494():
     src = Path(__file__).resolve().parent.parent.joinpath("app.py").read_text()
     assert f'"{TITLE494}"' in src
-    assert "tab492, tab493, tab494, tab495, tab496, tab497, tab498, tab499, tab500, tab501, tab502, tab503, tab504 = st.tabs([" in src
+    assert "tab492, tab493, tab494, tab495, tab496, tab497, tab498, tab499, tab500, tab501, tab502, tab503, tab504, tab505 = st.tabs([" in src
     assert "    with tab494:" in src
     # ordine: tab494 dopo tab493 nella dichiarazione
     i93 = src.index(f'"{TITLE493}"')
