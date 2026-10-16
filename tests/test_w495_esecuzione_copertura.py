@@ -75,7 +75,7 @@ def _piano():
 def test_registry_tab495():
     src = Path(__file__).resolve().parent.parent.joinpath("app.py").read_text()
     assert f'"{TITLE495}"' in src
-    assert "tab493, tab494, tab495, tab496, tab497, tab498, tab499, tab500, tab501, tab502, tab503, tab504, tab505, tab506 = st.tabs([" in src
+    assert "tab493, tab494, tab495, tab496, tab497, tab498, tab499, tab500, tab501, tab502, tab503, tab504, tab505, tab506, tab507 = st.tabs([" in src
     assert "    with tab495:" in src
     # ordine: tab495 dopo tab494 nella dichiarazione delle tab
     # (confronto dentro la riga st.tabs, non nel file: i titoli compaiono

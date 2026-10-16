@@ -1,0 +1,234 @@
+"""Test tab507 '🔭 Test prospettico di efficacia (scenari forward)': registry + funzioni pure."""
+
+import re
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from appfuncs import load as _load
+
+_F = _load("mh507_num", "mh507_pos", "mh507_nonneg", "mh507_str",
+           "mh507_scenario", "mh507_test", "mh507_riepilogo")
+
+TITLE507 = "🔭 Test prospettico di efficacia (scenari forward)"
+TITLE506 = "📉 Regressione di efficacia (OLS)"
+
+
+def _demo():
+    labs = ["Shock -20", "Shock -10", "Shock -5", "Shock +5", "Shock +10",
+            "Shock +20"]
+    moves = [-20.0, -10.0, -5.0, 5.0, 10.0, 20.0]
+    dh = [48000.0] * 6
+    di = [11500.0, 11750.0, 11875.0, 12125.0, 12250.0, 12500.0]
+    return labs, moves, dh, di
+
+
+class TestW507Validatori:
+    def test_num_ok(self):
+        assert _F["mh507_num"](3, "x") == 3.0
+        assert _F["mh507_num"](-2.5, "x") == -2.5
+
+    def test_num_ko(self):
+        for bad in (True, "3", None, float("nan"), float("inf")):
+            with pytest.raises(ValueError):
+                _F["mh507_num"](bad, "x")
+
+    def test_pos_ok(self):
+        assert _F["mh507_pos"](0.001, "x") == 0.001
+
+    def test_pos_ko(self):
+        for bad in (0.0, -1.0, True, "2", float("nan")):
+            with pytest.raises(ValueError):
+                _F["mh507_pos"](bad, "x")
+
+    def test_nonneg_ok(self):
+        assert _F["mh507_nonneg"](0.0, "x") == 0.0
+        assert _F["mh507_nonneg"](5, "x") == 5.0
+
+    def test_nonneg_ko(self):
+        for bad in (-0.001, float("inf"), None):
+            with pytest.raises(ValueError):
+                _F["mh507_nonneg"](bad, "x")
+
+    def test_str_ok(self):
+        assert _F["mh507_str"]("  Shock +5  ", "x") == "Shock +5"
+
+    def test_str_ko(self):
+        for bad in ("", "   ", None, 5):
+            with pytest.raises(ValueError):
+                _F["mh507_str"](bad, "x")
+
+
+class TestW507Scenario:
+    def test_demo_scenario(self):
+        s = _F["mh507_scenario"](-20.0, 48000.0, 11500.0, 3.9, 1500.0)
+        assert s["delta_coperto_eur"] == pytest.approx(-960000.0)
+        assert s["delta_strumento_eur"] == pytest.approx(897000.0)
+        assert s["ratio_offset"] == pytest.approx(0.934375)
+        assert s["rapporto_credito"] == pytest.approx(1500.0 / 897000.0)
+        assert s["verdetto"] == "IN_BANDA"
+
+    def test_segno_move_positivo(self):
+        # move positivo: coperto guadagna, strumento perde, ratio resta > 0
+        s = _F["mh507_scenario"](10.0, 48000.0, 12250.0, 3.9, 1500.0)
+        assert s["delta_coperto_eur"] == pytest.approx(480000.0)
+        assert s["delta_strumento_eur"] == pytest.approx(-477750.0)
+        assert s["ratio_offset"] == pytest.approx(0.9953125)
+        assert s["verdetto"] == "IN_BANDA"
+
+    def test_bordi_banda(self):
+        # ratio esattamente 0.8 e 1.25 -> IN_BANDA (bordi inclusi)
+        s1 = _F["mh507_scenario"](10.0, 10000.0, 8000.0, 1.0, 0.0)
+        assert s1["ratio_offset"] == pytest.approx(0.8)
+        assert s1["verdetto"] == "IN_BANDA"
+        s2 = _F["mh507_scenario"](10.0, 10000.0, 12500.0, 1.0, 0.0)
+        assert s2["ratio_offset"] == pytest.approx(1.25)
+        assert s2["verdetto"] == "IN_BANDA"
+
+    def test_fuori_banda_sotto(self):
+        s = _F["mh507_scenario"](10.0, 48000.0, 12000.0, 2.0, 1500.0)
+        assert s["ratio_offset"] == pytest.approx(0.5)
+        assert s["verdetto"] == "FUORI_BANDA"
+
+    def test_fuori_banda_sopra(self):
+        s = _F["mh507_scenario"](10.0, 48000.0, 12000.0, 6.0, 1500.0)
+        assert s["ratio_offset"] == pytest.approx(1.5)
+        assert s["verdetto"] == "FUORI_BANDA"
+
+    def test_rischio_credito(self):
+        # ecl enorme rispetto all'offset atteso
+        s = _F["mh507_scenario"](5.0, 48000.0, 12000.0, 3.9, 500000.0)
+        assert s["verdetto"] == "RISCHIO_CREDITO"
+
+    def test_soglia_credito_bordo(self):
+        # rapporto credito esattamente 5% -> non domina (bordo incluso)
+        # |ΔI| = 12000*4*10 = 480000 ; ecl = 24000 -> 0.05 ; ratio = 1.0
+        s = _F["mh507_scenario"](10.0, 48000.0, 12000.0, 4.0, 24000.0,
+                                 soglia_credito=0.05)
+        assert s["rapporto_credito"] == pytest.approx(0.05)
+        assert s["ratio_offset"] == pytest.approx(1.0)
+        assert s["verdetto"] == "IN_BANDA"
+
+    def test_move_nullo(self):
+        s = _F["mh507_scenario"](0.0, 48000.0, 12000.0, 3.9, 1500.0)
+        assert s["verdetto"] == "NON_VALUTABILE"
+        assert s["ratio_offset"] is None
+        assert s["rapporto_credito"] is None
+
+    def test_parametri_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh507_scenario"](10.0, 0.0, 12000.0, 3.9, 1500.0)  # dv01_h
+        with pytest.raises(ValueError):
+            _F["mh507_scenario"](10.0, 48000.0, -1.0, 3.9, 1500.0)  # dv01_i
+        with pytest.raises(ValueError):
+            _F["mh507_scenario"](10.0, 48000.0, 12000.0, 0.0, 1500.0)  # n
+        with pytest.raises(ValueError):
+            _F["mh507_scenario"](10.0, 48000.0, 12000.0, 3.9, -5.0)  # ecl
+        with pytest.raises(ValueError):
+            _F["mh507_scenario"](10.0, 48000.0, 12000.0, 3.9, 1500.0,
+                                 banda_inf=1.3, banda_sup=1.0)
+        with pytest.raises(ValueError):
+            _F["mh507_scenario"](10.0, 48000.0, 12000.0, 3.9, 1500.0,
+                                 soglia_credito=1.5)
+
+
+class TestW507Verdetti:
+    def test_demo_prospetticamente_efficace(self):
+        labs, moves, dh, di = _demo()
+        r = _F["mh507_test"](labs, moves, dh, di, 3.9, 1500.0, 48000.0,
+                             12000.0)
+        assert r["verdetto"] == "PROSPETTICAMENTE_EFFICACE"
+        assert r["n_scenari"] == 6
+        assert r["hedge_ratio_ottimale"] == pytest.approx(4.0)
+        assert r["ratio_min"] == pytest.approx(0.934375)
+        assert r["ratio_max"] == pytest.approx(1.015625)
+        assert r["banda"] == (0.8, 1.25)
+        assert r["soglia_credito"] == 0.05
+        assert all(x["verdetto"] == "IN_BANDA" for x in r["righe"])
+        assert r["righe"][0]["scenario"] == "Shock -20"
+
+    def test_non_efficace_un_fuori_banda_basta(self):
+        labs, moves, dh, di = _demo()
+        di2 = list(di)
+        di2[-1] = 20000.0  # ratio ultimo scenario = 1.625 -> FUORI_BANDA
+        r = _F["mh507_test"](labs, moves, dh, di2, 3.9, 1500.0, 48000.0,
+                             12000.0)
+        assert r["righe"][-1]["verdetto"] == "FUORI_BANDA"
+        assert r["verdetto"] == "NON_EFFICACE"
+
+    def test_a_rischio(self):
+        labs, moves, dh, di = _demo()
+        r = _F["mh507_test"](labs, moves, dh, di, 3.9, 500000.0, 48000.0,
+                             12000.0)
+        assert r["verdetto"] == "A_RISCHIO"
+
+    def test_non_valutabile(self):
+        labs = ["a", "b", "c"]
+        r = _F["mh507_test"](labs, [0.0, 0.0, 0.0], [48000.0] * 3,
+                             [12000.0] * 3, 3.9, 1500.0, 48000.0, 12000.0)
+        assert r["verdetto"] == "NON_VALUTABILE"
+        assert r["ratio_min"] is None and r["ratio_max"] is None
+
+    def test_lunghezze_diverse(self):
+        labs, moves, dh, di = _demo()
+        with pytest.raises(ValueError):
+            _F["mh507_test"](labs, moves[:5], dh, di, 3.9, 1500.0, 48000.0,
+                             12000.0)
+
+    def test_pochi_scenari(self):
+        with pytest.raises(ValueError):
+            _F["mh507_test"](["a", "b"], [10.0, -10.0], [48000.0] * 2,
+                             [12000.0] * 2, 3.9, 1500.0, 48000.0, 12000.0)
+
+    def test_basi_ko(self):
+        labs, moves, dh, di = _demo()
+        with pytest.raises(ValueError):
+            _F["mh507_test"](labs, moves, dh, di, 3.9, 1500.0, 0.0, 12000.0)
+
+    def test_etichette_ko(self):
+        labs, moves, dh, di = _demo()
+        with pytest.raises(ValueError):
+            _F["mh507_test"](["solo", "due"], moves, dh, di, 3.9, 1500.0,
+                             48000.0, 12000.0)
+
+
+class TestW507Riepilogo:
+    def test_demo(self):
+        labs, moves, dh, di = _demo()
+        s = _F["mh507_riepilogo"](labs, moves, dh, di, 3.9, 1500.0, 48000.0,
+                                  12000.0)
+        assert s["verdetto"] == "PROSPETTICAMENTE_EFFICACE"
+        assert len(s["righe"]) == 6
+        assert s["righe"][3]["scenario"] == "Shock +5"
+        assert s["righe"][3]["delta_coperto_eur"] == pytest.approx(240000.0)
+        assert s["righe"][3]["delta_strumento_eur"] == pytest.approx(
+            -236437.5)
+
+
+def test_registry_tab507():
+    src = Path(__file__).resolve().parent.parent.joinpath("app.py").read_text(encoding="utf-8")
+    line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
+    titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
+    assert len(titoli) == 507
+    assert TITLE507 in titoli
+    assert src.count(TITLE507) == 3
+    assert "tab506, tab507 = st.tabs([" in src
+    assert "    with tab507:" in src
+    dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
+    assert "tab507" in dvars
+    withs = re.findall(r"    with (tab\d+):", src)
+    assert "tab507" in withs
+    assert len(withs) == len(dvars) == 507
+    # ordine: tab507 dopo tab506
+    _decl507 = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
+    assert _decl507.index(f'"{TITLE506}"') < _decl507.index(f'"{TITLE507}"')
+    assert titoli[dvars.index("tab507")] == TITLE507
+
+
+def test_chiavi_st507_uniche():
+    src = Path(__file__).resolve().parent.parent.joinpath("app.py").read_text(encoding="utf-8")
+    keys = re.findall(r'key="(st507_[^"]+)"', src) + re.findall(
+        r'key=f"(st507_[^"]+)"', src)
+    assert len(keys) == len(set(keys)) > 5
