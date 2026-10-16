@@ -68,7 +68,7 @@ def test_registry_tab496():
     src = Path(__file__).resolve().parent.parent.joinpath("app.py").read_text()
     assert f'"{TITLE496}"' in src
     assert src.count(TITLE496) == 3
-    assert "tab495, tab496 = st.tabs([" in src
+    assert "tab495, tab496, tab497, tab498, tab499, tab500 = st.tabs([" in src
     assert "    with tab496:" in src
     # ordine: tab496 dopo tab495 nella dichiarazione delle tab
     _decl496 = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
