@@ -80,7 +80,7 @@ class TestRegistry484:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"    with (tab\d+):", src)
-        assert len(titoli) == len(dvars) == len(withs) == 491
+        assert len(titoli) == len(dvars) == len(withs) == 492
 
     def test_ultima_tab(self):
         import re
@@ -107,7 +107,7 @@ class TestRegistry484:
     def test_dvar_line(self):
         src = (Path(__file__).resolve().parent.parent / "app.py"
                ).read_text(encoding="utf-8")
-        assert "tab484, tab485, tab486, tab487, tab488, tab489, tab490, tab491 = st.tabs([" in src
+        assert "tab484, tab485, tab486, tab487, tab488, tab489, tab490, tab491, tab492 = st.tabs([" in src
 
 
 class TestNum484:

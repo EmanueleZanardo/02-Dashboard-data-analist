@@ -73,7 +73,7 @@ class TestRegistry488:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"    with (tab\d+):", src)
-        assert len(titoli) == len(dvars) == len(withs) == 491
+        assert len(titoli) == len(dvars) == len(withs) == 492
         assert TITLE488 in titoli
         assert "tab489" in dvars
 
@@ -88,7 +88,7 @@ class TestRegistry488:
 
     def test_dvar_line(self):
         src = self._src()
-        assert "tab486, tab487, tab488, tab489, tab490, tab491 = st.tabs([" in src
+        assert "tab486, tab487, tab488, tab489, tab490, tab491, tab492 = st.tabs([" in src
 
 
 class TestNum488:
