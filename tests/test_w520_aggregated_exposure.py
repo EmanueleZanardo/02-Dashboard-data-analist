@@ -1,0 +1,253 @@
+"""Test tab520 '🔁 Aggregated exposure (esposizione aggregata, IFRS 9 6.3.4)': registry + funzioni pure."""
+
+import math
+import re
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from appfuncs import load as _load
+
+_F = _load("mh520_num", "mh520_str", "mh520_componente", "mh520_verifica",
+           "mh520_riepilogo")
+
+TITLE520 = "🔁 Aggregated exposure (esposizione aggregata, IFRS 9 6.3.4)"
+TITLE519 = "⚠️💳 Rischio di credito che domina (IFRS 9)"
+
+
+def _c(cid="BASE-TTF-Q1", t="base", v=1250000.0, dv=42000.0,
+        d="Acquisto forecast TTF Q1 2027"):
+    return {"id": cid, "tipo": t, "valore": v, "variazione": dv,
+            "descrizione": d}
+
+
+def _e(eid="ESP-2026-001", comps=None):
+    if comps is None:
+        comps = [_c(),
+                 _c(cid="SWP-TTF-Q1", t="derivato", v=-8200.0,
+                     dv=-39500.0, d="Swap TTF Q1, prima relazione")]
+    return {"id": eid, "componenti": comps}
+
+
+class TestW520Validatori:
+    def test_num_ok(self):
+        assert _F["mh520_num"](2, "x") == 2.0
+        assert _F["mh520_num"](-8200.5, "x") == -8200.5
+
+    def test_num_ko(self):
+        for bad in (True, "2", None, float("nan"), float("inf")):
+            with pytest.raises(ValueError):
+                _F["mh520_num"](bad, "x")
+
+    def test_str_ok(self):
+        assert _F["mh520_str"]("  ESP-1 ", "x") == "ESP-1"
+
+    def test_str_ko(self):
+        for bad in (None, "", "   ", 5):
+            with pytest.raises(ValueError):
+                _F["mh520_str"](bad, "x")
+
+
+class TestW520Componente:
+    def test_ok_base(self):
+        r = _F["mh520_componente"](_c())
+        assert r["id"] == "BASE-TTF-Q1"
+        assert r["tipo"] == "base"
+        assert r["contributo"] == pytest.approx(42000.0)
+        assert r["descrizione"] == "Acquisto forecast TTF Q1 2027"
+
+    def test_ok_derivato_senza_descrizione(self):
+        r = _F["mh520_componente"](_c(cid="SWP-1", t="derivato",
+                                       v=-8200.0, dv=-39500.0, d=""))
+        assert r["tipo"] == "derivato"
+        assert r["descrizione"] == ""
+        assert r["contributo"] == pytest.approx(39500.0)
+
+    def test_descrizione_default(self):
+        d = _c()
+        del d["descrizione"]
+        r = _F["mh520_componente"](d)
+        assert r["descrizione"] == ""
+
+    def test_tipo_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh520_componente"](_c(t="hedge"))
+        with pytest.raises(ValueError):
+            _F["mh520_componente"](_c(t="BASE"))
+
+    def test_chiave_mancante(self):
+        d = _c()
+        del d["valore"]
+        with pytest.raises(ValueError):
+            _F["mh520_componente"](d)
+
+    def test_non_dict(self):
+        with pytest.raises(ValueError):
+            _F["mh520_componente"](["id"])
+
+    def test_id_vuoto(self):
+        with pytest.raises(ValueError):
+            _F["mh520_componente"](_c(cid="  "))
+
+    def test_valori_ko(self):
+        for bad in (True, float("nan"), float("inf"), "42000"):
+            with pytest.raises(ValueError):
+                _F["mh520_componente"](_c(dv=bad))
+
+    def test_descrizione_non_str(self):
+        with pytest.raises(ValueError):
+            _F["mh520_componente"](_c(d=5))
+
+
+class TestW520Verifica:
+    def test_demo_eleggibile(self):
+        r = _F["mh520_verifica"](_e())
+        assert r["id"] == "ESP-2026-001"
+        assert r["n_base"] == 1
+        assert r["n_derivati"] == 1
+        assert r["valore_aggregato"] == pytest.approx(1241800.0)
+        assert r["variazione_aggregata"] == pytest.approx(2500.0)
+        assert r["contributo_derivati"] == pytest.approx(
+            39500.0 / 81500.0)
+        assert r["verdetto"] == "ELEGGIBILE"
+        assert r["motivo"] == ""
+        assert len(r["righe"]) == 2
+
+    def test_non_eleggibile_solo_derivati(self):
+        r = _F["mh520_verifica"](
+            _e(eid="ESP-2026-002",
+               comps=[_c(cid="FWD-TTF-01", t="derivato", v=12000.0,
+                          dv=1500.0, d="Forward TTF"),
+                      _c(cid="OPT-TTF-01", t="derivato", v=-3400.0,
+                          dv=-900.0, d="Opzione TTF")]))
+        assert r["verdetto"] == "NON_ELEGGIBILE"
+        assert r["motivo"] == "nessuna componente di base"
+        assert r["contributo_derivati"] == pytest.approx(1.0)
+
+    def test_non_eleggibile_solo_base(self):
+        r = _F["mh520_verifica"](
+            _e(eid="X", comps=[_c(cid="A"), _c(cid="B", t="base")]))
+        assert r["verdetto"] == "NON_ELEGGIBILE"
+        assert "derivato" in r["motivo"]
+
+    def test_non_eleggibile_una_sola_componente(self):
+        r = _F["mh520_verifica"](_e(eid="X", comps=[_c()]))
+        assert r["verdetto"] == "NON_ELEGGIBILE"
+        assert r["motivo"] != ""
+
+    def test_denominatore_zero(self):
+        r = _F["mh520_verifica"](
+            _e(eid="X",
+               comps=[_c(cid="A", dv=0.0),
+                      _c(cid="D", t="derivato", v=0.0, dv=0.0)]))
+        assert r["verdetto"] == "ELEGGIBILE"
+        assert r["contributo_derivati"] == 0.0
+
+    def test_id_componente_duplicato(self):
+        with pytest.raises(ValueError):
+            _F["mh520_verifica"](_e(eid="X",
+                                   comps=[_c(cid="A"), _c(cid="A",
+                                                           t="derivato")]))
+
+    def test_componenti_vuota(self):
+        with pytest.raises(ValueError):
+            _F["mh520_verifica"](_e(eid="X", comps=[]))
+
+    def test_degeneri(self):
+        with pytest.raises(ValueError):
+            _F["mh520_verifica"]("non un dict")
+        with pytest.raises(ValueError):
+            _F["mh520_verifica"]({"id": "X"})
+        with pytest.raises(ValueError):
+            _F["mh520_verifica"]({"id": "  ",
+                                  "componenti": [_c(), _c(cid="B",
+                                                          t="derivato")]})
+        with pytest.raises(ValueError):
+            _F["mh520_verifica"]({"id": "X", "componenti": "no"})
+        with pytest.raises(ValueError):
+            _F["mh520_verifica"](
+                {"id": "X",
+                 "componenti": [{"id": "A", "tipo": "base"}]})
+
+
+class TestW520Riepilogo:
+    def test_misto(self):
+        a = _F["mh520_riepilogo"](
+            [_e(),
+             _e(eid="ESP-2026-002",
+                comps=[_c(cid="FWD", t="derivato", v=12000.0,
+                           dv=1500.0, d="Forward TTF"),
+                       _c(cid="OPT", t="derivato", v=-3400.0,
+                           dv=-900.0, d="Opzione TTF")])])
+        t = a["totali"]
+        assert t["n_esposizioni"] == 2
+        assert t["n_eleggibili"] == 1
+        assert t["n_non_eleggibili"] == 1
+        assert t["valore_aggregato_totale"] == pytest.approx(
+            1241800.0 + 8600.0)
+        assert t["variazione_aggregata_totale"] == pytest.approx(
+            2500.0 + 600.0)
+        assert t["verdetto_complessivo"] == "MISTO"
+
+    def test_tutte_eleggibili(self):
+        a = _F["mh520_riepilogo"]([_e(), _e(eid="Y")])
+        assert a["totali"]["verdetto_complessivo"] == "TUTTE_ELEGGIBILI"
+        assert a["totali"]["n_eleggibili"] == 2
+
+    def test_nessuna_eleggibile(self):
+        solo_d = _e(eid="Z",
+                    comps=[_c(cid="F", t="derivato", dv=1500.0),
+                           _c(cid="O", t="derivato", dv=-900.0)])
+        a = _F["mh520_riepilogo"]([solo_d])
+        assert a["totali"]["verdetto_complessivo"] == "NESSUNA_ELEGGIBILE"
+
+    def test_contributo_derivati_totale(self):
+        a = _F["mh520_riepilogo"]([_e()])
+        assert a["totali"]["contributo_derivati_totale"] == pytest.approx(
+            39500.0 / 81500.0)
+
+    def test_wrapper_parita_verifica(self):
+        a = _F["mh520_riepilogo"]([_e()])
+        v = _F["mh520_verifica"](_e())
+        assert a["righe"][0]["valore_aggregato"] == pytest.approx(
+            v["valore_aggregato"])
+        assert a["righe"][0]["verdetto"] == v["verdetto"]
+
+    def test_degeneri(self):
+        with pytest.raises(ValueError):
+            _F["mh520_riepilogo"]([])
+        with pytest.raises(ValueError):
+            _F["mh520_riepilogo"]("non una lista")
+        with pytest.raises(ValueError):
+            _F["mh520_riepilogo"]([_e(eid="A"), _e(eid="A")])
+
+
+def test_registry_tab520():
+    src = Path(__file__).resolve().parent.parent.joinpath("app.py").read_text(
+        encoding="utf-8")
+    line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
+    titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
+    assert len(titoli) == 520
+    assert TITLE520 in titoli
+    assert src.count(TITLE520) == 3
+    assert ", tab519, tab520 = st.tabs([" in src
+    assert "    with tab520:" in src
+    dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
+    assert "tab520" in dvars
+    withs = re.findall(r"    with (tab\d+):", src)
+    assert withs[-1] == "tab520"
+    assert len(withs) == len(dvars) == 520
+    # ordine: tab520 dopo tab519
+    _decl520 = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
+    assert _decl520.index(f'"{TITLE519}"') < _decl520.index(f'"{TITLE520}"')
+    assert titoli[dvars.index("tab520")] == TITLE520
+
+
+def test_chiavi_st520_uniche():
+    src = Path(__file__).resolve().parent.parent.joinpath("app.py").read_text(
+        encoding="utf-8")
+    keys = re.findall(r'key="(st520_[^"]+)"', src) + re.findall(
+        r'key=f"(st520_[^"]+)"', src)
+    assert len(keys) == len(set(keys)) > 5
