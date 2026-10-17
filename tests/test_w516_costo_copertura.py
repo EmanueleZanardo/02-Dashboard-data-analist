@@ -1,0 +1,178 @@
+"""Test tab516 '⏳ Costo della copertura (time value, IFRS 9)': registry + funzioni pure."""
+
+import re
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from appfuncs import load as _load
+
+_F = _load("mh516_num", "mh516_str", "mh516_opzione",
+           "mh516_costo", "mh516_riepilogo")
+
+TITLE516 = "⏳ Costo della copertura (time value, IFRS 9)"
+TITLE515 = "🛑 Cessazione della copertura (hedge discontinuation)"
+
+
+def _o(rid="OP-2026-001", fv=12500.0, intr=8000.0, tv=4500.0,
+       tipo="periodo", nper=6, real=False):
+    return {"id": rid, "fair_value": fv, "intrinsic": intr,
+            "time_value": tv, "tipo": tipo, "n_periodi": nper,
+            "transazione_realizzata": real}
+
+
+class TestW516Validatori:
+    def test_num_ok(self):
+        assert _F["mh516_num"](2, "x") == 2.0
+
+    def test_num_ko(self):
+        for bad in (True, "2", None, float("nan"), float("inf")):
+            with pytest.raises(ValueError):
+                _F["mh516_num"](bad, "x")
+
+    def test_str_ok(self):
+        assert _F["mh516_str"]("  OP-1 ", "x") == "OP-1"
+
+    def test_str_ko(self):
+        for bad in (None, "", "   ", 5):
+            with pytest.raises(ValueError):
+                _F["mh516_str"](bad, "x")
+
+
+class TestW516Opzione:
+    def test_ok(self):
+        r = _F["mh516_opzione"](_o())
+        assert r["id"] == "OP-2026-001"
+        assert r["tipo"] == "periodo"
+        assert r["n_periodi"] == 6
+        assert r["scostamento"] == pytest.approx(0.0)
+        assert r["scostamento_ok"] is True
+
+    def test_scostamento_flag(self):
+        r = _F["mh516_opzione"](_o(fv=12510.0))
+        assert r["scostamento"] == pytest.approx(10.0)
+        assert r["scostamento_ok"] is False
+
+    def test_tipo_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh516_opzione"](_o(tipo="futuro"))
+
+    def test_chiave_mancante_ko(self):
+        d = _o()
+        del d["time_value"]
+        with pytest.raises(ValueError):
+            _F["mh516_opzione"](d)
+
+    def test_n_periodi_ko(self):
+        for bad in (0, -3, 1.5, "6", True, None):
+            with pytest.raises(ValueError):
+                _F["mh516_opzione"](_o(nper=bad))
+
+    def test_real_non_bool_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh516_opzione"](_o(real="si"))
+
+
+class TestW516Costo:
+    def test_periodo_piano(self):
+        a = _F["mh516_costo"]([_o()])
+        o = a["righe"][0]
+        assert o["verdetto"] == "AMMORTAMENTO_SISTEMATICO"
+        assert o["quota_periodo"] == pytest.approx(750.0)
+        assert len(o["piano"]) == 6
+        assert o["piano"][0] == {"periodo": 1, "quota": pytest.approx(750.0),
+                                 "residuo": pytest.approx(3750.0)}
+        assert o["piano"][-1]["residuo"] == pytest.approx(0.0)
+        assert o["ammortizzato"] == pytest.approx(4500.0)
+        assert o["differito"] == pytest.approx(0.0)
+        assert o["rilasciato"] == pytest.approx(0.0)
+
+    def test_transazione_differita(self):
+        a = _F["mh516_costo"](
+            [_o(rid="B", tipo="transazione", nper=1, real=False)])
+        o = a["righe"][0]
+        assert o["verdetto"] == "DIFFERITO_OCI"
+        assert o["quota_periodo"] is None
+        assert o["piano"] == []
+        assert o["differito"] == pytest.approx(4500.0)
+
+    def test_transazione_rilasciata(self):
+        a = _F["mh516_costo"](
+            [_o(rid="B", tipo="transazione", nper=1, real=True)])
+        o = a["righe"][0]
+        assert o["verdetto"] == "RILASCIO_A_PNL"
+        assert o["rilasciato"] == pytest.approx(4500.0)
+        assert o["differito"] == pytest.approx(0.0)
+
+    def test_totali_demo(self):
+        a = _F["mh516_costo"]([
+            _o("OP-2026-001", 12500.0, 8000.0, 4500.0, "periodo", 6, False),
+            _o("OP-2026-002", 6200.0, 5000.0, 1200.0,
+               "transazione", 1, False)])
+        tt = a["totali"]
+        assert tt["n_opzioni"] == 2
+        assert tt["costo_totale"] == pytest.approx(5700.0)
+        assert tt["ammortizzato_totale"] == pytest.approx(4500.0)
+        assert tt["differito_totale"] == pytest.approx(1200.0)
+        assert tt["rilasciato_totale"] == pytest.approx(0.0)
+        assert tt["n_scostamenti"] == 0
+        assert tt["verdetto_complessivo"] == "MISTO"
+
+    def test_complessivo_tutto_differito(self):
+        a = _F["mh516_costo"](
+            [_o("A", tipo="transazione", nper=1, real=False)])
+        assert a["totali"]["verdetto_complessivo"] == "TUTTO_DIFFERITO"
+
+    def test_complessivo_tutto_rilasciato(self):
+        a = _F["mh516_costo"](
+            [_o("A", tipo="transazione", nper=1, real=True)])
+        assert a["totali"]["verdetto_complessivo"] == "TUTTO_RILASCIATO"
+
+    def test_complessivo_tutto_ammortamento(self):
+        a = _F["mh516_costo"]([_o("A"), _o("B")])
+        assert a["totali"]["verdetto_complessivo"] == \
+            "AMMORTAMENTO_SISTEMATICO"
+
+    def test_degeneri(self):
+        with pytest.raises(ValueError):
+            _F["mh516_costo"]([])
+        with pytest.raises(ValueError):
+            _F["mh516_costo"]("non una lista")
+        with pytest.raises(ValueError):
+            _F["mh516_costo"]([_o(rid="A"), _o(rid="A")])
+        with pytest.raises(ValueError):
+            _F["mh516_costo"]([_o(tv=float("nan"))])
+
+    def test_riepilogo_wrapper(self):
+        a = _F["mh516_riepilogo"]([_o()])
+        assert a["totali"]["n_opzioni"] == 1
+        assert a["righe"][0]["verdetto"] == "AMMORTAMENTO_SISTEMATICO"
+
+
+def test_registry_tab516():
+    src = Path(__file__).resolve().parent.parent.joinpath("app.py").read_text(encoding="utf-8")
+    line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
+    titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
+    assert len(titoli) == 516
+    assert TITLE516 in titoli
+    assert src.count(TITLE516) == 3
+    assert ", tab515, tab516 = st.tabs([" in src
+    assert "    with tab516:" in src
+    dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
+    assert "tab516" in dvars
+    withs = re.findall(r"    with (tab\d+):", src)
+    assert "tab516" in withs
+    assert len(withs) == len(dvars) == 516
+    # ordine: tab516 dopo tab515
+    _decl516 = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
+    assert _decl516.index(f'"{TITLE515}"') < _decl516.index(f'"{TITLE516}"')
+    assert titoli[dvars.index("tab516")] == TITLE516
+
+
+def test_chiavi_st516_uniche():
+    src = Path(__file__).resolve().parent.parent.joinpath("app.py").read_text(encoding="utf-8")
+    keys = re.findall(r'key="(st516_[^"]+)"', src) + re.findall(
+        r'key=f"(st516_[^"]+)"', src)
+    assert len(keys) == len(set(keys)) > 5
