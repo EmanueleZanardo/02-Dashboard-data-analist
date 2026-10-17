@@ -1,0 +1,178 @@
+"""Test tab517 '🧩 Componenti di rischio designati (IFRS 9)': registry + funzioni pure."""
+
+import re
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from appfuncs import load as _load
+
+_F = _load("mh517_num", "mh517_pct", "mh517_str", "mh517_componente",
+           "mh517_valutazione", "mh517_riepilogo")
+
+TITLE517 = "🧩 Componenti di rischio designati (IFRS 9)"
+TITLE516 = "⏳ Costo della copertura (time value, IFRS 9)"
+
+
+def _c(rid="RC-2026-001", elem="PPA baseload 2027", comp="TTF",
+       met="contratto_esplicito", quota=80.0, mis=True, imp=65.0):
+    return {"id": rid, "elemento": elem, "componente": comp, "metodo": met,
+            "quota_designata": quota, "misurabile": mis,
+            "impatto_componente": imp}
+
+
+class TestW517Validatori:
+    def test_num_ok(self):
+        assert _F["mh517_num"](2, "x") == 2.0
+
+    def test_num_ko(self):
+        for bad in (True, "2", None, float("nan"), float("inf")):
+            with pytest.raises(ValueError):
+                _F["mh517_num"](bad, "x")
+
+    def test_pct_ok(self):
+        assert _F["mh517_pct"](0.5, "x") == 0.5
+        assert _F["mh517_pct"](100.0, "x") == 100.0
+        assert _F["mh517_pct"](0.0, "x", zero_ok=True) == 0.0
+
+    def test_pct_ko(self):
+        for bad in (0.0, -1.0, 100.1, "50", True):
+            with pytest.raises(ValueError):
+                _F["mh517_pct"](bad, "x")
+        with pytest.raises(ValueError):
+            _F["mh517_pct"](-1.0, "x", zero_ok=True)
+        with pytest.raises(ValueError):
+            _F["mh517_pct"](100.1, "x", zero_ok=True)
+
+    def test_str_ok(self):
+        assert _F["mh517_str"]("  RC-1 ", "x") == "RC-1"
+
+    def test_str_ko(self):
+        for bad in (None, "", "   ", 5):
+            with pytest.raises(ValueError):
+                _F["mh517_str"](bad, "x")
+
+
+class TestW517Componente:
+    def test_ok(self):
+        r = _F["mh517_componente"](_c())
+        assert r["id"] == "RC-2026-001"
+        assert r["componente"] == "TTF"
+        assert r["identificabile"] is True
+        assert r["verdetto"] == "DESIGNABILE"
+        assert r["motivo"] == ""
+
+    def test_soglia_identificabile(self):
+        r = _F["mh517_componente"](_c(imp=10.0))
+        assert r["identificabile"] is True
+        assert r["verdetto"] == "DESIGNABILE"
+        r2 = _F["mh517_componente"](_c(imp=9.99))
+        assert r2["identificabile"] is False
+        assert r2["verdetto"] == "NON_DESIGNABILE"
+        assert "10%" in r2["motivo"]
+
+    def test_non_misurabile(self):
+        r = _F["mh517_componente"](_c(mis=False))
+        assert r["verdetto"] == "NON_DESIGNABILE"
+        assert "misurabile" in r["motivo"]
+
+    def test_doppio_motivo(self):
+        r = _F["mh517_componente"](_c(mis=False, imp=8.0))
+        assert r["verdetto"] == "NON_DESIGNABILE"
+        assert "; " in r["motivo"]
+
+    def test_componente_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh517_componente"](_c(comp="PETROLIO"))
+
+    def test_metodo_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh517_componente"](_c(met="a occhio"))
+
+    def test_chiave_mancante_ko(self):
+        d = _c()
+        del d["quota_designata"]
+        with pytest.raises(ValueError):
+            _F["mh517_componente"](d)
+
+    def test_quota_ko(self):
+        for bad in (0.0, -5.0, 100.1, "80", True, None):
+            with pytest.raises(ValueError):
+                _F["mh517_componente"](_c(quota=bad))
+
+    def test_impatto_ko(self):
+        for bad in (-0.1, 100.1, "65", True, None):
+            with pytest.raises(ValueError):
+                _F["mh517_componente"](_c(imp=bad))
+
+    def test_mis_non_bool_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh517_componente"](_c(mis="si"))
+
+
+class TestW517Valutazione:
+    def test_demo_misto(self):
+        a = _F["mh517_valutazione"](
+            [_c(), _c(rid="RC-2026-002", elem="Vendita spark spread Q1",
+                      comp="EUA_CO2", met="inferenza_statistica",
+                      quota=50.0, mis=False, imp=8.0)])
+        tt = a["totali"]
+        assert tt["n_componenti"] == 2
+        assert tt["n_designabili"] == 1
+        assert tt["quota_designata_media"] == pytest.approx(65.0)
+        assert tt["impatto_medio"] == pytest.approx(36.5)
+        assert tt["verdetto_complessivo"] == "MISTO"
+        assert a["righe"][0]["verdetto"] == "DESIGNABILE"
+        assert a["righe"][1]["verdetto"] == "NON_DESIGNABILE"
+
+    def test_complessivo_tutte_designabili(self):
+        a = _F["mh517_valutazione"]([_c(), _c(rid="B")])
+        assert a["totali"]["verdetto_complessivo"] == "TUTTE_DESIGNABILI"
+
+    def test_complessivo_nessuna(self):
+        a = _F["mh517_valutazione"]([_c(rid="A", mis=False)])
+        assert a["totali"]["verdetto_complessivo"] == "NESSUNA_DESIGNABILE"
+
+    def test_degeneri(self):
+        with pytest.raises(ValueError):
+            _F["mh517_valutazione"]([])
+        with pytest.raises(ValueError):
+            _F["mh517_valutazione"]("non una lista")
+        with pytest.raises(ValueError):
+            _F["mh517_valutazione"]([_c(rid="A"), _c(rid="A")])
+
+    def test_riepilogo_wrapper(self):
+        a = _F["mh517_riepilogo"]([_c()])
+        assert a["totali"]["n_componenti"] == 1
+        assert a["righe"][0]["verdetto"] == "DESIGNABILE"
+
+
+def test_registry_tab517():
+    src = Path(__file__).resolve().parent.parent.joinpath("app.py").read_text(
+        encoding="utf-8")
+    line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
+    titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
+    assert len(titoli) == 517
+    assert TITLE517 in titoli
+    assert src.count(TITLE517) == 3
+    assert ", tab516, tab517 = st.tabs([" in src
+    assert "    with tab517:" in src
+    dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
+    assert "tab517" in dvars
+    withs = re.findall(r"    with (tab\d+):", src)
+    assert "tab517" in withs
+    assert len(withs) == len(dvars) == 517
+    # ordine: tab517 dopo tab516
+    _decl517 = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
+    assert _decl517.index(f'"{TITLE516}"') < _decl517.index(f'"{TITLE517}"')
+    assert titoli[dvars.index("tab517")] == TITLE517
+
+
+def test_chiavi_st517_uniche():
+    src = Path(__file__).resolve().parent.parent.joinpath("app.py").read_text(
+        encoding="utf-8")
+    keys = re.findall(r'key="(st517_[^"]+)"', src) + re.findall(
+        r'key=f"(st517_[^"]+)"', src)
+    assert len(keys) == len(set(keys)) > 5
