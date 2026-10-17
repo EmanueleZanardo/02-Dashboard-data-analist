@@ -1,0 +1,228 @@
+"""Test tab509 '🧾 Scritture contabili (IFRS 9)': registry + funzioni pure."""
+
+import re
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from appfuncs import load as _load
+
+_F = _load("mh509_num", "mh509_str", "mh509_data", "mh509_riga",
+           "mh509_registrazione", "mh509_scritture", "mh509_mastro",
+           "mh509_riepilogo")
+
+TITLE509 = "🧾 Scritture contabili (IFRS 9)"
+TITLE508 = "📝 Documentazione della copertura (IFRS 9)"
+
+
+def _demo():
+    return [
+        {"periodo": "Q1 2026", "data": "2026-03-31",
+         "delta_fv_strumento": 45000.0, "quota_efficace": 44100.0,
+         "recycling_oci": 0.0},
+        {"periodo": "Q2 2026", "data": "2026-06-30",
+         "delta_fv_strumento": -30000.0, "quota_efficace": -29400.0,
+         "recycling_oci": 35000.0},
+        {"periodo": "Lug 2026", "data": "2026-07-31",
+         "delta_fv_strumento": 22000.0, "quota_efficace": 21560.0,
+         "recycling_oci": 18000.0},
+        {"periodo": "Ago 2026", "data": "2026-08-31",
+         "delta_fv_strumento": -14000.0, "quota_efficace": -13720.0,
+         "recycling_oci": 15000.0},
+    ]
+
+
+class TestW509Validatori:
+    def test_num_ok(self):
+        assert _F["mh509_num"](2, "x") == 2.0
+
+    def test_num_ko(self):
+        for bad in (True, "2", None, float("nan"), float("inf")):
+            with pytest.raises(ValueError):
+                _F["mh509_num"](bad, "x")
+
+    def test_str_ok(self):
+        assert _F["mh509_str"]("  HR-1 ", "x") == "HR-1"
+
+    def test_str_ko(self):
+        for bad in (None, "", "   ", 5):
+            with pytest.raises(ValueError):
+                _F["mh509_str"](bad, "x")
+
+    def test_data_ok(self):
+        assert _F["mh509_data"]("2026-10-16") == "2026-10-16"
+
+    def test_data_ko(self):
+        for bad in (None, "", "16/10/2026", "2026-13-01", "2026-02-30"):
+            with pytest.raises(ValueError):
+                _F["mh509_data"](bad)
+        with pytest.raises(ValueError):
+            _F["mh509_data"]("2099-01-01")  # futura
+
+
+class TestW509Riga:
+    def test_dare(self):
+        r = _F["mh509_riga"]("Riserva OCI - copertura CFH", 100.0, 0.0)
+        assert r["dare"] == 100.0 and r["avere"] == 0.0
+
+    def test_avere(self):
+        r = _F["mh509_riga"]("Riserva OCI - copertura CFH", 0.0, 250.5)
+        assert r["dare"] == 0.0 and r["avere"] == 250.5
+
+    def test_due_lati_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh509_riga"]("C", 10.0, 10.0)
+
+    def test_nulla_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh509_riga"]("C", 0.0, 0.0)
+
+    def test_negativa_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh509_riga"]("C", -5.0, 0.0)
+
+    def test_conto_vuoto_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh509_riga"]("", 5.0, 0.0)
+
+
+class TestW509Registrazione:
+    def test_quadrata(self):
+        r = _F["mh509_registrazione"](
+            "2026-03-31", "Copertura CFH HR-1 - Q1",
+            [_F["mh509_riga"]("Strumento derivato - FV", 45000.0, 0.0),
+             _F["mh509_riga"]("Riserva OCI - copertura CFH", 0.0, 44100.0),
+             _F["mh509_riga"]("Utile da inefficacia - P&L", 0.0, 900.0)])
+        assert r["quadrata"]
+        assert r["totale_dare"] == 45000.0
+        assert r["totale_avere"] == 45000.0
+
+    def test_non_quadrata_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh509_registrazione"](
+                "2026-03-31", "C",
+                [_F["mh509_riga"]("A", 100.0, 0.0),
+                 _F["mh509_riga"]("B", 0.0, 99.0)])
+
+    def test_vuota_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh509_registrazione"]("2026-03-31", "C", [])
+
+    def test_data_futura_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh509_registrazione"](
+                "2099-01-01", "C",
+                [_F["mh509_riga"]("A", 10.0, 0.0),
+                 _F["mh509_riga"]("B", 0.0, 10.0)])
+
+
+class TestW509Scritture:
+    def test_demo_quattro_periodi(self):
+        s = _F["mh509_riepilogo"]("HR-2026-001", _demo())
+        assert s["n_registrazioni"] == 4
+        assert s["tutte_quadrate"]
+        assert s["totale_dare"] == pytest.approx(179000.0)
+        assert s["totale_avere"] == pytest.approx(179000.0)
+        # Q1: D Derivato 45000 (44100 eff + 900 ineff), A Riserva 44100,
+        #     A Utile P&L 900
+        q1 = s["registrazioni"][0]
+        assert q1["totale_dare"] == 45000.0
+        assert len(q1["righe"]) == 4
+        # Q2: include inefficacia negativa + recycling
+        q2 = s["registrazioni"][1]
+        assert q2["totale_dare"] == 65000.0
+        conti2 = {r["conto"] for r in q2["righe"]}
+        assert "Perdita da inefficacia - P&L" in conti2
+        assert "Ricavi da recycling - P&L" in conti2
+
+    def test_mastro(self):
+        s = _F["mh509_riepilogo"]("HR-2026-001", _demo())
+        m = {c["conto"]: c for c in s["mastro"]}
+        der = m["Strumento derivato - FV"]
+        assert der["dare"] == pytest.approx(67000.0)
+        assert der["avere"] == pytest.approx(44000.0)
+        assert der["saldo"] == pytest.approx(23000.0)
+        oci = m["Riserva OCI - copertura CFH"]
+        assert oci["avere"] == pytest.approx(65660.0)
+        assert oci["dare"] == pytest.approx(111120.0)
+        # saldo mastro coerente con totale dare/avere
+        assert sum(c["saldo"] for c in s["mastro"]) == pytest.approx(0.0)
+
+    def test_periodo_senza_movimenti_saltato(self):
+        s = _F["mh509_riepilogo"](
+            "HR-1",
+            [{"periodo": "P1", "data": "2026-01-31",
+              "delta_fv_strumento": 0.0, "quota_efficace": 0.0,
+              "recycling_oci": 0.0}])
+        assert s["n_registrazioni"] == 0
+        assert s["totale_dare"] == 0.0
+        assert s["tutte_quadrate"]
+
+    def test_recycling_negativo(self):
+        s = _F["mh509_riepilogo"](
+            "HR-1",
+            [{"periodo": "P1", "data": "2026-01-31",
+              "delta_fv_strumento": 1000.0, "quota_efficace": 980.0,
+              "recycling_oci": -200.0}])
+        conti = {r["conto"] for r in s["registrazioni"][0]["righe"]}
+        assert "Costi da recycling - P&L" in conti
+        assert s["tutte_quadrate"]
+
+    def test_degenere(self):
+        # |quota_efficace| > |delta_fv|
+        with pytest.raises(ValueError):
+            _F["mh509_riepilogo"](
+                "HR-1",
+                [{"periodo": "P1", "data": "2026-01-31",
+                  "delta_fv_strumento": 1000.0, "quota_efficace": 1100.0,
+                  "recycling_oci": 0.0}])
+        # segni discordi
+        with pytest.raises(ValueError):
+            _F["mh509_riepilogo"](
+                "HR-1",
+                [{"periodo": "P1", "data": "2026-01-31",
+                  "delta_fv_strumento": 1000.0, "quota_efficace": -900.0,
+                  "recycling_oci": 0.0}])
+        # chiave mancante
+        with pytest.raises(ValueError):
+            _F["mh509_riepilogo"](
+                "HR-1", [{"periodo": "P1", "data": "2026-01-31"}])
+        # relazione vuota
+        with pytest.raises(ValueError):
+            _F["mh509_riepilogo"]("  ", _demo())
+        # data futura
+        with pytest.raises(ValueError):
+            _F["mh509_riepilogo"](
+                "HR-1",
+                [{"periodo": "P1", "data": "2099-01-31",
+                  "delta_fv_strumento": 1000.0, "quota_efficace": 980.0,
+                  "recycling_oci": 0.0}])
+
+
+def test_registry_tab509():
+    src = Path(__file__).resolve().parent.parent.joinpath("app.py").read_text(encoding="utf-8")
+    line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
+    titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
+    assert len(titoli) == 509
+    assert TITLE509 in titoli
+    assert src.count(TITLE509) == 3
+    assert ", tab508, tab509 = st.tabs([" in src
+    assert "    with tab509:" in src
+    dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
+    assert "tab509" in dvars
+    withs = re.findall(r"    with (tab\d+):", src)
+    assert "tab509" in withs
+    assert len(withs) == len(dvars) == 509
+    # ordine: tab509 dopo tab508
+    _decl509 = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
+    assert _decl509.index(f'"{TITLE508}"') < _decl509.index(f'"{TITLE509}"')
+    assert titoli[dvars.index("tab509")] == TITLE509
+
+
+def test_chiavi_st509_uniche():
+    src = Path(__file__).resolve().parent.parent.joinpath("app.py").read_text(encoding="utf-8")
+    keys = re.findall(r'key="(st509_[^"]+)"', src) + re.findall(
+        r'key=f"(st509_[^"]+)"', src)
+    assert len(keys) == len(set(keys)) > 5
