@@ -169,16 +169,16 @@ def test_registry_tab506():
     src = Path(__file__).resolve().parent.parent.joinpath("app.py").read_text(encoding="utf-8")
     line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
     titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
-    assert len(titoli) == 520
+    assert len(titoli) == 521
     assert TITLE506 in titoli
     assert src.count(TITLE506) == 3
-    assert "tab504, tab505, tab506, tab507, tab508, tab509, tab510, tab511, tab512, tab513, tab514, tab515, tab516, tab517, tab518, tab519, tab520 = st.tabs([" in src
+    assert "tab504, tab505, tab506, tab507, tab508, tab509, tab510, tab511, tab512, tab513, tab514, tab515, tab516, tab517, tab518, tab519, tab520, tab521 = st.tabs([" in src
     assert "    with tab506:" in src
     dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
     assert "tab506" in dvars
     withs = re.findall(r"    with (tab\d+):", src)
     assert "tab506" in withs
-    assert len(withs) == len(dvars) == 520
+    assert len(withs) == len(dvars) == 521
     # ordine: tab506 dopo tab505
     _decl506 = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
     assert _decl506.index(f'"{TITLE505}"') < _decl506.index(f'"{TITLE506}"')
