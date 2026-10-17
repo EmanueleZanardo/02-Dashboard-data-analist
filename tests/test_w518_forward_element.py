@@ -152,16 +152,16 @@ def test_registry_tab518():
         encoding="utf-8")
     line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
     titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
-    assert len(titoli) == 522
+    assert len(titoli) == 523
     assert TITLE518 in titoli
     assert src.count(TITLE518) == 3
-    assert ", tab517, tab518, tab519, tab520, tab521, tab522 = st.tabs([" in src
+    assert ", tab517, tab518, tab519, tab520, tab521, tab522, tab523 = st.tabs([" in src
     assert "    with tab518:" in src
     dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
     assert "tab518" in dvars
     withs = re.findall(r"    with (tab\d+):", src)
     assert "tab518" in withs
-    assert len(withs) == len(dvars) == 522
+    assert len(withs) == len(dvars) == 523
     # ordine: tab518 dopo tab517
     _decl518 = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
     assert _decl518.index(f'"{TITLE517}"') < _decl518.index(f'"{TITLE518}"')
