@@ -169,16 +169,16 @@ def test_registry_tab506():
     src = Path(__file__).resolve().parent.parent.joinpath("app.py").read_text(encoding="utf-8")
     line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
     titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
-    assert len(titoli) == 512
+    assert len(titoli) == 513
     assert TITLE506 in titoli
     assert src.count(TITLE506) == 3
-    assert "tab504, tab505, tab506, tab507, tab508, tab509, tab510, tab511, tab512 = st.tabs([" in src
+    assert "tab504, tab505, tab506, tab507, tab508, tab509, tab510, tab511, tab512, tab513 = st.tabs([" in src
     assert "    with tab506:" in src
     dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
     assert "tab506" in dvars
     withs = re.findall(r"    with (tab\d+):", src)
     assert "tab506" in withs
-    assert len(withs) == len(dvars) == 512
+    assert len(withs) == len(dvars) == 513
     # ordine: tab506 dopo tab505
     _decl506 = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
     assert _decl506.index(f'"{TITLE505}"') < _decl506.index(f'"{TITLE506}"')

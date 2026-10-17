@@ -1,0 +1,185 @@
+"""Test tab513 '🧪 Test retrospettivo di efficacia (look-back)': registry + funzioni pure."""
+
+import re
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from appfuncs import load as _load
+
+_F = _load("mh513_num", "mh513_str", "mh513_periodo",
+           "mh513_backtest", "mh513_riepilogo")
+
+TITLE513 = "🧪 Test retrospettivo di efficacia (look-back)"
+TITLE512 = "📒 Rollforward riserva cash-flow hedge (OCI)"
+
+
+def _p(periodo="2026-Q1", s=-9500.0, h=10000.0):
+    return {"periodo": periodo, "d_fv_strumento": s, "d_fv_coperto": h}
+
+
+def _demo():
+    return [_p(),
+            _p("2026-Q2", 12100.0, -11000.0),
+            _p("2026-Q3", -6000.0, 10000.0),
+            _p("2026-Q4", 8400.0, -7000.0)]
+
+
+class TestW513Validatori:
+    def test_num_ok(self):
+        assert _F["mh513_num"](2, "x") == 2.0
+
+    def test_num_ko(self):
+        for bad in (True, "2", None, float("nan"), float("inf")):
+            with pytest.raises(ValueError):
+                _F["mh513_num"](bad, "x")
+
+    def test_str_ok(self):
+        assert _F["mh513_str"]("  2026-Q1 ", "x") == "2026-Q1"
+
+    def test_str_ko(self):
+        for bad in (None, "", "   ", 5):
+            with pytest.raises(ValueError):
+                _F["mh513_str"](bad, "x")
+
+
+class TestW513Periodo:
+    def test_ok(self):
+        r = _F["mh513_periodo"](_p())
+        assert r["periodo"] == "2026-Q1"
+        assert r["d_fv_strumento"] == -9500.0
+        assert r["d_fv_coperto"] == 10000.0
+
+    def test_chiave_mancante_ko(self):
+        d = _p()
+        del d["d_fv_coperto"]
+        with pytest.raises(ValueError):
+            _F["mh513_periodo"](d)
+
+    def test_non_numerica_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh513_periodo"](_p(s="x"))
+
+    def test_periodo_vuoto_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh513_periodo"](_p(periodo="   "))
+
+    def test_non_dict_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh513_periodo"](["2026-Q1"])
+
+
+class TestW513Backtest:
+    def test_ratio_efficace(self):
+        # ratio = -(-9500)/10000 = 0.95 -> EFFICACE; inefficacia = 500
+        a = _F["mh513_backtest"]([_p()])
+        o = a["righe"][0]
+        assert o["ratio"] == pytest.approx(0.95)
+        assert o["verdetto"] == "EFFICACE"
+        assert o["inefficacia"] == pytest.approx(500.0)
+
+    def test_ratio_segno_invertito(self):
+        # ratio = -(9500)/10000 = -0.95 -> |ratio| 0.95 -> EFFICACE
+        a = _F["mh513_backtest"]([_p(s=9500.0)])
+        o = a["righe"][0]
+        assert o["ratio"] == pytest.approx(-0.95)
+        assert o["verdetto"] == "EFFICACE"
+
+    def test_banda_estremi_inclusi(self):
+        # |ratio| = 0.80 e 1.25 -> EFFICACE (estremi inclusi)
+        a = _F["mh513_backtest"]([_p("A", -80.0, 100.0)])
+        assert a["righe"][0]["verdetto"] == "EFFICACE"
+        b = _F["mh513_backtest"]([_p("B", -125.0, 100.0)])
+        assert b["righe"][0]["verdetto"] == "EFFICACE"
+
+    def test_banda_fuori(self):
+        # 0.799 e 1.251 -> INEFFICACE
+        a = _F["mh513_backtest"]([_p("A", -79.9, 100.0)])
+        assert a["righe"][0]["verdetto"] == "INEFFICACE"
+        b = _F["mh513_backtest"]([_p("B", -125.1, 100.0)])
+        assert b["righe"][0]["verdetto"] == "INEFFICACE"
+
+    def test_coperto_zero(self):
+        a = _F["mh513_backtest"]([_p("A", 500.0, 0.0)])
+        o = a["righe"][0]
+        assert o["ratio"] is None
+        assert o["verdetto"] == "NON_VALUTABILE"
+        assert o["inefficacia"] == pytest.approx(500.0)
+
+    def test_demo_totali(self):
+        # Q1: 0.95 EFFICACE (ineff 500); Q2: 1.10 EFFICACE (ineff 1100)
+        # Q3: 0.60 INEFFICACE (ineff 4000); Q4: 1.20 EFFICACE (ineff 1400)
+        a = _F["mh513_backtest"](_demo())
+        tt = a["totali"]
+        assert [o["verdetto"] for o in a["righe"]] == \
+            ["EFFICACE", "EFFICACE", "INEFFICACE", "EFFICACE"]
+        assert a["righe"][2]["ratio"] == pytest.approx(0.60)
+        assert tt["n_periodi"] == 4
+        assert tt["n_efficaci"] == 3
+        assert tt["n_inefficaci"] == 1
+        assert tt["n_non_valutabili"] == 0
+        # Σs = -9500+12100-6000+8400 = 5000
+        # Σh = 10000-11000+10000-7000 = 2000 -> ratio_cumulato = -2.5
+        assert tt["somma_strumento"] == pytest.approx(5000.0)
+        assert tt["somma_coperto"] == pytest.approx(2000.0)
+        assert tt["inefficacia_cumulata"] == pytest.approx(7000.0)
+        assert tt["ratio_cumulato"] == pytest.approx(-2.5)
+        assert tt["verdetto"] == "INEFFICACE"
+
+    def test_tutti_efficaci(self):
+        a = _F["mh513_backtest"]([_p("A", -9500.0, 10000.0),
+                                  _p("B", 12100.0, -11000.0)])
+        assert a["totali"]["verdetto"] == "EFFICACE"
+        assert a["totali"]["n_inefficaci"] == 0
+
+    def test_tutti_non_valutabili(self):
+        a = _F["mh513_backtest"]([_p("A", 100.0, 0.0),
+                                  _p("B", -50.0, 0.0)])
+        tt = a["totali"]
+        assert tt["n_non_valutabili"] == 2
+        assert tt["ratio_cumulato"] is None
+        assert tt["verdetto"] == "NON_VALUTABILE"
+
+    def test_degeneri(self):
+        with pytest.raises(ValueError):
+            _F["mh513_backtest"]([])
+        with pytest.raises(ValueError):
+            _F["mh513_backtest"]("non una lista")
+        with pytest.raises(ValueError):
+            _F["mh513_backtest"]([_p("A"), _p("A")])
+        with pytest.raises(ValueError):
+            _F["mh513_backtest"]([_p(s=float("nan"))])
+
+    def test_riepilogo_wrapper(self):
+        a = _F["mh513_riepilogo"]([_p()])
+        assert a["totali"]["verdetto"] == "EFFICACE"
+        assert a["totali"]["n_periodi"] == 1
+
+
+def test_registry_tab513():
+    src = Path(__file__).resolve().parent.parent.joinpath("app.py").read_text(encoding="utf-8")
+    line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
+    titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
+    assert len(titoli) == 513
+    assert TITLE513 in titoli
+    assert src.count(TITLE513) == 3
+    assert ", tab511, tab512, tab513 = st.tabs([" in src
+    assert "    with tab513:" in src
+    dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
+    assert "tab513" in dvars
+    withs = re.findall(r"    with (tab\d+):", src)
+    assert "tab513" in withs
+    assert len(withs) == len(dvars) == 513
+    # ordine: tab513 dopo tab512
+    _decl513 = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
+    assert _decl513.index(f'"{TITLE512}"') < _decl513.index(f'"{TITLE513}"')
+    assert titoli[dvars.index("tab513")] == TITLE513
+
+
+def test_chiavi_st513_uniche():
+    src = Path(__file__).resolve().parent.parent.joinpath("app.py").read_text(encoding="utf-8")
+    keys = re.findall(r'key="(st513_[^"]+)"', src) + re.findall(
+        r'key=f"(st513_[^"]+)"', src)
+    assert len(keys) == len(set(keys)) > 5
