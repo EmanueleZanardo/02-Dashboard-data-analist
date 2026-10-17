@@ -1,0 +1,185 @@
+"""Test tab514 '📅 Piano di recycling futuro (proiezione release OCI→P&L)': registry + funzioni pure."""
+
+import re
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from appfuncs import load as _load
+
+_F = _load("mh514_num", "mh514_str", "mh514_periodo",
+           "mh514_relazione", "mh514_piano", "mh514_riepilogo")
+
+TITLE514 = "📅 Piano di recycling futuro (proiezione release OCI→P&L)"
+TITLE513 = "🧪 Test retrospettivo di efficacia (look-back)"
+
+
+def _p(periodo="2026-Q1", imp=-3000.0):
+    return {"periodo": periodo, "impatto_pnl": imp}
+
+
+def _r(rid="HR-2026-002", ris=12000.0, periodi=None):
+    return {"id": rid, "riserva_iniziale": ris,
+            "periodi": periodi if periodi is not None
+            else [_p("2026-Q1", -3000.0), _p("2026-Q2", -3000.0),
+                  _p("2026-Q3", -3000.0), _p("2026-Q4", -3000.0)]}
+
+
+class TestW514Validatori:
+    def test_num_ok(self):
+        assert _F["mh514_num"](2, "x") == 2.0
+
+    def test_num_ko(self):
+        for bad in (True, "2", None, float("nan"), float("inf")):
+            with pytest.raises(ValueError):
+                _F["mh514_num"](bad, "x")
+
+    def test_str_ok(self):
+        assert _F["mh514_str"]("  HR-1 ", "x") == "HR-1"
+
+    def test_str_ko(self):
+        for bad in (None, "", "   ", 5):
+            with pytest.raises(ValueError):
+                _F["mh514_str"](bad, "x")
+
+
+class TestW514Periodo:
+    def test_ok(self):
+        r = _F["mh514_periodo"](_p())
+        assert r["periodo"] == "2026-Q1"
+        assert r["impatto_pnl"] == -3000.0
+
+    def test_chiave_mancante_ko(self):
+        d = _p()
+        del d["impatto_pnl"]
+        with pytest.raises(ValueError):
+            _F["mh514_periodo"](d)
+
+    def test_non_dict_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh514_periodo"]("2026-Q1")
+
+
+class TestW514Relazione:
+    def test_ok(self):
+        r = _F["mh514_relazione"](_r())
+        assert r["id"] == "HR-2026-002"
+        assert len(r["periodi"]) == 4
+
+    def test_chiave_mancante_ko(self):
+        d = _r()
+        del d["riserva_iniziale"]
+        with pytest.raises(ValueError):
+            _F["mh514_relazione"](d)
+
+    def test_periodi_duplicati_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh514_relazione"](
+                _r(periodi=[_p("2026-Q1"), _p("2026-Q1")]))
+
+    def test_periodi_vuoti_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh514_relazione"](_r(periodi=[]))
+
+
+class TestW514Piano:
+    def test_completo(self):
+        a = _F["mh514_piano"]([_r()])
+        o = a["righe"][0]
+        assert o["verdetto"] == "COMPLETO"
+        assert o["riciclato_totale"] == pytest.approx(12000.0)
+        assert o["residuo"] == pytest.approx(0.0, abs=0.01)
+        assert o["copertura"] == pytest.approx(1.0)
+        det = o["dettaglio"]
+        assert [d["riciclaggio"] for d in det] == [3000.0] * 4
+        assert det[-1]["riserva_residua"] == pytest.approx(0.0, abs=0.01)
+
+    def test_residuo(self):
+        a = _F["mh514_piano"](
+            [_r("HR-2026-003", 8000.0,
+                [_p("2026-Q1", -2000.0), _p("2026-Q2", -2000.0)])])
+        o = a["righe"][0]
+        assert o["verdetto"] == "RESIDUO"
+        assert o["riciclato_totale"] == pytest.approx(4000.0)
+        assert o["residuo"] == pytest.approx(4000.0)
+        assert o["copertura"] == pytest.approx(0.5)
+
+    def test_cap_al_residuo(self):
+        # impatto maggiore della riserva: ricicla solo il residuo
+        a = _F["mh514_piano"]([_r("A", 1000.0, [_p("P1", -5000.0)])])
+        o = a["righe"][0]
+        assert o["dettaglio"][0]["riciclaggio"] == pytest.approx(1000.0)
+        assert o["verdetto"] == "COMPLETO"
+
+    def test_segno_discorde_nessun_riciclaggio(self):
+        # impatto che aumenterebbe la riserva: nessun recycling
+        a = _F["mh514_piano"]([_r("A", 1000.0, [_p("P1", 5000.0)])])
+        o = a["righe"][0]
+        assert o["dettaglio"][0]["riciclaggio"] == 0.0
+        assert o["verdetto"] == "RESIDUO"
+        assert o["residuo"] == pytest.approx(1000.0)
+
+    def test_riserva_negativa(self):
+        a = _F["mh514_piano"](
+            [_r("A", -6000.0, [_p("P1", 2000.0), _p("P2", 4000.0)])])
+        o = a["righe"][0]
+        assert [d["riciclaggio"] for d in o["dettaglio"]] == [-2000.0, -4000.0]
+        assert o["verdetto"] == "COMPLETO"
+        assert o["copertura"] == pytest.approx(1.0)
+
+    def test_totali(self):
+        a = _F["mh514_piano"](
+            [_r("A", 12000.0,
+                [_p("P1", -3000.0), _p("P2", -3000.0),
+                 _p("P3", -3000.0), _p("P4", -3000.0)]),
+             _r("B", 8000.0, [_p("P1", -2000.0), _p("P2", -2000.0)])])
+        tt = a["totali"]
+        assert tt["n_relazioni"] == 2
+        assert tt["n_complete"] == 1
+        assert tt["riserva_iniziale"] == pytest.approx(20000.0)
+        assert tt["riciclato_totale"] == pytest.approx(16000.0)
+        assert tt["residuo_totale"] == pytest.approx(4000.0)
+
+    def test_degeneri(self):
+        with pytest.raises(ValueError):
+            _F["mh514_piano"]([])
+        with pytest.raises(ValueError):
+            _F["mh514_piano"]("non una lista")
+        with pytest.raises(ValueError):
+            _F["mh514_piano"]([_r("A"), _r("A")])
+        with pytest.raises(ValueError):
+            _F["mh514_piano"]([_r(periodi=[_p(imp=float("nan"))])])
+
+    def test_riepilogo_wrapper(self):
+        a = _F["mh514_riepilogo"]([_r()])
+        assert a["totali"]["n_relazioni"] == 1
+        assert a["righe"][0]["verdetto"] == "COMPLETO"
+
+
+def test_registry_tab514():
+    src = Path(__file__).resolve().parent.parent.joinpath("app.py").read_text(encoding="utf-8")
+    line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
+    titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
+    assert len(titoli) == 514
+    assert TITLE514 in titoli
+    assert src.count(TITLE514) == 3
+    assert ", tab513, tab514 = st.tabs([" in src
+    assert "    with tab514:" in src
+    dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
+    assert "tab514" in dvars
+    withs = re.findall(r"    with (tab\d+):", src)
+    assert "tab514" in withs
+    assert len(withs) == len(dvars) == 514
+    # ordine: tab514 dopo tab513
+    _decl514 = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
+    assert _decl514.index(f'"{TITLE513}"') < _decl514.index(f'"{TITLE514}"')
+    assert titoli[dvars.index("tab514")] == TITLE514
+
+
+def test_chiavi_st514_uniche():
+    src = Path(__file__).resolve().parent.parent.joinpath("app.py").read_text(encoding="utf-8")
+    keys = re.findall(r'key="(st514_[^"]+)"', src) + re.findall(
+        r'key=f"(st514_[^"]+)"', src)
+    assert len(keys) == len(set(keys)) > 5
