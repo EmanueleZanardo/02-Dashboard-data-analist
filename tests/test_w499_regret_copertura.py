@@ -150,16 +150,16 @@ def test_registry_tab499():
     src = Path(__file__).resolve().parent.parent.joinpath("app.py").read_text(encoding="utf-8")
     line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
     titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
-    assert len(titoli) == 528
+    assert len(titoli) == 529
     assert TITLE499 in titoli
     assert src.count(TITLE499) == 3
-    assert "tab498, tab499, tab500, tab501, tab502, tab503, tab504, tab505, tab506, tab507, tab508, tab509, tab510, tab511, tab512, tab513, tab514, tab515, tab516, tab517, tab518, tab519, tab520, tab521, tab522, tab523, tab524, tab525, tab526, tab527, tab528 = st.tabs([" in src
+    assert "tab498, tab499, tab500, tab501, tab502, tab503, tab504, tab505, tab506, tab507, tab508, tab509, tab510, tab511, tab512, tab513, tab514, tab515, tab516, tab517, tab518, tab519, tab520, tab521, tab522, tab523, tab524, tab525, tab526, tab527, tab528, tab529 = st.tabs([" in src
     assert "    with tab499:" in src
     dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
     assert "tab499" in dvars
     withs = re.findall(r"    with (tab\d+):", src)
     assert "tab499" in withs
-    assert len(withs) == len(dvars) == 528
+    assert len(withs) == len(dvars) == 529
     # ordine: tab499 dopo tab498
     _decl499 = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
     assert _decl499.index(f'"{TITLE498}"') < _decl499.index(f'"{TITLE499}"')

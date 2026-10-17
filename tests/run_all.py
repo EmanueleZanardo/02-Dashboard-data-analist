@@ -20,6 +20,14 @@ TESTS = Path(__file__).resolve().parent
 
 def is_legacy(path: Path) -> bool:
     src = path.read_text(encoding="utf-8")
+    # Un file con definizioni di test pytest-style (def test_ / class Test)
+    # va eseguito con pytest anche se contiene "raise SystemExit"
+    # (usato dentro i test per segnalare failure), altrimenti i suoi
+    # test verrebbero saltati dalla fase pytest e la fase legacy
+    # standalone non produrrebbe output parsabile (era il caso di
+    # test_w475_exec.py, i cui 16 test non giravano mai nella suite).
+    if re.search(r"(?m)^(?:async )?def test_|^class Test", src):
+        return False
     return "raise SystemExit" in src or "\nsys.exit(" in src
 
 

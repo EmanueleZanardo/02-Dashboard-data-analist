@@ -1,0 +1,188 @@
+"""Test tab529 '⚖️⏹️ Cessazione hedge accounting (IFRS 9 6.5.12)': registry + funzioni pure."""
+
+import math
+import re
+from pathlib import Path
+
+import pytest
+
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from appfuncs import load as _load
+
+_F = _load("mh529_num", "mh529_str", "mh529_relazione",
+           "mh529_misura", "mh529_riepilogo")
+
+TITLE529 = "⚖️⏹️ Cessazione hedge accounting (IFRS 9 6.5.12)"
+TITLE528 = "⚖️🔌 Own-use exemption NPNS (IFRS 9 2.4)"
+
+
+def _r(rid="R-1", tipo="cash_flow",
+       causa="item_non_piu_qualifica",
+       ris=85000.0, ade=0.0, d="x"):
+    return {"id": rid, "tipo_copertura": tipo, "causa": causa,
+            "riserva_oci_eur": ris, "adeguamento_fv_eur": ade,
+            "descrizione": d}
+
+
+class TestW529Validatori:
+    def test_num_ok(self):
+        assert _F["mh529_num"](2, "x") == 2.0
+        assert _F["mh529_num"](-1.5, "x") == -1.5
+        assert _F["mh529_num"](0.0, "x") == 0.0
+
+    def test_num_ko(self):
+        for bad in (True, False, "1", None, math.nan, math.inf, -math.inf):
+            with pytest.raises(ValueError):
+                _F["mh529_num"](bad, "x")
+
+    def test_str_ok(self):
+        assert _F["mh529_str"]("  R-1 ", "x") == "R-1"
+
+    def test_str_ko(self):
+        for bad in ("", "   ", None, 5):
+            with pytest.raises(ValueError):
+                _F["mh529_str"](bad, "x")
+
+
+class TestW529Relazione:
+    def test_ok_normalizza(self):
+        r = _F["mh529_relazione"](_r())
+        assert r["id"] == "R-1"
+        assert r["tipo_copertura"] == "cash_flow"
+        assert r["riserva_oci_eur"] == 85000.0
+        assert r["descrizione"] == "x"
+
+    def test_degeneri(self):
+        with pytest.raises(ValueError):
+            _F["mh529_relazione"]("non un dict")
+        with pytest.raises(ValueError):
+            _F["mh529_relazione"]({"id": "X"})
+        with pytest.raises(ValueError):
+            _F["mh529_relazione"](_r(rid="  "))
+        with pytest.raises(ValueError):
+            _F["mh529_relazione"](_r(tipo="trading"))
+        with pytest.raises(ValueError):
+            _F["mh529_relazione"](_r(causa="boh"))
+        with pytest.raises(ValueError):
+            _F["mh529_relazione"](_r(ris=True))
+        with pytest.raises(ValueError):
+            _F["mh529_relazione"](_r(ade=math.nan))
+        with pytest.raises(ValueError):
+            _F["mh529_relazione"](_r(ris=math.inf))
+        v = _r()
+        v["descrizione"] = 7
+        with pytest.raises(ValueError):
+            _F["mh529_relazione"](v)
+
+
+class TestW529Misura:
+    def test_riserva_in_oci_probabile(self):
+        r = _F["mh529_misura"](_r())
+        assert r["esito"] == "RISERVA_IN_OCI"
+        assert r["riserva_oci_eur"] == 85000.0
+        assert r["pnl_subito_eur"] == 0.0
+        assert r["adeguamento_da_ammortizzare_eur"] == 0.0
+
+    def test_rileva_subito_forecast_non_attesa(self):
+        r = _F["mh529_misura"](_r(causa="forecast_non_piu_attesa",
+                                  ris=-30000.0))
+        assert r["esito"] == "RILEVA_SUBITO"
+        assert r["pnl_subito_eur"] == -30000.0
+        assert r["riserva_oci_eur"] == 0.0
+
+    def test_rileva_subito_solo_cash_flow(self):
+        # forecast non piu' attesa su fair value -> AMMORTIZZA
+        r = _F["mh529_misura"](_r(tipo="fair_value",
+                                  causa="forecast_non_piu_attesa",
+                                  ade=120000.0))
+        assert r["esito"] == "AMMORTIZZA"
+
+    def test_ammortizza_fair_value(self):
+        r = _F["mh529_misura"](_r(tipo="fair_value",
+                                  causa="strumento_scaduto_venduto_risolto",
+                                  ade=120000.0))
+        assert r["esito"] == "AMMORTIZZA"
+        assert r["adeguamento_da_ammortizzare_eur"] == 120000.0
+        assert r["pnl_subito_eur"] == 0.0
+
+    def test_ammortizza_obiettivo_cambiato(self):
+        r = _F["mh529_misura"](_r(tipo="fair_value",
+                                  causa="obiettivo_gestione_cambiato",
+                                  ade=50000.0))
+        assert r["esito"] == "AMMORTIZZA"
+        assert r["adeguamento_da_ammortizzare_eur"] == 50000.0
+
+    def test_net_investment_in_oci(self):
+        r = _F["mh529_misura"](_r(tipo="net_investment",
+                                  causa="strumento_scaduto_venduto_risolto",
+                                  ris=200000.0))
+        assert r["esito"] == "RISERVA_IN_OCI"
+        assert r["riserva_oci_eur"] == 200000.0
+
+    def test_nessuna_cessazione_rollover(self):
+        r = _F["mh529_misura"](_r(causa="rollover_continuazione",
+                                  ris=85000.0))
+        assert r["esito"] == "NESSUNA_CESSAZIONE"
+        assert r["pnl_subito_eur"] == 0.0
+        assert r["riserva_oci_eur"] == 0.0
+        assert r["adeguamento_da_ammortizzare_eur"] == 0.0
+
+
+class TestW529Riepilogo:
+    def test_tutti_rileva_subito(self):
+        r = _F["mh529_riepilogo"]([_r("A", causa="forecast_non_piu_attesa",
+                                       ris=-30000.0),
+                                   _r("B", causa="forecast_non_piu_attesa",
+                                       ris=10000.0)])
+        t = r["totali"]
+        assert t["verdetto_complessivo"] == "TUTTI_RILEVATI_SUBITO"
+        assert t["n_rileva_subito"] == 2
+        assert t["pnl_subito_eur"] == -20000.0
+
+    def test_tutti_in_oci(self):
+        r = _F["mh529_riepilogo"]([_r("A"), _r("B", ris=15000.0)])
+        t = r["totali"]
+        assert t["verdetto_complessivo"] == "TUTTI_IN_OCI"
+        assert t["riserva_oci_trattenuta_eur"] == 100000.0
+
+    def test_nessuna_cessazione(self):
+        r = _F["mh529_riepilogo"]([_r("A", causa="rollover_continuazione")])
+        assert r["totali"]["verdetto_complessivo"] == "NESSUNA_CESSAZIONE"
+
+    def test_misto(self):
+        r = _F["mh529_riepilogo"]([_r("A", tipo="fair_value",
+                                       causa="obiettivo_gestione_cambiato",
+                                       ade=50000.0),
+                                   _r("B", causa="forecast_non_piu_attesa",
+                                       ris=-30000.0),
+                                   _r("C", causa="rollover_continuazione")])
+        t = r["totali"]
+        assert t["verdetto_complessivo"] == "MISTO"
+        assert t["n_relazioni"] == 3 and t["n_continuano"] == 1
+        assert t["pnl_subito_eur"] == -30000.0
+        assert t["adeguamento_da_ammortizzare_eur"] == 50000.0
+        assert t["riserva_oci_trattenuta_eur"] == 0.0
+
+    def test_degeneri(self):
+        with pytest.raises(ValueError):
+            _F["mh529_riepilogo"]([])
+        with pytest.raises(ValueError):
+            _F["mh529_riepilogo"]("non una lista")
+        with pytest.raises(ValueError):
+            _F["mh529_riepilogo"]([_r("A"), _r("A")])
+
+
+def test_registry_tab529():
+    src = Path(__file__).resolve().parent.parent.joinpath("app.py").read_text(
+        encoding="utf-8")
+    line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
+    titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
+    assert len(titoli) == 529
+    assert TITLE529 in titoli
+    assert TITLE528 in titoli
+    assert src.count(TITLE529) == 3
+    assert ", tab528, tab529 = st.tabs([" in src
+    # chiavi widget st529_* univoche (10 pattern attesi)
+    keys = re.findall(r'key=f?"(st529_[^"]+)"', src)
+    assert len(set(keys)) == len(keys) >= 10
