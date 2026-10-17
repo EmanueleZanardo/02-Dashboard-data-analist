@@ -211,8 +211,8 @@ def test_registry_tab523():
         encoding="utf-8")
     line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
     titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
-    assert len(titoli) == 523
+    assert len(titoli) == 524
     assert TITLE523 in titoli
     assert TITLE522 in titoli
     assert src.count(TITLE523) == 3
-    assert ", tab522, tab523 = st.tabs([" in src
+    assert ", tab522, tab523, tab524 = st.tabs([" in src
