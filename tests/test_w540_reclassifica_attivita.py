@@ -215,13 +215,13 @@ class TestW540Registry:
         src = (Path(__file__).resolve().parent.parent / "app.py").read_text(
             encoding="utf-8")
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
-        assert len(re.findall(r"tab\d+", line.split("= st.tabs([")[0])) == 543
-        assert len(re.findall(r"^\s*with (tab\d+):", src, re.M)) == 543
+        assert len(re.findall(r"tab\d+", line.split("= st.tabs([")[0])) == 544
+        assert len(re.findall(r"^\s*with (tab\d+):", src, re.M)) == 544
 
     def test_tab540_chain(self):
         src = (Path(__file__).resolve().parent.parent / "app.py").read_text(
             encoding="utf-8")
-        assert ", tab539, tab540, tab541, tab542, tab543 = st.tabs([" in src
+        assert ", tab539, tab540, tab541, tab542, tab543, tab544 = st.tabs([" in src
         assert "with tab540:" in src
 
     def test_chiavi_st540_uniche(self):
