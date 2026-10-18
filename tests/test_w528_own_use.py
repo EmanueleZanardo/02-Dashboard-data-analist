@@ -175,11 +175,11 @@ def test_registry_tab528():
         encoding="utf-8")
     line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
     titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
-    assert len(titoli) == 540
+    assert len(titoli) == 541
     assert TITLE528 in titoli
     assert TITLE527 in titoli
     assert src.count(TITLE528) == 3
-    assert ", tab527, tab528, tab529, tab530, tab531, tab532, tab533, tab534, tab535, tab536, tab537, tab538, tab539, tab540 = st.tabs([" in src
+    assert ", tab527, tab528, tab529, tab530, tab531, tab532, tab533, tab534, tab535, tab536, tab537, tab538, tab539, tab540, tab541 = st.tabs([" in src
     # chiavi widget st528_* univoche (13 pattern attesi)
     keys = re.findall(r'key=f?"(st528_[^"]+)"', src)
     assert len(set(keys)) == len(keys) >= 11

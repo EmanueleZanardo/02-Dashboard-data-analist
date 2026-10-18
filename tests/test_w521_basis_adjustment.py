@@ -214,16 +214,16 @@ def test_registry_tab521():
         encoding="utf-8")
     line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
     titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
-    assert len(titoli) == 540
+    assert len(titoli) == 541
     assert TITLE521 in titoli
     assert src.count(TITLE521) == 3
-    assert ", tab520, tab521, tab522, tab523, tab524, tab525, tab526, tab527, tab528, tab529, tab530, tab531, tab532, tab533, tab534, tab535, tab536, tab537, tab538, tab539, tab540 = st.tabs([" in src
+    assert ", tab520, tab521, tab522, tab523, tab524, tab525, tab526, tab527, tab528, tab529, tab530, tab531, tab532, tab533, tab534, tab535, tab536, tab537, tab538, tab539, tab540, tab541 = st.tabs([" in src
     assert "    with tab521:" in src
     dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
     assert "tab521" in dvars
     withs = re.findall(r"    with (tab\d+):", src)
     assert "tab521" in withs
-    assert len(withs) == len(dvars) == 540
+    assert len(withs) == len(dvars) == 541
     # ordine: tab521 dopo tab520
     _decl521 = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
     assert _decl521.index(f'"{TITLE520}"') < _decl521.index(f'"{TITLE521}"')
