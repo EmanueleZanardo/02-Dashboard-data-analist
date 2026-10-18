@@ -166,13 +166,13 @@ class TestW541Registry:
         src = (Path(__file__).resolve().parent.parent / "app.py").read_text(
             encoding="utf-8")
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
-        assert len(re.findall(r"tab\d+", line.split("= st.tabs([")[0])) == 545
-        assert len(re.findall(r"^\s*with (tab\d+):", src, re.M)) == 545
+        assert len(re.findall(r"tab\d+", line.split("= st.tabs([")[0])) == 546
+        assert len(re.findall(r"^\s*with (tab\d+):", src, re.M)) == 546
 
     def test_tab541_chain(self):
         src = (Path(__file__).resolve().parent.parent / "app.py").read_text(
             encoding="utf-8")
-        assert ", tab540, tab541, tab542, tab543, tab544, tab545 = st.tabs([" in src
+        assert ", tab540, tab541, tab542, tab543, tab544, tab545, tab546 = st.tabs([" in src
         assert "with tab541:" in src
 
     def test_chiavi_st541_uniche(self):
