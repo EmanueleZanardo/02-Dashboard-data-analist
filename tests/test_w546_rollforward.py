@@ -186,10 +186,10 @@ class TestW546Registry:
         src = (Path(__file__).resolve().parent.parent / "app.py").read_text(
             encoding="utf-8")
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
-        assert len(re.findall(r"tab\d+", line.split("= st.tabs([")[0])) == 547
-        assert len(re.findall(r"^\s*with (tab\d+):", src, re.M)) == 547
+        assert len(re.findall(r"tab\d+", line.split("= st.tabs([")[0])) == 548
+        assert len(re.findall(r"^\s*with (tab\d+):", src, re.M)) == 548
 
     def test_chain_estesa(self):
         src = (Path(__file__).resolve().parent.parent / "app.py").read_text(
             encoding="utf-8")
-        assert ", tab544, tab545, tab546, tab547 = st.tabs([" in src
+        assert ", tab544, tab545, tab546, tab547, tab548 = st.tabs([" in src
