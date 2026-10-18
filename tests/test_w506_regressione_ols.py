@@ -169,16 +169,16 @@ def test_registry_tab506():
     src = Path(__file__).resolve().parent.parent.joinpath("app.py").read_text(encoding="utf-8")
     line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
     titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
-    assert len(titoli) == 549
+    assert len(titoli) == 550
     assert TITLE506 in titoli
     assert src.count(TITLE506) == 3
-    assert "tab504, tab505, tab506, tab507, tab508, tab509, tab510, tab511, tab512, tab513, tab514, tab515, tab516, tab517, tab518, tab519, tab520, tab521, tab522, tab523, tab524, tab525, tab526, tab527, tab528, tab529, tab530, tab531, tab532, tab533, tab534, tab535, tab536, tab537, tab538, tab539, tab540, tab541, tab542, tab543, tab544, tab545, tab546, tab547, tab548, tab549 = st.tabs([" in src
+    assert "tab504, tab505, tab506, tab507, tab508, tab509, tab510, tab511, tab512, tab513, tab514, tab515, tab516, tab517, tab518, tab519, tab520, tab521, tab522, tab523, tab524, tab525, tab526, tab527, tab528, tab529, tab530, tab531, tab532, tab533, tab534, tab535, tab536, tab537, tab538, tab539, tab540, tab541, tab542, tab543, tab544, tab545, tab546, tab547, tab548, tab549, tab550 = st.tabs([" in src
     assert "    with tab506:" in src
     dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
     assert "tab506" in dvars
     withs = re.findall(r"    with (tab\d+):", src)
     assert "tab506" in withs
-    assert len(withs) == len(dvars) == 549
+    assert len(withs) == len(dvars) == 550
     # ordine: tab506 dopo tab505
     _decl506 = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
     assert _decl506.index(f'"{TITLE505}"') < _decl506.index(f'"{TITLE506}"')
