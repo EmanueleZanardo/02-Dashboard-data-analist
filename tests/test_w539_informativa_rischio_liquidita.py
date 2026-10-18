@@ -202,13 +202,13 @@ class TestW539Registry:
         src = (Path(__file__).resolve().parent.parent / "app.py").read_text(
             encoding="utf-8")
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
-        assert len(re.findall(r"tab\d+", line.split("= st.tabs([")[0])) == 542
-        assert len(re.findall(r"^\s*with (tab\d+):", src, re.M)) == 542
+        assert len(re.findall(r"tab\d+", line.split("= st.tabs([")[0])) == 543
+        assert len(re.findall(r"^\s*with (tab\d+):", src, re.M)) == 543
 
     def test_tab539_chain(self):
         src = (Path(__file__).resolve().parent.parent / "app.py").read_text(
             encoding="utf-8")
-        assert ", tab538, tab539, tab540, tab541, tab542 = st.tabs([" in src
+        assert ", tab538, tab539, tab540, tab541, tab542, tab543 = st.tabs([" in src
         assert "with tab539:" in src
 
     def test_chiavi_st539_uniche(self):
