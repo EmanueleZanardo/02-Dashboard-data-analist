@@ -251,7 +251,7 @@ def _registry():
 class TestRegistryTab305:
     def test_tab305_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 554
+        assert len(titoli) == len(dvars) == len(withs) == 555
         assert TITLE305 in titoli
         assert "tab305" in dvars
         assert "tab305" in withs
