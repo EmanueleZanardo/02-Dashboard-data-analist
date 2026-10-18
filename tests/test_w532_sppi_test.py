@@ -189,13 +189,13 @@ class TestW532Registry:
         src = (Path(__file__).resolve().parent.parent / "app.py").read_text(
             encoding="utf-8")
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
-        assert len(re.findall(r"tab\d+", line.split("= st.tabs([")[0])) == 532
-        assert len(re.findall(r"^\s*with (tab\d+):", src, re.M)) == 532
+        assert len(re.findall(r"tab\d+", line.split("= st.tabs([")[0])) == 533
+        assert len(re.findall(r"^\s*with (tab\d+):", src, re.M)) == 533
 
     def test_tab532_chain(self):
         src = (Path(__file__).resolve().parent.parent / "app.py").read_text(
             encoding="utf-8")
-        assert ", tab531, tab532 = st.tabs([" in src
+        assert ", tab531, tab532, tab533 = st.tabs([" in src
         assert "with tab532:" in src
 
     def test_chiavi_st532_uniche(self):

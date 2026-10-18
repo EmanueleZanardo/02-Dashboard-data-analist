@@ -179,11 +179,11 @@ def test_registry_tab530():
         encoding="utf-8")
     line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
     titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
-    assert len(titoli) == 532
+    assert len(titoli) == 533
     assert TITLE530 in titoli
     assert TITLE529 in titoli
     assert src.count(TITLE530) == 3
-    assert ", tab529, tab530, tab531, tab532 = st.tabs([" in src
+    assert ", tab529, tab530, tab531, tab532, tab533 = st.tabs([" in src
     # chiavi widget st530_* univoche (10+ pattern attesi)
     keys = re.findall(r'key=f?"(st530_[^"]+)"', src)
     assert len(set(keys)) == len(keys) >= 10
