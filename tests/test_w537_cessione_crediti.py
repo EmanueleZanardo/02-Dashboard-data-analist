@@ -197,13 +197,13 @@ class TestW537Registry:
         src = (Path(__file__).resolve().parent.parent / "app.py").read_text(
             encoding="utf-8")
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
-        assert len(re.findall(r"tab\d+", line.split("= st.tabs([")[0])) == 550
-        assert len(re.findall(r"^\s*with (tab\d+):", src, re.M)) == 550
+        assert len(re.findall(r"tab\d+", line.split("= st.tabs([")[0])) == 551
+        assert len(re.findall(r"^\s*with (tab\d+):", src, re.M)) == 551
 
     def test_tab537_chain(self):
         src = (Path(__file__).resolve().parent.parent / "app.py").read_text(
             encoding="utf-8")
-        assert ", tab536, tab537, tab538, tab539, tab540, tab541, tab542, tab543, tab544, tab545, tab546, tab547, tab548, tab549, tab550 = st.tabs([" in src
+        assert ", tab536, tab537, tab538, tab539, tab540, tab541, tab542, tab543, tab544, tab545, tab546, tab547, tab548, tab549, tab550, tab551 = st.tabs([" in src
         assert "with tab537:" in src
 
     def test_chiavi_st537_uniche(self):
