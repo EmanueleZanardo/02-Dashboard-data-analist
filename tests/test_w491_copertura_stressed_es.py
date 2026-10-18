@@ -70,7 +70,7 @@ class TestRegistry491:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"    with (tab\d+):", src)
-        assert len(titoli) == len(dvars) == len(withs) == 535
+        assert len(titoli) == len(dvars) == len(withs) == 536
         assert TITLE491 in titoli
         assert TITLE490 in titoli
         assert "tab491" in dvars
@@ -86,7 +86,7 @@ class TestRegistry491:
 
     def test_dvar_line(self):
         src = self._src()
-        assert "tab486, tab487, tab488, tab489, tab490, tab491, tab492, tab493, tab494, tab495, tab496, tab497, tab498, tab499, tab500, tab501, tab502, tab503, tab504, tab505, tab506, tab507, tab508, tab509, tab510, tab511, tab512, tab513, tab514, tab515, tab516, tab517, tab518, tab519, tab520, tab521, tab522, tab523, tab524, tab525, tab526, tab527, tab528, tab529, tab530, tab531, tab532, tab533, tab534, tab535 = st.tabs([" in src
+        assert "tab486, tab487, tab488, tab489, tab490, tab491, tab492, tab493, tab494, tab495, tab496, tab497, tab498, tab499, tab500, tab501, tab502, tab503, tab504, tab505, tab506, tab507, tab508, tab509, tab510, tab511, tab512, tab513, tab514, tab515, tab516, tab517, tab518, tab519, tab520, tab521, tab522, tab523, tab524, tab525, tab526, tab527, tab528, tab529, tab530, tab531, tab532, tab533, tab534, tab535, tab536 = st.tabs([" in src
 
     def test_chiavi_univoche(self):
         src = self._src()

@@ -36,7 +36,7 @@ def _registry():
 class TestRegistryTab253:
     def test_tab253_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 535
+        assert len(titoli) == len(dvars) == len(withs) == 536
         assert "🌑 Costo interruzioni (VoLL)" in titoli
         assert "tab253" in dvars
         assert "tab253" in withs
