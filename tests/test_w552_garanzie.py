@@ -200,9 +200,9 @@ class TestW552Registry:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"    with (tab\d+):", src)
-        assert len(titoli) == len(dvars) == len(withs) == 557
+        assert len(titoli) == len(dvars) == len(withs) == 558
         assert TITLE552 in titoli
-        assert "tab551, tab552, tab553, tab554, tab555, tab556, tab557 = st.tabs([" in src
+        assert "tab551, tab552, tab553, tab554, tab555, tab556, tab557, tab558 = st.tabs([" in src
 
     def test_chiavi_552_univoche(self):
         src = self._src()
