@@ -1,0 +1,203 @@
+"""Test tab572 "Fair value hedges del rischio di credito (IFRS 7.11)": registry + funzioni pure."""
+
+import math
+import re
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from appfuncs import load as _load
+
+_F = _load("mh572_num", "mh572_str", "mh572_posizione", "mh572_demo",
+           "mh572_riepilogo")
+
+TITLE572 = "🔗📊 Fair value hedges del rischio di credito (IFRS 7.11)"
+
+
+def _p(pid="HDG-1", descrizione="posizione", fv=100_000_000.0,
+       ex=100_000_000.0, no=60_000_000.0, pa=-2_000_000.0,
+       ca=-8_000_000.0, ph=1_900_000.0, ch=7_500_000.0):
+    return _F["mh572_posizione"](pid, descrizione, fv, ex, no, pa, ca,
+                                 ph, ch)
+
+
+class TestW572Validatori:
+    def test_num_ok(self):
+        assert _F["mh572_num"](2, "x") == 2.0
+        assert _F["mh572_num"](-3.5, "x") == -3.5
+        assert _F["mh572_num"](0, "x") == 0.0
+
+    def test_num_ko(self):
+        for bad in (True, "1", None, math.nan, math.inf):
+            with pytest.raises(ValueError):
+                _F["mh572_num"](bad, "x")
+
+    def test_str_ok(self):
+        assert _F["mh572_str"]("  abc ", "x") == "abc"
+
+    def test_str_ko(self):
+        for bad in ("", "   ", None, 5, b"a"):
+            with pytest.raises(ValueError):
+                _F["mh572_str"](bad, "x")
+
+
+class TestW572Posizione:
+    def test_hand_computed(self):
+        r = _p(pid="HDG-001", fv=45_000_000.0, ex=45_000_000.0,
+               no=40_000_000.0, pa=-800_000.0, ca=-3_200_000.0,
+               ph=750_000.0, ch=3_000_000.0)
+        assert r["id"] == "HDG-001"
+        assert r["residuo"] == pytest.approx(5_000_000.0)
+        assert r["hedge_ratio"] == pytest.approx(40.0 / 45.0)
+        assert r["netta_cumulata"] == pytest.approx(-200_000.0)
+
+    def test_residuo_floor_zero(self):
+        # overhedge entro il 2x: la voce non respinge, residuo floora a 0
+        r = _p(ex=100.0, no=150.0, fv=100.0, ca=0.0, ch=0.0)
+        assert r["residuo"] == 0.0
+        assert r["hedge_ratio"] == pytest.approx(1.5)
+
+    def test_hedge_ratio_none_exp_zero(self):
+        r = _p(ex=0.0, no=0.0, fv=0.0, ca=0.0, ch=0.0)
+        assert r["hedge_ratio"] is None
+        assert r["residuo"] == 0.0
+
+    def test_str_strip(self):
+        r = _p(pid="  HDG-X ", descrizione=" pos ")
+        assert r["id"] == "HDG-X"
+        assert r["descrizione"] == "pos"
+
+
+class TestW572Riepilogo:
+    def test_demo_rischio_residuo_significativo(self):
+        r = _F["mh572_riepilogo"](_F["mh572_demo"]())
+        # exp 85M, nominale 67M -> residuo 18M > 10M
+        assert r["esposizione_max_totale"] == pytest.approx(85_000_000.0)
+        assert r["nominale_hedge_totale"] == pytest.approx(67_000_000.0)
+        assert r["residuo_totale"] == pytest.approx(18_000_000.0)
+        assert r["n_anomalie"] == 0
+        assert r["verdetto"] == "RISCHIO_RESIDUO_SIGNIFICATIVO"
+
+    def test_demo_netta_cumulata_efficacia(self):
+        r = _F["mh572_riepilogo"](_F["mh572_demo"]())
+        netta = [a["netta_cumulata"] for a in r["analizzate"]]
+        assert netta == pytest.approx([-200_000.0, -100_000.0,
+                                       -20_000.0])
+
+    def test_copertura_adeguata(self):
+        r = _F["mh572_riepilogo"](
+            [_p(pid="HDG-A", ex=50_000_000.0, no=50_000_000.0,
+                fv=50_000_000.0, ca=-1_000_000.0, ch=990_000.0)])
+        assert r["residuo_totale"] == pytest.approx(0.0)
+        assert r["verdetto"] == "COPERTURA_ADEGUATA"
+
+    def test_residuo_boundary_soglia(self):
+        # residuo == soglia -> non significativo (>, non >=)
+        r = _F["mh572_riepilogo"](
+            [_p(ex=20_000_000.0, no=10_000_000.0, fv=20_000_000.0,
+                ca=0.0, ch=0.0)],
+            soglia_residuo_eur=10_000_000.0)
+        assert r["residuo_totale"] == pytest.approx(10_000_000.0)
+        assert r["verdetto"] == "COPERTURA_ADEGUATA"
+
+    def test_soglia_personalizzata(self):
+        r = _F["mh572_riepilogo"](_F["mh572_demo"](),
+                                  soglia_residuo_eur=20_000_000.0)
+        assert r["verdetto"] == "COPERTURA_ADEGUATA"
+
+    def test_id_duplicato_anomalia(self):
+        r = _F["mh572_riepilogo"]([_p(pid="HDG-X"), _p(pid="hdg-x")])
+        assert r["verdetto"] == "ANOMALIE_DA_VERIFICARE"
+        assert r["n_anomalie"] == 1
+        assert any("duplicato" in a
+                   for a in r["analizzate"][1]["anomalie"])
+
+    def test_fv_negativo_anomalia(self):
+        r = _F["mh572_riepilogo"]([_p(fv=-5.0, ca=0.0, ch=0.0)])
+        assert r["verdetto"] == "ANOMALIE_DA_VERIFICARE"
+        assert any("fair value" in a
+                   for a in r["analizzate"][0]["anomalie"])
+
+    def test_esposizione_negativa_anomalia(self):
+        r = _F["mh572_riepilogo"]([_p(ex=-5.0, ca=0.0, ch=0.0)])
+        assert r["verdetto"] == "ANOMALIE_DA_VERIFICARE"
+        assert any("negativa" in a
+                   for a in r["analizzate"][0]["anomalie"])
+
+    def test_nominale_negativo_anomalia(self):
+        r = _F["mh572_riepilogo"]([_p(no=-1.0, ca=0.0, ch=0.0)])
+        assert r["verdetto"] == "ANOMALIE_DA_VERIFICARE"
+        assert r["n_anomalie"] == 1
+
+    def test_overhedge_anomalo(self):
+        r = _F["mh572_riepilogo"]([_p(ex=100.0, no=250.0, fv=100.0,
+                                      ca=0.0, ch=0.0)])
+        assert r["verdetto"] == "ANOMALIE_DA_VERIFICARE"
+        assert any("overhedge" in a
+                   for a in r["analizzate"][0]["anomalie"])
+
+    def test_overhedge_boundary_2x_ok(self):
+        # nominale == 2x esposizione: non anomalo (>, non >=)
+        r = _F["mh572_riepilogo"]([_p(ex=100.0, no=200.0, fv=100.0,
+                                      ca=0.0, ch=0.0)])
+        assert r["n_anomalie"] == 0
+
+    def test_cumulata_eccede_fv_anomalia(self):
+        r = _F["mh572_riepilogo"]([_p(fv=100.0, ca=-150.0, ch=0.0)])
+        assert r["verdetto"] == "ANOMALIE_DA_VERIFICARE"
+        assert any("eccede" in a
+                   for a in r["analizzate"][0]["anomalie"])
+
+    def test_cumulata_eccede_fv_non_scatta_se_fv_negativo(self):
+        # fv negativo: solo l'anomalia sul FV, non il doppio conteggio
+        r = _F["mh572_riepilogo"]([_p(fv=-10.0, ca=-150.0, ch=0.0)])
+        assert r["n_anomalie"] == 1
+        assert any("fair value" in a
+                   for a in r["analizzate"][0]["anomalie"])
+
+    def test_nessuna_posizione_precede_anomalie(self):
+        # convenzione tab566/567/568: NESSUNA_* prima di ANOMALIE_DA_VERIFICARE
+        r = _F["mh572_riepilogo"](
+            [_p(pid="HDG-Z", fv=-5.0, ex=0.0, no=0.0,
+                pa=0.0, ca=0.0, ph=0.0, ch=0.0)])
+        assert r["n_anomalie"] == 1
+        assert r["verdetto"] == "NESSUNA_POSIZIONE"
+
+    def test_voci_vuote_ko(self):
+        with pytest.raises(ValueError):
+            _F["mh572_riepilogo"]([])
+
+    def test_soglia_ko(self):
+        for bad in (0.0, -100.0):
+            with pytest.raises(ValueError):
+                _F["mh572_riepilogo"](_F["mh572_demo"](),
+                                      soglia_residuo_eur=bad)
+
+
+class TestW572Registry:
+    def test_titolo_presente(self):
+        src = Path(__file__).resolve().parent.parent.joinpath(
+            "app.py").read_text(encoding="utf-8")
+        assert f'"{TITLE572}"' in src
+
+    def test_conteggio_tab(self):
+        src = Path(__file__).resolve().parent.parent.joinpath(
+            "app.py").read_text(encoding="utf-8")
+        m = re.search(r"= st\.tabs\(\[(.*?)\]\)", src, re.S)
+        titles = re.findall(r'"((?:[^"\\]|\\.)*)"', m.group(1))
+        assert len(titles) == 572
+        assert titles[-1] == TITLE572
+
+    def test_chain_tab_var(self):
+        src = Path(__file__).resolve().parent.parent.joinpath(
+            "app.py").read_text(encoding="utf-8")
+        assert ", tab571, tab572 = st.tabs([" in src
+        assert "with tab572:" in src
+
+    def test_chiavi_univoche(self):
+        src = Path(__file__).resolve().parent.parent.joinpath(
+            "app.py").read_text(encoding="utf-8")
+        keys = set(re.findall(r"st572_[a-z0-9_]+", src))
+        assert len(keys) >= 11, keys
