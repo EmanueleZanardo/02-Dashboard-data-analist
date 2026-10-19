@@ -217,14 +217,14 @@ class TestW550Registry:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"    with (tab\d+):", src)
-        assert len(titoli) == len(dvars) == len(withs) == 564
+        assert len(titoli) == len(dvars) == len(withs) == 565
         assert TITLE550 in titoli
 
     def test_ui_indentata(self):
         assert "    with tab550:" in self._src()
 
     def test_dvar_line(self):
-        assert "tab549, tab550, tab551, tab552, tab553, tab554, tab555, tab556, tab557, tab558, tab559, tab560, tab561, tab562, tab563, tab564 = st.tabs([" in self._src()
+        assert "tab549, tab550, tab551, tab552, tab553, tab554, tab555, tab556, tab557, tab558, tab559, tab560, tab561, tab562, tab563, tab564, tab565 = st.tabs([" in self._src()
 
     def test_chiavi_univoche(self):
         src = self._src()

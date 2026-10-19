@@ -161,16 +161,16 @@ def test_registry_tab519():
         encoding="utf-8")
     line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
     titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
-    assert len(titoli) == 564
+    assert len(titoli) == 565
     assert TITLE519 in titoli
     assert src.count(TITLE519) == 3
-    assert ", tab520, tab521, tab522, tab523, tab524, tab525, tab526, tab527, tab528, tab529, tab530, tab531, tab532, tab533, tab534, tab535, tab536, tab537, tab538, tab539, tab540, tab541, tab542, tab543, tab544, tab545, tab546, tab547, tab548, tab549, tab550, tab551, tab552, tab553, tab554, tab555, tab556, tab557, tab558, tab559, tab560, tab561, tab562, tab563, tab564 = st.tabs([" in src
+    assert ", tab520, tab521, tab522, tab523, tab524, tab525, tab526, tab527, tab528, tab529, tab530, tab531, tab532, tab533, tab534, tab535, tab536, tab537, tab538, tab539, tab540, tab541, tab542, tab543, tab544, tab545, tab546, tab547, tab548, tab549, tab550, tab551, tab552, tab553, tab554, tab555, tab556, tab557, tab558, tab559, tab560, tab561, tab562, tab563, tab564, tab565 = st.tabs([" in src
     assert "    with tab519:" in src
     dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
     assert "tab519" in dvars
     withs = re.findall(r"    with (tab\d+):", src)
     assert "tab519" in withs
-    assert len(withs) == len(dvars) == 564
+    assert len(withs) == len(dvars) == 565
     # ordine: tab519 dopo tab518
     _decl519 = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
     assert _decl519.index(f'"{TITLE518}"') < _decl519.index(f'"{TITLE519}"')
