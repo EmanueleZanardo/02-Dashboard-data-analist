@@ -177,13 +177,13 @@ class TestW564Registry:
             "app.py").read_text(encoding="utf-8")
         m = re.search(r"= st\.tabs\(\[(.*?)\]\)", src, re.S)
         titles = re.findall(r'"((?:[^"\\]|\\.)*)"', m.group(1))
-        assert len(titles) == 565
+        assert len(titles) == 566
         assert TITLE564 in titles
 
     def test_chain_tab_var(self):
         src = Path(__file__).resolve().parent.parent.joinpath(
             "app.py").read_text(encoding="utf-8")
-        assert ", tab563, tab564, tab565 = st.tabs([" in src
+        assert ", tab563, tab564, tab565, tab566 = st.tabs([" in src
         assert "with tab564:" in src
 
     def test_chiavi_univoche(self):
