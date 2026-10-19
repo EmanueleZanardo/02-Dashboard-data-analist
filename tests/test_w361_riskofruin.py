@@ -162,7 +162,7 @@ def _registry():
 class TestRegistry361:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 574
+        assert len(titoli) == len(dvars) == len(withs) == 575
         assert "tab361" in dvars
         assert "tab361" in withs
 
