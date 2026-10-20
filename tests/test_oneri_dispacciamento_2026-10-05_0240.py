@@ -155,12 +155,12 @@ class TestRegistryTab221:
         src = Path(__file__).parent.parent.joinpath("app.py").read_text()
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
-        assert len(titoli) == 602
+        assert len(titoli) == 603
         assert "🗓️ Ladder delle scadenze: profilo temporale di volumi, MtM e DV01" in titoli
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         assert "tab221" in dvars
         withs = re.findall(r"    with (tab\d+):", src)
         assert "tab221" in withs
-        assert len(withs) == len(dvars) == 602
+        assert len(withs) == len(dvars) == 603
         keys = re.findall(r'key="(od221_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 4
