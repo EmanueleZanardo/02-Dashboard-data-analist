@@ -193,13 +193,13 @@ class TestW570Registry:
             "app.py").read_text(encoding="utf-8")
         m = re.search(r"= st\.tabs\(\[(.*?)\]\)", src, re.S)
         titles = re.findall(r'"((?:[^"\\]|\\.)*)"', m.group(1))
-        assert len(titles) == 598
+        assert len(titles) == 599
         assert TITLE570 in titles
 
     def test_chain_tab_var(self):
         src = Path(__file__).resolve().parent.parent.joinpath(
             "app.py").read_text(encoding="utf-8")
-        assert ", tab569, tab570, tab571, tab572, tab573, tab574, tab575, tab576, tab577, tab578, tab579, tab580, tab581, tab582, tab583, tab584, tab585, tab586, tab587, tab588, tab589, tab590, tab591, tab592, tab593, tab594, tab595, tab596, tab597, tab598 = st.tabs([" in src
+        assert ", tab569, tab570, tab571, tab572, tab573, tab574, tab575, tab576, tab577, tab578, tab579, tab580, tab581, tab582, tab583, tab584, tab585, tab586, tab587, tab588, tab589, tab590, tab591, tab592, tab593, tab594, tab595, tab596, tab597, tab598, tab599 = st.tabs([" in src
         assert "with tab570:" in src
 
     def test_chiavi_univoche(self):

@@ -33,7 +33,7 @@ def _registry():
 class TestRegistryTab245:
     def test_tab245_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 598
+        assert len(titoli) == len(dvars) == len(withs) == 599
         assert "💳 Conguaglio a rate" in titoli
         assert "tab245" in dvars
         assert "tab245" in withs
