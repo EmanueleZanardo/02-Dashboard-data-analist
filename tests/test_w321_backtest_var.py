@@ -218,7 +218,7 @@ def _ris_demo():
 class TestRegistry321:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 600
+        assert len(titoli) == len(dvars) == len(withs) == 601
         assert TITLE321 in titoli
         assert "tab321" in dvars
         assert "    with tab321:" in src
@@ -255,7 +255,7 @@ class TestValidatori:
 
     def test_parse_pnl_ok(self):
         r = _F["mh321_parse_pnl"](SERIE_DEMO)
-        assert len(r) == N == 600
+        assert len(r) == N  # N=600 osservazioni demo, non il conteggio tab
         assert all(isinstance(v, float) for v in r)
 
     def test_parse_pnl_ko(self):
@@ -400,7 +400,7 @@ class TestTraffic:
 class TestRisultato:
     def test_risultato_demo(self):
         ris = _ris_demo()
-        assert ris["n"] == N == 600
+        assert ris["n"] == N  # N=600 osservazioni demo, non il conteggio tab
         assert ris["q"] == Q_DEMO
         assert ris["w"] == W_DEMO
         assert ris["n_test"] == N_TEST == 350
