@@ -149,11 +149,11 @@ class TestW589Registry:
     def test_conteggio_tab(self):
         m = re.search(r"= st\.tabs\(\[(.*?)\]\)", self._src(), re.S)
         titles = re.findall(r'"((?:[^"\\\\]|\\\\.)*)"', m.group(1))
-        assert len(titles) == 589
-        assert titles[-1] == TITLE589
+        assert len(titles) == 590
+        assert TITLE589 in titles
 
     def test_chain_tab_var(self):
-        assert ", tab588, tab589 = st.tabs([" in self._src()
+        assert ", tab588, tab589, tab590 = st.tabs([" in self._src()
         assert "with tab589:" in self._src()
 
     def test_chiavi_univoche(self):
