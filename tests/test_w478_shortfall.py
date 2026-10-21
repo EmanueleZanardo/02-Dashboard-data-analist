@@ -62,7 +62,7 @@ class TestRegistry481:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"    with (tab\d+):", src)
-        assert len(titoli) == len(dvars) == len(withs) == 605
+        assert len(titoli) == len(dvars) == len(withs) == 606
 
     def test_ultima_tab(self):
         import re
