@@ -37,7 +37,7 @@ def _registry():
 class TestRegistryTab258:
     def test_tab258_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 612
+        assert len(titoli) == len(dvars) == len(withs) == 613
         assert "🌿 Clean spread (con CO₂)" in titoli
         assert "tab258" in dvars
         assert "tab258" in withs
