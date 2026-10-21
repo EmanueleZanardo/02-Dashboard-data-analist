@@ -199,12 +199,12 @@ class TestW599Registry:
     def test_tab_count(self):
         m = re.search(r"= st\.tabs\(\[(.*?)\]\)", self._src(), re.S)
         titles = re.findall(r'"([^"]+)"', m.group(1))
-        assert len(titles) == 617
+        assert len(titles) == 618
         assert TITLE599 in titles
         assert TITLE599 in titles
 
     def test_chain(self):
-        assert ", tab598, tab599, tab600, tab601, tab602, tab603, tab604, tab605, tab606, tab607, tab608, tab609, tab610, tab611, tab612, tab613, tab614, tab615, tab616, tab617 = st.tabs([" in self._src()
+        assert ", tab598, tab599, tab600, tab601, tab602, tab603, tab604, tab605, tab606, tab607, tab608, tab609, tab610, tab611, tab612, tab613, tab614, tab615, tab616, tab617, tab618 = st.tabs([" in self._src()
         assert "with tab599:" in self._src()
 
     def test_keys(self):
