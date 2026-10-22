@@ -255,12 +255,12 @@ class TestStruttura:
     def test_tab_count(self):
         m = re.search(r"= st\.tabs\(\[(.*?)\]\)", self._src(), re.S)
         titles = re.findall(r'"([^"]+)"', m.group(1))
-        assert len(titles) == 640
+        assert len(titles) == 641
         assert TITLE638 in titles
 
     def test_registrazione(self):
         assert f'"{TITLE638}"' in self._src()
-        assert ", tab636, tab637, tab638, tab639, tab640 = st.tabs([" in self._src()
+        assert ", tab636, tab637, tab638, tab639, tab640, tab641 = st.tabs([" in self._src()
         assert "with tab638:" in self._src()
 
     def test_keys(self):
