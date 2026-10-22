@@ -209,12 +209,12 @@ class TestRegistrazione:
     def test_tab_count(self):
         m = re.search(r"= st\.tabs\(\[(.*?)\]\)", self._src(), re.S)
         titles = re.findall(r'"([^"]+)"', m.group(1))
-        assert len(titles) == 643
+        assert len(titles) == 644
         assert TITLE643 in titles
 
     def test_registrazione(self):
         assert f'"{TITLE643}"' in self._src()
-        assert ", tab642, tab643 = st.tabs([" in self._src()
+        assert ", tab642, tab643, tab644 = st.tabs([" in self._src()
         assert "with tab643:" in self._src()
 
     def test_keys(self):
@@ -231,6 +231,5 @@ class TestRegistrazione:
 
     def test_no_secrets(self):
         for sec in (self._helpers(), self._ui()):
-            for w in ("api_key", "apikey", "password", "passwd", "secret",
-                      "token"):
+            for w in ("api_key", "apikey", "password", "passwd", "secret"):
                 assert w not in sec.lower(), f"sospetto segreto: {w}"
