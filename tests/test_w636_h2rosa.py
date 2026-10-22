@@ -196,7 +196,7 @@ class TestUI636:
 
     def test_registrazione(self):
         assert f'"{TITLE636}"' in self._src()
-        assert ", tab635, tab637, tab638 = st.tabs([" in self._src()
+        assert ", tab635, tab636, tab637, tab638 = st.tabs([" in self._src()
         assert "with tab636:" in self._src()
 
     def test_keys(self):

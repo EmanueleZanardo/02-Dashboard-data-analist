@@ -184,7 +184,7 @@ class TestW611Registry:
         assert TITLE611 in titles
 
     def test_chain(self):
-        assert ", tab610, tab611, tab612, tab613, tab614, tab615, tab616, tab617, tab618, tab619, tab620, tab621, tab622, tab623, tab624, tab625, tab626, tab627, tab628, tab629, tab630, tab631, tab632, tab633, tab634, tab635, tab637, tab638 = st.tabs([" in self._src()
+        assert ", tab610, tab611, tab612, tab613, tab614, tab615, tab616, tab617, tab618, tab619, tab620, tab621, tab622, tab623, tab624, tab625, tab626, tab627, tab628, tab629, tab630, tab631, tab632, tab633, tab634, tab635, tab636, tab637, tab638 = st.tabs([" in self._src()
         assert "with tab611:" in self._src()
 
     def test_keys(self):

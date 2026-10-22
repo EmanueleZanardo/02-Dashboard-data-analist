@@ -183,7 +183,7 @@ class TestW629Registry:
         assert TITLE629 in titles
 
     def test_chain(self):
-        assert ", tab628, tab629, tab630, tab631, tab632, tab633, tab634, tab635, tab637, tab638 = st.tabs([" in self._src()
+        assert ", tab628, tab629, tab630, tab631, tab632, tab633, tab634, tab635, tab636, tab637, tab638 = st.tabs([" in self._src()
         assert "with tab629:" in self._src()
 
     def test_keys(self):
