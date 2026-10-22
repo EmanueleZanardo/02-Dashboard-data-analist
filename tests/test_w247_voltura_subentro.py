@@ -32,7 +32,7 @@ def _registry():
 class TestRegistryTab247:
     def test_tab247_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 637
+        assert len(titoli) == len(dvars) == len(withs) == 638
         assert "🔄 Voltura e subentro" in titoli
         assert "tab247" in dvars
         assert "tab247" in withs
