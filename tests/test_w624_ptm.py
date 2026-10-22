@@ -214,12 +214,12 @@ class TestW624Registry:
     def test_tab_count(self):
         m = re.search(r"= st\.tabs\(\[(.*?)\]\)", self._src(), re.S)
         titles = re.findall(r'"([^"]+)"', m.group(1))
-        assert len(titles) == 634
+        assert len(titles) == 635
         assert TITLE624 in titles
         assert TITLE624 in titles
 
     def test_chain(self):
-        assert ", tab623, tab624, tab625, tab626, tab627, tab628, tab629, tab630, tab631, tab632, tab633, tab634 = st.tabs([" in self._src()
+        assert ", tab623, tab624, tab625, tab626, tab627, tab628, tab629, tab630, tab631, tab632, tab633, tab634, tab635 = st.tabs([" in self._src()
         assert "with tab624:" in self._src()
 
     def test_keys(self):
