@@ -191,12 +191,12 @@ class TestUI636:
     def test_tab_count(self):
         m = re.search(r"= st\.tabs\(\[(.*?)\]\)", self._src(), re.S)
         titles = re.findall(r'"([^"]+)"', m.group(1))
-        assert len(titles) == 638
+        assert len(titles) == 639
         assert TITLE636 in titles
 
     def test_registrazione(self):
         assert f'"{TITLE636}"' in self._src()
-        assert ", tab635, tab636, tab637, tab638 = st.tabs([" in self._src()
+        assert ", tab635, tab636, tab637, tab638, tab639 = st.tabs([" in self._src()
         assert "with tab636:" in self._src()
 
     def test_keys(self):
