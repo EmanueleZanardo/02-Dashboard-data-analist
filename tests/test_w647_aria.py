@@ -259,7 +259,7 @@ class TestRegistry:
             "# W646 (22/10/2026)")[0]
 
     def test_chain_registry_e_label(self):
-        assert ", tab646, tab647, tab648, tab649, tab650, tab651, tab652, tab653, tab654 = st.tabs([" in self._src()
+        assert ", tab646, tab647, tab648, tab649, tab650, tab651, tab652, tab653, tab654, tab655 = st.tabs([" in self._src()
         assert "with tab647:" in self._src()
         assert TITLE647 in self._src()
 
@@ -267,7 +267,7 @@ class TestRegistry:
         src = self._src()
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
-        assert len(titoli) == 654
+        assert len(titoli) == 655
         assert TITLE647 in titoli
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         assert "tab647" in dvars
