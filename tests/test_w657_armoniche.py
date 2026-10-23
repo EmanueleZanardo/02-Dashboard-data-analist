@@ -250,13 +250,13 @@ class TestRegistry:
         assert "# W657 (23/10/2026) - tab657" in self._app()
 
     def test_chain_bumpata(self):
-        assert ", tab655, tab656, tab657, tab658, tab659, tab660, tab661, tab662, tab663, tab664, tab665, tab666, tab667, tab668 = st.tabs([" in self._app()
+        assert ", tab655, tab656, tab657, tab658, tab659, tab660, tab661, tab662, tab663, tab664, tab665, tab666, tab667, tab668, tab669 = st.tabs([" in self._app()
 
     def test_tab_count_657(self):
         src = self._app()
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
-        assert len(titoli) == 668
+        assert len(titoli) == 669
         assert TITLE657 in titoli
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         assert "tab657" in dvars

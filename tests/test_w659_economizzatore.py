@@ -335,11 +335,11 @@ class TestRegistry:
 
     def test_count_withs_659(self):
         assert len(re.findall(r"^    with tab\d+:$", _app_src(),
-                              flags=re.M)) == 668
+                              flags=re.M)) == 669
 
     def test_bump_catena_solo_append(self):
-        # l'ancora finale e' la coppia tab666, tab667 (APPEND boundary-safe)
-        assert "tab666, tab667 = st.tabs" in _app_src()
+        # l'ancora finale e' la terna tab667, tab668, tab669 (APPEND boundary-safe)
+        assert "tab667, tab668, tab669 = st.tabs" in _app_src()
 
     def test_helpers_applicati(self):
         assert _app_src().count("def mh659_") == 21
