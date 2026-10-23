@@ -39,7 +39,7 @@ def _registry():
 class TestRegistryTab255:
     def test_tab255_dichiarata(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 664
+        assert len(titoli) == len(dvars) == len(withs) == 665
         assert "⛽ Capacità gas giornaliera" in titoli
         assert "tab255" in dvars
         assert "tab255" in withs
