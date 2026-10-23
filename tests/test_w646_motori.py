@@ -234,7 +234,7 @@ class TestIntegrazioneUI:
             "# W645 (22/10/2026)")[0]
 
     def test_chain_registry_e_label(self):
-        assert ", tab645, tab646, tab647, tab648 = st.tabs([" in self._src()
+        assert ", tab645, tab646, tab647, tab648, tab649 = st.tabs([" in self._src()
         assert "with tab646:" in self._src()
         assert TITLE646 in self._src()
 
@@ -242,13 +242,13 @@ class TestIntegrazioneUI:
         src = self._src()
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
-        assert len(titoli) == 648
+        assert len(titoli) == 649
         assert TITLE646 in titoli
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         assert "tab646" in dvars
         withs = re.findall(r"    with (tab\d+):", src)
         assert "tab646" in withs
-        assert len(withs) == len(dvars) == 648
+        assert len(withs) == len(dvars) == 649
 
     def test_ui_chiavi_e_guard(self):
         ui = self._ui()
