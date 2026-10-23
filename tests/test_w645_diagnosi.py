@@ -223,7 +223,7 @@ class TestIntegrazioneUI:
             "# W644 (22/10/2026)")[0]
 
     def test_chain_registry_e_label(self):
-        assert ", tab644, tab645, tab646, tab647, tab648, tab649, tab650, tab651 = st.tabs([" in self._src()
+        assert ", tab644, tab645, tab646, tab647, tab648, tab649, tab650, tab651, tab652 = st.tabs([" in self._src()
         assert "with tab645:" in self._src()
         assert TITLE645 in self._src()
 
