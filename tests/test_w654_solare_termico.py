@@ -250,13 +250,13 @@ class TestUI:
         assert "# W654 (23/10/2026) - tab654" in self._app()
 
     def test_chain_bumpata(self):
-        assert ", tab653, tab654, tab655, tab656, tab657, tab658, tab659, tab660, tab661 = st.tabs([" in self._app()
+        assert ", tab653, tab654, tab655, tab656, tab657, tab658, tab659, tab660, tab661, tab662 = st.tabs([" in self._app()
 
     def test_tab_count_654(self):
         src = self._app()
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
-        assert len(titoli) == 661
+        assert len(titoli) == 662
         assert TITLE654 in titoli
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         assert "tab654" in dvars
