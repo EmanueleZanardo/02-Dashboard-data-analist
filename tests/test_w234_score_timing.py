@@ -5,12 +5,12 @@ class TestRegistryTab234:
         src = Path(__file__).parent.parent.joinpath("app.py").read_text(encoding="utf-8")
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
-        assert len(titoli) == 682
+        assert len(titoli) == 683
         assert "🎯 Score di timing" in titoli
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         assert "tab234" in dvars
         withs = re.findall(r"    with (tab\d+):", src)
         assert "tab234" in withs
-        assert len(withs) == len(dvars) == 682
+        assert len(withs) == len(dvars) == 683
         keys = re.findall(r'key="(t234_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 10
