@@ -234,7 +234,7 @@ class TestIntegrazioneUI:
             "# W645 (22/10/2026)")[0]
 
     def test_chain_registry_e_label(self):
-        assert ", tab645, tab646, tab647, tab648, tab649, tab650, tab651, tab652, tab653, tab654, tab655, tab656, tab657, tab658, tab659, tab660, tab661, tab662, tab663, tab664, tab665, tab666, tab667, tab668, tab669, tab670, tab671, tab672, tab673, tab674, tab675, tab676, tab677, tab678, tab679 = st.tabs([" in self._src()
+        assert ", tab645, tab646, tab647, tab648, tab649, tab650, tab651, tab652, tab653, tab654, tab655, tab656, tab657, tab658, tab659, tab660, tab661, tab662, tab663, tab664, tab665, tab666, tab667, tab668, tab669, tab670, tab671, tab672, tab673, tab674, tab675, tab676, tab677, tab678, tab679, tab680 = st.tabs([" in self._src()
         assert "with tab646:" in self._src()
         assert TITLE646 in self._src()
 
@@ -242,13 +242,13 @@ class TestIntegrazioneUI:
         src = self._src()
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
-        assert len(titoli) == 679
+        assert len(titoli) == 680
         assert TITLE646 in titoli
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         assert "tab646" in dvars
         withs = re.findall(r"    with (tab\d+):", src)
         assert "tab646" in withs
-        assert len(withs) == len(dvars) == 679
+        assert len(withs) == len(dvars) == 680
 
     def test_ui_chiavi_e_guard(self):
         ui = self._ui()

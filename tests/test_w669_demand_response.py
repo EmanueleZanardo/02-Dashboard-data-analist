@@ -539,10 +539,10 @@ class TestRegistry:
 
     def test_numero_tab_669(self):
         src = _app_src()
-        assert len(re.findall(r"\n    with tab\d+:", src)) == 679
+        assert len(re.findall(r"\n    with tab\d+:", src)) == 680
 
     def test_chain_tail_669(self):
-        assert ", tab667, tab668, tab669, tab670, tab671, tab672, tab673, tab674, tab675, tab676, tab677, tab678, tab679 = st.tabs([" in _app_src()
+        assert ", tab667, tab668, tab669, tab670, tab671, tab672, tab673, tab674, tab675, tab676, tab677, tab678, tab679, tab680 = st.tabs([" in _app_src()
 
     def test_titolo_669_in_app(self):
         assert TITLE669 in _app_src()
