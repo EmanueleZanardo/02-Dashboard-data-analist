@@ -34,7 +34,7 @@ class TestValoriAttesi:
         # Volume residuo = volume annuo (365 gg rimanenti).
         # MtM: A = 10000*(95-80) = 150000; B = 0 (indicizzato);
         #      C = 2000*(95-100) = -10000 -> esposizione solo su A.
-        r = calcola_concentrazione_controparte(_df_base(), 95.0)
+        r = calcola_concentrazione_controparte(_df_base(), 95.0, data_rif=OGGI)
         assert r["errore"] is None
         assert r["valido"] is True
         assert r["n_controparti"] == 3
@@ -53,7 +53,7 @@ class TestValoriAttesi:
 
     def test_singola_controparte_hhi_10000(self):
         df = _df_base().iloc[:1].copy()
-        r = calcola_concentrazione_controparte(df, 95.0)
+        r = calcola_concentrazione_controparte(df, 95.0, data_rif=OGGI)
         assert r["errore"] is None
         assert abs(r["hhi"] - 10000.0) < 1e-6
         assert abs(r["cr1_pct"] - 100.0) < 1e-9
@@ -63,7 +63,7 @@ class TestValoriAttesi:
         df = _df_base().copy()
         df["Fornitore"] = ["A", "B", "C", "D"]
         df["Volume_MWh_anno"] = [5000.0] * 4
-        r = calcola_concentrazione_controparte(df, 95.0)
+        r = calcola_concentrazione_controparte(df, 95.0, data_rif=OGGI)
         assert r["errore"] is None
         assert abs(r["hhi"] - 2500.0) < 1e-6  # 4 x 25%^2
         assert "diversificato" in r["verdetto"]
@@ -72,7 +72,7 @@ class TestValoriAttesi:
         # Contratto che scade tra 182 giorni: volume residuo ~= meta'.
         df = _df_base().iloc[:1].copy()
         df["Fine"] = OGGI + datetime.timedelta(days=182)
-        r = calcola_concentrazione_controparte(df, 95.0)
+        r = calcola_concentrazione_controparte(df, 95.0, data_rif=OGGI)
         assert r["errore"] is None
         vol_res = r["df_controparti"].loc[0, "Volume residuo (MWh)"]
         assert abs(vol_res - 6000.0 * 182 / 365) < 1e-6
@@ -87,36 +87,36 @@ class TestRobustezza:
 
     def test_colonne_mancanti(self):
         r = calcola_concentrazione_controparte(
-            _df_base().drop(columns=["Tipo"]), 95.0)
+            _df_base().drop(columns=["Tipo"]), 95.0, data_rif=OGGI)
         assert r["errore"] is not None and "Colonne mancanti" in r["errore"]
 
     def test_tutti_scaduti(self):
         df = _df_base().copy()
         df["Fine"] = OGGI - datetime.timedelta(days=1)
-        r = calcola_concentrazione_controparte(df, 95.0)
+        r = calcola_concentrazione_controparte(df, 95.0, data_rif=OGGI)
         assert r["errore"] is not None and "attivo" in r["errore"]
 
     def test_prezzo_mercato_non_valido(self):
         for pm in (0, -5.0, float("nan"), "95"):
-            r = calcola_concentrazione_controparte(_df_base(), pm)
+            r = calcola_concentrazione_controparte(_df_base(), pm, data_rif=OGGI)
             assert r["errore"] is not None, pm
 
     def test_volume_non_positivo(self):
         df = _df_base().copy()
         df.loc[0, "Volume_MWh_anno"] = 0.0
-        r = calcola_concentrazione_controparte(df, 95.0)
+        r = calcola_concentrazione_controparte(df, 95.0, data_rif=OGGI)
         assert r["errore"] is not None
 
     def test_tipo_non_valido(self):
         df = _df_base().copy()
         df.loc[0, "Tipo"] = "Variabile"
-        r = calcola_concentrazione_controparte(df, 95.0)
+        r = calcola_concentrazione_controparte(df, 95.0, data_rif=OGGI)
         assert r["errore"] is not None
 
     def test_determinismo(self):
         df = _df_base()
-        r1 = calcola_concentrazione_controparte(df, 95.0)
-        r2 = calcola_concentrazione_controparte(df, 95.0)
+        r1 = calcola_concentrazione_controparte(df, 95.0, data_rif=OGGI)
+        r2 = calcola_concentrazione_controparte(df, 95.0, data_rif=OGGI)
         assert r1["hhi"] == r2["hhi"]
         assert r1["verdetto"] == r2["verdetto"]
         pd.testing.assert_frame_equal(r1["df_controparti"],
@@ -125,7 +125,7 @@ class TestRobustezza:
     def test_indice_tz_aware(self):
         df = _df_base().copy()
         df["Fine"] = pd.to_datetime(df["Fine"]).dt.tz_localize("Europe/Zurich")
-        r = calcola_concentrazione_controparte(df, 95.0)
+        r = calcola_concentrazione_controparte(df, 95.0, data_rif=OGGI)
         assert r["errore"] is None and r["valido"] is True
 
 
@@ -137,12 +137,12 @@ class TestRegistryTab202:
         src = Path(__file__).parent.parent.joinpath("app.py").read_text()
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
-        assert len(titoli) == 671
+        assert len(titoli) == 672
         assert "🗓️ Ladder delle scadenze: profilo temporale di volumi, MtM e DV01" in titoli
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         assert "tab202" in dvars
         withs = re.findall(r"    with (tab\d+):", src)
         assert "tab202" in withs
-        assert len(withs) == len(dvars) == 671
+        assert len(withs) == len(dvars) == 672
         keys = re.findall(r'key="(cc202_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 3
