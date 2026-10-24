@@ -660,3 +660,22 @@ class TestSegreti:
                 r"(?i)(api[_-]?key|secret|password|passwd|token)"
                 r"\s*=\s*[\"']",
                 src), fn
+
+
+class TestDemoUiKeysRegression:
+    """Regressione 24/10/2026 ciclo ~06:39: la UI usava _def674["om"]
+    mentre mh674_demo() definisce "opex_om" -> KeyError a render.
+    Ogni chiave letta dal frammento UI deve esistere nel demo dict."""
+
+    def test_ui_keys_subset_di_demo_keys(self):
+        ui = _ui_src()
+        demo_keys = set(_F["mh674_demo"]().keys())
+        used = set(re.findall(r'_def674\["([a-z_0-9]+)"\]', ui))
+        assert used, "nessuna chiave _def674 trovata nella UI"
+        mancanti = sorted(used - demo_keys)
+        assert not mancanti, f"chiavi UI non nel demo dict: {mancanti}"
+
+    def test_om_rinominato_opex_om(self):
+        ui = _ui_src()
+        assert '_def674["om"]' not in ui
+        assert '_def674["opex_om"]' in ui
