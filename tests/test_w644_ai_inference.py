@@ -230,12 +230,12 @@ class TestRegistrazione:
     def test_tab_count(self):
         m = re.search(r"= st\.tabs\(\[(.*?)\]\)", self._src(), re.S)
         titles = re.findall(r'"([^"]+)"', m.group(1))
-        assert len(titles) == 673
+        assert len(titles) == 674
         assert TITLE644 in titles
 
     def test_registrazione(self):
         assert f'"{TITLE644}"' in self._src()
-        assert ", tab643, tab644, tab645, tab646, tab647, tab648, tab649, tab650, tab651, tab652, tab653, tab654, tab655, tab656, tab657, tab658, tab659, tab660, tab661, tab662, tab663, tab664, tab665, tab666, tab667, tab668, tab669, tab670, tab671, tab672, tab673 = st.tabs([" in self._src()
+        assert ", tab643, tab644, tab645, tab646, tab647, tab648, tab649, tab650, tab651, tab652, tab653, tab654, tab655, tab656, tab657, tab658, tab659, tab660, tab661, tab662, tab663, tab664, tab665, tab666, tab667, tab668, tab669, tab670, tab671, tab672, tab673, tab674 = st.tabs([" in self._src()
         assert "with tab644:" in self._src()
 
     def test_keys(self):
