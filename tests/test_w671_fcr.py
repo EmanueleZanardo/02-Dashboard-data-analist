@@ -566,11 +566,11 @@ class TestRegistry:
 
     def test_numero_tab_671(self):
         src = _app_src()
-        assert len(re.findall(r"\n    with tab\d+:", src)) == 694
+        assert len(re.findall(r"\n    with tab\d+:", src)) == 695
 
     def test_bump_catena_solo_append(self):
         src = _app_src()
-        assert ", tab669, tab670, tab671, tab672, tab673, tab674, tab675, tab676, tab677, tab678, tab679, tab680, tab681, tab682, tab683, tab684, tab685, tab686, tab687, tab688, tab689, tab690, tab691, tab692, tab693, tab694 = st.tabs([" in src
+        assert ", tab669, tab670, tab671, tab672, tab673, tab674, tab675, tab676, tab677, tab678, tab679, tab680, tab681, tab682, tab683, tab684, tab685, tab686, tab687, tab688, tab689, tab690, tab691, tab692, tab693, tab694, tab695 = st.tabs([" in src
 
     def test_titolo_671_in_app(self):
         assert TITLE671 in _app_src()
