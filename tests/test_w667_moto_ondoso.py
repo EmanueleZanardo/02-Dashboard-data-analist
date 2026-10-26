@@ -528,11 +528,11 @@ class TestRegistry:
 
     def test_numero_tab_667(self):
         src = _app_src()
-        assert len(re.findall(r"\n    with tab\d+:", src)) == 730
+        assert len(re.findall(r"\n    with tab\d+:", src)) == 731
 
     def test_chain_tail_667(self):
         # APPEND boundary-safe: tab671 appeso in coda alla catena
-        assert "tab728, tab729, tab730 = st.tabs" in _app_src()
+        assert "tab729, tab730, tab731 = st.tabs" in _app_src()
 
     def test_titolo_667_in_app(self):
         assert TITLE667 in _app_src()
