@@ -1,4 +1,12 @@
-**Ultimo aggiornamento: 26/10/2026 ~00:39 CEST**
+**Ultimo aggiornamento: 26/10/2026 ~02:00 CEST**
+
+## 26/10/2026 ~02:00 CET — aggiornamento documentale giornaliero
+- **25/10: repo cresciuto da tab693 a tab716 (24 nuove, una per ciclo orario), tutte pushate e verificate; 26/10 00:39: tab717.** Head remoto `6dc8036` (tab717, 26/10 00:39). Titoli verificati: tab700 pompa di calore ad acqua di falda (07:39), tab712 batteria a sabbia (19:39, VAN +11.175.459 EUR, TIR 35,68%, payback anno 3), tab713 teleriscaldamento 5G (20:39), tab714 eolico offshore galleggiante (21:39), tab715 idrogeno in caverne saline (22:39), tab716 energia da gradiente salino (23:39, demo MARGINALE: VAN −2.558.480 EUR, TIR 4,99%, payback anno 13), tab717 batterie ferro-aria (00:39, demo CONVIENTE: risparmio 903,16 EUR/anno, VAN +101.898,67 EUR).
+- **tab717:** full suite 20.504 passed / 0 failed; sweep chiavi demo-vs-UI 182 tab pulito; push VERIFY_OK (parent `f94e9568`, tree `b5043fdf`, blob app.py/STATUS.md/test verificati via API).
+- **Nota di coordinamento:** il job QA-dashboard scrive le sue entry direttamente sul STATUS.md remoto; questo job mergia le proprie sezioni giornaliere sulla base live.
+- Streamlit keepalive: curl in loop 303 noto (non affidabile) — verifica browser LIVE 25/10 00:19 OK, app caricata, nessuna pagina di sleep.
+- Blocchi: vecchia chiave ENTSO-E nella storia git (da ruotare); app non pubblica — serve suo gesto su share.streamlit.io.
+
 
 ## 25/10/2026 ~02:00 CEST — aggiornamento documentale giornaliero
 - **24/10: repo cresciuto da 671 a 693 tab (22 nuove, una per ciclo orario), tutte pushate e verificate.** Head remoto `d94f61d` (tab693, 25/10 00:39). Titoli verificati: tab672 "Riserva secondaria aFRR" (ea26704c, 02:39), tab673 "Riserva terziaria mFRR" (b43885a8, 04:39), tab680 accumulo gravitazionale (11:39), tab684 solare termico (15:39), tab685 fotovoltaico galleggiante FPV (16:39), tab686 CER (17:39), tab687 V2H (4b2ce291, 18:39), tab688 immersion cooling (19:39), tab689 black start (fc95bce5, 20:39), tab690 grid-forming (96617c62, 21:39), tab691 supercondensatori (a3eaadf3, 22:39), tab692 second life batterie EV (23:39), tab693 accumulo termico stagionale (00:39).
