@@ -1189,7 +1189,7 @@ class TestRegistryPostApply:
             src)
         assert m is not None, "riga unpack st.tabs non trovata"
         n_tab = len(re.findall(r"tab\d+", m.group(1)))
-        assert n_tab == 722, \
+        assert n_tab == 723, \
             f"conteggio tab {n_tab} != 704 (atteso post-apply)"
         idx = src.index("st.tabs(")
         assert TITLE704 in src[idx:], \
