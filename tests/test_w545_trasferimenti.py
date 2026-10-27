@@ -206,5 +206,5 @@ class TestW545Registry:
         src = (Path(__file__).resolve().parent.parent / "app.py").read_text(
             encoding="utf-8")
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
-        assert len(re.findall(r"tab\d+", line.split("= st.tabs([")[0])) == 749
-        assert len(re.findall(r"^\s*with (tab\d+):", src, re.M)) == 749
+        assert len(re.findall(r"tab\d+", line.split("= st.tabs([")[0])) == 750
+        assert len(re.findall(r"^\s*with (tab\d+):", src, re.M)) == 750
