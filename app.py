@@ -92449,6 +92449,1174 @@ def demo_calcoli():
     return mh770_calcola(**mh770_demo())
 
 
+# W805 (29/10/2026) - "Rosticceria: girarrosto a gas
+# efficiente + recupero calore girarrosto su ACS +
+# celle e banchi caldi efficienti batte girarrosto
+# vecchio + celle tradizionali + caldaia a gas?"
+#
+# Business case deterministico di una
+# rosticceria guidato dai KG DI POLLI ARROSTO
+# AL GIORNO e dai GIORNI DI APERTURA ALL'ANNO:
+# i polli arrostiti guidano il calore di cottura
+# del girarrosto (kWh_th per kg di polli), i
+# banchi caldi di mantenimento (kWh_e per kg di
+# polli, elettrici) e il carico frigorifero
+# delle celle (kWh_c per kg di polli) e, insieme
+# ai litri di acqua calda al giorno per il
+# lavaggio di spiedi, teglie e attrezzature, il
+# fabbisogno di ACS. Baseline: girarrosto a gas
+# vecchio, banchi caldi e celle tradizionali
+# elettrici, caldaia a gas per l'ACS di lavaggio,
+# calore del girarrosto disperso senza recupero.
+# Alternativa: girarrosto a gas efficiente,
+# recupero del calore del girarrosto sull'ACS di
+# lavaggio, banchi caldi e celle efficienti,
+# pompa di calore per l'ACS residua dopo il
+# recupero.
+#
+# DISTINZIONE ESPLICITA: questa scheda NON e'
+# la scheda del panificio (li' i driver sono i
+# kg di pane al giorno per la cottura del pane,
+# senza girarrosto e senza polli: qui invece il
+# calore e' quello del girarrosto a gas per i
+# polli arrosto, con banchi caldi di
+# mantenimento dei polli e celle dei polli, e il
+# recupero va sull'ACS di lavaggio di spiedi e
+# teglie), NON e' la scheda della pasticceria
+# (li' i driver sono i kg di dolci al giorno con
+# abbattitore da T_in a T_out e celle dei dolci:
+# qui invece non c'e' nessun dolce, nessun
+# abbattitore, nessun raffreddamento da T_in a
+# T_out, il calore e' quello del girarrosto per
+# i polli e i banchi sono caldi di mantenimento,
+# non freddi), NON e' la scheda della gelateria
+# (li' i driver sono i litri di gelato con
+# pastorizzazione e freddo del gelato: qui
+# invece non c'e' nessuna pastorizzazione,
+# nessun gelato, nessun freddo di gelato, il
+# freddo e' quello delle celle dei polli), NON
+# e' la scheda della pescheria (li' i driver
+# sono i kg di pesce al giorno con macchina del
+# ghiaccio in scaglie e recupero dai
+# condensatori: qui invece non c'e' nessun
+# pesce, nessuna macchina del ghiaccio, nessun
+# ghiaccio, il recupero viene dal calore del
+# girarrosto, non dai condensatori), NON e' la
+# scheda del fioraio (li' i driver sono la
+# superficie del negozio in m2 per il
+# riscaldamento piu' volume, carico specifico e
+# ore della cella frigo fiori, con recupero dal
+# condensatore sul riscaldamento del negozio:
+# qui invece non c'e' nessun negozio da
+# riscaldare, nessun riscaldamento, nessuna
+# cella fiori, nessun fiore, il recupero va
+# sull'ACS di lavaggio, non sul
+# riscaldamento), NON e' la scheda del
+# parrucchiere (li' il driver sono la superficie
+# del salone piu' i lavaggi di capelli, con ACS
+# dei lavaggi e recupero dalle acque reflue di
+# lavaggio: qui invece non ci sono lavaggi di
+# capelli, nessuna ACS di lavaggi, nessun
+# lavatesta, il recupero viene dal calore del
+# girarrosto, non dalle acque), NON e' la scheda
+# del ristorante (li' il driver sono i coperti
+# annui per ACS e carico termico delle celle
+# frigo di cucina: qui invece non ci sono
+# coperti, nessuna ACS di cucina, il freddo e'
+# quello delle celle dei polli guidato dai kg di
+# polli, non da coperti), NON e' la scheda della
+# farmacia (li' il driver e' la superficie di
+# vendita piu' la potenza elettrica continua
+# dei frigoriferi farmaceutici, con recupero dai
+# frigoriferi: qui invece il freddo e' quello
+# delle celle dei polli, guidato dai kg di
+# polli, e il recupero va sull'ACS di lavaggio,
+# non su un fabbisogno farmaceutico), NON e' la
+# scheda dell'albergo (li' il driver e' il
+# pernottamento turistico, con ACS delle docce
+# degli ospiti: qui invece non c'e' nessun
+# pernottamento turistico, nessun ospite che
+# dorme, nessuna doccia, nessuna ACS di docce),
+# NON e' la scheda della palestra (li' il driver
+# sono le docce degli utenti dopo l'attivita'
+# fisica, con ACS delle docce e recupero dalle
+# acque delle docce: qui invece non ci sono
+# utenti che fanno sport, non ci sono docce,
+# non c'e' ACS di docce), NON e' la scheda
+# dell'autolavaggio (li' il driver sono i veicoli
+# lavati, con acqua di lavaggio dei veicoli: qui
+# invece non c'e' nessun veicolo, nessun
+# lavaggio di auto, nessuna acqua di lavaggio
+# dei veicoli) e NON e' la scheda del
+# palaghiaccio (li' il ghiaccio e' la pista da
+# pattinaggio, con freddo di pista e calore di
+# scarto verso gli spogliatoi: qui invece non
+# c'e' nessuna pista, nessun ghiaccio, il
+# girarrosto arrostisce polli e le celle li
+# conservano): qui i driver sono i kg di polli
+# arrosto al giorno, i giorni di apertura
+# all'anno e i litri di ACS di lavaggio al
+# giorno, e nient'altro.
+#
+# Fisica ed economia (costanti come letterali
+# qui dentro, mai costanti di modulo; WACC e
+# tolleranza in ingresso come PERCENTUALI, es.
+# 5 = 5 %, e divisi per 100 dentro le funzioni;
+# denaro in EUR, energia in kWh salvo dove
+# indicato, emissioni in tCO2):
+#
+#   kg_polli_anno [kg/anno] =
+#       kg_polli_giorno x giorni_anno
+#   Q_cottura [kWh_th/anno] =
+#       kg_polli_anno x q_cottura_per_kg
+#       (calore utile di cottura dei polli al
+#       girarrosto)
+#   gas_girarrosto_base [kWh/anno] =
+#       Q_cottura / eta_girarrosto_base
+#   gas_girarrosto_alt [kWh/anno] =
+#       Q_cottura / eta_girarrosto_alt
+#       (stesso calore utile, rendimento diverso:
+#       girarrosto vecchio contro efficiente)
+#   E_banchi_base [kWh_e/anno] =
+#       kg_polli_anno x q_banchi_per_kg
+#       x fattore_banchi_base
+#   E_banchi_alt [kWh_e/anno] =
+#       kg_polli_anno x q_banchi_per_kg
+#       x fattore_banchi_alt
+#       (banchi caldi di mantenimento dei polli,
+#       elettrici: stesso carico specifico,
+#       fattore di efficienza diverso, base 1,00
+#       contro alt 0,80)
+#   Q_celle [kWh_c/anno] =
+#       kg_polli_anno x q_celle_per_kg
+#       (carico frigorifero delle celle dei
+#       polli, guidato dai kg di polli)
+#   E_freddo_base [kWh_e/anno] =
+#       Q_celle / COP_freddo_base
+#   E_freddo_alt [kWh_e/anno] =
+#       Q_celle / COP_freddo_alt
+#       (stesso carico frigorifero, COP diverso:
+#       celle tradizionali contro efficienti)
+#   Q_acs [kWh_th/anno] =
+#       litri_acs_giorno x giorni_anno
+#       x 4,186 x delta_T / 3600
+#       (1 litro di acqua = 1 kg; calore per
+#       scaldare l'acqua di lavaggio di delta_T
+#       gradi, da temperatura di rete a
+#       temperatura di lavaggio)
+#   Q_rec [kWh_th/anno] =
+#       min(Q_acs, Q_cottura x f_rec)
+#       (calore del girarrosto recuperato
+#       sull'ACS di lavaggio, f_rec in [0, 1];
+#       il recupero non puo' superare l'ACS da
+#       coprire: saturato a Q_acs)
+#   Q_acs_net [kWh_th/anno] =
+#       max(0, Q_acs - Q_rec)
+#       (il recupero non puo' rendere negativa
+#       l'ACS netta; con la saturazione di Q_rec
+#       a Q_acs, la netta e' zero quando il
+#       recupero saturato copre tutta l'ACS)
+#   gas_acs_base [kWh/anno] = Q_acs / eta_caldaia_base
+#       (gas bruciato dalla caldaia baseline
+#       per l'ACS di lavaggio, senza recupero:
+#       la baseline non recupera calore dal
+#       girarrosto)
+#   E_pdc_acs [kWh_e/anno] =
+#       Q_acs_net / COP_pdc_acs
+#       (la pompa di calore scalda solo l'ACS
+#       netta, dopo il recupero dal girarrosto)
+#   C_base [EUR/anno] =
+#       (gas_girarrosto_base + gas_acs_base) / 1000
+#       x p_gas + (E_banchi_base + E_freddo_base)
+#       / 1000 x p_el + O&M_base
+#   C_alt [EUR/anno] =
+#       gas_girarrosto_alt / 1000 x p_gas
+#       + (E_banchi_alt + E_freddo_alt + E_pdc_acs)
+#       / 1000 x p_el + O&M_alt
+#       (prezzi gas ed elettricita' in EUR/MWh,
+#       energie in kWh: conversione / 1000 esatta,
+#       1 MWh = 1000 kWh)
+#   risparmio [EUR/anno] = C_base - C_alt
+#   CO2_base [t/anno] =
+#       (gas_girarrosto_base + gas_acs_base) / 1000
+#       x f_gas + (E_banchi_base + E_freddo_base)
+#       / 1000 x f_el
+#   CO2_alt [t/anno] =
+#       gas_girarrosto_alt / 1000 x f_gas
+#       + (E_banchi_alt + E_freddo_alt + E_pdc_acs)
+#       / 1000 x f_el
+#   CO2_evitata [t/anno] = CO2_base - CO2_alt
+#   flussi = [-CAPEX] + [risparmio] x vita
+#   VAN al WACC; TIR per bisezione (None se nessun
+#   cambio di segno); payback = primo anno con
+#   cumulato >= 0 (regola >=: il cumulato nullo
+#   basta; con CAPEX nullo il payback e' 0)
+#   verdetto: NON_CALCOLABILE se risparmio <= 0
+#       (guard degenere: nessun KPI, nessun grafico,
+#       nessuna tabella, nessun CSV); altrimenti
+#       CONVIENTE se VAN > 0; MARGINALE se VAN
+#       negativa entro tolleranza % del CAPEX
+#       (cioe' |VAN| <= tolleranza / 100 x CAPEX,
+#       incluso VAN = 0); NON_CONVIENTE se VAN
+#       negativa oltre la tolleranza.
+#   prezzo gas di pareggio [EUR/MWh]: si risolve
+#   C_base == C_alt per p_gas, cioe'
+#   p_gas_be = ((E_banchi_alt + E_freddo_alt
+#       + E_pdc_acs) / 1000 x p_el + O&M_alt
+#       - (E_banchi_base + E_freddo_base) / 1000
+#       x p_el - O&M_base)
+#       / ((gas_girarrosto_base + gas_acs_base
+#       - gas_girarrosto_alt) / 1000).
+#       None se il denominatore gas <= 0 (nessun
+#       gas risparmiato: nessun prezzo da
+#       calcolare) e None se il numeratore < 0
+#       (a prezzo gas zero l'alternativa e' gia'
+#       piu' conveniente: nessun prezzo non
+#       negativo la pareggia dal basso). Quando
+#       esiste e' una SOGLIA MINIMA: sopra di
+#       essa l'alternativa vince (il costo base
+#       cresce con p_gas, il costo alternativo
+#       meno, perche' brucia meno gas), sotto
+#       perde; al pareggio esatto il risparmio e'
+#       zero, quindi scatta la guard
+#       NON_CALCOLABILE (risparmio <= 0).
+#
+# Validazione (regime degenere degli helper):
+# kg di polli al giorno >= 0, giorni di apertura
+# interi > 0, calore di cottura per kg >= 0,
+# rendimenti girarrosto e caldaia in (0, 1],
+# carico banchi per kg >= 0, fattore banchi alt
+# in (0, 1], carico celle per kg >= 0,
+# COP freddo base e alt > 1, litri ACS al giorno
+# >= 0, delta_T ACS > 0, f_rec in [0, 1],
+# COP_pdc_acs > 1 (una macchina con COP <= 1 non
+# ha senso fisico in questa scheda), prezzi >= 0,
+# O&M >= 0, CAPEX >= 0, fattori >= 0, WACC in
+# [0, 50] %, vita intera > 0, tolleranza in
+# [0, 100] %. Tutti gli input devono essere finiti
+# (NaN, infiniti, bool e stringhe rifiutati).
+# Guard degenere della UI (piu' stretta degli
+# helper, perche' la scheda la dichiara cosi'):
+# kg <= 0, giorni <= 0, eta <= 0 o > 1, COP <= 1,
+# delta_T <= 0, f_rec fuori [0, 1], prezzi <= 0,
+# CAPEX <= 0, vita <= 0, oppure risparmio <= 0
+# -> verdetto NON_CALCOLABILE, KPI/grafico/
+# tabella/CSV saltati, si mostra solo il
+# verdetto e la nota. Il risparmio <= 0 NON e'
+# un range di input: e' un esito del calcolo, e
+# negli helper resta calcolabile (flussi, VAN,
+# TIR e payback sono prodotti normalmente, e il
+# verdetto li dichiara non presentabili).
+#
+# Demo (valori scelti e documentati qui):
+# rosticceria con 120 kg di polli arrosto al
+# giorno per 310 giorni di apertura all'anno
+# (37.200 kg all'anno), calore di cottura 1,20
+# kWh_th per kg di polli (44.640 kWh_th/anno),
+# girarrosto base 0,70 e alt 0,88, banchi caldi
+# 0,25 kWh_e per kg di polli con fattore base
+# 1,00 e alt 0,80, carico celle 0,30 kWh_c per kg
+# di polli, COP freddo base 2,2 e alt 3,2, ACS di
+# lavaggio 200 litri al giorno con delta_T 40 K,
+# f_rec 0,08, caldaia 0,85, COP PdC ACS 3,2,
+# gas 90, el 250 EUR/MWh, O&M base 1.200 / alt
+# 2.000, CAPEX 18.000, WACC 5 %, vita 15,
+# f_gas 0,20 / f_el 0,35, tolleranza 10 %
+# (caso calcolato con ricalcolo Python
+# indipendente: risparmio positivo, vedi sotto).
+#
+#
+def mh804_num(x, nome):
+    """Valida un numero reale finito (bool e stringhe rifiutati)."""
+    import math
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        raise ValueError(f"{nome}: deve essere un numero reale")
+    v = float(x)
+    if math.isnan(v) or math.isinf(v):
+        raise ValueError(f"{nome}: deve essere finito")
+    return v
+
+
+def mh804_nneg(x, nome):
+    """Valida un numero >= 0."""
+    v = mh804_num(x, nome)
+    if v < 0.0:
+        raise ValueError(f"{nome}: non puo' essere negativo")
+    return v
+
+
+def mh804_pos(x, nome):
+    """Valida un numero > 0."""
+    v = mh804_num(x, nome)
+    if v <= 0.0:
+        raise ValueError(f"{nome}: deve essere positivo")
+    return v
+
+
+def mh804_cop(x, nome):
+    """Valida un COP > 1: COP <= 1 rifiutato (una
+    macchina con COP <= 1 non ha senso fisico
+    in questa scheda)."""
+    v = mh804_num(x, nome)
+    if v <= 1.0:
+        raise ValueError(f"{nome}: deve essere maggiore di 1")
+    return v
+
+
+def mh804_frazione(x, nome):
+    """Valida una frazione in [0, 1] (frazione di
+    calore del girarrosto recuperata sull'ACS)."""
+    v = mh804_num(x, nome)
+    if v < 0.0 or v > 1.0:
+        raise ValueError(f"{nome}: deve essere tra 0 e 1")
+    return v
+
+
+def mh804_int_pos(x, nome):
+    """Valida un intero > 0 (accetta float interi)."""
+    v = mh804_num(x, nome)
+    if v <= 0.0 or v != int(v):
+        raise ValueError(f"{nome}: deve essere un intero positivo")
+    return int(v)
+
+
+def mh804_eta(x, nome):
+    """Valida un rendimento in (0, 1]:
+    zero rifiutato (divisione per zero), sopra 1
+    rifiutato (fisicamente impossibile)."""
+    v = mh804_num(x, nome)
+    if v <= 0.0 or v > 1.0:
+        raise ValueError(f"{nome}: deve essere tra 0 (escluso) e 1")
+    return v
+
+
+def mh804_pct_wacc(x, nome):
+    """Valida una percentuale WACC in [0, 50]."""
+    v = mh804_num(x, nome)
+    if v < 0.0 or v > 50.0:
+        raise ValueError(f"{nome}: deve essere tra 0 e 50 %")
+    return v
+
+
+def mh804_pct_tolleranza(x, nome):
+    """Valida una percentuale di tolleranza in [0, 100]."""
+    v = mh804_num(x, nome)
+    if v < 0.0 or v > 100.0:
+        raise ValueError(f"{nome}: deve essere tra 0 e 100 %")
+    return v
+
+
+def mh804_kg_polli_anno(kg_polli_giorno, giorni_anno):
+    """Polli arrostiti all'anno [kg/anno]:
+    kg al giorno x giorni di apertura."""
+    k = mh804_nneg(kg_polli_giorno, "kg di polli al giorno")
+    g = mh804_int_pos(giorni_anno, "giorni di apertura")
+    return k * g
+
+
+def mh804_q_cottura(kg_polli_anno, q_cottura_per_kg):
+    """Calore utile di cottura [kWh_th/anno]:
+    kg di polli all'anno x kWh_th per kg."""
+    k = mh804_nneg(kg_polli_anno, "kg di polli all'anno")
+    q = mh804_nneg(q_cottura_per_kg, "calore di cottura per kg")
+    return k * q
+
+
+def mh804_gas_girarrosto(q_cottura_kwh, eta_girarrosto):
+    """Gas del girarrosto [kWh/anno]:
+    Q_cottura / eta_girarrosto (stesso calore utile,
+    rendimento diverso tra baseline e alternativa)."""
+    q = mh804_nneg(q_cottura_kwh, "calore di cottura")
+    eta = mh804_eta(eta_girarrosto, "rendimento girarrosto")
+    return q / eta
+
+
+def mh804_e_banchi(kg_polli_anno, q_banchi_per_kg, fattore_banchi):
+    """Elettricita' dei banchi caldi di mantenimento
+    [kWh_e/anno]: kg di polli all'anno x kWh_e per
+    kg x fattore di efficienza (base 1,00, alt
+    0,80: stesso carico specifico, fattore
+    diverso)."""
+    k = mh804_nneg(kg_polli_anno, "kg di polli all'anno")
+    q = mh804_nneg(q_banchi_per_kg, "carico banchi per kg")
+    f = mh804_pos(fattore_banchi, "fattore banchi")
+    if f > 1.0:
+        raise ValueError("fattore banchi: deve essere tra 0 (escluso) e 1")
+    return k * q * f
+
+
+def mh804_q_celle(kg_polli_anno, q_celle_per_kg):
+    """Carico frigorifero delle celle dei polli
+    [kWh_c/anno]: kg di polli all'anno x
+    kWh_c per kg di polli."""
+    k = mh804_nneg(kg_polli_anno, "kg di polli all'anno")
+    q = mh804_nneg(q_celle_per_kg, "carico celle per kg")
+    return k * q
+
+
+def mh804_e_freddo(q_celle_kwh, cop_freddo):
+    """Elettricita' delle celle [kWh_e/anno]:
+    Q_celle / COP_freddo (stesso carico
+    frigorifero, COP diverso tra baseline e
+    alternativa)."""
+    q = mh804_nneg(q_celle_kwh, "carico celle")
+    c = mh804_cop(cop_freddo, "COP freddo")
+    return q / c
+
+
+def mh804_q_acs(litri_giorno, giorni_anno, delta_t_k):
+    """ACS di lavaggio [kWh_th/anno]:
+    litri al giorno x giorni x 4,186 x delta_T
+    / 3600 (1 litro di acqua = 1 kg; calore per
+    scaldare l'acqua di lavaggio di delta_T gradi)."""
+    l = mh804_nneg(litri_giorno, "litri ACS al giorno")
+    g = mh804_int_pos(giorni_anno, "giorni di apertura")
+    d = mh804_pos(delta_t_k, "delta_T ACS")
+    return l * g * 4.186 * d / 3600.0
+
+
+def mh804_q_rec(q_cottura_kwh, f_rec, q_acs_kwh):
+    """Calore del girarrosto recuperato [kWh_th/anno]:
+    min(Q_acs, Q_cottura x f_rec).
+    Il recupero non puo' superare l'ACS da coprire:
+    saturato a Q_acs."""
+    qc = mh804_nneg(q_cottura_kwh, "calore di cottura")
+    f = mh804_frazione(f_rec, "frazione recuperata")
+    qa = mh804_nneg(q_acs_kwh, "ACS")
+    return min(qa, qc * f)
+
+
+def mh804_q_acs_net(q_acs_kwh, q_rec_kwh):
+    """ACS netta [kWh_th/anno]:
+    max(0, Q_acs - Q_rec): il recupero non puo'
+    rendere negativa l'ACS netta."""
+    qa = mh804_nneg(q_acs_kwh, "ACS")
+    qr = mh804_nneg(q_rec_kwh, "calore recuperato")
+    return max(0.0, qa - qr)
+
+
+def mh804_gas_acs(q_acs_kwh, eta_caldaia):
+    """Gas baseline per ACS [kWh/anno]:
+    Q_acs / eta_caldaia (ACS di lavaggio, senza
+    recupero: la baseline non recupera calore dal
+    girarrosto)."""
+    qa = mh804_nneg(q_acs_kwh, "ACS")
+    eta = mh804_eta(eta_caldaia, "rendimento caldaia")
+    return qa / eta
+
+
+def mh804_e_pdc_acs(q_acs_net_kwh, cop_pdc_acs):
+    """Elettricita' pompa di calore per ACS
+    [kWh_e/anno]: Q_acs_net / COP_pdc_acs (solo
+    l'ACS netta, dopo il recupero dal girarrosto)."""
+    q = mh804_nneg(q_acs_net_kwh, "ACS netta")
+    c = mh804_cop(cop_pdc_acs, "COP ACS")
+    return q / c
+
+
+def mh804_c_base(gas_girarrosto_base_kwh, gas_acs_base_kwh,
+                 p_gas_eur_mwh,
+                 e_banchi_base_kwh, e_freddo_base_kwh,
+                 p_el_eur_mwh, om_base_eur_anno):
+    """Costo baseline [EUR/anno]:
+    (gas_girarrosto_base + gas_acs_base) / 1000
+    x p_gas + (E_banchi_base + E_freddo_base)
+    / 1000 x p_el + O&M_base."""
+    ggb = mh804_nneg(gas_girarrosto_base_kwh, "gas girarrosto base")
+    ga = mh804_nneg(gas_acs_base_kwh, "gas ACS base")
+    pg = mh804_nneg(p_gas_eur_mwh, "prezzo gas")
+    ebb = mh804_nneg(e_banchi_base_kwh, "elettricita' banchi base")
+    eb = mh804_nneg(e_freddo_base_kwh, "elettricita' freddo base")
+    pel = mh804_nneg(p_el_eur_mwh, "prezzo elettricita'")
+    om = mh804_nneg(om_base_eur_anno, "O&M base")
+    return (ggb + ga) / 1000.0 * pg + (ebb + eb) / 1000.0 * pel + om
+
+
+def mh804_c_alt(gas_girarrosto_alt_kwh, p_gas_eur_mwh,
+                e_banchi_alt_kwh, e_freddo_alt_kwh,
+                e_pdc_acs_kwh,
+                p_el_eur_mwh, om_alt_eur_anno):
+    """Costo alternativo [EUR/anno]:
+    gas_girarrosto_alt / 1000 x p_gas
+    + (E_banchi_alt + E_freddo_alt + E_pdc_acs)
+    / 1000 x p_el + O&M_alt."""
+    gga = mh804_nneg(gas_girarrosto_alt_kwh, "gas girarrosto alt")
+    pg = mh804_nneg(p_gas_eur_mwh, "prezzo gas")
+    eba = mh804_nneg(e_banchi_alt_kwh, "elettricita' banchi alt")
+    ea = mh804_nneg(e_freddo_alt_kwh, "elettricita' freddo alt")
+    ep = mh804_nneg(e_pdc_acs_kwh, "elettricita' ACS")
+    pel = mh804_nneg(p_el_eur_mwh, "prezzo elettricita'")
+    om = mh804_nneg(om_alt_eur_anno, "O&M alternativo")
+    return gga / 1000.0 * pg + (eba + ea + ep) / 1000.0 * pel + om
+
+
+def mh804_risparmio(c_base_eur_anno, c_alt_eur_anno):
+    """Risparmio [EUR/anno]: C_base - C_alt. Puo'
+    essere negativo: in questa scheda risparmio <= 0
+    e' la guard degenere della UI (verdetto
+    NON_CALCOLABILE, KPI/grafico/tabella/CSV
+    saltati), non un errore degli helper."""
+    b = mh804_num(c_base_eur_anno, "costo baseline")
+    a = mh804_num(c_alt_eur_anno, "costo alternativo")
+    return b - a
+
+
+def mh804_co2_base(gas_girarrosto_base_kwh, gas_acs_base_kwh,
+                   f_gas_t_per_mwh,
+                   e_banchi_base_kwh, e_freddo_base_kwh,
+                   f_el_t_per_mwh):
+    """CO2 baseline [t/anno]:
+    (gas_girarrosto_base + gas_acs_base) / 1000
+    x f_gas + (E_banchi_base + E_freddo_base)
+    / 1000 x f_el."""
+    ggb = mh804_nneg(gas_girarrosto_base_kwh, "gas girarrosto base")
+    ga = mh804_nneg(gas_acs_base_kwh, "gas ACS base")
+    fg = mh804_nneg(f_gas_t_per_mwh, "fattore gas")
+    ebb = mh804_nneg(e_banchi_base_kwh, "elettricita' banchi base")
+    eb = mh804_nneg(e_freddo_base_kwh, "elettricita' freddo base")
+    fel = mh804_nneg(f_el_t_per_mwh, "fattore elettricita'")
+    return (ggb + ga) / 1000.0 * fg + (ebb + eb) / 1000.0 * fel
+
+
+def mh804_co2_alt(gas_girarrosto_alt_kwh, f_gas_t_per_mwh,
+                  e_banchi_alt_kwh, e_freddo_alt_kwh,
+                  e_pdc_acs_kwh, f_el_t_per_mwh):
+    """CO2 alternativa [t/anno]:
+    gas_girarrosto_alt / 1000 x f_gas
+    + (E_banchi_alt + E_freddo_alt + E_pdc_acs)
+    / 1000 x f_el."""
+    gga = mh804_nneg(gas_girarrosto_alt_kwh, "gas girarrosto alt")
+    fg = mh804_nneg(f_gas_t_per_mwh, "fattore gas")
+    eba = mh804_nneg(e_banchi_alt_kwh, "elettricita' banchi alt")
+    ea = mh804_nneg(e_freddo_alt_kwh, "elettricita' freddo alt")
+    ep = mh804_nneg(e_pdc_acs_kwh, "elettricita' ACS")
+    fel = mh804_nneg(f_el_t_per_mwh, "fattore elettricita'")
+    return gga / 1000.0 * fg + (eba + ea + ep) / 1000.0 * fel
+
+
+def mh804_co2_evitata(gas_girarrosto_base_kwh, gas_acs_base_kwh,
+                      f_gas_t_per_mwh,
+                      e_banchi_base_kwh, e_freddo_base_kwh,
+                      gas_girarrosto_alt_kwh,
+                      e_banchi_alt_kwh, e_freddo_alt_kwh,
+                      e_pdc_acs_kwh, f_el_t_per_mwh):
+    """CO2 evitata [t/anno]: CO2_base - CO2_alt.
+    Puo' essere negativa con elettricita' sporca:
+    NON e' una guard in questa scheda, ma con
+    risparmio <= 0 la UI non la mostra comunque
+    (guard sul risparmio, non sulla CO2)."""
+    base = mh804_co2_base(gas_girarrosto_base_kwh, gas_acs_base_kwh,
+                          f_gas_t_per_mwh,
+                          e_banchi_base_kwh, e_freddo_base_kwh,
+                          f_el_t_per_mwh)
+    alt = mh804_co2_alt(gas_girarrosto_alt_kwh, f_gas_t_per_mwh,
+                        e_banchi_alt_kwh, e_freddo_alt_kwh,
+                        e_pdc_acs_kwh, f_el_t_per_mwh)
+    return base - alt
+
+
+def mh804_breakeven_gas(e_banchi_alt_kwh, e_freddo_alt_kwh,
+                        e_pdc_acs_kwh,
+                        p_el_eur_mwh, om_alt_eur_anno,
+                        e_banchi_base_kwh, e_freddo_base_kwh,
+                        om_base_eur_anno,
+                        gas_girarrosto_base_kwh, gas_acs_base_kwh,
+                        gas_girarrosto_alt_kwh):
+    """Prezzo gas di pareggio [EUR/MWh]:
+    ((E_banchi_alt + E_freddo_alt + E_pdc_acs)
+    / 1000 x p_el + O&M_alt
+    - (E_banchi_base + E_freddo_base) / 1000
+    x p_el - O&M_base)
+    / ((gas_girarrosto_base + gas_acs_base
+    - gas_girarrosto_alt) / 1000).
+    None se il denominatore gas <= 0 e None se il
+    numeratore < 0.
+    Quando esiste e' una SOGLIA MINIMA: sopra di
+    essa l'alternativa vince sui costi, sotto
+    perde."""
+    eba = mh804_nneg(e_banchi_alt_kwh, "elettricita' banchi alt")
+    ea = mh804_nneg(e_freddo_alt_kwh, "elettricita' freddo alt")
+    ep = mh804_nneg(e_pdc_acs_kwh, "elettricita' ACS")
+    pel = mh804_nneg(p_el_eur_mwh, "prezzo elettricita'")
+    oma = mh804_nneg(om_alt_eur_anno, "O&M alternativo")
+    ebb = mh804_nneg(e_banchi_base_kwh, "elettricita' banchi base")
+    eb = mh804_nneg(e_freddo_base_kwh, "elettricita' freddo base")
+    omb = mh804_nneg(om_base_eur_anno, "O&M base")
+    ggb = mh804_nneg(gas_girarrosto_base_kwh, "gas girarrosto base")
+    ga = mh804_nneg(gas_acs_base_kwh, "gas ACS base")
+    gga = mh804_nneg(gas_girarrosto_alt_kwh, "gas girarrosto alt")
+    denominatore = (ggb + ga - gga) / 1000.0
+    if denominatore <= 0.0:
+        return None
+    numeratore = ((eba + ea + ep) / 1000.0 * pel + oma
+                  - (ebb + eb) / 1000.0 * pel - omb)
+    if numeratore < 0.0:
+        return None
+    return numeratore / denominatore
+
+
+def mh804_flussi(capex_eur, risparmio_eur_anno, vita_anni):
+    """Flussi di cassa [EUR]: flusso_0 = -CAPEX;
+    flusso_t (t >= 1) = risparmio annuo piatto."""
+    cx = mh804_nneg(capex_eur, "CAPEX")
+    r = mh804_num(risparmio_eur_anno, "risparmio")
+    anni = mh804_int_pos(vita_anni, "vita")
+    return [-cx] + [r] * anni
+
+
+def mh804_van(flussi, wacc_pct):
+    """VAN dai flussi: somma flussi_t / (1 + r)^t con
+    r = wacc_pct / 100; r = 0 -> somma dei flussi."""
+    r = mh804_pct_wacc(wacc_pct, "WACC") / 100.0
+    tot = 0.0
+    for t, f in enumerate(flussi):
+        v = mh804_num(f, "flusso")
+        if r == 0.0:
+            tot += v
+        else:
+            tot += v / (1.0 + r) ** t
+    return tot
+
+
+def mh804_tir(flussi):
+    """TIR (frazione) per bisezione su [-0,99, 5,0];
+    None se nessun cambio di segno."""
+    vals = [mh804_num(f, "flusso") for f in flussi]
+
+    def _npv(x):
+        return sum(f / (1.0 + x) ** i
+                   for i, f in enumerate(vals))
+
+    lo, hi = -0.99, 5.0
+    n_lo, n_hi = _npv(lo), _npv(hi)
+    if n_lo == 0.0:
+        return lo
+    if n_hi == 0.0:
+        return hi
+    if (n_lo > 0.0) == (n_hi > 0.0):
+        return None
+    for _ in range(200):
+        mid = (lo + hi) / 2.0
+        n_mid = _npv(mid)
+        if n_mid == 0.0:
+            return mid
+        if (n_lo > 0.0) == (n_mid > 0.0):
+            lo, n_lo = mid, n_mid
+        else:
+            hi, n_hi = mid, n_mid
+        if hi - lo < 1e-12:
+            break
+    return (lo + hi) / 2.0
+
+
+def mh804_payback(flussi):
+    """Payback [anni interi]: primo anno con cumulato
+    >= 0 (regola >=: il cumulato nullo basta).
+    None se il cumulato non raggiunge mai lo zero."""
+    cum = 0.0
+    for k, f in enumerate(flussi):
+        v = mh804_num(f, "flusso")
+        cum += v
+        if cum >= 0.0:
+            return k
+    return None
+
+
+def mh804_verdetto(risparmio_eur_anno, van_eur, capex_eur,
+                   tolleranza_pct):
+    """Verdetto: NON_CALCOLABILE se il risparmio e'
+    None o <= 0 (guard degenere: la UI salta KPI,
+    grafico, tabella e CSV); altrimenti CONVIENTE se
+    VAN > 0; MARGINALE se VAN negativa entro
+    tolleranza % del CAPEX (|VAN| <= tolleranza /
+    100 x CAPEX, incluso VAN = 0); NON_CONVIENTE se
+    VAN negativa oltre la tolleranza. Solleva
+    ValueError per valori non numerici o non finiti,
+    CAPEX negativo e tolleranza fuori [0, 100] %."""
+    if risparmio_eur_anno is None:
+        return "NON_CALCOLABILE"
+    r = mh804_num(risparmio_eur_anno, "risparmio")
+    if r <= 0.0:
+        return "NON_CALCOLABILE"
+    van = mh804_num(van_eur, "VAN")
+    cx = mh804_nneg(capex_eur, "CAPEX")
+    tol = mh804_pct_tolleranza(tolleranza_pct, "tolleranza")
+    if van > 0.0:
+        return "CONVIENTE"
+    if abs(van) <= tol / 100.0 * cx:
+        return "MARGINALE"
+    return "NON_CONVIENTE"
+
+
+def mh804_valida(kg_polli_giorno, giorni_anno,
+                 q_cottura_per_kg,
+                 eta_girarrosto_base, eta_girarrosto_alt,
+                 q_banchi_per_kg, fattore_banchi_alt,
+                 q_celle_per_kg,
+                 cop_freddo_base, cop_freddo_alt,
+                 litri_acs_giorno, delta_t_acs,
+                 f_rec, eta_caldaia_base, cop_pdc_acs,
+                 p_gas, p_el,
+                 om_base, om_alt,
+                 capex, wacc_pct, vita_anni,
+                 f_gas, f_el, tolleranza_pct):
+    """Validazione degli input: ritorna il dict
+    {"valido": bool, "errore": str} (errore vuoto se
+    valido; mai eccezioni, nemmeno per tipi non
+    numerici, NaN o infiniti). Il risparmio <= 0 NON
+    e' un range di input: e' un esito del calcolo, e
+    in questa scheda e' la guard degenere della UI
+    (verdetto NON_CALCOLABILE), quindi valida NON
+    lo controlla e calcola NON lo controlla.
+    La guard UI piu' stretta (kg <= 0, prezzi <= 0,
+    CAPEX <= 0) vive nella UI, non qui: qui zero e'
+    ammesso dove e' fisicamente sensato (kg, prezzi,
+    CAPEX) e la UI lo intercetta prima di calcola."""
+    import math
+
+    def _finito(v):
+        return (isinstance(v, (int, float))
+                and not isinstance(v, bool)
+                and math.isfinite(float(v)))
+
+    ingressi = (kg_polli_giorno, giorni_anno,
+                q_cottura_per_kg,
+                eta_girarrosto_base, eta_girarrosto_alt,
+                q_banchi_per_kg, fattore_banchi_alt,
+                q_celle_per_kg,
+                cop_freddo_base, cop_freddo_alt,
+                litri_acs_giorno, delta_t_acs,
+                f_rec, eta_caldaia_base, cop_pdc_acs,
+                p_gas, p_el,
+                om_base, om_alt,
+                capex, wacc_pct, vita_anni,
+                f_gas, f_el, tolleranza_pct)
+    nomi = ("kg di polli al giorno",
+            "giorni di apertura",
+            "calore di cottura per kg",
+            "rendimento girarrosto base",
+            "rendimento girarrosto alt",
+            "carico banchi per kg",
+            "fattore banchi alt",
+            "carico celle per kg",
+            "COP freddo base", "COP freddo alt",
+            "litri ACS al giorno", "delta_T ACS",
+            "frazione recuperata",
+            "rendimento caldaia",
+            "COP ACS pompa di calore",
+            "prezzo gas",
+            "prezzo elettricita'", "O&M base", "O&M alternativo",
+            "CAPEX", "WACC", "vita", "fattore gas",
+            "fattore elettricita'", "tolleranza")
+    for v, n in zip(ingressi, nomi):
+        if not _finito(v):
+            return {"valido": False,
+                    "errore": f"{n}: deve essere un numero finito"}
+    try:
+        mh804_nneg(kg_polli_giorno, "kg di polli al giorno")
+        mh804_int_pos(giorni_anno, "giorni di apertura")
+        mh804_nneg(q_cottura_per_kg, "calore di cottura per kg")
+        mh804_eta(eta_girarrosto_base, "rendimento girarrosto base")
+        mh804_eta(eta_girarrosto_alt, "rendimento girarrosto alt")
+        mh804_nneg(q_banchi_per_kg, "carico banchi per kg")
+        fba = mh804_pos(fattore_banchi_alt, "fattore banchi alt")
+        if fba > 1.0:
+            raise ValueError("fattore banchi alt: deve essere tra 0 (escluso) e 1")
+        mh804_nneg(q_celle_per_kg, "carico celle per kg")
+        mh804_cop(cop_freddo_base, "COP freddo base")
+        mh804_cop(cop_freddo_alt, "COP freddo alt")
+        mh804_nneg(litri_acs_giorno, "litri ACS al giorno")
+        mh804_pos(delta_t_acs, "delta_T ACS")
+        mh804_frazione(f_rec, "frazione recuperata")
+        mh804_eta(eta_caldaia_base, "rendimento caldaia")
+        mh804_cop(cop_pdc_acs, "COP ACS")
+        mh804_nneg(p_gas, "prezzo gas")
+        mh804_nneg(p_el, "prezzo elettricita'")
+        mh804_nneg(om_base, "O&M base")
+        mh804_nneg(om_alt, "O&M alternativo")
+        mh804_nneg(capex, "CAPEX")
+        mh804_pct_wacc(wacc_pct, "WACC")
+        mh804_int_pos(vita_anni, "vita")
+        mh804_nneg(f_gas, "fattore gas")
+        mh804_nneg(f_el, "fattore elettricita'")
+        mh804_pct_tolleranza(tolleranza_pct, "tolleranza")
+    except ValueError as e:
+        return {"valido": False, "errore": str(e)}
+    return {"valido": True, "errore": ""}
+
+
+def mh804_calcola(kg_polli_giorno, giorni_anno,
+                  q_cottura_per_kg,
+                  eta_girarrosto_base, eta_girarrosto_alt,
+                  q_banchi_per_kg, fattore_banchi_alt,
+                  q_celle_per_kg,
+                  cop_freddo_base, cop_freddo_alt,
+                  litri_acs_giorno, delta_t_acs,
+                  f_rec, eta_caldaia_base, cop_pdc_acs,
+                  p_gas, p_el,
+                  om_base, om_alt,
+                  capex, wacc_pct, vita_anni,
+                  f_gas, f_el, tolleranza_pct):
+    """Orchestratore rosticceria: valida gli input e
+    SOLLEVA ValueError per il regime degenere di
+    input (kg di polli al giorno negativi, giorni
+    di apertura <= 0 o non interi, calore di
+    cottura per kg negativo, rendimenti <= 0 o
+    sopra 1, carico banchi per kg negativo,
+    fattore banchi alt <= 0 o sopra 1, carico
+    celle per kg negativo, COP <= 1, litri ACS
+    negativi, delta_T ACS <= 0, frazione
+    recuperata fuori [0, 1], prezzi < 0, O&M < 0,
+    CAPEX < 0, WACC < 0 o sopra 50 %, vita <= 0
+    o non intera, fattori < 0, tolleranza fuori
+    [0, 100] %, input non numerici o non finiti).
+    Poi calcola polli annui, calore di cottura,
+    gas girarrosto base e alt, elettricita'
+    banchi base e alt, carico celle, elettricita'
+    freddo base e alt, ACS di lavaggio, calore del
+    girarrosto recuperato (saturato all'ACS), ACS
+    netta, gas ACS baseline, elettricita' pompa di
+    calore per ACS, costo baseline, costo
+    alternativo, risparmio, CO2 base, CO2
+    alternativa, CO2 evitata, breakeven gas,
+    flussi, VAN, TIR, payback e verdetto
+    (NON_CALCOLABILE se risparmio <= 0, altrimenti
+    CONVIENTE se VAN > 0, MARGINALE se VAN
+    negativa entro tolleranza % del CAPEX,
+    NON_CONVIENTE altrimenti). Il risparmio <= 0
+    NON solleva: resta calcolabile negli helper e
+    la UI lo intercetta con st.stop() PRIMA di KPI,
+    grafico, tabella e CSV. WACC e tolleranza in
+    ingresso come PERCENTUALI; "tir" in uscita e'
+    in percentuale. Ritorna il dict completo con
+    df_flussi e df_tabella."""
+    val = mh804_valida(
+        kg_polli_giorno, giorni_anno,
+        q_cottura_per_kg,
+        eta_girarrosto_base, eta_girarrosto_alt,
+        q_banchi_per_kg, fattore_banchi_alt,
+        q_celle_per_kg,
+        cop_freddo_base, cop_freddo_alt,
+        litri_acs_giorno, delta_t_acs,
+        f_rec, eta_caldaia_base, cop_pdc_acs,
+        p_gas, p_el,
+        om_base, om_alt,
+        capex, wacc_pct, vita_anni,
+        f_gas, f_el, tolleranza_pct)
+    if not val["valido"]:
+        raise ValueError(val["errore"])
+    kgg = mh804_nneg(kg_polli_giorno, "kg di polli al giorno")
+    gg = mh804_int_pos(giorni_anno, "giorni di apertura")
+    qc = mh804_nneg(q_cottura_per_kg, "calore di cottura per kg")
+    egb = mh804_eta(eta_girarrosto_base, "rendimento girarrosto base")
+    ega = mh804_eta(eta_girarrosto_alt, "rendimento girarrosto alt")
+    qb = mh804_nneg(q_banchi_per_kg, "carico banchi per kg")
+    fba = mh804_pos(fattore_banchi_alt, "fattore banchi alt")
+    if fba > 1.0:
+        raise ValueError("fattore banchi alt: deve essere tra 0 (escluso) e 1")
+    qcel = mh804_nneg(q_celle_per_kg, "carico celle per kg")
+    cfb = mh804_cop(cop_freddo_base, "COP freddo base")
+    cfa = mh804_cop(cop_freddo_alt, "COP freddo alt")
+    lit = mh804_nneg(litri_acs_giorno, "litri ACS al giorno")
+    dt = mh804_pos(delta_t_acs, "delta_T ACS")
+    frec = mh804_frazione(f_rec, "frazione recuperata")
+    eta = mh804_eta(eta_caldaia_base, "rendimento caldaia")
+    copp = mh804_cop(cop_pdc_acs, "COP ACS")
+    pg = mh804_nneg(p_gas, "prezzo gas")
+    pel = mh804_nneg(p_el, "prezzo elettricita'")
+    omb = mh804_nneg(om_base, "O&M base")
+    oma = mh804_nneg(om_alt, "O&M alternativo")
+    cx = mh804_nneg(capex, "CAPEX")
+    wa = mh804_pct_wacc(wacc_pct, "WACC")
+    vita = mh804_int_pos(vita_anni, "vita")
+    fg = mh804_nneg(f_gas, "fattore gas")
+    fel = mh804_nneg(f_el, "fattore elettricita'")
+    tol = mh804_pct_tolleranza(tolleranza_pct, "tolleranza")
+    kga = mh804_kg_polli_anno(kgg, gg)
+    qcott = mh804_q_cottura(kga, qc)
+    ggb = mh804_gas_girarrosto(qcott, egb)
+    gga = mh804_gas_girarrosto(qcott, ega)
+    ebb = mh804_e_banchi(kga, qb, 1.0)
+    eba = mh804_e_banchi(kga, qb, fba)
+    qcelk = mh804_q_celle(kga, qcel)
+    efb_k = mh804_e_freddo(qcelk, cfb)
+    efa_k = mh804_e_freddo(qcelk, cfa)
+    qacs = mh804_q_acs(lit, gg, dt)
+    qrec = mh804_q_rec(qcott, frec, qacs)
+    qnet = mh804_q_acs_net(qacs, qrec)
+    gasa = mh804_gas_acs(qacs, eta)
+    epdc = mh804_e_pdc_acs(qnet, copp)
+    cb = mh804_c_base(ggb, gasa, pg, ebb, efb_k, pel, omb)
+    ca = mh804_c_alt(gga, pg, eba, efa_k, epdc, pel, oma)
+    risp = mh804_risparmio(cb, ca)
+    import math
+    if not math.isfinite(risp):
+        raise ValueError("risparmio non finito")
+    co2b = mh804_co2_base(ggb, gasa, fg, ebb, efb_k, fel)
+    co2a = mh804_co2_alt(gga, fg, eba, efa_k, epdc, fel)
+    co2 = mh804_co2_evitata(ggb, gasa, fg, ebb, efb_k,
+                            gga, eba, efa_k, epdc, fel)
+    be = mh804_breakeven_gas(eba, efa_k, epdc, pel, oma,
+                             ebb, efb_k, omb, ggb, gasa, gga)
+    flussi = mh804_flussi(cx, risp, vita)
+    van = mh804_van(flussi, wa)
+    tir = mh804_tir(flussi)
+    pb = mh804_payback(flussi)
+    verd = mh804_verdetto(risp, van, cx, tol)
+    import pandas as _pd
+    righe_flussi = []
+    cum = 0.0
+    for kk in range(vita + 1):
+        cum += flussi[kk]
+        righe_flussi.append(
+            {"Anno": kk,
+             "Flusso (EUR/anno)": flussi[kk],
+             "Cumulato (EUR)": cum})
+    df_flussi = _pd.DataFrame(righe_flussi)
+    df_tabella = _pd.DataFrame([
+        {"Voce": "Kg di polli al giorno", "Valore": kgg},
+        {"Voce": "Giorni di apertura all'anno", "Valore": gg},
+        {"Voce": "Calore di cottura per kg (kWh_th/kg)", "Valore": qc},
+        {"Voce": "Rendimento girarrosto base", "Valore": egb},
+        {"Voce": "Rendimento girarrosto alt", "Valore": ega},
+        {"Voce": "Carico banchi caldi per kg (kWh_e/kg)", "Valore": qb},
+        {"Voce": "Fattore banchi caldi alt", "Valore": fba},
+        {"Voce": "Carico celle per kg di polli (kWh_c/kg)",
+         "Valore": qcel},
+        {"Voce": "COP freddo base", "Valore": cfb},
+        {"Voce": "COP freddo alt", "Valore": cfa},
+        {"Voce": "Litri ACS di lavaggio al giorno", "Valore": lit},
+        {"Voce": "Delta_T ACS (K)", "Valore": dt},
+        {"Voce": "Frazione calore girarrosto recuperata",
+         "Valore": frec},
+        {"Voce": "Rendimento caldaia", "Valore": eta},
+        {"Voce": "COP ACS pompa di calore", "Valore": copp},
+        {"Voce": "Prezzo gas (EUR/MWh)", "Valore": pg},
+        {"Voce": "Prezzo elettricita' (EUR/MWh)", "Valore": pel},
+        {"Voce": "O&M base (EUR/anno)", "Valore": omb},
+        {"Voce": "O&M alternativo (EUR/anno)", "Valore": oma},
+        {"Voce": "CAPEX (EUR)", "Valore": cx},
+        {"Voce": "WACC (%)", "Valore": wa},
+        {"Voce": "Vita (anni)", "Valore": vita},
+        {"Voce": "Fattore gas (tCO2/MWh)", "Valore": fg},
+        {"Voce": "Fattore elettricita' (tCO2/MWh)", "Valore": fel},
+        {"Voce": "Tolleranza MARGINALE (% CAPEX)", "Valore": tol},
+        {"Voce": "Kg di polli all'anno", "Valore": kga},
+        {"Voce": "Calore di cottura (kWh_th/anno)", "Valore": qcott},
+        {"Voce": "Gas girarrosto base (kWh/anno)", "Valore": ggb},
+        {"Voce": "Gas girarrosto alt (kWh/anno)", "Valore": gga},
+        {"Voce": "Elettricita' banchi caldi base (kWh_e/anno)",
+         "Valore": ebb},
+        {"Voce": "Elettricita' banchi caldi alt (kWh_e/anno)",
+         "Valore": eba},
+        {"Voce": "Carico celle (kWh_c/anno)", "Valore": qcelk},
+        {"Voce": "Elettricita' freddo base (kWh_e/anno)", "Valore": efb_k},
+        {"Voce": "Elettricita' freddo alt (kWh_e/anno)", "Valore": efa_k},
+        {"Voce": "ACS di lavaggio (kWh_th/anno)", "Valore": qacs},
+        {"Voce": "Calore girarrosto recuperato (kWh_th/anno)",
+         "Valore": qrec},
+        {"Voce": "ACS netta (kWh_th/anno)", "Valore": qnet},
+        {"Voce": "Gas ACS baseline (kWh/anno)", "Valore": gasa},
+        {"Voce": "Elettricita' pompa di calore ACS (kWh_e/anno)",
+         "Valore": epdc},
+        {"Voce": "Costo baseline (EUR/anno)", "Valore": cb},
+        {"Voce": "Costo alternativo (EUR/anno)", "Valore": ca},
+        {"Voce": "Risparmio (EUR/anno)", "Valore": risp},
+        {"Voce": "CO2 baseline (t/anno)", "Valore": co2b},
+        {"Voce": "CO2 alternativa (t/anno)", "Valore": co2a},
+        {"Voce": "CO2 evitata (t/anno)", "Valore": co2},
+        {"Voce": "VAN (EUR)", "Valore": van},
+        {"Voce": "TIR (%)", "Valore": None if tir is None
+         else tir * 100.0},
+        {"Voce": "Payback (anni)", "Valore": pb},
+        {"Voce": "Breakeven prezzo gas (EUR/MWh)", "Valore": be},
+        {"Voce": "Verdetto", "Valore": verd},
+    ])
+    return {
+        "valid": True,
+        "errore": "",
+        "kg_polli_giorno": kgg,
+        "giorni_anno": gg,
+        "q_cottura_per_kg": qc,
+        "eta_girarrosto_base": egb,
+        "eta_girarrosto_alt": ega,
+        "q_banchi_per_kg": qb,
+        "fattore_banchi_alt": fba,
+        "q_celle_per_kg": qcel,
+        "cop_freddo_base": cfb,
+        "cop_freddo_alt": cfa,
+        "litri_acs_giorno": lit,
+        "delta_t_acs": dt,
+        "f_rec": frec,
+        "eta_caldaia_base": eta,
+        "cop_pdc_acs": copp,
+        "p_gas": pg,
+        "p_el": pel,
+        "om_base": omb,
+        "om_alt": oma,
+        "capex": cx,
+        "wacc_pct": wa,
+        "vita_anni": vita,
+        "f_gas": fg,
+        "f_el": fel,
+        "tolleranza_pct": tol,
+        "kg_polli_anno": kga,
+        "q_cottura_kwh_anno": qcott,
+        "gas_girarrosto_base_kwh_anno": ggb,
+        "gas_girarrosto_alt_kwh_anno": gga,
+        "e_banchi_base_kwh_anno": ebb,
+        "e_banchi_alt_kwh_anno": eba,
+        "q_celle_kwh_anno": qcelk,
+        "e_freddo_base_kwh_anno": efb_k,
+        "e_freddo_alt_kwh_anno": efa_k,
+        "q_acs_kwh_anno": qacs,
+        "q_rec_kwh_anno": qrec,
+        "q_acs_net_kwh_anno": qnet,
+        "gas_acs_base_kwh_anno": gasa,
+        "e_pdc_acs_kwh_anno": epdc,
+        "c_base_eur_anno": cb,
+        "c_alt_eur_anno": ca,
+        "risparmio_eur_anno": risp,
+        "co2_base_t_anno": co2b,
+        "co2_alt_t_anno": co2a,
+        "co2_evitata_t_anno": co2,
+        "flussi": flussi,
+        "van": van,
+        "tir": None if tir is None else tir * 100.0,
+        "payback": pb,
+        "breakeven_gas_eur_mwh": be,
+        "verdetto": verd,
+        "df_flussi": df_flussi,
+        "df_tabella": df_tabella,
+    }
+
+
+def mh804_csv(bc, ingressi):
+    """CSV (separatore ';') rosticceria: righe
+    voce/valore con input, fisica, economia e
+    finanza. bc: dict di mh804_calcola; ingressi:
+    dict degli input."""
+    import pandas as _pd
+    righe = [
+        ("kg_polli_giorno", ingressi["kg_polli_giorno"]),
+        ("giorni_anno", ingressi["giorni_anno"]),
+        ("q_cottura_per_kg", ingressi["q_cottura_per_kg"]),
+        ("eta_girarrosto_base", ingressi["eta_girarrosto_base"]),
+        ("eta_girarrosto_alt", ingressi["eta_girarrosto_alt"]),
+        ("q_banchi_per_kg", ingressi["q_banchi_per_kg"]),
+        ("fattore_banchi_alt", ingressi["fattore_banchi_alt"]),
+        ("q_celle_per_kg", ingressi["q_celle_per_kg"]),
+        ("cop_freddo_base", ingressi["cop_freddo_base"]),
+        ("cop_freddo_alt", ingressi["cop_freddo_alt"]),
+        ("litri_acs_giorno", ingressi["litri_acs_giorno"]),
+        ("delta_t_acs", ingressi["delta_t_acs"]),
+        ("f_rec", ingressi["f_rec"]),
+        ("eta_caldaia_base", ingressi["eta_caldaia_base"]),
+        ("cop_pdc_acs", ingressi["cop_pdc_acs"]),
+        ("p_gas", ingressi["p_gas"]),
+        ("p_el", ingressi["p_el"]),
+        ("om_base", ingressi["om_base"]),
+        ("om_alt", ingressi["om_alt"]),
+        ("capex", ingressi["capex"]),
+        ("wacc_pct", ingressi["wacc_pct"]),
+        ("vita_anni", ingressi["vita_anni"]),
+        ("f_gas", ingressi["f_gas"]),
+        ("f_el", ingressi["f_el"]),
+        ("tolleranza_pct", ingressi["tolleranza_pct"]),
+        ("kg_polli_anno", bc["kg_polli_anno"]),
+        ("q_cottura_kwh_anno", bc["q_cottura_kwh_anno"]),
+        ("gas_girarrosto_base_kwh_anno", bc["gas_girarrosto_base_kwh_anno"]),
+        ("gas_girarrosto_alt_kwh_anno", bc["gas_girarrosto_alt_kwh_anno"]),
+        ("e_banchi_base_kwh_anno", bc["e_banchi_base_kwh_anno"]),
+        ("e_banchi_alt_kwh_anno", bc["e_banchi_alt_kwh_anno"]),
+        ("q_celle_kwh_anno", bc["q_celle_kwh_anno"]),
+        ("e_freddo_base_kwh_anno", bc["e_freddo_base_kwh_anno"]),
+        ("e_freddo_alt_kwh_anno", bc["e_freddo_alt_kwh_anno"]),
+        ("q_acs_kwh_anno", bc["q_acs_kwh_anno"]),
+        ("q_rec_kwh_anno", bc["q_rec_kwh_anno"]),
+        ("q_acs_net_kwh_anno", bc["q_acs_net_kwh_anno"]),
+        ("gas_acs_base_kwh_anno", bc["gas_acs_base_kwh_anno"]),
+        ("e_pdc_acs_kwh_anno", bc["e_pdc_acs_kwh_anno"]),
+        ("c_base_eur_anno", bc["c_base_eur_anno"]),
+        ("c_alt_eur_anno", bc["c_alt_eur_anno"]),
+        ("risparmio_eur_anno", bc["risparmio_eur_anno"]),
+        ("co2_base_t_anno", bc["co2_base_t_anno"]),
+        ("co2_alt_t_anno", bc["co2_alt_t_anno"]),
+        ("co2_evitata_t_anno", bc["co2_evitata_t_anno"]),
+        ("van_eur", bc["van"]),
+        ("tir_pct", bc["tir"]),
+        ("payback_anni", bc["payback"]),
+        ("breakeven_gas_eur_mwh", bc["breakeven_gas_eur_mwh"]),
+        ("verdetto", bc["verdetto"]),
+    ]
+    df = _pd.DataFrame(righe, columns=["voce", "valore"])
+    return df.to_csv(index=False, sep=";")
+
+
+def mh804_demo():
+    """Default della UI: rosticceria con 120
+    kg di polli arrosto al giorno per 310 giorni
+    di apertura all'anno (37.200 kg all'anno),
+    calore di cottura 1,20 kWh_th per kg di polli
+    (44.640 kWh_th/anno), girarrosto base 0,70 e
+    alt 0,88, banchi caldi 0,25 kWh_e per kg di
+    polli con fattore base 1,00 e alt 0,80,
+    carico celle 0,30 kWh_c per kg di polli, COP
+    freddo base 2,2 e alt 3,2, ACS di lavaggio
+    200 litri al giorno con delta_T 40 K,
+    frazione recuperata 0,08, caldaia a
+    rendimento 0,85, pompa di calore COP ACS 3,2,
+    gas 90 e elettricita' 250 EUR/MWh, O&M base
+    1.200 e alternativo 2.000 EUR/anno, CAPEX
+    18.000 EUR, WACC 5 %, vita 15 anni, fattore
+    gas 0,20 e fattore elettricita' 0,35
+    tCO2/MWh, tolleranza MARGINALE 10 % del
+    CAPEX. Caso calcolato con ricalcolo Python
+    indipendente: risparmio positivo, VAN
+    negativa oltre la tolleranza (vedi
+    mh804_demo_calcoli)."""
+    return {
+        "kg_polli_giorno": 120,
+        "giorni_anno": 310,
+        "q_cottura_per_kg": 1.20,
+        "eta_girarrosto_base": 0.70,
+        "eta_girarrosto_alt": 0.88,
+        "q_banchi_per_kg": 0.25,
+        "fattore_banchi_alt": 0.80,
+        "q_celle_per_kg": 0.30,
+        "cop_freddo_base": 2.2,
+        "cop_freddo_alt": 3.2,
+        "litri_acs_giorno": 200,
+        "delta_t_acs": 40,
+        "f_rec": 0.08,
+        "eta_caldaia_base": 0.85,
+        "cop_pdc_acs": 3.2,
+        "p_gas": 90,
+        "p_el": 250,
+        "om_base": 1200,
+        "om_alt": 2000,
+        "capex": 18000,
+        "wacc_pct": 5.0,
+        "vita_anni": 15,
+        "f_gas": 0.20,
+        "f_el": 0.35,
+        "tolleranza_pct": 10.0,
+    }
+
+
+def mh804_demo_calcoli():
+    """Numeri di riferimento della demo: rosticceria
+    calcolata sui default di mh804_demo()
+    (per i test)."""
+    return mh804_calcola(**mh804_demo())
+
+
+def demo_calcoli():
+    """Alias di mh804_demo_calcoli per compatibilita'
+    con lo schema delle schede precedenti."""
+    return mh804_demo_calcoli()
+
+
 # W804 (29/10/2026) - "Pasticceria: forno a gas
 # efficiente + recupero calore forno su ACS +
 # freddo efficiente batte forno a gas vecchio +
@@ -232268,7 +233436,7 @@ def mh503_riepilogo(contratti, r_pct, u_pct, stoccabili):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256, tab257, tab258, tab259, tab260, tab261, tab262, tab263, tab264, tab265, tab266, tab267, tab268, tab269, tab270, tab271, tab272, tab273, tab274, tab275, tab276, tab277, tab278, tab279, tab280, tab281, tab282, tab283, tab284, tab285, tab286, tab287, tab288, tab289, tab290, tab291, tab292, tab293, tab294, tab295, tab296, tab297, tab298, tab299, tab300, tab301, tab302, tab303, tab304, tab305, tab306, tab307, tab308, tab309, tab310, tab311, tab312, tab313, tab314, tab315, tab316, tab317, tab318, tab319, tab320, tab321, tab322, tab323, tab324, tab325, tab326, tab327, tab328, tab329, tab330, tab331, tab332, tab333, tab334, tab335, tab336, tab337, tab338, tab339, tab340, tab341, tab342, tab343, tab344, tab345, tab346, tab347, tab348, tab349, tab350, tab351, tab352, tab353, tab354, tab355, tab356, tab357, tab358, tab359, tab360, tab361, tab362, tab363, tab364, tab365, tab366, tab367, tab368, tab369, tab370, tab371, tab372, tab373, tab374, tab375, tab376, tab377, tab378, tab379, tab380, tab381, tab382, tab383, tab384, tab385, tab386, tab387, tab388, tab389, tab390, tab391, tab392, tab393, tab394, tab395, tab396, tab397, tab398, tab399, tab400, tab401, tab402, tab403, tab404, tab405, tab406, tab407, tab408, tab409, tab410, tab411, tab412, tab413, tab414, tab415, tab416, tab417, tab418, tab419, tab420, tab421, tab422, tab423, tab424, tab425, tab426, tab427, tab428, tab429, tab430, tab431, tab432, tab433, tab434, tab435, tab436, tab437, tab438, tab439, tab440, tab441, tab442, tab443, tab444, tab445, tab446, tab447, tab448, tab449, tab450, tab451, tab452, tab453, tab454, tab455, tab456, tab457, tab458, tab459, tab460, tab461, tab462, tab463, tab464, tab465, tab466, tab467, tab468, tab469, tab470, tab471, tab472, tab473, tab474, tab475, tab476, tab477, tab478, tab479, tab480, tab481, tab482, tab483, tab484, tab485, tab486, tab487, tab488, tab489, tab490, tab491, tab492, tab493, tab494, tab495, tab496, tab497, tab498, tab499, tab500, tab501, tab502, tab503, tab504, tab505, tab506, tab507, tab508, tab509, tab510, tab511, tab512, tab513, tab514, tab515, tab516, tab517, tab518, tab519, tab520, tab521, tab522, tab523, tab524, tab525, tab526, tab527, tab528, tab529, tab530, tab531, tab532, tab533, tab534, tab535, tab536, tab537, tab538, tab539, tab540, tab541, tab542, tab543, tab544, tab545, tab546, tab547, tab548, tab549, tab550, tab551, tab552, tab553, tab554, tab555, tab556, tab557, tab558, tab559, tab560, tab561, tab562, tab563, tab564, tab565, tab566, tab567, tab568, tab569, tab570, tab571, tab572, tab573, tab574, tab575, tab576, tab577, tab578, tab579, tab580, tab581, tab582, tab583, tab584, tab585, tab586, tab587, tab588, tab589, tab590, tab591, tab592, tab593, tab594, tab595, tab596, tab597, tab598, tab599, tab600, tab601, tab602, tab603, tab604, tab605, tab606, tab607, tab608, tab609, tab610, tab611, tab612, tab613, tab614, tab615, tab616, tab617, tab618, tab619, tab620, tab621, tab622, tab623, tab624, tab625, tab626, tab627, tab628, tab629, tab630, tab631, tab632, tab633, tab634, tab635, tab636, tab637, tab638, tab639, tab640, tab641, tab642, tab643, tab644, tab645, tab646, tab647, tab648, tab649, tab650, tab651, tab652, tab653, tab654, tab655, tab656, tab657, tab658, tab659, tab660, tab661, tab662, tab663, tab664, tab665, tab666, tab667, tab668, tab669, tab670, tab671, tab672, tab673, tab674, tab675, tab676, tab677, tab678, tab679, tab680, tab681, tab682, tab683, tab684, tab685, tab686, tab687, tab688, tab689, tab690, tab691, tab692, tab693, tab694, tab695, tab696, tab697, tab698, tab699, tab700, tab701, tab702, tab703, tab704, tab705, tab706, tab707, tab708, tab709, tab710, tab711, tab712, tab713, tab714, tab715, tab716, tab717, tab718, tab719, tab720, tab721, tab722, tab723, tab724, tab725, tab726, tab727, tab728, tab729, tab730, tab731, tab732, tab733, tab734, tab735, tab736, tab737, tab738, tab739, tab740, tab741, tab742, tab743, tab744, tab745, tab746, tab747, tab748, tab749, tab750, tab751, tab752, tab753, tab754, tab755, tab756, tab757, tab758, tab759, tab760, tab761, tab762, tab763, tab764, tab765, tab766, tab767, tab768, tab769, tab770, tab771, tab772, tab773, tab774, tab775, tab776, tab777, tab778, tab779, tab780, tab781, tab782, tab783, tab784, tab785, tab786, tab787, tab788, tab789, tab790, tab791, tab792, tab793, tab794, tab795, tab796, tab797, tab798, tab799, tab800, tab801, tab802, tab803 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete", "🔥 Teleriscaldamento vs caldaia", "🌿 Clean spread (con CO₂)", "🇮🇹 PUN da prezzi zonali", "❄️ Pompa di calore vs caldaia", "🏢 PUE & costo data center", "🔌 Gruppo elettrogeno vs blackout", "🚗 Flotta aziendale: TCO diesel vs elettrico", "📜 Garanzie di origine: costo del 100% rinnovabile", "♻️ Fine vita FV: revamping vs dismissione", "🌾️ Agrivoltaico: doppio reddito", "🟢 Biometano: business case", "🌬️ Eolico onshore: business case", "🌊 Idroelettrico run-of-river: business case", "🔥 Geotermia profonda: business case", "☀️ Solare termodinamico (CSP): business case", "🌬️ Eolico offshore: business case", "☀️ Fotovoltaico utility-scale: business case", "⚛️ Nucleare SMR: business case", "📊 Posizione vs limiti di rischio", "💧 Cash flow at risk (CFaR)", "⚡ Aste MI: scostamenti vs MGP", "🌡️ Stress climatico: domanda e prezzo", "🌪️ Derivati meteo: pricing HDD/CDD", "🚢 LNG vs gasdotto: costo delivered", "🛢️ Crack spread: margine raffinazione 3-2-1", "🧪 Margine petrolchimico: nafta → etilene", "🛢️ Carry petrolio: contango & stoccaggio fisico", "🏭 Unit commitment CCGT: accendere o no?", "🛛️ Differenziali greggio: sweet vs sour", "⛽ Basis gas TTF–PSV", "🚢⚡ Rigassificazione GNL: margine terminale", "⚡🔥 Clean spark spread: margine centrale a gas", "⚫🔥 Clean dark spread: margine centrale a carbone", "🔀💰 PTR transfrontaliero: vale il prezzo d'asta?", "📊💹 Sharpe & Sortino: la strategia rende davvero?", "🪓📊 Component VaR: quale posizione tagliare per prima?", "🛡📉 Hedge ratio ottimale: quanto coprire con i futures?", "🧪📉 Backtest del VaR: il modello tiene?", "🧪🛡 Backtest dell'ES: la coda e' sottostimata?", "🪓🛡 Component ES: chi contribuisce alla coda?", "➕📊 Marginal VaR: quanto rischio aggiunge il nuovo trade?", "🚦📏 Limite VaR: quanto margine resta?", "🧪⚡ Stress test: quanto perde il book negli scenari?", "🧮📊 Rapporto di diversificazione: quanto rischio risparmia il book?", "🛡️🔍 Rischio di modello: quale VaR credere?", "✂️📉 Incremental VaR: quanto rischio togli chiudendo la posizione?", "🧱📉 Capacità VaR: quanto nozionale puoi ancora aggiungere?", "🗂️📊 VaR per segmento: dove si concentra il rischio?", "🎯🛡 Risk budgeting: il book rispetta i target?", "💎📊 RAROC: il rendimento ripaga il rischio?", "🌊📉 Expected Shortfall: la perdita oltre il VaR", "💥📈 Stress di correlazione: quanto sale il VaR se si rompono?", "🎯💥 Rho critica: a quale correlazione il VaR tocca il limite?", "💧📉 LVaR: il VaR corretto per il costo di liquidazione", "📐📉 Cornish-Fisher: il VaR corretto per skew e code grasse", "📐🌊 Expected Shortfall con Cornish-Fisher: la coda oltre il VaR con code grasse", "📉💥 VaR rotto: la probabilita' di breccia con code grasse", "⏳📉 VaR multi-orizzonte: lo scaling con autocorrelazione dei rendimenti", "🏔️📉 Valori estremi (Hill): il VaR oltre il massimo storico", "🌊📉 POT-GPD: il VaR dalla coda paretiana oltre soglia", "🧠📉 CAViaR: il VaR adattivo che impara dai rendimenti", "🌀📉 Copula t-Student: il VaR che vede le code muoversi insieme", "🎛📉 FHS: il VaR con la volatilita' di oggi", "⚙️📉 GARCH(1,1): la volatilita' che ricorda", "🧪📉 Backtest VaR: il modello resiste al tempo?", "🎯📉 Convergenza forward: il forward indovina lo spot?", "🔄📉 Half-life di mean reversion: lo spot torna alla media?", "Ω📊 Omega ratio: oltre Sharpe e Sortino", "📈📉 Calmar ratio: il rendimento che paga il drawdown", "🩹 Pain index e Pain ratio: il dolore medio oltre il peggio", "🛟 Sterling ratio: il Calmar mediato sui peggiori drawdown", "🔻 Burke ratio: il drawdown penalizzato al quadrato", "🌊📉 CDaR: il drawdown medio oltre la soglia (il VaR dei drawdown)", "🔍📉 Martin ratio: il Calmar che guarda tutto il dolore", "⛵ Tempo di recupero: quanto resta sott'acqua l'equity", "🎯 Information ratio: la strategia batte davvero il benchmark?", "📊 Capture ratio: quanto cattura la strategia nei mercati su e giù?", "🎯 Hit rate: quanto spesso la strategia batte il benchmark?", "📏 Tracking error: quanto si discosta la strategia dal benchmark?", "📉 Max drawdown relativo: quanto si scende sotto il benchmark?", "📐 Treynor & Jensen: il premio per unita' di rischio sistematico", "⚖️ M² Modigliani: il rendimento a parita' di rischio col benchmark", "📉 Sortino ratio: il rendimento per unità di rischio al ribasso", "📉 Calmar ratio: il rendimento annuo per unità di max drawdown", "📐 K-ratio: la regolarità della crescita dell'equity", "🎯 Volatilità target: il sizing a volatilità costante", "📐 Kelly criterion: il sizing ottimale dall'edge stimato", "🎲 Risk of ruin: probabilita' di toccare una barriera di drawdown", "🎯 Sizing anti-rovina: f massima con ROR vincolato", "📊 Monte Carlo: distribuzione del capitale dopo N trade", "VaR & Expected Shortfall del P&L dopo N trade", "Kelly con costi di trading: sizing netto", "Frazione di Kelly: half-Kelly e trade-off crescita/volatilità", "Kelly robusto: sizing con edge incerta", "Kelly con portafoglio: due posizioni simultanee", "Kelly con correlazione: due posizioni correlate", "Kelly adattivo: win-rate rolling e size dinamica", "Kelly con controllo drawdown: sizing frazionato al drawdown", "Kelly con target di volatilità: sizing riscalato sulla vol", "Kelly bayesiano: sizing con win-rate posterior", "Kelly con lotti interi: sizing discreto e drag di arrotondamento", "Kelly con stop-loss: sizing con perdita troncata", "Kelly con take-profit: sizing con vincita troncata", "Kelly frazionario (fractional Kelly): λ·f*", "Rischio di rovina (risk of ruin): probabilita' di rovina prima del target", "Kelly con tre esiti: sizing con vincita, perdita parziale e perdita piena", "Kelly con limite di posizione: sizing con cap f_max", "Kelly con vincoli multipli: cap, lotti, stop e drawdown", "Kelly con incertezza: haircut bayesiano sulla p stimata", "Kelly su N trade: raddoppio, dimezzamento e crescita attesa", "Kelly: mappa di sensibilità f* e crescita su (p, b)", "Kelly su ritorni continui: f* = μ/σ² e volatility drag", "Kelly con costi di transazione: f* netto = (μ-c)/σ²", "Kelly e drawdown: probabilità di toccare un max drawdown", "Kelly frazionario: frazione ottima per un budget di volatilità", "Monte Carlo: VaR e Expected Shortfall di una posizione power", "Kelly con limite VaR: sizing con vincolo di perdita massima", "Component VaR: contributo al rischio per posizione", "Component ES: contributo al rischio di coda per posizione", "Shock correlazioni: stress test sul rischio di coda", "Backtest VaR di Kupiec: copertura e likelihood ratio", "Reverse stress test: quanto shock regge il limite?", "Mappa di rottura: superficie VaR su shock congiunti vol+corr", "Liquidity-adjusted VaR: VaR + costo di liquidazione", "Component VaR: attribution del VaR per asset", "Hedge VaR: copertura ottimale con futures", "Jump VaR: VaR con salti di prezzo (Merton)", "Delta-Gamma VaR: VaR parametrico di una posizione con opzioni", "Expected Shortfall: misura di rischio coerente", "VaR ed ES con code pesanti (t-Student)", "🌈📉 Misura spettrale: l'ES pesato con l'avversione al rischio", "🧲📈 Misura entropica: rischio con avversione costante (CARA)", "🌀📈 Wang transform: misura distorsiva del rischio", "🎯📈 EVaR: il bound di Chernoff piu' conservativo", "🔀📊 RVaR: la media dei quantili tra VaR ed ES", "🎯📊 Median Shortfall: la mediana della coda, robusta tra VaR ed ES", "🎯📉 LPM: il rischio downside contro un target", "📐⚖ Expectile: la misura di rischio elicitabile e coerente", "🌀 Distortion risk measures: VaR, ES e Wang da un'unica formula", "📊 Spectral risk measure: VaR ponderato dal tuo spettro di avversione", "🔀 Entropic risk measure: avversione esponenziale al rischio", "🎯 Contributi di rischio ES: allocazione di Eulero del portafoglio", "🔱 Risk parity: pesi a parità di contributo di rischio (risk budgeting)", "🎯 Numero effettivo di scommesse (ENB): quante posizioni indipendenti hai davvero?", "📈 Massima diversificazione (MD): i pesi che massimizzano il rapporto DR", "🛡️ Minima varianza (MV): i pesi che minimizzano la volatilità di portafoglio", "🎯 Sharpe massimo (MS): i pesi che massimizzano il rendimento per unità di rischio", "🎯 Rendimento target (TR): minima varianza a rendimento atteso fissato", "κ Kappa ratio: un'unica famiglia per Omega e Sortino", "📏 Tail ratio: la coda destra contro la sinistra", "🔄 Recovery factor: quanto rende ogni euro di drawdown", "💢 Pain index: il dolore che serve per il rendimento", "🛟 Sterling ratio: quanto rende contro i K peggiori drawdown", "⚖ Gain-to-Pain ratio: quanto guadagno per ogni euro perso", "🌊 Volatility drag: quanto rendimento mangia la volatilita'", "🎯 Omega ratio: quanto upside prendi per ogni euro di downside", "📐 Sharpe corretto: il rendimento per unita' di rischio con code grasse", "🎯 Probabilistic Sharpe ratio: lo Sharpe e' davvero significativo?", "🎯 Deflated Sharpe ratio: lo Sharpe sopravvive ai backtest multipli?", "🎚️ Kappa ratio: Omega e Sortino sono lo stesso strumento", "🔺 Farinelli-Tibiletti: Omega e upside potential in un'unica formula", "📊 Rachev ratio: tutta la coda destra contro tutta la coda sinistra", "⭐ STAR ratio: il rendimento medio contro la perdita attesa di coda", "📈 Gain-Loss ratio: guadagno atteso contro perdita attesa", "📉 Ulcer Performance Index (Martin ratio): il rischio drawdown contro il rendimento", "🎯 Calmar ratio: il rendimento medio contro il peggior drawdown", "🔃 MAR ratio: il rendimento composto contro il peggior drawdown", "🤕 Pain ratio: il rendimento medio contro il drawdown medio", "🚀 Upside Potential ratio: il guadagno atteso contro la downside deviation", "🔀 Sequence risk: l'ordine dei rendimenti cambia il drawdown", "🛡 CDaR: la perdita media dei peggiori drawdown", "⏱️ Tempo sott'acqua: durata dei drawdown e recupero", "🎯 Attribuzione del drawdown: chi ha causato il peggior calo", "🔄 Recupero dal drawdown: quanto rimbalzo serve per tornare al picco", "📐 Calmar ratio: rendimento per unita' di peggior perdita", "⚖️ Sortino ratio: rendimento per unita' di volatilita' negativa", "🧮 Omega ratio: guadagni pesati contro perdite pesate", "📉 Burke ratio: rendimento per unita' di drawdown quadratico", "🎯 Kappa ratio (Kappa-3): rendimento per unita' di coda cubica", "📈 Martin ratio: rendimento per unita' di Ulcer Index", "📈 Sterling ratio: rendimento per unita' di drawdown medio annuo", "🩹 Pain ratio: rendimento per unita' di dolore medio (Pain Index)", "📉 CDaR ratio: rendimento per unita' di coda media (Conditional Drawdown-at-Risk)", "🎯 Drawdown-at-Risk (DaR): la soglia di drawdown superata solo nell'alpha% dei casi", "📈 Recovery Factor: profitto totale per unita' di peggior drawdown", "📐 Calmar geometrico: CAGR composto per unita' di peggior drawdown", "💹 Gain-to-Pain ratio: guadagni totali per ogni punto perso", "🏞️ Lake ratio: l'area del dolore sotto il picco", "🌀 Rolling drawdown: il peggior calo in ogni finestra", "📏 Variance ratio: il prezzo segue un random walk?", "⛓️ Johansen: power e gas cointegrati?", "🔗 ECM: quanto in fretta power torna all'equilibrio col gas?", "💥 Risposta allo shock: di quanto uno shock del gas muove power?", "📜 Scomposizione storica: cosa ha mosso davvero il prezzo power?", "🌊 Spillover gas↔power: chi trasmette e chi riceve gli shock?", "📈 Previsione VECM(1): dove vanno power e gas nei prossimi H giorni?", "📊 Backtest VECM(1): il modello batte il random walk?", "⚖️ Lo spread è stazionario? Test ADF", "🔮 Quando rientra lo spread? Forecast mean-reversion", "💰 Vale la pena tradare il rientro? P&L atteso del trade", "📐 Quanto puntare sul rientro? Sizing Kelly del trade", "⚠️ Quanto posso perdere? VaR del trade dimensionato", "🧪⚠️ Stress test del trade: VaR sotto shock", "🛑 Stop & target: dove chiudere il trade", "🧭 Ottimizza stop/target: i migliori k", "⏳ Time stop: uscire se non succede niente", "🔀 Scale-out: tutto insieme o a pezzi?", "🧺 Portafoglio: quanti trade insieme?", "📐 Correlazione: la diversificazione è reale?", "💸 Costi veri: l'edge sopravvive al netto?", "📅 L'edge annualizzato: il trade si ripete?", "📉 VaR annuale: quanto capitale di rischio?", "📊 VaR per segnale: chi mangia il capitale?", "📈 Expected Shortfall: quanto perdi quando perdi?", "🎯 Risk budgeting: ogni segnale si guadagna il suo capitale", "🔔 Drift dei budget: quando ribilanciare?", "🔁 Ribilanciare: i nuovi pesi post-shock", "⏰ Frequenza di ribilanciamento", "💰 Costo di esecuzione: quanto costa davvero ruotare", "🎯 Calibrazione: previsto vs realizzato", "⏳ Scheduling di esecuzione", "📉 Implementation shortfall: scomponi il costo realizzato", "🏦 Costo del margine: il capitale fermo al clearing", "📞 Margin call: variazione margine e buffer di liquidità", "📏 DV01 del portafoglio forward: sensibilità del MtM a uno shift parallelo della curva", "🗓️ Ladder delle scadenze: profilo temporale di volumi, MtM e DV01", "🧪💥 Shock di curva: P&L del portafoglio sotto scenari di prezzo", "⏳ Theta del portafoglio forward: quanto vale il passare del tempo", "🏦 Rho del portafoglio forward: il MtM sotto il tasso d'interesse", "🧾🔍 P&L spiegato dalle greche: theta, delta e rho contro il ΔMtM realizzato", "📉 VaR ed Expected Shortfall del portafoglio forward: il rischio giornaliero", "🌪️📉 Stressed VaR: il VaR sotto volatilità stressata", "🪓🌪️ Component Stressed VaR: quale linea tagliare sotto stress?", "🪓🌊 Component Stressed ES: chi alimenta la coda sotto stress?", "🛡️🌪️ Copertura dello Stressed ES: quanto hedgiare per rientrare nel limite?", "⏳🌪️ Decadimento dello stress: aspettare o coprire?", "💸⏳ Costo dell'attesa: il budget di rischio consumato", "🚨⏳ Monitoraggio dell'attesa: il trigger di escalation", "🛡️📋 Esecuzione della copertura: il piano ordini", "📊✅ Verifica della copertura: il piano ha funzionato?", "🔓🛡️ Rilascio della copertura: quando alleggerire l'hedge?", "📓 Blotter delle coperture: registro operazioni", "🎯 Regret della copertura: fissato vs spot", "📑 Efficacia contabile: dollar-offset delle coperture", "🛑 De-designazione: continuare o chiudere la copertura?", "⚖️ Ribilanciamento: aggiustare l'hedge ratio senza de-designare", "📦 Cost-of-carry: scomponi il premio del forward", "📊📓 Diario dell'inefficacia: OCI vs P&L per periodo", "♻️ Recycling OCI: rilascio della riserva a P&L", "📉 Regressione di efficacia (OLS)", "🔭 Test prospettico di efficacia (scenari forward)", "📝 Documentazione della copertura (IFRS 9)", "🧾 Scritture contabili (IFRS 9)", "📋 Informativa IFRS 7 (coperture)", "📉 Sensibilità al rischio di mercato (IFRS 7.40)", "📒 Rollforward riserva cash-flow hedge (OCI)", "🧪 Test retrospettivo di efficacia (look-back)", "📅 Piano di recycling futuro (proiezione release OCI→P&L)", "🛑 Cessazione della copertura (hedge discontinuation)", "⏳ Costo della copertura (time value, IFRS 9)", "🧩 Componenti di rischio designati (IFRS 9)", "➡️ Forward element escluso (IFRS 9)", "⚠️💳 Rischio di credito che domina (IFRS 9)", "🔁 Aggregated exposure (esposizione aggregata, IFRS 9 6.3.4)", "🧱 Basis adjustment (adeguamento del costo, IFRS 9 6.5.11)", "⚖️📋 Hedge ratio designato (IFRS 9 6.4.1(c)(iii))", "🔀📊 Tipo di copertura (IFRS 9 6.5.2)", "🧪📐 Derivato ipotetico (IFRS 9 B6.5.5)", "⚖️🔄 Ribilanciamento (IFRS 9 6.5.5)", "⚖️🧺 Posizione netta (IFRS 9 6.6)", "⚖️📉 Ammortamento adeguamento FV hedge (IFRS 9 6.5.10)", "⚖️🔌 Own-use exemption NPNS (IFRS 9 2.4)", "⚖️⏹️ Cessazione hedge accounting (IFRS 9 6.5.12)", "🔗📄 Derivati incorporati (IFRS 9 4.3)", "⚖️📶 Gerarchia fair value (IFRS 13)", "🧾💸 SPPI test (IFRS 9 4.1.2(b))", "📉⏳ ECL a 3 stadi (IFRS 9 5.5)", "📐📊 Tasso di interesse effettivo (IFRS 9 5.4.1)", "🏦📋 Business model assessment (IFRS 9 4.1.1/4.1.2(a))", "🔁🏦 Modifica di passività (IFRS 9 3.3.2)", "🏭📤 Cessione crediti (IFRS 9 3.2)", "🛡️📑 Informativa rischio di credito (IFRS 7.35)", "💧📋 Informativa rischio di liquidità (IFRS 7.39)", "🔁📂 Reclassifica attività finanziarie (IFRS 9 4.4)", "⚠️💰 Inadempimenti e violazioni covenant (IFRS 7.18-19)", "⚖️📑 Compensazione attività/passività finanziarie (IFRS 7.13A-13F)", "📊📋 P&L per categoria (IFRS 7.20)", "🏦📥 Collateral & garanzie reali (IFRS 7.15)", "🔄📤 Trasferimenti di attività finanziarie (IFRS 7.42A-42H)", "📒➡️ Rollforward fondo svalutazione crediti (IFRS 7.16)", "⏰📉 Crediti scaduti non deteriorati (IFRS 7.37)", "💲📊 Fair value vs valore contabile (IFRS 7.25)", "🧾📊 Valore contabile per categoria (IFRS 7.8)", "🏛️💳 Rischio di credito proprio su passività FVTPL (IFRS 7.9-7.10)", "💧📉 Scadenze delle passività finanziarie (IFRS 7.39)", "🏦🔑 Garanzie reali acquisite in possesso (IFRS 7.38)", "📊🕐 Day-1 P&L differito (IFRS 7.27)", "🛡️📊 Risk appetite & limiti (IFRS 7.33-7.34)", "📐⚖️ Fair value: movimenti livello 3 (IFRS 7.28)", "🏷️📋 Fair value: eccezioni e approssimazioni (IFRS 7.29)", "🗂️⚠️ Concentrazioni di rischio (IFRS 7.32)", "📊🔀 Trasferimenti tra livelli fair value (IFRS 7.30)", "💸📊 FVA: funding valuation adjustment del portafoglio", "🧾📝 Informativa sull'hedge accounting (IFRS 7.24A-24F)", "🧭📊 Esposizioni ai rischi e origine (IFRS 7.31)", "💳📊 DVA: debit valuation adjustment del portafoglio", "🏦📏 Limiti di credito controparte (fido)", "📊⚖️ Rappresentativita' analisi di sensibilita' (IFRS 7.41-7.42)", "📊🔬 Fair value: metodi e assunzioni (IFRS 7.27)", "📊🎯 Sensibilita' fair value livello 3 (IFRS 7.27(h))", "📊🏦 XVA: CVA + DVA + FVA + KVA + ColVA (aggiustamenti di valutazione)", "📊🈤 Riclassifiche di attività finanziarie (IFRS 7.12B-12D)", "📊📉 Utili/perdite da derecognition di attività al costo ammortizzato (IFRS 7.20A)", "💸📊 Proventi e oneri da commissioni (IFRS 7.17)", "🛡️📊 Esposizione max al rischio di credito (IFRS 7.36)", "🔗📊 Fair value hedges del rischio di credito (IFRS 7.11)", "📊⚠️ Fonti di inefficacia delle coperture (IFRS 7.24D)", "💶📊 Inefficacia a P&L per tipo di copertura (IFRS 7.24G)", "📊🔄 Importi a OCI e riciclo a P&L (IFRS 7.24E)", "📊🗂️ Strumenti di copertura per categoria di rischio (IFRS 7.24F)", "📊📦 Elementi coperti per categoria di rischio (IFRS 7.24B)", "📊⚡ Premio di rischio forward (ex-post)", "🔌💰 Rendita da congestione (congestion rent)", "📊📅 Flussi di cassa futuri coperti (IFRS 7.24C)", "🏭🤝 EPC: rendimento energetico garantito (ESCO)", "📊↔️ Bid-ask spread e costi di transazione", "💱📉 Rischio cambio: costo EUR del procurement in USD", "🔄📐 Convertitore unità di misura energia e prezzi", "📜⚖️ CfD a due vie: payoff, MtM e sensibilità", "🔌📉 LoLE & EENS: adeguatezza del parco di generazione", "🧾⚖️ M&V IPMVP: verifica dei risparmi energetici", "🔋⏱️ Dispatch ottimale accumulo day-ahead", "📉⏳ Curva di durata prezzi", "🧱📐 Bootstrap curva forward (mensile→oraria)", "🔌📏 ELCC: capacity credit delle rinnovabili", "⚡🏛️ Asta del mercato della capacità: clearing e de-rating", "🔥📈 Spark/Dark spread: margini di generazione (clean)", "💱⛽ Prezzo CO₂ di switch: gas vs carbone", "🚢⛽ Bunker fuel: VLSFO vs LNG vs metanolo vs ammoniaca", "🌍🏠 ETS2: costo carbonio per edifici & trasporti", "🌍📉 MACC: curva dei costi di abbattimento CO₂", "🪵 Biomassa legnosa: business case (CHP)", "🧊 Accumulo termico (TES): peak-shaving del calore", "🔌🔋 V2G: ricavi da vehicle-to-grid", "🏦📊 WACC: costo del capitale per progetti energetici", "📊💨 P50/P90: incertezza della producibilità rinnovabile", "⚡📊 Profile cost: il costo della forma", "☀️🔌 Rapporto DC/AC: clipping vs capex", "🌐⚡ Integration cost: profile + balancing + grid", "🌬️♻️ Repowering eolico: più MWh dagli stessi MW", "☀️🧹 Soiling & degrado FV: quanto perdi senza pulire i pannelli", "⚡🔀 Redispatch: costi e ottimo della congestione", "☀️📐 Tilt & orientamento FV: l'angolo che massimizza il rendimento", "🔌🚗 Colonnine di ricarica pubblica: il business case", "🌬️📦 CAES: l'accumulo ad aria compressa", "🔋♻️ Second-life: batterie EV → storage stazionario", "☀️🪞 FV bifacciale: il guadagno posteriore ripaga il sovraccosto?", "🟢📄 PPA vs merchant: il prezzo fisso vale lo sconto?", "🌀 Volano (flywheel): accumulo cinetico per FCR e servizi di rete", "🔋🌊 Batterie a flusso (VRFB): accumulo long-duration", "⛽🌱 Biocarburanti (HVO): il premium per decarbonizzare", "🔋🧂 Batterie al sodio (Na-ion): l'accumulo senza litio conviene?", "📐 LACE: il costo che la rete evita (il vero valore di un impianto)", "🧪 LCOH: il costo dell'idrogeno verde (quando l'elettrolisi conviene)", "💧⚗️ Blending idrogeno in rete gas: il premium per decarbonizzare", "🔥⛽ Metanazione (Power-to-Methane): il metano sintetico da CO2 catturata", "⚗️💚 Power-to-Ammonia: l'ammoniaca verde da H2 (Haber-Bosch)", "🧪⛽ Power-to-Methanol: il metanolo verde da CO₂ (sintesi catalitica)", "✈️⛽ Power-to-SAF: il cherosene sintetico da CO₂ (Fischer-Tropsch)", "🏭💚 Power-to-Steel: l'acciaio verde da H2 (DRI)", "💧🗄️ Stoccaggio H2: lo storage idrogeno rende? (caverna salina)", "🚚💧 Trasporto H2: pipeline, trailer o liquido? (logistica idrogeno)", "🌬️🏭 Direct Air Capture: il costo della CO2 dall'aria", "💧🌊 Desalinizzazione RO: il costo dell'acqua dall'energia", "🌱⚗️ BECCS: bioenergia con cattura CO2 (rimozione netta)", "⚓ Cold ironing: elettrificare le navi in banchina", "🔷 Idrogeno turchese: la pirolisi del metano", "🔵 Idrogeno blu: il reforming con cattura CO2 (SMR+CCS)", "🏛️🎯 Aste FER-X: a che strike conviene partecipare?", "🩷 Idrogeno rosa: l'elettrolisi alimentata dal nucleare", "🤍 Idrogeno bianco: l'H2 naturale dal sottosuolo", "💛 Idrogeno giallo: l'elettrolisi alimentata dal fotovoltaico", "🧪🛢️ LOHC: l'idrogeno nei liquidi organici", "♻️🔥 Termovalorizzatore: il business case waste-to-energy", "🧊❄️ Telerifreddamento (district cooling): centrale frigorifera vs chiller", "⚡🏭 VPP (Virtual Power Plant): aggregare la flessibilità distribuita", "🔥♨️ Waste heat data center: il calore di scarto diventa teleriscaldamento", "🤖⚡ Inferenza AI: dal MW delle GPU al costo per milione di token", "🏭📋 Diagnosi energetica: audit e piano di efficientamento", "🔧⚙️ Motori elettrici: l'inverter paga?", "🌬️🔧 Aria compressa: quanto costano le perdite?", "🔌📉 Trasformatore: quanto costano le perdite a vuoto?", "💡 Relamping LED: il passaggio a LED paga davvero?", "❄️ Free cooling: quanto vale il freddo gratis?", "🔥 Caldaia a condensazione: il retrofit paga?", "🏢 Cappotto termico: il retrofit dell'involucro paga?", "❄️ Trigenerazione (CCHP): un solo combustibile, elettricita' + calore + freddo", "☀️🚿 Solare termico: quanta acqua calda dal tetto?", "♨️⚡ ORC: il calore di scarto diventa elettricità", "🌊 Energia delle maree: il business case tidal", "🌊⚡ Armoniche: quanto costano le distorsioni?", "⚡ Rifasamento: quanto costa il cos(phi) basso?", "🔥 Economizzatore fumi: il calore che esce dal camino", "⚖️ Sbilanciamento fasi: quanto costa la corrente nel neutro?", "💡🌃 Illuminazione pubblica: LED + telecontrollo — il business case", "🔥⚡ Forno a induzione: elettrificare il forno industriale paga?", "🌡💨 Essiccazione industriale: quanta energia per togliere l'acqua?", "🔌🏝️ Microrete industriale: quanto costa staccarsi dalla rete?", "♨️🕳️ Trappole di vapore: quanto vapore perdi dalle trappole rotte?", "🌡️🔥 Pompa di calore industriale ad alta temperatura: il COP di Carnot dal calore di scarto", "🌊〰️ Moto ondoso: il business case wave energy", "❄️🏭 Refrigerazione industriale: quanto costa il freddo?", "⚡📋 Demand response: quanto rendono i servizi di flessibilità?", "🧱💧 Essiccazione fanghi: togliere l'acqua dai fanghi paga?", "⚡📡 Riserva primaria FCR: vendere banda di regolazione di frequenza paga?", "⚡🔄 Riserva secondaria aFRR: la banda automatica di ripristino frequenza paga?", "⚡📋 Riserva terziaria mFRR: la banda manuale di bilanciamento paga?", "🔌📋 Riserva di sostituzione RR: la riserva lenta di Terna paga?", "🏛️⚡ Mercato della capacità: la remunerazione della capacità disponibile paga?", "📜💹 Trading GO: il market making sui certificati verdi paga?", "🌊💨 Eolico offshore flottante: il vento in mare aperto paga?", "☀️🌾 Agrivoltaico: doppio raccolto, un solo terreno?", "❄️💨 Aria liquida (LAES): l'accumulo criogenico di lunga durata?", "🏔️⚖️ Accumulo gravitazionale: blocchi, altezza e gravità come batteria?", "🔋⚡ Celle a combustibile: elettricità + calore senza combustione?", "🌬️🧪 DAC: la cattura diretta di CO2 dall'aria paga?", "🌱🔥 Biochar: il carbonio della biomassa resta nel suolo?", "☀️🔥 Solare termico: calore dal sole senza fotovoltaico?", "🌊☀️ Fotovoltaico galleggiante (FPV): il business case", "🏘️⚡ Comunità energetiche rinnovabili (CER): l'energia condivisa paga?", "🔌🏠 Vehicle-to-home (V2H): la batteria dell'auto alimenta la casa?", "💧🖥️ Immersion cooling: il raffreddamento a liquido del data center paga?", "⚡🏁 Black start: il riavvio della rete dopo il blackout paga?", "🔌⚡ Grid-forming + inerzia sintetica: la batteria che forma la rete paga?", "⚡ Supercondensatori: potenza istantanea per FFR e peak shaving paga?", "🔋♻️ Second life batterie EV: il riuso stazionario paga?", "☀️🗄️ Accumulo termico stagionale: il calore dell'estate per l'inverno paga?", "⚡🔌 Interconnessione HVDC: il cavo in corrente continua paga?", "🔋🌊 Batterie a flusso redox: potenza ed energia separate pagano?", "⚡🤝 Scambio peer-to-peer: vendere il surplus al vicino conviene?", "♨️💧 Calore dalle acque reflue: la fognatura scalda l'edificio?", "🌡️🕳️ Sonde geotermiche: la pompa di calore dal sottosuolo paga?", "🌬️🔥 Pompa di calore aerotermica: l'aria esterna scalda l'edificio a prezzo giusto?", "💧🔥 Pompa di calore ad acqua di falda: l'acqua del sottosuolo scalda l'edificio?", "🌬️♻️ Recuperatore di calore per ventilazione: l'aria esausta scalda l'aria nuova?", "🔥⚡ Pompa di calore ibrida: caldaia + pompa di calore, chi fa cosa?", "🔥 Pompa di calore ad assorbimento: il calore dal gas senza compressore paga?", "💧 Raffrescamento evaporativo (adiabatico): il freddo dall'acqua senza compressore paga?", "❄️🔥 Pompa di calore a CO2 transcritica: alta temperatura senza gas?", "🌱🔥 Biogas da digestione anaerobica: il business case dell'impianto", "🏝️ Microgrid in isola: PV + batteria + generatore, quanto costa l'autonomia?", "🚌🔌 Ricarica in deposito per bus elettrici: la gestione intelligente della potenza paga?", "🏭🌡️ Teleriscaldamento con pompa di calore di rete: la PdC distrettuale paga contro la caldaia a gas?", "🧱🔥 Accumulo termico a cambiamento di fase (PCM): il calore latente paga?", "🔋🧂 Batterie sodio-ione: senza litio, l'accumulo stazionario paga?", "🏜️🔥 Batteria a sabbia: il calore rinnovabile stoccato paga?", "🔥♻️ Teleriscaldamento 5G: l'anello a bassa temperatura paga?", "🌊⚡ Eolico offshore galleggiante: l'acqua profonda paga?", "🧂💧 Idrogeno in caverne saline: lo stoccaggio sotterraneo paga?", "🌊🧂 Energia da gradiente salino: la foce del fiume genera elettricità?", "🔋⚙️ Batterie ferro-aria: l'accumulo multi-giorno paga?", "🌊🔥 Pompa di calore ad acqua di mare: il mare scalda la città?", "🪵🔥 Torrefazione: i pellet torrefatti sostituiscono il carbone?", "🌿🔥 Syngas da gassificazione: la biomassa diventa gas combustibile?", "☀️❄️ Raffrescamento solare: il sole fa freddo con l'assorbitore?", "❄️🏙️ District cooling: il freddo centralizzato paga contro i chiller singoli?", "🔋♻️ Riciclo batterie al litio: il metallo recuperato paga lo smaltimento?", "☀️🗼 Solare a concentrazione (CSP) a torre: l'elettricità dispacciabile dal sole paga?", "🔥💧 Turbina a gas H2-ready: il co-firing a idrogeno paga il retrofit?", "🚚💧 Camion pesante a idrogeno: il fuel-cell paga contro il diesel?", "⚡🔥 Cogenerazione CAR: il risparmio di energia primaria paga i certificati?", "🔋🟡 Batterie zinco-aria: l'accumulo a basso costo paga contro LFP?", "⚗️ Elettrolizzatori a confronto: alcalino vs PEM vs SOEC — quale tecnologia paga?", "🌿⚗️ Ammoniaca verde: Haber-Bosch da H2 verde — il prezzo dell'NH3 paga?", "💧⚡ Mini-idroelettrico ad acqua fluente: il salto del torrente paga?", "🌿⛽ Biometano da upgrading del biogas: il metano pulito paga?", "💧❄️ Idrogeno liquido (LH2): la liquefazione paga?", "🌡️💧 Accumulo termico in acquifero (ATES): il calore estivo paga d'inverno?", "⚛️🔥 Fusione nucleare: a quale prezzo il primo impianto paga?", "🌡️🌋 Geotermia avanzata (EGS): il calore profondo diventa elettricità?", "🌊🌡️ OTEC: l'energia termica degli oceani paga?", "🧂🔥 Sali fusi: il calore stoccato ridà elettricità a prezzo giusto?", "🏭 Cemento verde: la cattura CO2 sul clinker paga?", "🔥🪟 Forno fusorio del vetro: l'elettrificazione paga?", "🏺🔥 Forno ceramico: l'elettrificazione della cottura paga?", "🌱🔥 Serra riscaldata: la pompa di calore batte la caldaia a gas?", "✈️⚡ Ground power elettrico in aeroporto: l'e-GPU batte diesel + APU?", "❄️⛷️ Innevamento artificiale: cannoni ventilatori o lance ad aria compressa?", "❄️🏭 Cella frigorifera: free-cooling e pompa di calore battono il gruppo tradizionale?", "🏊♨️ Piscina coperta riscaldata: pompa di calore + copertura battono la caldaia a gas?", "⚓🔌 Cold ironing portuale: la corrente da banchina batte i generatori diesel di bordo?", "⛴️🔋 Traghetto elettrico a batteria: la batteria batte il diesel sulla rotta breve?", "🚛🔋 Camion elettrico a batteria: la ricarica megawatt batte il diesel sul lungo raggio?", "🚆💧 Treno regionale a idrogeno: il fuel-cell batte il diesel sulle linee non elettrificate?", "🏭♨️ Calore di scarto industriale: il recupero termico paga contro la caldaia a gas?", "🏋️ Accumulo a gravità: sollevare pesi quando l'energia costa poco, venderla quando costa tanto?", "☀️🔥 Pannelli ibridi PVT: elettricità + calore dallo stesso tetto — il doppio rendimento paga?", "⚡🔥 Caldaia a elettrodi: vapore e calore industriale con elettricità in surplus — conviene più del gas?", "♻️🔥 Forno ad arco elettrico (EAF): fondere rottame con elettricità batte l'altoforno?", "📄 Cartiera: essiccare la carta con vapore o con pompa di calore?", "🍺 Birrificio: bollire il mosto con calore recuperato e pompa di calore batte la caldaia a gas?", "🧀 Caseificio: pastorizzare il latte con calore recuperato e pompa di calore batte la caldaia a gas?", "🧺 Lavanderia industriale: lavare a caldo con calore recuperato e pompa di calore batte la caldaia a gas?", "🥫 Conservificio: sterilizzare le conserve con calore recuperato e pompa di calore batte la caldaia a gas?", "🧵 Tintoria: tingere il tessuto con bagni caldi recuperati e pompa di calore batte la caldaia a gas?", "🪵 Essiccazione del legno: essiccare il legname con pompa di calore batte l'essiccatore a gas?", "🍝 Pastificio: essiccare la pasta con calore recuperato e pompa di calore batte l'essiccatore a gas?", "🍞 Panificio: forno elettrico con recupero fumi batte il forno a gas?", "🏭 Fonderia: fondere la ghisa a induzione con preriscaldo della carica batte il cubilotto a coke?", "🍬 Zuccherificio: concentrare il succo con multi-effetto e MVR batte l'evaporatore a singolo effetto a gas?", "🫙 Vetreria: fondere il vetro con forno ossi-combustibile + boost elettrico batte il forno rigenerativo a gas?", "🧵 Tintoria tessile: recuperare calore dalle acque reflue di tintura batte scaldare acqua nuova in caldaia a gas?", "🐄 Conceria: scaldare le vasche di concia con pompa di calore + recupero calore batte la caldaia a gas?", "🫒 Oleificio: la sansa che avanza alimenta un cogeneratore a biomassa e batte rete + caldaia a gas?", "🥩 Salumificio: stagionare e cuocere i salumi con pompa di calore + recupero calore batte caldaia a gas + frigorifero elettrico?", "🥃 Distilleria: distillare con pompa di calore + recupero calore dai condensatori batte la caldaia a gas?", "🏭 Cementificio: recuperare calore dai fumi del forno per preriscaldare la farina batte il combustibile comprato?", "🧱 Laterizi: cuocere i mattoni con recupero calore dai fumi batte il forno tunnel a gas?", "🐔 Mangimificio: essiccare il mangime con recupero calore dall'aria esausta batte l'essiccatore a gas?", "📦 Cartotecnica: la cogenerazione (CHP) batte caldaia + rete per un cartotecnico?", "🏭 Acciaieria: forno elettrico ad arco (EAF) vs altoforno — quando il rottame batte la ghisa?", "🔩 Galvanica: zincatura a caldo vs elettrolitica — quando lo zinco freddo batte il bagno a 450 °C?", "🫠 Pressofusione alluminio: forno fusorio elettrico a induzione batte il forno a gas?", "🎨 Verniciatura industriale: essiccare la vernice con pompa di calore + recupero calore dall'aria esausta batte il bruciatore a gas?", "🍷 Cantina vinicola: pompa di calore geotermica reversibile batte chiller + caldaia a gas?", "🥩♻️ Macelleria: il calore dei frigoriferi scalda acqua e negozio?", "🍦 Gelateria: pastorizzare con pompa di calore e freddo efficiente batte caldaia a gas + chiller tradizionale?", "🚗 Autolavaggio: pompa di calore + recupero calore dalle acque reflue batte la caldaia a gas per acqua calda e asciugatura?", "🍺 Birreria: scaldare il mosto con pompa di calore + recupero calore dal raffreddamento batte caldaia a gas + chiller tradizionale?", "🏋️ Palestra: pompa di calore + recupero calore dalle docce batte la caldaia a gas per acqua calda e riscaldamento?", "⛸️ Palaghiaccio: il calore di scarto del freddo pista scalda gli spogliatoi e batte caldaia a gas + chiller tradizionale?", "🏫 Scuola: pompa di calore + recupero calore dalla ventilazione batte la caldaia a gas per aule e mensa?", "🏛️ Museo: pompa di calore reversibile + recupero calore dalla ventilazione batte caldaia a gas + chiller per sale espositive?", "📚 Biblioteca: pompa di calore reversibile + recupero calore ventilazione sale lettura + climatizzazione continua depositi batte caldaia a gas + chiller?", "🎭 Teatro: pompa di calore reversibile + recupero calore ventilazione sala batte caldaia a gas + chiller?", "🎬 Cinema: pompa di calore reversibile + recupero calore ventilazione sale batte caldaia a gas + chiller?", "🏨 Albergo: pompa di calore reversibile + recupero calore docce su ACS batte caldaia a gas + chiller?", "🏥 Ospedale: pompa di calore reversibile + recupero calore ventilazione batte caldaia a gas + chiller?", "🛒 Supermercato: recupero calore banchi frigo + pompa di calore batte caldaia a gas + chiller?", "🍽️ Ristorante: pompa di calore + recupero calore celle frigo su ACS batte caldaia a gas + chiller?", "🏭 Centro logistico: pompa di calore per riscaldare un magazzino alto batte caldaia a gas + chiller uffici?", "🏛️ Biblioteca: pompa di calore reversibile + recupero calore dalla ventilazione sale lettura batte caldaia a gas + chiller?", "💊 Farmacia: pompa di calore reversibile + recupero calore dai frigoriferi farmaceutici batte caldaia a gas + chiller?", "💇 Parrucchiere: pompa di calore + recupero calore dalle acque di lavaggio batte caldaia a gas + chiller?", "🌸 Fioraio: pompa di calore + recupero calore dalla cella frigo fiori batte caldaia a gas + frigo tradizionale?", "🐟 Pescheria: macchina del ghiaccio in loco + celle efficienti + recupero calore condensatori su ACS batte ghiaccio comprato + celle tradizionali + caldaia a gas?", "🧁 Pasticceria: forno a gas efficiente + recupero calore forno su ACS + freddo efficiente batte forno a gas vecchio + celle tradizionali + caldaia a gas?"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256, tab257, tab258, tab259, tab260, tab261, tab262, tab263, tab264, tab265, tab266, tab267, tab268, tab269, tab270, tab271, tab272, tab273, tab274, tab275, tab276, tab277, tab278, tab279, tab280, tab281, tab282, tab283, tab284, tab285, tab286, tab287, tab288, tab289, tab290, tab291, tab292, tab293, tab294, tab295, tab296, tab297, tab298, tab299, tab300, tab301, tab302, tab303, tab304, tab305, tab306, tab307, tab308, tab309, tab310, tab311, tab312, tab313, tab314, tab315, tab316, tab317, tab318, tab319, tab320, tab321, tab322, tab323, tab324, tab325, tab326, tab327, tab328, tab329, tab330, tab331, tab332, tab333, tab334, tab335, tab336, tab337, tab338, tab339, tab340, tab341, tab342, tab343, tab344, tab345, tab346, tab347, tab348, tab349, tab350, tab351, tab352, tab353, tab354, tab355, tab356, tab357, tab358, tab359, tab360, tab361, tab362, tab363, tab364, tab365, tab366, tab367, tab368, tab369, tab370, tab371, tab372, tab373, tab374, tab375, tab376, tab377, tab378, tab379, tab380, tab381, tab382, tab383, tab384, tab385, tab386, tab387, tab388, tab389, tab390, tab391, tab392, tab393, tab394, tab395, tab396, tab397, tab398, tab399, tab400, tab401, tab402, tab403, tab404, tab405, tab406, tab407, tab408, tab409, tab410, tab411, tab412, tab413, tab414, tab415, tab416, tab417, tab418, tab419, tab420, tab421, tab422, tab423, tab424, tab425, tab426, tab427, tab428, tab429, tab430, tab431, tab432, tab433, tab434, tab435, tab436, tab437, tab438, tab439, tab440, tab441, tab442, tab443, tab444, tab445, tab446, tab447, tab448, tab449, tab450, tab451, tab452, tab453, tab454, tab455, tab456, tab457, tab458, tab459, tab460, tab461, tab462, tab463, tab464, tab465, tab466, tab467, tab468, tab469, tab470, tab471, tab472, tab473, tab474, tab475, tab476, tab477, tab478, tab479, tab480, tab481, tab482, tab483, tab484, tab485, tab486, tab487, tab488, tab489, tab490, tab491, tab492, tab493, tab494, tab495, tab496, tab497, tab498, tab499, tab500, tab501, tab502, tab503, tab504, tab505, tab506, tab507, tab508, tab509, tab510, tab511, tab512, tab513, tab514, tab515, tab516, tab517, tab518, tab519, tab520, tab521, tab522, tab523, tab524, tab525, tab526, tab527, tab528, tab529, tab530, tab531, tab532, tab533, tab534, tab535, tab536, tab537, tab538, tab539, tab540, tab541, tab542, tab543, tab544, tab545, tab546, tab547, tab548, tab549, tab550, tab551, tab552, tab553, tab554, tab555, tab556, tab557, tab558, tab559, tab560, tab561, tab562, tab563, tab564, tab565, tab566, tab567, tab568, tab569, tab570, tab571, tab572, tab573, tab574, tab575, tab576, tab577, tab578, tab579, tab580, tab581, tab582, tab583, tab584, tab585, tab586, tab587, tab588, tab589, tab590, tab591, tab592, tab593, tab594, tab595, tab596, tab597, tab598, tab599, tab600, tab601, tab602, tab603, tab604, tab605, tab606, tab607, tab608, tab609, tab610, tab611, tab612, tab613, tab614, tab615, tab616, tab617, tab618, tab619, tab620, tab621, tab622, tab623, tab624, tab625, tab626, tab627, tab628, tab629, tab630, tab631, tab632, tab633, tab634, tab635, tab636, tab637, tab638, tab639, tab640, tab641, tab642, tab643, tab644, tab645, tab646, tab647, tab648, tab649, tab650, tab651, tab652, tab653, tab654, tab655, tab656, tab657, tab658, tab659, tab660, tab661, tab662, tab663, tab664, tab665, tab666, tab667, tab668, tab669, tab670, tab671, tab672, tab673, tab674, tab675, tab676, tab677, tab678, tab679, tab680, tab681, tab682, tab683, tab684, tab685, tab686, tab687, tab688, tab689, tab690, tab691, tab692, tab693, tab694, tab695, tab696, tab697, tab698, tab699, tab700, tab701, tab702, tab703, tab704, tab705, tab706, tab707, tab708, tab709, tab710, tab711, tab712, tab713, tab714, tab715, tab716, tab717, tab718, tab719, tab720, tab721, tab722, tab723, tab724, tab725, tab726, tab727, tab728, tab729, tab730, tab731, tab732, tab733, tab734, tab735, tab736, tab737, tab738, tab739, tab740, tab741, tab742, tab743, tab744, tab745, tab746, tab747, tab748, tab749, tab750, tab751, tab752, tab753, tab754, tab755, tab756, tab757, tab758, tab759, tab760, tab761, tab762, tab763, tab764, tab765, tab766, tab767, tab768, tab769, tab770, tab771, tab772, tab773, tab774, tab775, tab776, tab777, tab778, tab779, tab780, tab781, tab782, tab783, tab784, tab785, tab786, tab787, tab788, tab789, tab790, tab791, tab792, tab793, tab794, tab795, tab796, tab797, tab798, tab799, tab800, tab801, tab802, tab803, tab804 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete", "🔥 Teleriscaldamento vs caldaia", "🌿 Clean spread (con CO₂)", "🇮🇹 PUN da prezzi zonali", "❄️ Pompa di calore vs caldaia", "🏢 PUE & costo data center", "🔌 Gruppo elettrogeno vs blackout", "🚗 Flotta aziendale: TCO diesel vs elettrico", "📜 Garanzie di origine: costo del 100% rinnovabile", "♻️ Fine vita FV: revamping vs dismissione", "🌾️ Agrivoltaico: doppio reddito", "🟢 Biometano: business case", "🌬️ Eolico onshore: business case", "🌊 Idroelettrico run-of-river: business case", "🔥 Geotermia profonda: business case", "☀️ Solare termodinamico (CSP): business case", "🌬️ Eolico offshore: business case", "☀️ Fotovoltaico utility-scale: business case", "⚛️ Nucleare SMR: business case", "📊 Posizione vs limiti di rischio", "💧 Cash flow at risk (CFaR)", "⚡ Aste MI: scostamenti vs MGP", "🌡️ Stress climatico: domanda e prezzo", "🌪️ Derivati meteo: pricing HDD/CDD", "🚢 LNG vs gasdotto: costo delivered", "🛢️ Crack spread: margine raffinazione 3-2-1", "🧪 Margine petrolchimico: nafta → etilene", "🛢️ Carry petrolio: contango & stoccaggio fisico", "🏭 Unit commitment CCGT: accendere o no?", "🛛️ Differenziali greggio: sweet vs sour", "⛽ Basis gas TTF–PSV", "🚢⚡ Rigassificazione GNL: margine terminale", "⚡🔥 Clean spark spread: margine centrale a gas", "⚫🔥 Clean dark spread: margine centrale a carbone", "🔀💰 PTR transfrontaliero: vale il prezzo d'asta?", "📊💹 Sharpe & Sortino: la strategia rende davvero?", "🪓📊 Component VaR: quale posizione tagliare per prima?", "🛡📉 Hedge ratio ottimale: quanto coprire con i futures?", "🧪📉 Backtest del VaR: il modello tiene?", "🧪🛡 Backtest dell'ES: la coda e' sottostimata?", "🪓🛡 Component ES: chi contribuisce alla coda?", "➕📊 Marginal VaR: quanto rischio aggiunge il nuovo trade?", "🚦📏 Limite VaR: quanto margine resta?", "🧪⚡ Stress test: quanto perde il book negli scenari?", "🧮📊 Rapporto di diversificazione: quanto rischio risparmia il book?", "🛡️🔍 Rischio di modello: quale VaR credere?", "✂️📉 Incremental VaR: quanto rischio togli chiudendo la posizione?", "🧱📉 Capacità VaR: quanto nozionale puoi ancora aggiungere?", "🗂️📊 VaR per segmento: dove si concentra il rischio?", "🎯🛡 Risk budgeting: il book rispetta i target?", "💎📊 RAROC: il rendimento ripaga il rischio?", "🌊📉 Expected Shortfall: la perdita oltre il VaR", "💥📈 Stress di correlazione: quanto sale il VaR se si rompono?", "🎯💥 Rho critica: a quale correlazione il VaR tocca il limite?", "💧📉 LVaR: il VaR corretto per il costo di liquidazione", "📐📉 Cornish-Fisher: il VaR corretto per skew e code grasse", "📐🌊 Expected Shortfall con Cornish-Fisher: la coda oltre il VaR con code grasse", "📉💥 VaR rotto: la probabilita' di breccia con code grasse", "⏳📉 VaR multi-orizzonte: lo scaling con autocorrelazione dei rendimenti", "🏔️📉 Valori estremi (Hill): il VaR oltre il massimo storico", "🌊📉 POT-GPD: il VaR dalla coda paretiana oltre soglia", "🧠📉 CAViaR: il VaR adattivo che impara dai rendimenti", "🌀📉 Copula t-Student: il VaR che vede le code muoversi insieme", "🎛📉 FHS: il VaR con la volatilita' di oggi", "⚙️📉 GARCH(1,1): la volatilita' che ricorda", "🧪📉 Backtest VaR: il modello resiste al tempo?", "🎯📉 Convergenza forward: il forward indovina lo spot?", "🔄📉 Half-life di mean reversion: lo spot torna alla media?", "Ω📊 Omega ratio: oltre Sharpe e Sortino", "📈📉 Calmar ratio: il rendimento che paga il drawdown", "🩹 Pain index e Pain ratio: il dolore medio oltre il peggio", "🛟 Sterling ratio: il Calmar mediato sui peggiori drawdown", "🔻 Burke ratio: il drawdown penalizzato al quadrato", "🌊📉 CDaR: il drawdown medio oltre la soglia (il VaR dei drawdown)", "🔍📉 Martin ratio: il Calmar che guarda tutto il dolore", "⛵ Tempo di recupero: quanto resta sott'acqua l'equity", "🎯 Information ratio: la strategia batte davvero il benchmark?", "📊 Capture ratio: quanto cattura la strategia nei mercati su e giù?", "🎯 Hit rate: quanto spesso la strategia batte il benchmark?", "📏 Tracking error: quanto si discosta la strategia dal benchmark?", "📉 Max drawdown relativo: quanto si scende sotto il benchmark?", "📐 Treynor & Jensen: il premio per unita' di rischio sistematico", "⚖️ M² Modigliani: il rendimento a parita' di rischio col benchmark", "📉 Sortino ratio: il rendimento per unità di rischio al ribasso", "📉 Calmar ratio: il rendimento annuo per unità di max drawdown", "📐 K-ratio: la regolarità della crescita dell'equity", "🎯 Volatilità target: il sizing a volatilità costante", "📐 Kelly criterion: il sizing ottimale dall'edge stimato", "🎲 Risk of ruin: probabilita' di toccare una barriera di drawdown", "🎯 Sizing anti-rovina: f massima con ROR vincolato", "📊 Monte Carlo: distribuzione del capitale dopo N trade", "VaR & Expected Shortfall del P&L dopo N trade", "Kelly con costi di trading: sizing netto", "Frazione di Kelly: half-Kelly e trade-off crescita/volatilità", "Kelly robusto: sizing con edge incerta", "Kelly con portafoglio: due posizioni simultanee", "Kelly con correlazione: due posizioni correlate", "Kelly adattivo: win-rate rolling e size dinamica", "Kelly con controllo drawdown: sizing frazionato al drawdown", "Kelly con target di volatilità: sizing riscalato sulla vol", "Kelly bayesiano: sizing con win-rate posterior", "Kelly con lotti interi: sizing discreto e drag di arrotondamento", "Kelly con stop-loss: sizing con perdita troncata", "Kelly con take-profit: sizing con vincita troncata", "Kelly frazionario (fractional Kelly): λ·f*", "Rischio di rovina (risk of ruin): probabilita' di rovina prima del target", "Kelly con tre esiti: sizing con vincita, perdita parziale e perdita piena", "Kelly con limite di posizione: sizing con cap f_max", "Kelly con vincoli multipli: cap, lotti, stop e drawdown", "Kelly con incertezza: haircut bayesiano sulla p stimata", "Kelly su N trade: raddoppio, dimezzamento e crescita attesa", "Kelly: mappa di sensibilità f* e crescita su (p, b)", "Kelly su ritorni continui: f* = μ/σ² e volatility drag", "Kelly con costi di transazione: f* netto = (μ-c)/σ²", "Kelly e drawdown: probabilità di toccare un max drawdown", "Kelly frazionario: frazione ottima per un budget di volatilità", "Monte Carlo: VaR e Expected Shortfall di una posizione power", "Kelly con limite VaR: sizing con vincolo di perdita massima", "Component VaR: contributo al rischio per posizione", "Component ES: contributo al rischio di coda per posizione", "Shock correlazioni: stress test sul rischio di coda", "Backtest VaR di Kupiec: copertura e likelihood ratio", "Reverse stress test: quanto shock regge il limite?", "Mappa di rottura: superficie VaR su shock congiunti vol+corr", "Liquidity-adjusted VaR: VaR + costo di liquidazione", "Component VaR: attribution del VaR per asset", "Hedge VaR: copertura ottimale con futures", "Jump VaR: VaR con salti di prezzo (Merton)", "Delta-Gamma VaR: VaR parametrico di una posizione con opzioni", "Expected Shortfall: misura di rischio coerente", "VaR ed ES con code pesanti (t-Student)", "🌈📉 Misura spettrale: l'ES pesato con l'avversione al rischio", "🧲📈 Misura entropica: rischio con avversione costante (CARA)", "🌀📈 Wang transform: misura distorsiva del rischio", "🎯📈 EVaR: il bound di Chernoff piu' conservativo", "🔀📊 RVaR: la media dei quantili tra VaR ed ES", "🎯📊 Median Shortfall: la mediana della coda, robusta tra VaR ed ES", "🎯📉 LPM: il rischio downside contro un target", "📐⚖ Expectile: la misura di rischio elicitabile e coerente", "🌀 Distortion risk measures: VaR, ES e Wang da un'unica formula", "📊 Spectral risk measure: VaR ponderato dal tuo spettro di avversione", "🔀 Entropic risk measure: avversione esponenziale al rischio", "🎯 Contributi di rischio ES: allocazione di Eulero del portafoglio", "🔱 Risk parity: pesi a parità di contributo di rischio (risk budgeting)", "🎯 Numero effettivo di scommesse (ENB): quante posizioni indipendenti hai davvero?", "📈 Massima diversificazione (MD): i pesi che massimizzano il rapporto DR", "🛡️ Minima varianza (MV): i pesi che minimizzano la volatilità di portafoglio", "🎯 Sharpe massimo (MS): i pesi che massimizzano il rendimento per unità di rischio", "🎯 Rendimento target (TR): minima varianza a rendimento atteso fissato", "κ Kappa ratio: un'unica famiglia per Omega e Sortino", "📏 Tail ratio: la coda destra contro la sinistra", "🔄 Recovery factor: quanto rende ogni euro di drawdown", "💢 Pain index: il dolore che serve per il rendimento", "🛟 Sterling ratio: quanto rende contro i K peggiori drawdown", "⚖ Gain-to-Pain ratio: quanto guadagno per ogni euro perso", "🌊 Volatility drag: quanto rendimento mangia la volatilita'", "🎯 Omega ratio: quanto upside prendi per ogni euro di downside", "📐 Sharpe corretto: il rendimento per unita' di rischio con code grasse", "🎯 Probabilistic Sharpe ratio: lo Sharpe e' davvero significativo?", "🎯 Deflated Sharpe ratio: lo Sharpe sopravvive ai backtest multipli?", "🎚️ Kappa ratio: Omega e Sortino sono lo stesso strumento", "🔺 Farinelli-Tibiletti: Omega e upside potential in un'unica formula", "📊 Rachev ratio: tutta la coda destra contro tutta la coda sinistra", "⭐ STAR ratio: il rendimento medio contro la perdita attesa di coda", "📈 Gain-Loss ratio: guadagno atteso contro perdita attesa", "📉 Ulcer Performance Index (Martin ratio): il rischio drawdown contro il rendimento", "🎯 Calmar ratio: il rendimento medio contro il peggior drawdown", "🔃 MAR ratio: il rendimento composto contro il peggior drawdown", "🤕 Pain ratio: il rendimento medio contro il drawdown medio", "🚀 Upside Potential ratio: il guadagno atteso contro la downside deviation", "🔀 Sequence risk: l'ordine dei rendimenti cambia il drawdown", "🛡 CDaR: la perdita media dei peggiori drawdown", "⏱️ Tempo sott'acqua: durata dei drawdown e recupero", "🎯 Attribuzione del drawdown: chi ha causato il peggior calo", "🔄 Recupero dal drawdown: quanto rimbalzo serve per tornare al picco", "📐 Calmar ratio: rendimento per unita' di peggior perdita", "⚖️ Sortino ratio: rendimento per unita' di volatilita' negativa", "🧮 Omega ratio: guadagni pesati contro perdite pesate", "📉 Burke ratio: rendimento per unita' di drawdown quadratico", "🎯 Kappa ratio (Kappa-3): rendimento per unita' di coda cubica", "📈 Martin ratio: rendimento per unita' di Ulcer Index", "📈 Sterling ratio: rendimento per unita' di drawdown medio annuo", "🩹 Pain ratio: rendimento per unita' di dolore medio (Pain Index)", "📉 CDaR ratio: rendimento per unita' di coda media (Conditional Drawdown-at-Risk)", "🎯 Drawdown-at-Risk (DaR): la soglia di drawdown superata solo nell'alpha% dei casi", "📈 Recovery Factor: profitto totale per unita' di peggior drawdown", "📐 Calmar geometrico: CAGR composto per unita' di peggior drawdown", "💹 Gain-to-Pain ratio: guadagni totali per ogni punto perso", "🏞️ Lake ratio: l'area del dolore sotto il picco", "🌀 Rolling drawdown: il peggior calo in ogni finestra", "📏 Variance ratio: il prezzo segue un random walk?", "⛓️ Johansen: power e gas cointegrati?", "🔗 ECM: quanto in fretta power torna all'equilibrio col gas?", "💥 Risposta allo shock: di quanto uno shock del gas muove power?", "📜 Scomposizione storica: cosa ha mosso davvero il prezzo power?", "🌊 Spillover gas↔power: chi trasmette e chi riceve gli shock?", "📈 Previsione VECM(1): dove vanno power e gas nei prossimi H giorni?", "📊 Backtest VECM(1): il modello batte il random walk?", "⚖️ Lo spread è stazionario? Test ADF", "🔮 Quando rientra lo spread? Forecast mean-reversion", "💰 Vale la pena tradare il rientro? P&L atteso del trade", "📐 Quanto puntare sul rientro? Sizing Kelly del trade", "⚠️ Quanto posso perdere? VaR del trade dimensionato", "🧪⚠️ Stress test del trade: VaR sotto shock", "🛑 Stop & target: dove chiudere il trade", "🧭 Ottimizza stop/target: i migliori k", "⏳ Time stop: uscire se non succede niente", "🔀 Scale-out: tutto insieme o a pezzi?", "🧺 Portafoglio: quanti trade insieme?", "📐 Correlazione: la diversificazione è reale?", "💸 Costi veri: l'edge sopravvive al netto?", "📅 L'edge annualizzato: il trade si ripete?", "📉 VaR annuale: quanto capitale di rischio?", "📊 VaR per segnale: chi mangia il capitale?", "📈 Expected Shortfall: quanto perdi quando perdi?", "🎯 Risk budgeting: ogni segnale si guadagna il suo capitale", "🔔 Drift dei budget: quando ribilanciare?", "🔁 Ribilanciare: i nuovi pesi post-shock", "⏰ Frequenza di ribilanciamento", "💰 Costo di esecuzione: quanto costa davvero ruotare", "🎯 Calibrazione: previsto vs realizzato", "⏳ Scheduling di esecuzione", "📉 Implementation shortfall: scomponi il costo realizzato", "🏦 Costo del margine: il capitale fermo al clearing", "📞 Margin call: variazione margine e buffer di liquidità", "📏 DV01 del portafoglio forward: sensibilità del MtM a uno shift parallelo della curva", "🗓️ Ladder delle scadenze: profilo temporale di volumi, MtM e DV01", "🧪💥 Shock di curva: P&L del portafoglio sotto scenari di prezzo", "⏳ Theta del portafoglio forward: quanto vale il passare del tempo", "🏦 Rho del portafoglio forward: il MtM sotto il tasso d'interesse", "🧾🔍 P&L spiegato dalle greche: theta, delta e rho contro il ΔMtM realizzato", "📉 VaR ed Expected Shortfall del portafoglio forward: il rischio giornaliero", "🌪️📉 Stressed VaR: il VaR sotto volatilità stressata", "🪓🌪️ Component Stressed VaR: quale linea tagliare sotto stress?", "🪓🌊 Component Stressed ES: chi alimenta la coda sotto stress?", "🛡️🌪️ Copertura dello Stressed ES: quanto hedgiare per rientrare nel limite?", "⏳🌪️ Decadimento dello stress: aspettare o coprire?", "💸⏳ Costo dell'attesa: il budget di rischio consumato", "🚨⏳ Monitoraggio dell'attesa: il trigger di escalation", "🛡️📋 Esecuzione della copertura: il piano ordini", "📊✅ Verifica della copertura: il piano ha funzionato?", "🔓🛡️ Rilascio della copertura: quando alleggerire l'hedge?", "📓 Blotter delle coperture: registro operazioni", "🎯 Regret della copertura: fissato vs spot", "📑 Efficacia contabile: dollar-offset delle coperture", "🛑 De-designazione: continuare o chiudere la copertura?", "⚖️ Ribilanciamento: aggiustare l'hedge ratio senza de-designare", "📦 Cost-of-carry: scomponi il premio del forward", "📊📓 Diario dell'inefficacia: OCI vs P&L per periodo", "♻️ Recycling OCI: rilascio della riserva a P&L", "📉 Regressione di efficacia (OLS)", "🔭 Test prospettico di efficacia (scenari forward)", "📝 Documentazione della copertura (IFRS 9)", "🧾 Scritture contabili (IFRS 9)", "📋 Informativa IFRS 7 (coperture)", "📉 Sensibilità al rischio di mercato (IFRS 7.40)", "📒 Rollforward riserva cash-flow hedge (OCI)", "🧪 Test retrospettivo di efficacia (look-back)", "📅 Piano di recycling futuro (proiezione release OCI→P&L)", "🛑 Cessazione della copertura (hedge discontinuation)", "⏳ Costo della copertura (time value, IFRS 9)", "🧩 Componenti di rischio designati (IFRS 9)", "➡️ Forward element escluso (IFRS 9)", "⚠️💳 Rischio di credito che domina (IFRS 9)", "🔁 Aggregated exposure (esposizione aggregata, IFRS 9 6.3.4)", "🧱 Basis adjustment (adeguamento del costo, IFRS 9 6.5.11)", "⚖️📋 Hedge ratio designato (IFRS 9 6.4.1(c)(iii))", "🔀📊 Tipo di copertura (IFRS 9 6.5.2)", "🧪📐 Derivato ipotetico (IFRS 9 B6.5.5)", "⚖️🔄 Ribilanciamento (IFRS 9 6.5.5)", "⚖️🧺 Posizione netta (IFRS 9 6.6)", "⚖️📉 Ammortamento adeguamento FV hedge (IFRS 9 6.5.10)", "⚖️🔌 Own-use exemption NPNS (IFRS 9 2.4)", "⚖️⏹️ Cessazione hedge accounting (IFRS 9 6.5.12)", "🔗📄 Derivati incorporati (IFRS 9 4.3)", "⚖️📶 Gerarchia fair value (IFRS 13)", "🧾💸 SPPI test (IFRS 9 4.1.2(b))", "📉⏳ ECL a 3 stadi (IFRS 9 5.5)", "📐📊 Tasso di interesse effettivo (IFRS 9 5.4.1)", "🏦📋 Business model assessment (IFRS 9 4.1.1/4.1.2(a))", "🔁🏦 Modifica di passività (IFRS 9 3.3.2)", "🏭📤 Cessione crediti (IFRS 9 3.2)", "🛡️📑 Informativa rischio di credito (IFRS 7.35)", "💧📋 Informativa rischio di liquidità (IFRS 7.39)", "🔁📂 Reclassifica attività finanziarie (IFRS 9 4.4)", "⚠️💰 Inadempimenti e violazioni covenant (IFRS 7.18-19)", "⚖️📑 Compensazione attività/passività finanziarie (IFRS 7.13A-13F)", "📊📋 P&L per categoria (IFRS 7.20)", "🏦📥 Collateral & garanzie reali (IFRS 7.15)", "🔄📤 Trasferimenti di attività finanziarie (IFRS 7.42A-42H)", "📒➡️ Rollforward fondo svalutazione crediti (IFRS 7.16)", "⏰📉 Crediti scaduti non deteriorati (IFRS 7.37)", "💲📊 Fair value vs valore contabile (IFRS 7.25)", "🧾📊 Valore contabile per categoria (IFRS 7.8)", "🏛️💳 Rischio di credito proprio su passività FVTPL (IFRS 7.9-7.10)", "💧📉 Scadenze delle passività finanziarie (IFRS 7.39)", "🏦🔑 Garanzie reali acquisite in possesso (IFRS 7.38)", "📊🕐 Day-1 P&L differito (IFRS 7.27)", "🛡️📊 Risk appetite & limiti (IFRS 7.33-7.34)", "📐⚖️ Fair value: movimenti livello 3 (IFRS 7.28)", "🏷️📋 Fair value: eccezioni e approssimazioni (IFRS 7.29)", "🗂️⚠️ Concentrazioni di rischio (IFRS 7.32)", "📊🔀 Trasferimenti tra livelli fair value (IFRS 7.30)", "💸📊 FVA: funding valuation adjustment del portafoglio", "🧾📝 Informativa sull'hedge accounting (IFRS 7.24A-24F)", "🧭📊 Esposizioni ai rischi e origine (IFRS 7.31)", "💳📊 DVA: debit valuation adjustment del portafoglio", "🏦📏 Limiti di credito controparte (fido)", "📊⚖️ Rappresentativita' analisi di sensibilita' (IFRS 7.41-7.42)", "📊🔬 Fair value: metodi e assunzioni (IFRS 7.27)", "📊🎯 Sensibilita' fair value livello 3 (IFRS 7.27(h))", "📊🏦 XVA: CVA + DVA + FVA + KVA + ColVA (aggiustamenti di valutazione)", "📊🈤 Riclassifiche di attività finanziarie (IFRS 7.12B-12D)", "📊📉 Utili/perdite da derecognition di attività al costo ammortizzato (IFRS 7.20A)", "💸📊 Proventi e oneri da commissioni (IFRS 7.17)", "🛡️📊 Esposizione max al rischio di credito (IFRS 7.36)", "🔗📊 Fair value hedges del rischio di credito (IFRS 7.11)", "📊⚠️ Fonti di inefficacia delle coperture (IFRS 7.24D)", "💶📊 Inefficacia a P&L per tipo di copertura (IFRS 7.24G)", "📊🔄 Importi a OCI e riciclo a P&L (IFRS 7.24E)", "📊🗂️ Strumenti di copertura per categoria di rischio (IFRS 7.24F)", "📊📦 Elementi coperti per categoria di rischio (IFRS 7.24B)", "📊⚡ Premio di rischio forward (ex-post)", "🔌💰 Rendita da congestione (congestion rent)", "📊📅 Flussi di cassa futuri coperti (IFRS 7.24C)", "🏭🤝 EPC: rendimento energetico garantito (ESCO)", "📊↔️ Bid-ask spread e costi di transazione", "💱📉 Rischio cambio: costo EUR del procurement in USD", "🔄📐 Convertitore unità di misura energia e prezzi", "📜⚖️ CfD a due vie: payoff, MtM e sensibilità", "🔌📉 LoLE & EENS: adeguatezza del parco di generazione", "🧾⚖️ M&V IPMVP: verifica dei risparmi energetici", "🔋⏱️ Dispatch ottimale accumulo day-ahead", "📉⏳ Curva di durata prezzi", "🧱📐 Bootstrap curva forward (mensile→oraria)", "🔌📏 ELCC: capacity credit delle rinnovabili", "⚡🏛️ Asta del mercato della capacità: clearing e de-rating", "🔥📈 Spark/Dark spread: margini di generazione (clean)", "💱⛽ Prezzo CO₂ di switch: gas vs carbone", "🚢⛽ Bunker fuel: VLSFO vs LNG vs metanolo vs ammoniaca", "🌍🏠 ETS2: costo carbonio per edifici & trasporti", "🌍📉 MACC: curva dei costi di abbattimento CO₂", "🪵 Biomassa legnosa: business case (CHP)", "🧊 Accumulo termico (TES): peak-shaving del calore", "🔌🔋 V2G: ricavi da vehicle-to-grid", "🏦📊 WACC: costo del capitale per progetti energetici", "📊💨 P50/P90: incertezza della producibilità rinnovabile", "⚡📊 Profile cost: il costo della forma", "☀️🔌 Rapporto DC/AC: clipping vs capex", "🌐⚡ Integration cost: profile + balancing + grid", "🌬️♻️ Repowering eolico: più MWh dagli stessi MW", "☀️🧹 Soiling & degrado FV: quanto perdi senza pulire i pannelli", "⚡🔀 Redispatch: costi e ottimo della congestione", "☀️📐 Tilt & orientamento FV: l'angolo che massimizza il rendimento", "🔌🚗 Colonnine di ricarica pubblica: il business case", "🌬️📦 CAES: l'accumulo ad aria compressa", "🔋♻️ Second-life: batterie EV → storage stazionario", "☀️🪞 FV bifacciale: il guadagno posteriore ripaga il sovraccosto?", "🟢📄 PPA vs merchant: il prezzo fisso vale lo sconto?", "🌀 Volano (flywheel): accumulo cinetico per FCR e servizi di rete", "🔋🌊 Batterie a flusso (VRFB): accumulo long-duration", "⛽🌱 Biocarburanti (HVO): il premium per decarbonizzare", "🔋🧂 Batterie al sodio (Na-ion): l'accumulo senza litio conviene?", "📐 LACE: il costo che la rete evita (il vero valore di un impianto)", "🧪 LCOH: il costo dell'idrogeno verde (quando l'elettrolisi conviene)", "💧⚗️ Blending idrogeno in rete gas: il premium per decarbonizzare", "🔥⛽ Metanazione (Power-to-Methane): il metano sintetico da CO2 catturata", "⚗️💚 Power-to-Ammonia: l'ammoniaca verde da H2 (Haber-Bosch)", "🧪⛽ Power-to-Methanol: il metanolo verde da CO₂ (sintesi catalitica)", "✈️⛽ Power-to-SAF: il cherosene sintetico da CO₂ (Fischer-Tropsch)", "🏭💚 Power-to-Steel: l'acciaio verde da H2 (DRI)", "💧🗄️ Stoccaggio H2: lo storage idrogeno rende? (caverna salina)", "🚚💧 Trasporto H2: pipeline, trailer o liquido? (logistica idrogeno)", "🌬️🏭 Direct Air Capture: il costo della CO2 dall'aria", "💧🌊 Desalinizzazione RO: il costo dell'acqua dall'energia", "🌱⚗️ BECCS: bioenergia con cattura CO2 (rimozione netta)", "⚓ Cold ironing: elettrificare le navi in banchina", "🔷 Idrogeno turchese: la pirolisi del metano", "🔵 Idrogeno blu: il reforming con cattura CO2 (SMR+CCS)", "🏛️🎯 Aste FER-X: a che strike conviene partecipare?", "🩷 Idrogeno rosa: l'elettrolisi alimentata dal nucleare", "🤍 Idrogeno bianco: l'H2 naturale dal sottosuolo", "💛 Idrogeno giallo: l'elettrolisi alimentata dal fotovoltaico", "🧪🛢️ LOHC: l'idrogeno nei liquidi organici", "♻️🔥 Termovalorizzatore: il business case waste-to-energy", "🧊❄️ Telerifreddamento (district cooling): centrale frigorifera vs chiller", "⚡🏭 VPP (Virtual Power Plant): aggregare la flessibilità distribuita", "🔥♨️ Waste heat data center: il calore di scarto diventa teleriscaldamento", "🤖⚡ Inferenza AI: dal MW delle GPU al costo per milione di token", "🏭📋 Diagnosi energetica: audit e piano di efficientamento", "🔧⚙️ Motori elettrici: l'inverter paga?", "🌬️🔧 Aria compressa: quanto costano le perdite?", "🔌📉 Trasformatore: quanto costano le perdite a vuoto?", "💡 Relamping LED: il passaggio a LED paga davvero?", "❄️ Free cooling: quanto vale il freddo gratis?", "🔥 Caldaia a condensazione: il retrofit paga?", "🏢 Cappotto termico: il retrofit dell'involucro paga?", "❄️ Trigenerazione (CCHP): un solo combustibile, elettricita' + calore + freddo", "☀️🚿 Solare termico: quanta acqua calda dal tetto?", "♨️⚡ ORC: il calore di scarto diventa elettricità", "🌊 Energia delle maree: il business case tidal", "🌊⚡ Armoniche: quanto costano le distorsioni?", "⚡ Rifasamento: quanto costa il cos(phi) basso?", "🔥 Economizzatore fumi: il calore che esce dal camino", "⚖️ Sbilanciamento fasi: quanto costa la corrente nel neutro?", "💡🌃 Illuminazione pubblica: LED + telecontrollo — il business case", "🔥⚡ Forno a induzione: elettrificare il forno industriale paga?", "🌡💨 Essiccazione industriale: quanta energia per togliere l'acqua?", "🔌🏝️ Microrete industriale: quanto costa staccarsi dalla rete?", "♨️🕳️ Trappole di vapore: quanto vapore perdi dalle trappole rotte?", "🌡️🔥 Pompa di calore industriale ad alta temperatura: il COP di Carnot dal calore di scarto", "🌊〰️ Moto ondoso: il business case wave energy", "❄️🏭 Refrigerazione industriale: quanto costa il freddo?", "⚡📋 Demand response: quanto rendono i servizi di flessibilità?", "🧱💧 Essiccazione fanghi: togliere l'acqua dai fanghi paga?", "⚡📡 Riserva primaria FCR: vendere banda di regolazione di frequenza paga?", "⚡🔄 Riserva secondaria aFRR: la banda automatica di ripristino frequenza paga?", "⚡📋 Riserva terziaria mFRR: la banda manuale di bilanciamento paga?", "🔌📋 Riserva di sostituzione RR: la riserva lenta di Terna paga?", "🏛️⚡ Mercato della capacità: la remunerazione della capacità disponibile paga?", "📜💹 Trading GO: il market making sui certificati verdi paga?", "🌊💨 Eolico offshore flottante: il vento in mare aperto paga?", "☀️🌾 Agrivoltaico: doppio raccolto, un solo terreno?", "❄️💨 Aria liquida (LAES): l'accumulo criogenico di lunga durata?", "🏔️⚖️ Accumulo gravitazionale: blocchi, altezza e gravità come batteria?", "🔋⚡ Celle a combustibile: elettricità + calore senza combustione?", "🌬️🧪 DAC: la cattura diretta di CO2 dall'aria paga?", "🌱🔥 Biochar: il carbonio della biomassa resta nel suolo?", "☀️🔥 Solare termico: calore dal sole senza fotovoltaico?", "🌊☀️ Fotovoltaico galleggiante (FPV): il business case", "🏘️⚡ Comunità energetiche rinnovabili (CER): l'energia condivisa paga?", "🔌🏠 Vehicle-to-home (V2H): la batteria dell'auto alimenta la casa?", "💧🖥️ Immersion cooling: il raffreddamento a liquido del data center paga?", "⚡🏁 Black start: il riavvio della rete dopo il blackout paga?", "🔌⚡ Grid-forming + inerzia sintetica: la batteria che forma la rete paga?", "⚡ Supercondensatori: potenza istantanea per FFR e peak shaving paga?", "🔋♻️ Second life batterie EV: il riuso stazionario paga?", "☀️🗄️ Accumulo termico stagionale: il calore dell'estate per l'inverno paga?", "⚡🔌 Interconnessione HVDC: il cavo in corrente continua paga?", "🔋🌊 Batterie a flusso redox: potenza ed energia separate pagano?", "⚡🤝 Scambio peer-to-peer: vendere il surplus al vicino conviene?", "♨️💧 Calore dalle acque reflue: la fognatura scalda l'edificio?", "🌡️🕳️ Sonde geotermiche: la pompa di calore dal sottosuolo paga?", "🌬️🔥 Pompa di calore aerotermica: l'aria esterna scalda l'edificio a prezzo giusto?", "💧🔥 Pompa di calore ad acqua di falda: l'acqua del sottosuolo scalda l'edificio?", "🌬️♻️ Recuperatore di calore per ventilazione: l'aria esausta scalda l'aria nuova?", "🔥⚡ Pompa di calore ibrida: caldaia + pompa di calore, chi fa cosa?", "🔥 Pompa di calore ad assorbimento: il calore dal gas senza compressore paga?", "💧 Raffrescamento evaporativo (adiabatico): il freddo dall'acqua senza compressore paga?", "❄️🔥 Pompa di calore a CO2 transcritica: alta temperatura senza gas?", "🌱🔥 Biogas da digestione anaerobica: il business case dell'impianto", "🏝️ Microgrid in isola: PV + batteria + generatore, quanto costa l'autonomia?", "🚌🔌 Ricarica in deposito per bus elettrici: la gestione intelligente della potenza paga?", "🏭🌡️ Teleriscaldamento con pompa di calore di rete: la PdC distrettuale paga contro la caldaia a gas?", "🧱🔥 Accumulo termico a cambiamento di fase (PCM): il calore latente paga?", "🔋🧂 Batterie sodio-ione: senza litio, l'accumulo stazionario paga?", "🏜️🔥 Batteria a sabbia: il calore rinnovabile stoccato paga?", "🔥♻️ Teleriscaldamento 5G: l'anello a bassa temperatura paga?", "🌊⚡ Eolico offshore galleggiante: l'acqua profonda paga?", "🧂💧 Idrogeno in caverne saline: lo stoccaggio sotterraneo paga?", "🌊🧂 Energia da gradiente salino: la foce del fiume genera elettricità?", "🔋⚙️ Batterie ferro-aria: l'accumulo multi-giorno paga?", "🌊🔥 Pompa di calore ad acqua di mare: il mare scalda la città?", "🪵🔥 Torrefazione: i pellet torrefatti sostituiscono il carbone?", "🌿🔥 Syngas da gassificazione: la biomassa diventa gas combustibile?", "☀️❄️ Raffrescamento solare: il sole fa freddo con l'assorbitore?", "❄️🏙️ District cooling: il freddo centralizzato paga contro i chiller singoli?", "🔋♻️ Riciclo batterie al litio: il metallo recuperato paga lo smaltimento?", "☀️🗼 Solare a concentrazione (CSP) a torre: l'elettricità dispacciabile dal sole paga?", "🔥💧 Turbina a gas H2-ready: il co-firing a idrogeno paga il retrofit?", "🚚💧 Camion pesante a idrogeno: il fuel-cell paga contro il diesel?", "⚡🔥 Cogenerazione CAR: il risparmio di energia primaria paga i certificati?", "🔋🟡 Batterie zinco-aria: l'accumulo a basso costo paga contro LFP?", "⚗️ Elettrolizzatori a confronto: alcalino vs PEM vs SOEC — quale tecnologia paga?", "🌿⚗️ Ammoniaca verde: Haber-Bosch da H2 verde — il prezzo dell'NH3 paga?", "💧⚡ Mini-idroelettrico ad acqua fluente: il salto del torrente paga?", "🌿⛽ Biometano da upgrading del biogas: il metano pulito paga?", "💧❄️ Idrogeno liquido (LH2): la liquefazione paga?", "🌡️💧 Accumulo termico in acquifero (ATES): il calore estivo paga d'inverno?", "⚛️🔥 Fusione nucleare: a quale prezzo il primo impianto paga?", "🌡️🌋 Geotermia avanzata (EGS): il calore profondo diventa elettricità?", "🌊🌡️ OTEC: l'energia termica degli oceani paga?", "🧂🔥 Sali fusi: il calore stoccato ridà elettricità a prezzo giusto?", "🏭 Cemento verde: la cattura CO2 sul clinker paga?", "🔥🪟 Forno fusorio del vetro: l'elettrificazione paga?", "🏺🔥 Forno ceramico: l'elettrificazione della cottura paga?", "🌱🔥 Serra riscaldata: la pompa di calore batte la caldaia a gas?", "✈️⚡ Ground power elettrico in aeroporto: l'e-GPU batte diesel + APU?", "❄️⛷️ Innevamento artificiale: cannoni ventilatori o lance ad aria compressa?", "❄️🏭 Cella frigorifera: free-cooling e pompa di calore battono il gruppo tradizionale?", "🏊♨️ Piscina coperta riscaldata: pompa di calore + copertura battono la caldaia a gas?", "⚓🔌 Cold ironing portuale: la corrente da banchina batte i generatori diesel di bordo?", "⛴️🔋 Traghetto elettrico a batteria: la batteria batte il diesel sulla rotta breve?", "🚛🔋 Camion elettrico a batteria: la ricarica megawatt batte il diesel sul lungo raggio?", "🚆💧 Treno regionale a idrogeno: il fuel-cell batte il diesel sulle linee non elettrificate?", "🏭♨️ Calore di scarto industriale: il recupero termico paga contro la caldaia a gas?", "🏋️ Accumulo a gravità: sollevare pesi quando l'energia costa poco, venderla quando costa tanto?", "☀️🔥 Pannelli ibridi PVT: elettricità + calore dallo stesso tetto — il doppio rendimento paga?", "⚡🔥 Caldaia a elettrodi: vapore e calore industriale con elettricità in surplus — conviene più del gas?", "♻️🔥 Forno ad arco elettrico (EAF): fondere rottame con elettricità batte l'altoforno?", "📄 Cartiera: essiccare la carta con vapore o con pompa di calore?", "🍺 Birrificio: bollire il mosto con calore recuperato e pompa di calore batte la caldaia a gas?", "🧀 Caseificio: pastorizzare il latte con calore recuperato e pompa di calore batte la caldaia a gas?", "🧺 Lavanderia industriale: lavare a caldo con calore recuperato e pompa di calore batte la caldaia a gas?", "🥫 Conservificio: sterilizzare le conserve con calore recuperato e pompa di calore batte la caldaia a gas?", "🧵 Tintoria: tingere il tessuto con bagni caldi recuperati e pompa di calore batte la caldaia a gas?", "🪵 Essiccazione del legno: essiccare il legname con pompa di calore batte l'essiccatore a gas?", "🍝 Pastificio: essiccare la pasta con calore recuperato e pompa di calore batte l'essiccatore a gas?", "🍞 Panificio: forno elettrico con recupero fumi batte il forno a gas?", "🏭 Fonderia: fondere la ghisa a induzione con preriscaldo della carica batte il cubilotto a coke?", "🍬 Zuccherificio: concentrare il succo con multi-effetto e MVR batte l'evaporatore a singolo effetto a gas?", "🫙 Vetreria: fondere il vetro con forno ossi-combustibile + boost elettrico batte il forno rigenerativo a gas?", "🧵 Tintoria tessile: recuperare calore dalle acque reflue di tintura batte scaldare acqua nuova in caldaia a gas?", "🐄 Conceria: scaldare le vasche di concia con pompa di calore + recupero calore batte la caldaia a gas?", "🫒 Oleificio: la sansa che avanza alimenta un cogeneratore a biomassa e batte rete + caldaia a gas?", "🥩 Salumificio: stagionare e cuocere i salumi con pompa di calore + recupero calore batte caldaia a gas + frigorifero elettrico?", "🥃 Distilleria: distillare con pompa di calore + recupero calore dai condensatori batte la caldaia a gas?", "🏭 Cementificio: recuperare calore dai fumi del forno per preriscaldare la farina batte il combustibile comprato?", "🧱 Laterizi: cuocere i mattoni con recupero calore dai fumi batte il forno tunnel a gas?", "🐔 Mangimificio: essiccare il mangime con recupero calore dall'aria esausta batte l'essiccatore a gas?", "📦 Cartotecnica: la cogenerazione (CHP) batte caldaia + rete per un cartotecnico?", "🏭 Acciaieria: forno elettrico ad arco (EAF) vs altoforno — quando il rottame batte la ghisa?", "🔩 Galvanica: zincatura a caldo vs elettrolitica — quando lo zinco freddo batte il bagno a 450 °C?", "🫠 Pressofusione alluminio: forno fusorio elettrico a induzione batte il forno a gas?", "🎨 Verniciatura industriale: essiccare la vernice con pompa di calore + recupero calore dall'aria esausta batte il bruciatore a gas?", "🍷 Cantina vinicola: pompa di calore geotermica reversibile batte chiller + caldaia a gas?", "🥩♻️ Macelleria: il calore dei frigoriferi scalda acqua e negozio?", "🍦 Gelateria: pastorizzare con pompa di calore e freddo efficiente batte caldaia a gas + chiller tradizionale?", "🚗 Autolavaggio: pompa di calore + recupero calore dalle acque reflue batte la caldaia a gas per acqua calda e asciugatura?", "🍺 Birreria: scaldare il mosto con pompa di calore + recupero calore dal raffreddamento batte caldaia a gas + chiller tradizionale?", "🏋️ Palestra: pompa di calore + recupero calore dalle docce batte la caldaia a gas per acqua calda e riscaldamento?", "⛸️ Palaghiaccio: il calore di scarto del freddo pista scalda gli spogliatoi e batte caldaia a gas + chiller tradizionale?", "🏫 Scuola: pompa di calore + recupero calore dalla ventilazione batte la caldaia a gas per aule e mensa?", "🏛️ Museo: pompa di calore reversibile + recupero calore dalla ventilazione batte caldaia a gas + chiller per sale espositive?", "📚 Biblioteca: pompa di calore reversibile + recupero calore ventilazione sale lettura + climatizzazione continua depositi batte caldaia a gas + chiller?", "🎭 Teatro: pompa di calore reversibile + recupero calore ventilazione sala batte caldaia a gas + chiller?", "🎬 Cinema: pompa di calore reversibile + recupero calore ventilazione sale batte caldaia a gas + chiller?", "🏨 Albergo: pompa di calore reversibile + recupero calore docce su ACS batte caldaia a gas + chiller?", "🏥 Ospedale: pompa di calore reversibile + recupero calore ventilazione batte caldaia a gas + chiller?", "🛒 Supermercato: recupero calore banchi frigo + pompa di calore batte caldaia a gas + chiller?", "🍽️ Ristorante: pompa di calore + recupero calore celle frigo su ACS batte caldaia a gas + chiller?", "🏭 Centro logistico: pompa di calore per riscaldare un magazzino alto batte caldaia a gas + chiller uffici?", "🏛️ Biblioteca: pompa di calore reversibile + recupero calore dalla ventilazione sale lettura batte caldaia a gas + chiller?", "💊 Farmacia: pompa di calore reversibile + recupero calore dai frigoriferi farmaceutici batte caldaia a gas + chiller?", "💇 Parrucchiere: pompa di calore + recupero calore dalle acque di lavaggio batte caldaia a gas + chiller?", "🌸 Fioraio: pompa di calore + recupero calore dalla cella frigo fiori batte caldaia a gas + frigo tradizionale?", "🐟 Pescheria: macchina del ghiaccio in loco + celle efficienti + recupero calore condensatori su ACS batte ghiaccio comprato + celle tradizionali + caldaia a gas?", "🧁 Pasticceria: forno a gas efficiente + recupero calore forno su ACS + freddo efficiente batte forno a gas vecchio + celle tradizionali + caldaia a gas?", "🍗 Rosticceria: girarrosto a gas efficiente + recupero calore girarrosto su ACS + celle e banchi caldi efficienti batte girarrosto vecchio + celle tradizionali + caldaia a gas?"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -356559,6 +357727,460 @@ Spark spread;1200000;4,0"""
                     "text/csv", key="st803_csv_flussi")
             except ValueError as _e803:
                 st.error(f"Input non valido: {_e803}")
+
+
+    with tab804:
+        st.markdown("<h1>🍗 Rosticceria: girarrosto a gas efficiente + recupero calore girarrosto su ACS + celle e banchi caldi efficienti batte girarrosto vecchio + celle tradizionali + caldaia a gas?</h1>", unsafe_allow_html=True)
+        st.info(edu("🍗 Rosticceria: girarrosto a gas efficiente + recupero calore girarrosto su ACS + celle e banchi caldi efficienti batte girarrosto vecchio + celle tradizionali + caldaia a gas?", "In una rosticceria i driver sono tre: i KG DI POLLI ARROSTO AL GIORNO, che guidano il calore di cottura del girarrosto, i banchi caldi di mantenimento dei polli e il carico frigorifero delle celle dei polli, i GIORNI DI APERTURA ALL'ANNO, e i LITRI DI ACS DI LAVAGGIO AL GIORNO per spiedi, teglie e attrezzature. I polli arrostiti all'anno sono kg_polli_anno = kg_polli_giorno x giorni_anno kg/anno. Il calore utile di cottura e' Q_cottura = kg_polli_anno x q_cottura_per_kg kWh_th/anno (kWh_th per kg di polli). Il gas del girarrosto e' gas_girarrosto_base = Q_cottura / eta_girarrosto_base kWh/anno in baseline e gas_girarrosto_alt = Q_cottura / eta_girarrosto_alt kWh/anno nell'alternativa (stesso calore utile, rendimento diverso: girarrosto vecchio contro efficiente). L'elettricita' dei banchi caldi di mantenimento e' E_banchi_base = kg_polli_anno x q_banchi_per_kg x fattore_banchi_base kWh_e/anno in baseline (fattore base 1,00) ed E_banchi_alt = kg_polli_anno x q_banchi_per_kg x fattore_banchi_alt kWh_e/anno nell'alternativa (fattore alt 0,80: stesso carico specifico, fattore di efficienza diverso). Il carico frigorifero delle celle dei polli e' Q_celle = kg_polli_anno x q_celle_per_kg kWh_c/anno (kWh_c per kg di polli); l'elettricita' del freddo e' E_freddo_base = Q_celle / COP_freddo_base kWh_e/anno in baseline ed E_freddo_alt = Q_celle / COP_freddo_alt kWh_e/anno nell'alternativa (stesso carico frigorifero, COP diverso: celle tradizionali contro efficienti). L'ACS di lavaggio e' Q_acs = litri_acs_giorno x giorni_anno x 4,186 x delta_T / 3600 kWh_th/anno (1 litro di acqua = 1 kg; calore per scaldare l'acqua di lavaggio di delta_T gradi). Il calore del girarrosto recuperato sull'ACS e' Q_rec = min(Q_acs, Q_cottura x f_rec) kWh_th/anno, con f_rec in [0, 1]: il recupero non puo' superare l'ACS da coprire, quindi satura a Q_acs. L'ACS netta da coprire con la pompa di calore e' Q_acs_net = max(0, Q_acs - Q_rec) kWh_th/anno (il recupero non puo' rendere negativa l'ACS netta). La baseline brucia gas in caldaia per l'ACS di lavaggio, senza recupero: gas_acs_base = Q_acs / eta_caldaia_base kWh/anno. L'elettricita' della pompa di calore per ACS e' E_pdc_acs = Q_acs_net / COP_pdc_acs kWh_e/anno (solo l'ACS netta, dopo il recupero dal girarrosto). Il costo baseline e' C_base = (gas_girarrosto_base + gas_acs_base) / 1000 x prezzo gas EUR/MWh + (E_banchi_base + E_freddo_base) / 1000 x prezzo elettricita' EUR/MWh + O&M base EUR/anno. Il costo alternativo e' C_alt = gas_girarrosto_alt / 1000 x prezzo gas EUR/MWh + (E_banchi_alt + E_freddo_alt + E_pdc_acs) / 1000 x prezzo elettricita' EUR/MWh + O&M alternativo EUR/anno (prezzi in EUR/MWh, energie in kWh: conversione / 1000 esatta, 1 MWh = 1000 kWh). Il risparmio e' C_base - C_alt EUR/anno. La CO2 baseline e' CO2_base = (gas_girarrosto_base + gas_acs_base) / 1000 x f_gas + (E_banchi_base + E_freddo_base) / 1000 x f_el t/anno; la CO2 alternativa e' CO2_alt = gas_girarrosto_alt / 1000 x f_gas + (E_banchi_alt + E_freddo_alt + E_pdc_acs) / 1000 x f_el t/anno; la CO2 evitata e' CO2_base - CO2_alt t/anno. I flussi sono [-CAPEX, risparmio x vita] e la convenienza finanziaria e' da VAN, TIR e payback (primo anno con cumulato maggiore o uguale a zero). Il prezzo gas di pareggio si ottiene risolvendo C_base = C_alt per prezzo gas: p_gas_be = ((E_banchi_alt + E_freddo_alt + E_pdc_acs) / 1000 x prezzo elettricita' + O&M alternativo - (E_banchi_base + E_freddo_base) / 1000 x prezzo elettricita' - O&M base) / ((gas_girarrosto_base + gas_acs_base - gas_girarrosto_alt) / 1000) EUR/MWh; e' None se il denominatore gas e' nullo o negativo e None se il numeratore e' negativo; quando esiste e' una SOGLIA MINIMA: sopra di essa l'alternativa vince sui costi, sotto perde, perche' il costo base cresce con il prezzo gas piu' in fretta del costo alternativo, che brucia meno gas. Nel demo il breakeven e' None (numeratore negativo: a prezzo gas zero l'alternativa e' gia' piu' conveniente di 61,31 EUR/anno, quindi nessun prezzo non negativo la pareggia dal basso); il None NON significa convenienza finanziaria, la VAN va letta da sola (nel demo la VAN e' negativa oltre la tolleranza, quindi NON_CONVIENTE). Il verdetto e': NON_CALCOLABILE se un input e' degenere (kg di polli al giorno nulli o negativi, giorni di apertura nulli o negativi, rendimento girarrosto o caldaia nullo o sopra 1, COP freddo o COP ACS nullo, minore o uguale a 1 o negativo, delta_T ACS nullo o negativo, frazione recuperata fuori [0, 1], prezzo nullo o negativo, CAPEX nullo o negativo, vita nulla o negativa) oppure se il risparmio e' nullo o negativo (guard degenere: KPI, grafico, tabella e CSV saltati, si mostra solo il verdetto e la nota); altrimenti CONVIENTE se VAN maggiore di zero, MARGINALE se VAN negativa entro tolleranza % del CAPEX, NON_CONVIENTE se VAN negativa oltre la tolleranza. Distinzione esplicita: NOT panificio (niente cottura del pane, niente kg di pane: qui il calore e' quello del girarrosto a gas per i polli arrosto, con banchi caldi di mantenimento dei polli e celle dei polli, e il recupero va sull'ACS di lavaggio di spiedi e teglie), NOT pasticceria (niente dolci, niente abbattitore da T_in a T_out: qui non c'e' nessun dolce, nessun raffreddamento da T_in a T_out, i banchi sono caldi di mantenimento, non freddi), NOT gelateria (niente pastorizzazione, niente gelato, niente freddo del gelato: qui il freddo e' quello delle celle dei polli), NOT pescheria (niente pesce, niente macchina del ghiaccio, niente ghiaccio in scaglie: qui il recupero viene dal calore del girarrosto, non dai condensatori), NOT fioraio (niente negozio da riscaldare, niente riscaldamento, niente cella fiori: qui il recupero va sull'ACS di lavaggio, non sul riscaldamento), NOT parrucchiere (niente lavaggi di capelli, niente ACS di lavaggi, niente acque reflue di lavaggio: qui il recupero viene dal calore del girarrosto, non dalle acque), NOT ristorante (niente coperti, niente ACS di cucina: qui il freddo e' quello delle celle dei polli, guidato dai kg di polli, non da coperti), NOT farmacia (niente frigoriferi farmaceutici: qui il freddo e' quello delle celle dei polli, e il recupero va sull'ACS di lavaggio), NOT albergo (niente pernottamento turistico, niente ospiti che dormono, niente docce, niente ACS di docce: qui non c'e' nessun ospite), NOT palestra (niente docce degli utenti dopo lo sport, niente ACS delle docce: qui non ci sono utenti che fanno sport, non ci sono docce), NOT autolavaggio (niente veicoli, niente lavaggi di auto, niente acqua di lavaggio dei veicoli: qui non c'e' nessun veicolo), NOT palaghiaccio (niente pista da pattinaggio: qui non c'e' nessuna pista, il girarrosto arrostisce polli e le celle li conservano). Driver POLLI + GIORNI + ACS: i kg di polli al giorno guidano cottura, banchi e celle, i giorni guidano l'anno, i litri di ACS guidano il lavaggio."))
+        _def804 = mh804_demo()
+        st.markdown("**Polli, giorni e cottura**")
+        _c804a = st.columns(4)
+        with _c804a[0]:
+            _kg804 = st.slider("Kg di polli arrosto al giorno",
+                               min_value=0, max_value=500,
+                               value=int(_def804["kg_polli_giorno"]),
+                               step=10, key="st804_kg_polli_giorno")
+        with _c804a[1]:
+            _gg804 = st.slider("Giorni di apertura all'anno",
+                               min_value=0, max_value=365,
+                               value=int(_def804["giorni_anno"]),
+                               step=5, key="st804_giorni")
+        with _c804a[2]:
+            _qc804 = st.slider("Calore di cottura per kg (kWh_th/kg)",
+                               min_value=0.0, max_value=3.0,
+                               value=float(_def804["q_cottura_per_kg"]),
+                               step=0.05, key="st804_q_cottura")
+        with _c804a[3]:
+            _egb804 = st.slider("Rendimento girarrosto base",
+                                min_value=0.0, max_value=1.0,
+                                value=float(_def804["eta_girarrosto_base"]),
+                                step=0.05, key="st804_eta_girarrosto_base")
+        st.markdown("**Girarrosto alt, banchi caldi e celle**")
+        _c804b = st.columns(4)
+        with _c804b[0]:
+            _ega804 = st.slider("Rendimento girarrosto alt",
+                                min_value=0.0, max_value=1.0,
+                                value=float(_def804["eta_girarrosto_alt"]),
+                                step=0.05, key="st804_eta_girarrosto_alt")
+        with _c804b[1]:
+            _qb804 = st.slider("Carico banchi caldi per kg (kWh_e/kg)",
+                               min_value=0.0, max_value=1.0,
+                               value=float(_def804["q_banchi_per_kg"]),
+                               step=0.05, key="st804_q_banchi")
+        with _c804b[2]:
+            _fba804 = st.slider("Fattore banchi caldi alt",
+                                min_value=0.0, max_value=1.0,
+                                value=float(_def804["fattore_banchi_alt"]),
+                                step=0.05, key="st804_fattore_banchi_alt")
+        with _c804b[3]:
+            _qcel804 = st.slider("Carico celle per kg di polli (kWh_c/kg)",
+                                 min_value=0.0, max_value=1.0,
+                                 value=float(_def804["q_celle_per_kg"]),
+                                 step=0.05, key="st804_q_celle")
+        st.markdown("**Freddo celle e ACS di lavaggio**")
+        _c804c = st.columns(4)
+        with _c804c[0]:
+            _cfb804 = st.slider("COP freddo base",
+                                min_value=1.0, max_value=6.0,
+                                value=float(_def804["cop_freddo_base"]),
+                                step=0.1, key="st804_cop_freddo_base")
+        with _c804c[1]:
+            _cfa804 = st.slider("COP freddo alt",
+                                min_value=1.0, max_value=6.0,
+                                value=float(_def804["cop_freddo_alt"]),
+                                step=0.1, key="st804_cop_freddo_alt")
+        with _c804c[2]:
+            _lit804 = st.slider("Litri ACS di lavaggio al giorno",
+                                min_value=0, max_value=2000,
+                                value=int(_def804["litri_acs_giorno"]),
+                                step=50, key="st804_litri_acs")
+        with _c804c[3]:
+            _dt804 = st.slider("Delta_T ACS (K)",
+                               min_value=0, max_value=80,
+                               value=int(_def804["delta_t_acs"]),
+                               step=5, key="st804_delta_t")
+        st.markdown("**Recupero girarrosto, caldaia e pompa di calore ACS**")
+        _c804d = st.columns(4)
+        with _c804d[0]:
+            _frec804 = st.slider("Frazione calore girarrosto recuperata su ACS",
+                                 min_value=0.0, max_value=1.0,
+                                 value=float(_def804["f_rec"]),
+                                 step=0.05, key="st804_f_rec")
+        with _c804d[1]:
+            _eta804 = st.slider("Rendimento caldaia a gas",
+                                min_value=0.0, max_value=1.0,
+                                value=float(_def804["eta_caldaia_base"]),
+                                step=0.05, key="st804_eta_caldaia")
+        with _c804d[2]:
+            _copp804 = st.slider("COP ACS pompa di calore",
+                                 min_value=1.0, max_value=6.0,
+                                 value=float(_def804["cop_pdc_acs"]),
+                                 step=0.1, key="st804_cop_pdc_acs")
+        with _c804d[3]:
+            _pg804 = st.slider("Prezzo gas (EUR/MWh)",
+                               min_value=0, max_value=200,
+                               value=int(_def804["p_gas"]),
+                               step=5, key="st804_p_gas")
+        st.markdown("**Prezzi e O&M**")
+        _c804e = st.columns(4)
+        with _c804e[0]:
+            _pel804 = st.slider("Prezzo elettricita' (EUR/MWh)",
+                                min_value=0, max_value=400,
+                                value=int(_def804["p_el"]),
+                                step=5, key="st804_p_el")
+        with _c804e[1]:
+            _omb804 = st.slider("O&M base (EUR/anno)",
+                                min_value=0, max_value=50000,
+                                value=int(_def804["om_base"]),
+                                step=100, key="st804_om_base")
+        with _c804e[2]:
+            _oma804 = st.slider("O&M alternativo (EUR/anno)",
+                                min_value=0, max_value=50000,
+                                value=int(_def804["om_alt"]),
+                                step=100, key="st804_om_alt")
+        with _c804e[3]:
+            _fg804 = st.slider("Fattore gas (tCO2/MWh)",
+                               min_value=0.0, max_value=1.0,
+                               value=float(_def804["f_gas"]),
+                               step=0.01, key="st804_f_gas")
+        st.markdown("**Fattori, finanza e vita**")
+        _c804f = st.columns(4)
+        with _c804f[0]:
+            _fel804 = st.slider("Fattore elettricita' (tCO2/MWh)",
+                                min_value=0.0, max_value=1.0,
+                                value=float(_def804["f_el"]),
+                                step=0.01, key="st804_f_el")
+        with _c804f[1]:
+            _cx804 = st.slider("CAPEX girarrosto + recupero + banchi e celle (EUR)",
+                               min_value=0, max_value=500000,
+                               value=int(_def804["capex"]),
+                               step=1000, key="st804_capex")
+        with _c804f[2]:
+            _wacc804 = st.slider("WACC (%)",
+                                 min_value=0.0, max_value=20.0,
+                                 value=float(_def804["wacc_pct"]),
+                                 step=0.5, key="st804_wacc")
+        with _c804f[3]:
+            _vita804 = st.number_input("Vita (anni)",
+                                       min_value=0, max_value=40,
+                                       value=int(_def804["vita_anni"]),
+                                       step=1, key="st804_vita")
+        st.markdown("**Tolleranza e grafico**")
+        _c804g = st.columns(4)
+        with _c804g[0]:
+            _tol804 = st.slider("Tolleranza MARGINALE (% CAPEX)",
+                                min_value=0.0, max_value=100.0,
+                                value=float(_def804["tolleranza_pct"]),
+                                step=5.0, key="st804_tolleranza")
+        with _c804g[1]:
+            _graf804 = st.selectbox("Grafico da mostrare",
+                                    ["Costi annui: baseline contro alternativa",
+                                     "Cumulato flussi anno per anno",
+                                     "Energie: cottura, banchi, celle, ACS, elettricita'"],
+                                    key="st804_grafico")
+        with _c804g[2]:
+            _sfl804 = st.checkbox("Mostra flussi anno per anno",
+                                  value=False,
+                                  key="st804_show_flussi")
+        with _c804g[3]:
+            _stb804 = st.checkbox("Mostra tabella dettaglio",
+                                  value=True,
+                                  key="st804_show_tabella")
+        st.markdown("**Visualizzazione e note**")
+        _c804h = st.columns(4)
+        with _c804h[0]:
+            _nota804 = st.checkbox("Mostra nota didattica",
+                                   value=True,
+                                   key="st804_nota")
+        with _c804h[1]:
+            _ipot804 = st.checkbox("Mostra ipotesi di calcolo",
+                                   value=False,
+                                   key="st804_ipotesi")
+        with _c804h[2]:
+            _nota2_804 = st.checkbox("Mostra nota sul verdetto",
+                                     value=False,
+                                     key="st804_nota_verdetto")
+        with _c804h[3]:
+            _nota3_804 = st.checkbox("Mostra nota sulla distinzione",
+                                     value=False,
+                                     key="st804_nota_distinzione")
+        if st.button("Calcola rosticceria: girarrosto efficiente + recupero calore girarrosto su ACS + celle e banchi caldi efficienti contro girarrosto vecchio + celle tradizionali + caldaia a gas",
+                     key="st804_calcola"):
+            try:
+                _deg804 = (float(_kg804) <= 0.0 or
+                           int(_gg804) <= 0 or
+                           float(_qc804) < 0.0 or
+                           float(_egb804) <= 0.0 or
+                           float(_egb804) > 1.0 or
+                           float(_ega804) <= 0.0 or
+                           float(_ega804) > 1.0 or
+                           float(_qb804) < 0.0 or
+                           float(_fba804) <= 0.0 or
+                           float(_fba804) > 1.0 or
+                           float(_qcel804) < 0.0 or
+                           float(_cfb804) <= 1.0 or
+                           float(_cfa804) <= 1.0 or
+                           float(_lit804) < 0.0 or
+                           float(_dt804) <= 0.0 or
+                           float(_frec804) < 0.0 or
+                           float(_frec804) > 1.0 or
+                           float(_eta804) <= 0.0 or
+                           float(_eta804) > 1.0 or
+                           float(_copp804) <= 1.0 or
+                           float(_pg804) <= 0.0 or
+                           float(_pel804) <= 0.0 or
+                           float(_omb804) < 0.0 or
+                           float(_oma804) < 0.0 or
+                           float(_fg804) < 0.0 or
+                           float(_fel804) < 0.0 or
+                           float(_cx804) <= 0.0 or
+                           float(_wacc804) < 0.0 or
+                           float(_wacc804) > 50.0 or
+                           int(_vita804) <= 0 or
+                           float(_tol804) < 0.0 or
+                           float(_tol804) > 100.0)
+                if _deg804:
+                    st.info("Verdetto: NON_CALCOLABILE "
+                            "(regime degenere: kg di polli al "
+                            "giorno nulli o negativi, giorni di "
+                            "apertura nulli o negativi, calore "
+                            "di cottura per kg negativo, "
+                            "rendimento girarrosto o caldaia "
+                            "nullo o sopra 1, carico banchi per "
+                            "kg negativo, fattore banchi alt "
+                            "nullo o sopra 1, carico celle per "
+                            "kg negativo, COP freddo o COP ACS "
+                            "nullo, minore o uguale a 1 o "
+                            "negativo, litri ACS negativi, "
+                            "delta_T ACS nullo o negativo, "
+                            "frazione recuperata fuori [0, 1], "
+                            "prezzo nullo o negativo, O&M "
+                            "negativo, CAPEX nullo o negativo, "
+                            "fattore negativo, WACC negativo o "
+                            "sopra 50 %, vita nulla o negativa, "
+                            "tolleranza fuori [0, 100] %, oppure "
+                            "input non validi). KPI, grafico, "
+                            "tabella e CSV non calcolabili: si "
+                            "mostra solo il verdetto e questa "
+                            "nota.")
+                    st.stop()
+                _bc804 = mh804_calcola(
+                    kg_polli_giorno=float(_kg804),
+                    giorni_anno=int(_gg804),
+                    q_cottura_per_kg=float(_qc804),
+                    eta_girarrosto_base=float(_egb804),
+                    eta_girarrosto_alt=float(_ega804),
+                    q_banchi_per_kg=float(_qb804),
+                    fattore_banchi_alt=float(_fba804),
+                    q_celle_per_kg=float(_qcel804),
+                    cop_freddo_base=float(_cfb804),
+                    cop_freddo_alt=float(_cfa804),
+                    litri_acs_giorno=float(_lit804),
+                    delta_t_acs=float(_dt804),
+                    f_rec=float(_frec804),
+                    eta_caldaia_base=float(_eta804),
+                    cop_pdc_acs=float(_copp804),
+                    p_gas=float(_pg804),
+                    p_el=float(_pel804),
+                    om_base=float(_omb804),
+                    om_alt=float(_oma804),
+                    capex=float(_cx804),
+                    wacc_pct=float(_wacc804),
+                    vita_anni=int(_vita804),
+                    f_gas=float(_fg804),
+                    f_el=float(_fel804),
+                    tolleranza_pct=float(_tol804))
+                if _bc804["risparmio_eur_anno"] <= 0.0:
+                    st.info("Verdetto: NON_CALCOLABILE - il "
+                            "risparmio e' nullo o negativo "
+                            "(il girarrosto efficiente con "
+                            "recupero su ACS e celle e banchi "
+                            "caldi efficienti non batte il "
+                            "girarrosto vecchio + celle "
+                            "tradizionali + caldaia a gas: il "
+                            "gas costa troppo poco, oppure "
+                            "l'elettricita' e l'O&M "
+                            "dell'alternativa costano troppo, "
+                            "oppure non ci sono polli da "
+                            "arrostire e mantenere caldi). KPI, "
+                            "grafico, tabella e CSV sono "
+                            "saltati: con risparmio nullo o "
+                            "negativo non c'e' un caso "
+                            "presentabile, solo il verdetto e "
+                            "questa nota. Per uscire dal regime "
+                            "NON_CALCOLABILE serve un risparmio "
+                            "positivo: prezzo del gas piu' "
+                            "alto, kg di polli al giorno piu' "
+                            "alti, rendimento girarrosto alt o "
+                            "COP freddo piu' alti, prezzo "
+                            "elettricita' piu' basso, o O&M "
+                            "alternativo piu' basso.")
+                    st.stop()
+                _k804a = st.columns(4)
+                _k804a[0].metric("Risparmio (EUR/anno)",
+                                 f"{_bc804['risparmio_eur_anno']:,.0f}")
+                _k804a[1].metric("CO2 evitata (t/anno)",
+                                 f"{_bc804['co2_evitata_t_anno']:,.2f}")
+                _k804a[2].metric("VAN (kEUR)",
+                                 f"{_bc804['van'] / 1000.0:,.1f}")
+                _k804a[3].metric("Breakeven gas (EUR/MWh)",
+                                 f"{_bc804['breakeven_gas_eur_mwh']:,.4f}" if _bc804['breakeven_gas_eur_mwh'] is not None else "n/d")
+                _v804 = _bc804["verdetto"]
+                _txt804 = (f"Verdetto: {_v804} - risparmio "
+                           f"{_bc804['risparmio_eur_anno']:,.0f} EUR/anno, "
+                           f"costo alternativo "
+                           f"{_bc804['c_alt_eur_anno']:,.0f} EUR/anno "
+                           f"contro costo baseline "
+                           f"{_bc804['c_base_eur_anno']:,.0f} EUR/anno, "
+                           f"CO2 evitata "
+                           f"{_bc804['co2_evitata_t_anno']:,.2f} t/anno, "
+                           f"VAN "
+                           f"{_bc804['van']:,.0f} EUR, TIR "
+                           f"{_bc804['tir'] if _bc804['tir'] is not None else 'n/d'} %, payback "
+                           f"{_bc804['payback'] if _bc804['payback'] is not None else 'n/d'} anni, "
+                           f"breakeven gas "
+                           f"{_bc804['breakeven_gas_eur_mwh'] if _bc804['breakeven_gas_eur_mwh'] is not None else 'n/d'} EUR/MWh (soglia minima quando esiste, n/d se nessun prezzo non negativo pareggia).")
+                if _v804 == "CONVIENTE":
+                    st.success(f"{_txt804}")
+                elif _v804 == "MARGINALE":
+                    st.warning(f"{_txt804}")
+                elif _v804 == "NON_CONVIENTE":
+                    st.error(f"{_txt804}")
+                else:
+                    st.info(f"{_txt804}")
+                st.markdown(f"**Riepilogo** - kg di polli al giorno "
+                            f"{_bc804['kg_polli_giorno']:,.0f}, "
+                            f"giorni di apertura "
+                            f"{_bc804['giorni_anno']:,.0f}, "
+                            f"kg di polli all'anno "
+                            f"{_bc804['kg_polli_anno']:,.0f}, "
+                            f"calore di cottura "
+                            f"{_bc804['q_cottura_kwh_anno']:,.0f} kWh_th/anno, "
+                            f"gas girarrosto base "
+                            f"{_bc804['gas_girarrosto_base_kwh_anno']:,.0f} kWh/anno, "
+                            f"gas girarrosto alt "
+                            f"{_bc804['gas_girarrosto_alt_kwh_anno']:,.0f} kWh/anno, "
+                            f"elettricita' banchi caldi base "
+                            f"{_bc804['e_banchi_base_kwh_anno']:,.0f} kWh_e/anno, "
+                            f"elettricita' banchi caldi alt "
+                            f"{_bc804['e_banchi_alt_kwh_anno']:,.0f} kWh_e/anno, "
+                            f"carico celle "
+                            f"{_bc804['q_celle_kwh_anno']:,.0f} kWh_c/anno, "
+                            f"elettricita' freddo base "
+                            f"{_bc804['e_freddo_base_kwh_anno']:,.0f} kWh_e/anno, "
+                            f"elettricita' freddo alt "
+                            f"{_bc804['e_freddo_alt_kwh_anno']:,.0f} kWh_e/anno, "
+                            f"ACS di lavaggio "
+                            f"{_bc804['q_acs_kwh_anno']:,.0f} kWh_th/anno, "
+                            f"calore girarrosto recuperato "
+                            f"{_bc804['q_rec_kwh_anno']:,.0f} kWh_th/anno, "
+                            f"ACS netta "
+                            f"{_bc804['q_acs_net_kwh_anno']:,.0f} kWh_th/anno, "
+                            f"gas ACS baseline "
+                            f"{_bc804['gas_acs_base_kwh_anno']:,.0f} kWh/anno, "
+                            f"elettricita' pompa di calore ACS "
+                            f"{_bc804['e_pdc_acs_kwh_anno']:,.0f} kWh_e/anno, "
+                            f"costo baseline "
+                            f"{_bc804['c_base_eur_anno']:,.0f} EUR/anno, "
+                            f"costo alternativo "
+                            f"{_bc804['c_alt_eur_anno']:,.0f} EUR/anno, "
+                            f"risparmio "
+                            f"{_bc804['risparmio_eur_anno']:,.0f} EUR/anno, "
+                            f"CO2 baseline "
+                            f"{_bc804['co2_base_t_anno']:,.2f} t/anno, "
+                            f"CO2 alternativa "
+                            f"{_bc804['co2_alt_t_anno']:,.2f} t/anno, "
+                            f"CO2 evitata "
+                            f"{_bc804['co2_evitata_t_anno']:,.2f} t/anno, "
+                            f"CAPEX "
+                            f"{_bc804['capex']:,.0f} EUR, "
+                            f"VAN "
+                            f"{_bc804['van']:,.0f} EUR, TIR "
+                            f"{_bc804['tir'] if _bc804['tir'] is not None else 'n/d'} %, payback "
+                            f"{_bc804['payback'] if _bc804['payback'] is not None else 'n/d'} anni, "
+                            f"breakeven gas "
+                            f"{_bc804['breakeven_gas_eur_mwh'] if _bc804['breakeven_gas_eur_mwh'] is not None else 'n/d'} EUR/MWh, "
+                            f"verdetto {_bc804['verdetto']}.")
+                if _nota804:
+                    st.info("NOTA DIDATTICA - Con 120 kg di polli arrosto al giorno per 310 giorni i polli annui sono 37.200 kg (120 x 310) e il calore di cottura e' 44.640 kWh_th/anno (37.200 x 1,20). Il gas del girarrosto base e' 63.771,43 kWh/anno (44.640 / 0,70) e il gas del girarrosto alt e' 50.727,27 kWh/anno (44.640 / 0,88): il girarrosto efficiente risparmia da solo 13.044,16 kWh di gas all'anno. I banchi caldi di mantenimento consumano 9.300 kWh_e/anno in base (37.200 x 0,25 x 1,00) e 7.440 kWh_e/anno nell'alternativa (37.200 x 0,25 x 0,80): il fattore 0,80 risparmia 1.860 kWh_e/anno. Il carico delle celle e' 11.160 kWh_c/anno (37.200 x 0,30), con elettricita' base 5.072,73 kWh_e/anno (11.160 / 2,2) e alt 3.487,50 kWh_e/anno (11.160 / 3,2). L'ACS di lavaggio e' 2.883,69 kWh_th/anno (200 litri x 310 giorni x 4,186 x 40 / 3600) e il calore del girarrosto recuperabile grezzo e' 3.571,20 kWh_th/anno (44.640 x 0,08): il recupero SATURA all'ACS, quindi Q_rec e' 2.883,69 kWh_th/anno, l'ACS netta e' zero e la pompa di calore per ACS non consuma nulla (0 kWh_e/anno) — il recupero oltre l'ACS e' calore buttato, non un guadagno. Il gas ACS baseline e' 3.392,58 kWh/anno (2.883,69 / 0,85, senza recupero: la baseline non recupera). Il costo baseline e' 10.837,94 EUR/anno ((63.771,43 + 3.392,58) / 1000 x 90 = 6.044,76 di gas + (9.300 + 5.072,73) / 1000 x 250 = 3.593,18 di elettricita' + O&M base 1.200) e il costo alternativo e' 9.297,33 EUR/anno (50.727,27 / 1000 x 90 = 4.565,45 di gas + (7.440 + 3.487,50 + 0) / 1000 x 250 = 2.731,88 di elettricita' + O&M alternativo 2.000): il risparmio e' 1.540,61 EUR/anno. La CO2 baseline e' 18,46 t/anno (67.164,00 / 1000 x 0,20 = 13,43 dal gas + 14.372,73 / 1000 x 0,35 = 5,03 dall'elettricita') e la CO2 alternativa e' 13,97 t/anno (50.727,27 / 1000 x 0,20 = 10,15 dal gas + 10.927,50 / 1000 x 0,35 = 3,82 dall'elettricita'): la CO2 evitata e' 4,49 t/anno. Con CAPEX 18.000 EUR, WACC 5 % e vita 15 anni la VAN e' -2.008,97 EUR, la TIR 3,30 % (sotto il WACC) e il payback 12 anni (il cumulato all'anno 11 e' -1.053,26 EUR, all'anno 12 e' 487,35 EUR, gia' positivo): verdetto NON_CONVIENTE, perche' la VAN negativa supera la tolleranza del 10 % (1.800 EUR). Il breakeven gas e' None (numeratore negativo: a prezzo gas zero l'alternativa e' gia' piu' conveniente di 61,31 EUR/anno, quindi nessun prezzo non negativo la pareggia dal basso): il None NON significa convenienza finanziaria, la VAN va letta da sola. Senza recupero (f_rec zero) il risparmio scende a 1.315,32 EUR/anno e la VAN e' -4.347,38 EUR, quindi NON_CONVIENTE con payback 14 anni e breakeven 9,98 EUR/MWh: il recupero vale circa 225 EUR/anno. Con f_rec 0,05 il recupero grezzo e' 2.232 kWh_th/anno (sotto l'ACS, senza saturazione), l'ACS netta e' 651,69 kWh_th/anno, il risparmio e' 1.489,70 EUR/anno e la VAN e' -2.537,43 EUR, quindi NON_CONVIENTE con payback 13 anni e breakeven None. Con ACS doppia (400 litri al giorno) l'ACS e' 5.767,38 kWh_th/anno, il recupero satura ancora a 3.571,20, il risparmio sale a 1.674,37 EUR/anno e la VAN e' -620,63 EUR, entro la tolleranza del 10 % (1.800 EUR), quindi MARGINALE con payback 11 anni e breakeven 5,56 EUR/MWh: piu' ACS da lavare, piu' recupero utile. Con 240 kg di polli al giorno il risparmio sale a 3.575,89 EUR/anno, la VAN e' 19.116,55 EUR, quindi CONVIENTE con payback 6 anni. Con 60 kg al giorno il risparmio scende a 437,18 EUR/anno, la VAN e' -13.462,18 EUR, quindi NON_CONVIENTE con payback mai raggiunto e breakeven 45,91 EUR/MWh: il caso piccolo non regge il CAPEX. Con CAPEX 16.000 EUR la VAN e' -8,97 EUR, entro la tolleranza del 10 % (1.600 EUR), quindi MARGINALE con payback 11 anni; con CAPEX 14.000 EUR la VAN e' 1.991,03 EUR, quindi CONVIENTE con payback 10 anni: il CAPEX decide il verdetto, non la fisica. Con CAPEX nullo la VAN e' 15.991,03 EUR (1.540,61 x 10,37966 di annuita' 15 anni al 5 %), la TIR non e' definita (nessun cambio di segno: flusso zero all'anno 0 e poi solo flussi positivi) e il payback e' 0 (regola >=: all'anno 0 il cumulato e' gia' zero). Con vita 10 anni la VAN e' -6.103,80 EUR, quindi NON_CONVIENTE con payback mai raggiunto: il caso ha bisogno di vita lunga. Con WACC zero la VAN sale a 5.109,19 EUR (15 x 1.540,61 - 18.000) e il payback resta 12 anni. Con elettricita' 400 EUR/MWh il risparmio sale a 2.057,40 EUR/anno, la VAN e' 3.355,07 EUR, quindi CONVIENTE con payback 9 anni: qui l'elettricita' cara aiuta, perche' banchi e celle efficienti risparmiano piu' elettricita' di quanta ne consumi la pompa di calore (che nel demo e' zero). Con O&M alternativo 3.000 EUR/anno il risparmio e' 540,61 EUR/anno, la VAN e' -12.388,63 EUR, quindi NON_CONVIENTE con payback mai raggiunto e breakeven 57,11 EUR/MWh. Con prezzo gas 150 EUR/MWh il risparmio sale a 2.526,82 EUR/anno, la VAN e' 8.227,49 EUR, quindi CONVIENTE con payback 8 anni. Senza carico celle (0 kWh_c/kg) il risparmio e' 1.144,31 EUR/anno, la VAN e' -6.122,50 EUR, quindi NON_CONVIENTE con payback mai raggiunto e breakeven 20,38 EUR/MWh: le celle efficienti aiutano ma non decidono il caso. Senza polli (0 kg al giorno) non c'e' cottura ne' banchi ne' celle: in UI e' guard degenere (kg nulli) con verdetto NON_CALCOLABILE, e negli helper il risparmio e' -719,96 EUR/anno con breakeven 302,22 EUR/MWh (resta solo il gas ACS da pareggiare). Distinzione esplicita: distinto dal panificio (kg di pane per la cottura del pane, senza girarrosto e senza polli: qui il calore e' quello del girarrosto per i polli e il recupero va sull'ACS di lavaggio di spiedi e teglie), dalla pasticceria (kg di dolci, abbattitore da T_in a T_out, celle dei dolci: qui nessun dolce, nessun abbattitore, i banchi sono caldi di mantenimento), dalla gelateria (litri di gelato, pastorizzazione, freddo del gelato: qui nessuna pastorizzazione, nessun gelato, il freddo e' quello delle celle dei polli), dalla pescheria (kg di pesce, macchina del ghiaccio in scaglie, recupero dai condensatori: qui nessun pesce, nessun ghiaccio, il recupero viene dal calore del girarrosto), dal fioraio (superficie negozio per riscaldamento piu' cella fiori, recupero sul riscaldamento: qui niente riscaldamento, recupero sull'ACS di lavaggio), dal parrucchiere (lavaggi di capelli, ACS, recupero dalle acque reflue), dal ristorante (coperti, ACS di cucina, celle frigo di cucina), dalla farmacia (superficie di vendita piu' frigoriferi farmaceutici, recupero dai frigoriferi, nessun girarrosto), dall'albergo (pernottamento, ACS docce ospiti), dalla palestra (docce utenti, recupero dalle acque delle docce), dall'autolavaggio (veicoli lavati, acque di lavaggio dei veicoli) e dal palaghiaccio (pista da pattinaggio, freddo di pista verso spogliatoi): qui driver POLLI + GIORNI + ACS = kg di polli al giorno per cottura, banchi e celle, giorni di apertura per l'anno, litri di ACS per il lavaggio; niente pane, niente dolci, niente gelato, niente pesce, niente lavaggi, niente coperti, niente docce, niente veicoli, niente frigoriferi farmaceutici, niente pista.")
+                if _ipot804:
+                    st.info("IPOTESI - kg_polli_anno = kg_polli_giorno x giorni_anno; Q_cottura = kg_polli_anno x q_cottura_per_kg; gas_girarrosto_base = Q_cottura / eta_girarrosto_base; gas_girarrosto_alt = Q_cottura / eta_girarrosto_alt; E_banchi_base = kg_polli_anno x q_banchi_per_kg x 1,00; E_banchi_alt = kg_polli_anno x q_banchi_per_kg x fattore_banchi_alt; Q_celle = kg_polli_anno x q_celle_per_kg; E_freddo_base = Q_celle / COP_freddo_base; E_freddo_alt = Q_celle / COP_freddo_alt; Q_acs = litri_acs_giorno x giorni_anno x 4,186 x delta_T / 3600 (1 litro = 1 kg); Q_rec = min(Q_acs, Q_cottura x f_rec) (saturazione all'ACS); Q_acs_net = max(0, Q_acs - Q_rec); gas_acs_base = Q_acs / eta_caldaia_base (senza recupero: la baseline non recupera); E_pdc_acs = Q_acs_net / COP_pdc_acs; C_base = (gas_girarrosto_base + gas_acs_base) / 1000 x prezzo gas + (E_banchi_base + E_freddo_base) / 1000 x prezzo elettricita' + O&M base; C_alt = gas_girarrosto_alt / 1000 x prezzo gas + (E_banchi_alt + E_freddo_alt + E_pdc_acs) / 1000 x prezzo elettricita' + O&M alternativo; risparmio = C_base - C_alt; CO2_base = (gas_girarrosto_base + gas_acs_base) / 1000 x f_gas + (E_banchi_base + E_freddo_base) / 1000 x f_el; CO2_alt = gas_girarrosto_alt / 1000 x f_gas + (E_banchi_alt + E_freddo_alt + E_pdc_acs) / 1000 x f_el; CO2 evitata = CO2_base - CO2_alt; flussi [-CAPEX, risparmio x vita]; VAN al WACC; TIR per bisezione; payback = primo anno con cumulato >= 0, None se mai (con CAPEX nullo il payback e' 0); breakeven gas = ((E_banchi_alt + E_freddo_alt + E_pdc_acs) / 1000 x prezzo elettricita' + O&M alternativo - (E_banchi_base + E_freddo_base) / 1000 x prezzo elettricita' - O&M base) / ((gas_girarrosto_base + gas_acs_base - gas_girarrosto_alt) / 1000), None se denominatore gas <= 0 o numeratore < 0, SOGLIA MINIMA quando esiste; verdetto: NON_CALCOLABILE se input degenere (kg <= 0, giorni <= 0, eta <= 0 o > 1, COP <= 1, delta_T <= 0, f_rec fuori [0, 1], prezzi <= 0, CAPEX <= 0, vita <= 0) o risparmio <= 0 (guard: KPI, grafico, tabella e CSV saltati), altrimenti CONVIENTE se VAN > 0, MARGINALE se VAN negativa entro tolleranza % del CAPEX, NON_CONVIENTE se VAN negativa oltre la tolleranza; regime degenere di input negli helper (kg negativi, giorni <= 0 o non interi, calore di cottura per kg negativo, rendimenti <= 0 o sopra 1, carico banchi per kg negativo, fattore banchi alt <= 0 o sopra 1, carico celle per kg negativo, COP <= 1, litri ACS negativi, delta_T ACS <= 0, frazione recuperata fuori [0, 1], prezzi < 0, O&M < 0, CAPEX < 0, fattori < 0, WACC < 0 o sopra 50 %, vita <= 0 o non intera, tolleranza fuori [0, 100] %, input non validi) solleva ValueError negli helper e ferma la UI con st.stop() prima di KPI, grafico, tabella e CSV.")
+                if _nota2_804:
+                    st.info("NOTA VERDETTO - Il verdetto di questa scheda ha due stadi: prima la guard degenere (input degenere o risparmio nullo o negativo = NON_CALCOLABILE, senza KPI, grafico, tabella e CSV), poi la VAN contro la tolleranza % del CAPEX. Nel demo il risparmio 1.540,61 EUR/anno supera la guard ma la VAN -2.008,97 EUR supera la tolleranza del 10 % (1.800 EUR), quindi NON_CONVIENTE. Con CAPEX 16.000 EUR la VAN e' -8,97 EUR, entro la tolleranza del 10 % (1.600 EUR), quindi MARGINALE; con CAPEX 14.000 EUR la VAN e' 1.991,03 EUR, quindi CONVIENTE: il CAPEX decide il verdetto. Senza recupero (f_rec zero) il risparmio resta positivo (1.315,32 EUR/anno) ma la VAN e' -4.347,38 EUR, quindi NON_CONVIENTE: il recupero da solo non basta. Con ACS doppia (400 litri al giorno) il risparmio sale a 1.674,37 EUR/anno e la VAN e' -620,63 EUR, entro la tolleranza del 10 % (1.800 EUR), quindi MARGINALE. A prezzo gas zero la UI e' in guard degenere (prezzi nulli = NON_CALCOLABILE) anche se negli helper il risparmio sarebbe positivo (61,31 EUR/anno): la guard UI e' piu' stretta degli helper, e il verdetto resta NON_CALCOLABILE con KPI, grafico, tabella e CSV saltati. Il breakeven demo e' None (numeratore negativo): il None non significa convenienza, la VAN va letta da sola. Con 60 kg di polli al giorno il risparmio e' 437,18 EUR/anno ma la VAN e' -13.462,18 EUR, quindi NON_CONVIENTE: il caso piccolo non regge il CAPEX. Con vita 10 anni la VAN e' -6.103,80 EUR, quindi NON_CONVIENTE anche se il risparmio e' positivo: il payback da solo non basta, conta la VAN. Con CAPEX nullo la VAN e' 15.991,03 EUR, la TIR non e' definita (nessun cambio di segno) e il payback e' 0 (regola >=: all'anno 0 il cumulato e' gia' zero); ma in UI il CAPEX nullo e' guard degenere (NON_CALCOLABILE), quindi quel caso non viene mostrato. Con WACC zero la VAN sale a 5.109,19 EUR e il payback resta 12 anni. Con O&M alternativo 3.000 EUR/anno il risparmio e' 540,61 EUR/anno ma la VAN e' -12.388,63 EUR, quindi NON_CONVIENTE: un risparmio positivo piccolo non basta.")
+                if _nota3_804:
+                    st.info("NOTA DISTINZIONE - Qui i driver sono POLLI + GIORNI + ACS: i kg di polli al giorno guidano cottura, banchi e celle, i giorni di apertura guidano l'anno, i litri di ACS guidano il lavaggio, senza pane, senza dolci, senza gelato, senza pesce, senza riscaldamento, senza lavaggi, senza coperti, senza docce e senza veicoli. Nel panificio i driver sono i kg di pane al giorno per la cottura del pane, senza girarrosto e senza polli: senza girarrosto, non c'e' calore di cottura dei polli da cui recuperare, e applicare qui solo il pane sottostimerebbe il caso, perche' i polli hanno un calore proprio di cottura e banchi caldi di mantenimento. Nella pasticceria il driver sono i kg di dolci al giorno con abbattitore da T_in a T_out e celle dei dolci: senza abbattitore, non c'e' freddo da T_in a T_out da cui risparmiare, e applicare qui i dolci falserebbe entrambi i fabbisogni, perche' li' il freddo e' quello dell'abbattitore, non dei banchi caldi. Nella gelateria il driver sono i litri di gelato con pastorizzazione e freddo del gelato: senza pastorizzazione, non c'e' calore di pastorizzazione da cui recuperare, e applicare qui il gelato falserebbe entrambi i fabbisogni, perche' li' il freddo e' quello del gelato, non delle celle dei polli. Nella pescheria il driver sono i kg di pesce al giorno con macchina del ghiaccio in scaglie e recupero dai condensatori: senza pesce, non c'e' ghiaccio da produrre, e applicare qui il ghiaccio inventerebbe un fabbisogno che non esiste, perche' qui il calore di scarto e' quello del girarrosto, non dei condensatori. Nel fioraio i driver sono la superficie del negozio per il riscaldamento piu' volume, carico specifico e ore della cella fiori, con recupero dal condensatore sul riscaldamento: senza riscaldamento da coprire, non c'e' riscaldamento su cui recuperare, e applicare qui il riscaldamento inventerebbe un fabbisogno che non esiste, perche' il calore del girarrosto qui va sull'ACS di lavaggio, non su un negozio. Nel parrucchiere il driver sono la superficie del salone piu' i lavaggi di capelli, con ACS dei lavaggi e recupero dalle acque reflue di lavaggio: senza lavaggi, non c'e' ACS da cui recuperare, e applicare qui i lavaggi falserebbe il caso, perche' qui il calore di scarto e' quello del girarrosto, non delle acque. Nel ristorante il driver sono i coperti annui per ACS e carico termico delle celle frigo di cucina: senza coperti, non c'e' ACS di cucina da produrre, e applicare qui i coperti inventerebbe un fabbisogno che non esiste, perche' banchi e celle dei polli non seguono i coperti ma i kg di polli. Nella farmacia il driver e' la superficie di vendita piu' la potenza elettrica continua dei frigoriferi farmaceutici, con recupero dai frigoriferi: senza frigoriferi farmaceutici, non c'e' calore di scarto dei frighi da cui recuperare, e applicare qui solo i frighi sottostimerebbe il caso, perche' il girarrosto ha un calore proprio di cottura da cui recuperare. Nell'albergo il driver e' il pernottamento turistico, con ACS delle docce degli ospiti: anche li' c'e' recupero, ma dalle docce, non dal girarrosto, e applicare qui solo le docce ospiti sottostimerebbe il caso, perche' una rosticceria non ha ospiti ne' docce. Nella palestra il driver sono le docce degli utenti: anche li' c'e' recupero dalle acque, ma dalle docce dopo lo sport, non dal girarrosto, e applicare qui solo le docce utenti sottostimerebbe il caso, perche' la cottura e i banchi dei polli sono il fabbisogno dominante. Nell'autolavaggio il driver sono i veicoli lavati, con acqua di lavaggio dei veicoli e recupero dalle acque di lavaggio dei veicoli: senza veicoli, non c'e' acqua di lavaggio veicoli da cui recuperare, e applicare qui il lavaggio veicoli falserebbe entrambi i fabbisogni, perche' li' il calore andrebbe ai veicoli, non al lavaggio di spiedi. Nel palaghiaccio il ghiaccio e' la pista da pattinaggio, con freddo di pista e calore di scarto verso gli spogliatoi: senza pista, non c'e' freddo di pista da cui recuperare, e applicare qui la pista falserebbe il caso, perche' qui il girarrosto arrostisce polli e le celle li conservano, non una superficie da mantenere gelata. Il girarrosto a gas non e' un chiller da pista, non e' un frigo farmaceutico e non e' una cella fiori: invertire i driver falserebbe entrambi i fabbisogni.")
+                if _bc804["risparmio_eur_anno"] <= 0.0:
+                    st.info("Guard risparmio prima del grafico: "
+                            "con risparmio nullo o negativo il "
+                            "grafico non viene mostrato.")
+                    st.stop()
+                if _graf804 == "Costi annui: baseline contro alternativa":
+                    st.markdown("**Costi annui: baseline contro alternativa (EUR/anno)**")
+                    _dati804 = {"EUR/anno": [_bc804["c_alt_eur_anno"],
+                                             _bc804["c_base_eur_anno"]]}
+                elif _graf804 == "Cumulato flussi anno per anno":
+                    st.markdown("**Cumulato flussi anno per anno (EUR)**")
+                    _dati804 = {"Cumulato (EUR)": list(_bc804["df_flussi"]["Cumulato (EUR)"])}
+                else:
+                    st.markdown("**Energie: cottura, banchi, celle, ACS, elettricita' (kWh/anno)**")
+                    _dati804 = {"kWh/anno": [_bc804["q_cottura_kwh_anno"],
+                                             _bc804["e_banchi_alt_kwh_anno"],
+                                             _bc804["q_celle_kwh_anno"],
+                                             _bc804["q_acs_kwh_anno"],
+                                             _bc804["q_rec_kwh_anno"],
+                                             _bc804["e_freddo_alt_kwh_anno"],
+                                             _bc804["e_pdc_acs_kwh_anno"]]}
+                st.bar_chart(_dati804)
+                if _sfl804:
+                    st.markdown("**Flussi anno per anno**")
+                    st.dataframe(_bc804["df_flussi"])
+                if _stb804:
+                    st.markdown("**Voci fisiche ed economiche**")
+                    st.dataframe(_bc804["df_tabella"])
+                if _bc804["risparmio_eur_anno"] <= 0.0:
+                    st.info("Guard risparmio prima del CSV: "
+                            "con risparmio nullo o negativo il "
+                            "CSV non viene offerto.")
+                    st.stop()
+                _in804 = {"kg_polli_giorno": float(_kg804),
+                          "giorni_anno": int(_gg804),
+                          "q_cottura_per_kg": float(_qc804),
+                          "eta_girarrosto_base": float(_egb804),
+                          "eta_girarrosto_alt": float(_ega804),
+                          "q_banchi_per_kg": float(_qb804),
+                          "fattore_banchi_alt": float(_fba804),
+                          "q_celle_per_kg": float(_qcel804),
+                          "cop_freddo_base": float(_cfb804),
+                          "cop_freddo_alt": float(_cfa804),
+                          "litri_acs_giorno": float(_lit804),
+                          "delta_t_acs": float(_dt804),
+                          "f_rec": float(_frec804),
+                          "eta_caldaia_base": float(_eta804),
+                          "cop_pdc_acs": float(_copp804),
+                          "p_gas": float(_pg804),
+                          "p_el": float(_pel804),
+                          "om_base": float(_omb804),
+                          "om_alt": float(_oma804),
+                          "capex": float(_cx804),
+                          "wacc_pct": float(_wacc804),
+                          "vita_anni": int(_vita804),
+                          "f_gas": float(_fg804),
+                          "f_el": float(_fel804),
+                          "tolleranza_pct": float(_tol804)}
+                _csv804 = mh804_csv(_bc804, _in804)
+                st.download_button(
+                    "Scarica CSV rosticceria girarrosto recupero ACS banchi celle",
+                    _csv804.encode("utf-8"),
+                    "rosticceria_girarrosto_recupero_acs_banchi_celle.csv",
+                    "text/csv", key="st804_csv")
+                _csvf804 = _bc804["df_flussi"].to_csv(index=False, sep=";")
+                st.download_button(
+                    "Scarica CSV flussi",
+                    _csvf804.encode("utf-8"),
+                    "rosticceria_girarrosto_recupero_acs_banchi_celle_flussi.csv",
+                    "text/csv", key="st804_csv_flussi")
+            except ValueError as _e804:
+                st.error(f"Input non valido: {_e804}")
 
 
 # Footer
