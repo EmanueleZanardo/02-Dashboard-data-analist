@@ -89,7 +89,7 @@ class TestRegistry462:
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         withs = re.findall(r"with (tab\d+):", src)
-        assert len(titoli) == len(dvars) == len(withs) == 798
+        assert len(titoli) == len(dvars) == len(withs) == 799
         assert "tab462" in dvars
         assert "tab462" in withs
 
