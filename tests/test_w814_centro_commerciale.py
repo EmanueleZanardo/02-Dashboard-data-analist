@@ -1,7 +1,7 @@
 """Test nuova scheda "Centro commerciale:
 pompa di calore + LED + banchi frigo chiusi
 + scale mobili con standby battono caldaia a
-gas + illuminazione tradizionale + frighi
+gas + illuminazione tradizionale + banchi frigo
 aperti + scale sempre accese?" (titolo
 completo nel frammento UI).
 
@@ -1144,7 +1144,7 @@ def test_ui_titolo_atteso():
               "LED + banchi frigo chiusi + scale "
               "mobili con standby battono caldaia a "
               "gas + illuminazione tradizionale + "
-              "frighi aperti + scale sempre accese?")
+              "banchi frigo aperti + scale sempre accese?")
     assert src.count(titolo) == 2
 
 
