@@ -222,7 +222,7 @@ def _pareto(n=2000, xi=0.4):
 class TestRegistry315:
     def test_conteggi(self):
         src, titoli, dvars, withs = _registry()
-        assert len(titoli) == len(dvars) == len(withs) == 836
+        assert len(titoli) == len(dvars) == len(withs) == 837
         assert TITLE315 in titoli
         assert "tab315" in dvars
         assert "    with tab315:" in src
