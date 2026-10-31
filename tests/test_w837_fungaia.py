@@ -142,40 +142,85 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from w839_helpers import (
-    demo_calcoli,
-    mh837_autoconsumo,
-    mh837_c_alt,
-    mh837_c_base,
-    mh837_calcola,
-    mh837_co2_alt,
-    mh837_co2_base,
-    mh837_co2_evitata,
-    mh837_csv,
-    mh837_demo,
-    mh837_demo_calcoli,
-    mh837_e_alt_lorda,
-    mh837_e_alt_netta_clima,
-    mh837_e_alt_rete,
-    mh837_e_base,
-    mh837_e_esportata,
-    mh837_e_pv,
-    mh837_e_spec_alt_max,
-    mh837_flussi,
-    mh837_frazione,
-    mh837_int_pos,
-    mh837_nneg,
-    mh837_num,
-    mh837_payback,
-    mh837_pos,
-    mh837_recupero,
-    mh837_risparmio,
-    mh837_sensibilita,
-    mh837_tir,
-    mh837_valida,
-    mh837_van,
-    mh837_verdetto,
-)
+try:
+    from w839_helpers import (
+        demo_calcoli,
+        mh837_autoconsumo,
+        mh837_c_alt,
+        mh837_c_base,
+        mh837_calcola,
+        mh837_co2_alt,
+        mh837_co2_base,
+        mh837_co2_evitata,
+        mh837_csv,
+        mh837_demo,
+        mh837_demo_calcoli,
+        mh837_e_alt_lorda,
+        mh837_e_alt_netta_clima,
+        mh837_e_alt_rete,
+        mh837_e_base,
+        mh837_e_esportata,
+        mh837_e_pv,
+        mh837_e_spec_alt_max,
+        mh837_flussi,
+        mh837_frazione,
+        mh837_int_pos,
+        mh837_nneg,
+        mh837_num,
+        mh837_payback,
+        mh837_pos,
+        mh837_recupero,
+        mh837_risparmio,
+        mh837_sensibilita,
+        mh837_tir,
+        mh837_valida,
+        mh837_van,
+        mh837_verdetto,
+    )
+except ModuleNotFoundError:
+    # Fallback hidden_files (schema w826 _leggi): da repo
+    # w839_helpers.py non e' importabile, si carica dal percorso
+    # assoluto degli artefatti del ciclo.
+    import importlib.util as _ilu
+    _hf = os.path.expanduser(
+        "~/workspace/goals/energy-analyst-dashboard-qa-bugfix-and-new-features"
+        "/hidden_files")
+    _spec = _ilu.spec_from_file_location(
+        "w839_helpers", os.path.join(_hf, "w839_helpers.py"))
+    _mod = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(_mod)
+    demo_calcoli = _mod.demo_calcoli
+    mh837_autoconsumo = _mod.mh837_autoconsumo
+    mh837_c_alt = _mod.mh837_c_alt
+    mh837_c_base = _mod.mh837_c_base
+    mh837_calcola = _mod.mh837_calcola
+    mh837_co2_alt = _mod.mh837_co2_alt
+    mh837_co2_base = _mod.mh837_co2_base
+    mh837_co2_evitata = _mod.mh837_co2_evitata
+    mh837_csv = _mod.mh837_csv
+    mh837_demo = _mod.mh837_demo
+    mh837_demo_calcoli = _mod.mh837_demo_calcoli
+    mh837_e_alt_lorda = _mod.mh837_e_alt_lorda
+    mh837_e_alt_netta_clima = _mod.mh837_e_alt_netta_clima
+    mh837_e_alt_rete = _mod.mh837_e_alt_rete
+    mh837_e_base = _mod.mh837_e_base
+    mh837_e_esportata = _mod.mh837_e_esportata
+    mh837_e_pv = _mod.mh837_e_pv
+    mh837_e_spec_alt_max = _mod.mh837_e_spec_alt_max
+    mh837_flussi = _mod.mh837_flussi
+    mh837_frazione = _mod.mh837_frazione
+    mh837_int_pos = _mod.mh837_int_pos
+    mh837_nneg = _mod.mh837_nneg
+    mh837_num = _mod.mh837_num
+    mh837_payback = _mod.mh837_payback
+    mh837_pos = _mod.mh837_pos
+    mh837_recupero = _mod.mh837_recupero
+    mh837_risparmio = _mod.mh837_risparmio
+    mh837_sensibilita = _mod.mh837_sensibilita
+    mh837_tir = _mod.mh837_tir
+    mh837_valida = _mod.mh837_valida
+    mh837_van = _mod.mh837_van
+    mh837_verdetto = _mod.mh837_verdetto
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _HF_FALLBACK = os.path.expanduser(
