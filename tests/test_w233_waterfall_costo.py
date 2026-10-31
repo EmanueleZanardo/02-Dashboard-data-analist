@@ -64,12 +64,12 @@ class TestRegistryTab233:
         src = Path(__file__).parent.parent.joinpath("app.py").read_text(encoding="utf-8")
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
-        assert len(titoli) == 824
+        assert len(titoli) == 825
         assert "💧 Waterfall del costo" in titoli
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         assert "tab233" in dvars
         withs = re.findall(r"    with (tab\d+):", src)
         assert "tab233" in withs
-        assert len(withs) == len(dvars) == 824
+        assert len(withs) == len(dvars) == 825
         keys = re.findall(r'key="(t233_[^"]+)"', src)
         assert len(keys) == len(set(keys)) >= 10
