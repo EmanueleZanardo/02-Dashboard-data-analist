@@ -1,4 +1,12 @@
-**Ultimo aggiornamento: 31/10/2026 ~00:39 CET**
+**Ultimo aggiornamento: 31/10/2026 ~02:00 CEST**
+
+## 31/10/2026 ~02:00 CET — aggiornamento documentale giornaliero
+- **tab825 «Cioccolateria» live al ciclo 00:39 del 31/10, commit `605d34a`** (parent af3d29c6, VERIFY_OK, tree d7bce53c): raffinazione con motori efficienti + recupero; demo 120.000 kg/anno, E base 252.000 vs alt 174.000 kWh_e/anno, gas 216.000 vs 84.000 kWh/anno, risparmio 7.700 EUR/anno, CO2 evitata 46,16 t/anno, VAN 29.923,37 EUR, TIR 12,91 %, payback 7 anni, breakeven gas 0,0417 EUR/kWh. Test nuova tab 61 passed, sweep chiavi 290 tab OK. Fix incluso: test strutturali nuova tab con fallback hidden_files (9 fail da repo risolti). Due 422 transitori GitHub risolti con resume da checkpoint, senza re-push completo.
+- Precedente: tab824 «Allevamento avicolo / pollaio da carne» live 30/10 23:39 (commit af3d29c6, VAN 21.898,29 EUR, TIR 14,47 %). La tab826 del ciclo 01:39 non risulta ancora nel daily log alle 02:00.
+- **Nota di coordinamento:** il job QA-dashboard scrive le sue entry direttamente sul STATUS.md remoto; questo job mergia le proprie sezioni giornaliere sulla base live.
+- Streamlit keepalive: verifica browser LIVE 29/10 23:17 OK — dashboard «Singularity Quant ETRM» sveglia, nessuna pagina di sleep (il curl in loop 303 resta non indicativo).
+- Blocchi: vecchia chiave ENTSO-E nella storia git (da ruotare); app non pubblica — serve suo gesto su share.streamlit.io.
+
 
 ## 30/10/2026 ~02:00 CET — aggiornamento documentale giornaliero
 - **29/10: repo cresciuto da tab783 a tab807 (25 nuove tab in 2 giorni, una per ciclo orario).** Ultime verificate: tab804 rosticceria (21:39, commit e91eddfa, NON_CONVIENTE: VAN -2.008,97 EUR, TIR 3,30 %), tab805 tavola calda (22:39, commit 01ca0618, MARGINALE: VAN -1.641,26 EUR, TIR 3,87 %), tab806 bar/caffetteria (23:39, commit c2cb73b2, MARGINALE: VAN -221,99 EUR, TIR 4,34 %, 471 file changed, 0 deleted).
