@@ -125,13 +125,13 @@ class TestRegistryTab223:
             encoding="utf-8")
         line = [ln for ln in src.split("\n") if "= st.tabs([" in ln][0]
         titoli = re.findall(r'"([^"]+)"', line.split("st.tabs([", 1)[1])
-        assert len(titoli) == 864
+        assert len(titoli) == 865
         assert "🗓️ Ladder delle scadenze: profilo temporale di volumi, MtM e DV01" in titoli
         dvars = re.findall(r"tab\d+", line.split("= st.tabs", 1)[0])
         assert "tab223" in dvars
         withs = re.findall(r"    with (tab\d+):", src)
         assert "tab223" in withs
-        assert len(withs) == len(dvars) == 864
+        assert len(withs) == len(dvars) == 865
         keys = re.findall(r'key="(tm223_[^"]+)"', src)
         dyn_keys = re.findall(r'key=_pfx223 \+ "([^"]+)"', src)
         # le key dinamiche sono prefissate a runtime con tm223_bt_/tm223_mt_
