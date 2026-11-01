@@ -1,4 +1,12 @@
-**Ultimo aggiornamento: 01/11/2026 ~00:39 CET**
+**Ultimo aggiornamento: 01/11/2026 ~02:00 CEST**
+
+## 01/11/2026 ~02:00 CET — aggiornamento documentale giornaliero
+- **Tre tab live in 24h, tutte VERIFY_OK:** tab843 «Agriturismo» 31/10 22:39 (commit `1e0d111f`, parent bcdbfc76; demo risparmio 23.242,62 EUR/anno, CO2 evitata 41,79 t/anno, VAN 39.654,45 EUR, TIR 6,81 %, payback 11 anni, 79 test); tab844 «Magazzino logistico» 31/10 23:39 (commit `c6727dca`, parent 1e0d111f; risparmio 123.864 EUR/anno, VAN 1.028.619,22 EUR, TIR 23,71 %, payback 5 anni, CO2 evitata 204,84 t/anno, 162 test da repo); tab845 «Impianto di depurazione» 01/11 00:39 (commit `d4a9bdec`, parent c6727dca; risparmio 306.751 EUR/anno, VAN 2,38M EUR, TIR 51,02 %, payback 2 anni). Sweep chiavi _def 310 tab OK, _bc solo falso allarme noto tab729, 0 segreti hardcoded. Prossimo ciclo: tab846.
+- Precedente: tab842 e tab841 nei cicli 31/10 precedenti; tab825 «Cioccolateria» 31/10 00:39 (605d34a).
+- **Nota di coordinamento:** il job QA-dashboard scrive le sue entry direttamente sul STATUS.md remoto; questo job mergia le proprie sezioni giornaliere sulla base live.
+- Streamlit keepalive: verifica browser LIVE 31/10 23:17 OK — dashboard «Singularity Quant ETRM» sveglia, nessuna pagina di sleep (il curl in loop 303 resta non indicativo); visibile il gate d'ingresso normale («SINGULARITY OS», richiesta Key/hardware key), nessuna chiave inserita.
+- Blocchi: vecchia chiave ENTSO-E nella storia git (da ruotare); app non pubblica — serve suo gesto su share.streamlit.io.
+
 
 ## 31/10/2026 ~02:00 CET — aggiornamento documentale giornaliero
 - **tab825 «Cioccolateria» live al ciclo 00:39 del 31/10, commit `605d34a`** (parent af3d29c6, VERIFY_OK, tree d7bce53c): raffinazione con motori efficienti + recupero; demo 120.000 kg/anno, E base 252.000 vs alt 174.000 kWh_e/anno, gas 216.000 vs 84.000 kWh/anno, risparmio 7.700 EUR/anno, CO2 evitata 46,16 t/anno, VAN 29.923,37 EUR, TIR 12,91 %, payback 7 anni, breakeven gas 0,0417 EUR/kWh. Test nuova tab 61 passed, sweep chiavi 290 tab OK. Fix incluso: test strutturali nuova tab con fallback hidden_files (9 fail da repo risolti). Due 422 transitori GitHub risolti con resume da checkpoint, senza re-push completo.
