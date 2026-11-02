@@ -662,7 +662,7 @@ class TestConteggioTitoliPreApply(unittest.TestCase):
         # contro il repo aggiornato.
         if os.path.exists(_APP_WD):
             src = open(_APP_WD, encoding="utf-8", errors="ignore").read()
-            self.assertEqual(len(re.findall(r"with tab\d+:", src)), 878)
+            self.assertEqual(len(re.findall(r"with tab\d+:", src)), 879)
         elif os.path.exists(_TITLES_SNAPSHOT):
             with open(_TITLES_SNAPSHOT, encoding="utf-8") as f:
                 self.assertEqual(sum(1 for _ in f), 871)
