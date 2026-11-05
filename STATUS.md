@@ -1,4 +1,13 @@
-**Ultimo aggiornamento: 04/11/2026 ~11:49 CET**
+**Ultimo aggiornamento: 05/11/2026 ~02:00 CET**
+
+## 05/11/2026 ~02:00 CET — aggiornamento documentale giornaliero
+- **tab887 RISOLTA il 04/11 — la pendenza del 03/11 è chiusa.** Ciclo QA-dashboard 04/11 ~11:49 (unico del giorno, cap 1/giorno): la tab887 «Confetteria» authorata il 03/11 (apply locale completo, mai pushato per slot fallito + recupero senza esito) è stata verificata e pushata SENZA authorare una tab nuova.
+- Verifiche: py_compile OK, pytest nuova tab 68 passed + 32 subtests, sweep chiavi demo/UI 0 violazioni, 0 segreti hardcoded, sync locale/remoto = sola impronta apply (488 changed + 1 added, 0 deleted), merge STATUS.md sulla base remota (solo docs mossa dal job documentale).
+- Push: 6 interruzioni da errori 5xx GitHub transitori, resume da checkpoint; VERIFY_OK al tentativo 7. Commit `22067b5` (parent d0e709f, base attesa), tree 0dd943c3, 787 file su main; blob app.py/STATUS.md/test verificati via API.
+- Feature tab887: confetteria 400.000 kg/anno — PdC + recupero calore + LED + FV 160 kWp battono gas/tradizionale: risparmio 69.848 EUR/anno, VAN 320.998,35 EUR, TIR 15,23%, payback 6 anni, CO2 evitata 139,20 t/anno, CONVIENTE. Prossima: tab888.
+- Streamlit keepalive 04/11 23:18: browser LIVE — app sveglia, nessuna pagina di sleep (il curl in loop 303 resta non indicativo); visibile il gate d'ingresso normale («SINGULARITY OS», richiesta Key/hardware key), nessuna chiave inserita.
+- **Job QA-dashboard ora giornaliero ~11:49** (ordine 02/11 19:46, cap 1 deploy/giorno).
+- Blocchi: vecchia chiave ENTSO-E nella storia git (da ruotare); app non pubblica — serve suo gesto su share.streamlit.io.
 
 ## 04/11/2026 ~02:00 CET — aggiornamento documentale giornaliero
 - **Nessuna nuova tab il 03/11 — tab887 PENDENTE.** Job QA-dashboard slot 11:49 (run 9477ca8e) fallito subito senza alcun lavoro (nessun report di ciclo, nessun commit; ref fermo a 3ca1d9d5, tab886 Olivicoltura). Recupero lanciato manualmente via cron.run alle 12:10 (run 734ceee8, unico aggiornamento giornaliero previsto dalla regola 1/giorno): a fine giornata 03/11 ancora SENZA esito — resta PENDENTE, non completato, da non dare per fatto.
