@@ -745,14 +745,14 @@ class TestCasiLimite(unittest.TestCase):
 class TestDemoUiKeysRegression(unittest.TestCase):
     def test_ui_chiavi_def_subset_demo(self):
         src = open(_UI_PATH, encoding="utf-8").read()
-        lette = set(re.findall(r'_def888\["([^"]+)"\]', src))
+        lette = set(re.findall(r'_def884\["([^"]+)"\]', src))
         self.assertTrue(lette <= set(mh884_demo().keys()), lette - set(mh884_demo().keys()))
         self.assertEqual(lette, set(mh884_demo().keys()))
 
     def test_ui_chiavi_bc_subset_calcola(self):
         src = open(_UI_PATH, encoding="utf-8").read()
-        lette = set(re.findall(r"_bc888\['([^']+)'\]", src))
-        lette |= set(re.findall(r'_bc888\["([^"]+)"\]', src))
+        lette = set(re.findall(r"_bc884\['([^']+)'\]", src))
+        lette |= set(re.findall(r'_bc884\["([^"]+)"\]', src))
         attese = set(mh884_demo_calcoli().keys())
         self.assertTrue(lette <= attese, lette - attese)
 
@@ -766,7 +766,7 @@ class TestConteggioTitoliPreApply(unittest.TestCase):
         # post apply.
         if os.path.exists(_APP_WD):
             src = open(_APP_WD, encoding="utf-8", errors="ignore").read()
-            self.assertEqual(len(re.findall(r"with tab\d+:", src)), 887)
+            self.assertEqual(len(re.findall(r"with tab\d+:", src)), 888)
         else:
             self.skipTest("nessuna copia di lavoro del repo trovata")
 
@@ -807,16 +807,16 @@ class TestStrutturaUI(unittest.TestCase):
         src = open(_UI_PATH, encoding="utf-8").read()
         self.assertNotIn(_VECCHIO_MH, src)
         self.assertNotIn(_VECCHIO_ST, src)
-        chiavi = re.findall(r'key="(st888_[^"]+)"', src)
-        self.assertTrue(all(k.startswith("st888_") for k in chiavi))
+        chiavi = re.findall(r'key="(st884_[^"]+)"', src)
+        self.assertTrue(all(k.startswith("st884_") for k in chiavi))
         self.assertEqual(len(chiavi), len(set(chiavi)))
-        self.assertIn('key="st888_calcola"', src)
-        self.assertIn('key="st888_csv"', src)
-        self.assertIn('key="st888_csv_flussi"', src)
+        self.assertIn('key="st884_calcola"', src)
+        self.assertIn('key="st884_csv"', src)
+        self.assertIn('key="st884_csv_flussi"', src)
 
     def test_ui_guard_prima_output(self):
         src = open(_UI_PATH, encoding="utf-8").read()
-        self.assertLess(src.index("_deg888"), src.index(".paiac("))
+        self.assertLess(src.index("_deg884"), src.index(".paiac("))
         self.assertLess(src.index("risparmio_eur_anno'] <= 0.0"), src.index(".paiac("))
         self.assertIn("st.stop()", src)
 
