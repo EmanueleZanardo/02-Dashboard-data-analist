@@ -1,4 +1,14 @@
-**Ultimo aggiornamento: 05/11/2026 ~11:49 CET**
+**Ultimo aggiornamento: 06/11/2026 ~02:00 CET**
+
+## 06/11/2026 ~02:00 CET — aggiornamento documentale giornaliero
+- **tab888 «Risaia» pushata il 05/11 — ciclo QA-dashboard 05/11 ~11:49 (unico del giorno, cap 1/giorno).** Commit `1f2ff52` (parent b31756a, base attesa, tree 788 file, VERIFY_OK).
+- Feature tab888: essiccazione risone con pompa di calore + recupero calore + irrigazione efficiente + FV 100 kWp battono essiccatore a gas + irrigazione tradizionale: risparmio 33.972,56 EUR/anno, CAPEX 365.000 EUR, VAN 58.373,18 EUR, TIR 6,82%, payback 11 anni, CO2 evitata 53,45 t/anno, CONVIENTE. 70 nuovi test verdi.
+- Bugfix 1 (derivaz. apply): il letterale `_sub` non era stato bumpato in derivazione → bump `== 887` no-op su 461 test; fix con bump dedicato (461 file, 0 skip).
+- Bugfix 2 (preesistente, emerso con la tab888): tab884 Sericoltura e tab885 Tartuficoltura usavano prefissi worker 888/889 invece di 884/885 → 8 chiavi Streamlit duplicate (DuplicateWidgetID a runtime); rinominati 285 identificatori per blocco, test e UI aggiornati; sweep finale 0 violazioni. Lezioni registrate in AGENTS.md.
+- Verifiche: py_compile OK, pytest nuova tab 70+25, campione post-bump 270+79, test tab884/885/888 200+79, 0 segreti hardcoded. Prossima: tab889.
+- Streamlit keepalive 05/11 23:18: browser LIVE — app sveglia, nessuna pagina di sleep (il curl in loop 303 resta non indicativo); visibile il gate d'ingresso normale («SINGULARITY OS», richiesta Key/hardware key), nessuna chiave inserita.
+- **Job QA-dashboard ora giornaliero ~11:49** (ordine 02/11 19:46, cap 1 deploy/giorno).
+- Blocchi: vecchia chiave ENTSO-E nella storia git (da ruotare); app non pubblica — serve suo gesto su share.streamlit.io.
 
 ## 05/11/2026 ~02:00 CET — aggiornamento documentale giornaliero
 - **tab887 RISOLTA il 04/11 — la pendenza del 03/11 è chiusa.** Ciclo QA-dashboard 04/11 ~11:49 (unico del giorno, cap 1/giorno): la tab887 «Confetteria» authorata il 03/11 (apply locale completo, mai pushato per slot fallito + recupero senza esito) è stata verificata e pushata SENZA authorare una tab nuova.
