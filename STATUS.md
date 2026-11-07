@@ -1,4 +1,13 @@
-**Ultimo aggiornamento: 06/11/2026 ~11:49 CET**
+**Ultimo aggiornamento: 07/11/2026 ~02:00 CET**
+
+## 07/11/2026 ~02:00 CET — aggiornamento documentale giornaliero
+- **tab889 «Cantiere edile» pushata il 06/11 — ciclo QA-dashboard 06/11 ~11:49 (unico del giorno, cap 1/giorno).** Commit `41a6272` (parent 2a65b065, 789 blob, VERIFY_OK indipendente: SHA app.py/STATUS.md/test_w894 = locali).
+- Feature tab889: allaccio rete + batteria + FV + pompa di calore + LED vs diesel: diesel 97.344 EUR/anno vs 37.000 EUR/anno, risparmio 60.344 EUR/anno, VAN 121.258 EUR, TIR 32,58%, payback 3 anni, CONVIENTE.
+- Nota operativa: run1 del push morto con l'interruzione del run worker prima dei blob (nessun checkpoint); run2 rilanciato e completato in ~10 min da zero blob — re-run sicuro, fail-closed sulla base remota.
+- Verifiche: py_compile OK, test nuova tab verdi, 0 segreti hardcoded. Prossima: tab890.
+- Streamlit keepalive 06/11 (05:19, 11:19, 17:18, 23:17): browser LIVE — app sveglia, nessuna pagina di sleep (il curl in loop 303 resta non indicativo); visibile il gate d'ingresso normale («SINGULARITY OS», richiesta Key/hardware key), nessuna chiave inserita.
+- **Job QA-dashboard ora giornaliero ~11:49** (ordine 02/11 19:46, cap 1 deploy/giorno).
+- Blocchi: vecchia chiave ENTSO-E nella storia git (da ruotare); app non pubblica — serve suo gesto su share.streamlit.io.
 
 ## 06/11/2026 ~02:00 CET — aggiornamento documentale giornaliero
 - **tab888 «Risaia» pushata il 05/11 — ciclo QA-dashboard 05/11 ~11:49 (unico del giorno, cap 1/giorno).** Commit `1f2ff52` (parent b31756a, base attesa, tree 788 file, VERIFY_OK).
