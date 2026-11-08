@@ -1,4 +1,12 @@
-**Ultimo aggiornamento: 07/11/2026 ~11:49 CET**
+**Ultimo aggiornamento: 08/11/2026 ~02:00 CET**
+
+## 08/11/2026 ~02:00 CET — aggiornamento documentale giornaliero
+- **tab890 «Discarica» pushata il 07/11 — ciclo QA-dashboard 07/11 ~11:49 (unico del giorno, cap 1/giorno).** Commit `75c06b15` (parent 7930b9f8, job documentale 07/11 ~02:00 mergiato solo su STATUS.md; tree 2ccfaa0f, 790 blob; verifica indipendente via API: blob SHA app.py/STATUS.md/test = locali).
+- Feature tab890: biogas da discarica alimenta cogeneratore e batte la torcia: risparmio 542.282,85 EUR/anno, VAN 3.878.710,54 EUR, TIR 30,41%, payback 4 anni, CO2 evitata 1.928,82 t/anno, CAPEX 1.750.000 EUR, CONVIENTE. Bump registry 889→890.
+- Verifiche: py_compile OK, nuova tab 67 test + 20 subtest verdi, campione post-bump 411 + 107 subtest, sweep _def/_bc 0 violazioni, 0 segreti hardcoded. Push run1 al primo tentativo, 492 blob, ~13,5 min. Nessun bug trovato. Prossima: tab891.
+- Streamlit keepalive 07/11 (05:19, 11:17, 17:17, 23:17): browser LIVE — app sveglia, nessuna pagina di sleep (il curl in loop 303 resta non indicativo); visibile il gate d'ingresso normale («SINGULARITY OS», richiesta Key/hardware key), nessuna chiave inserita.
+- **Job QA-dashboard ora giornaliero ~11:49** (ordine 02/11 19:46, cap 1 deploy/giorno).
+- Blocchi: vecchia chiave ENTSO-E nella storia git (da ruotare); app non pubblica — serve suo gesto su share.streamlit.io.
 
 ## 07/11/2026 ~02:00 CET — aggiornamento documentale giornaliero
 - **tab889 «Cantiere edile» pushata il 06/11 — ciclo QA-dashboard 06/11 ~11:49 (unico del giorno, cap 1/giorno).** Commit `41a6272` (parent 2a65b065, 789 blob, VERIFY_OK indipendente: SHA app.py/STATUS.md/test_w894 = locali).
