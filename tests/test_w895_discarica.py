@@ -774,7 +774,7 @@ class TestConteggioTitoliPreApply(unittest.TestCase):
         # post apply 890.
         if os.path.exists(_APP_WD):
             src = open(_APP_WD, encoding="utf-8", errors="ignore").read()
-            self.assertEqual(len(re.findall(r"with tab\d+:", src)), 891)
+            self.assertEqual(len(re.findall(r"with tab\d+:", src)), 892)
         else:
             self.skipTest("nessuna copia di lavoro del repo trovata")
 
