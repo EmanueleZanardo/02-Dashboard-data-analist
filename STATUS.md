@@ -1,4 +1,12 @@
-**Ultimo aggiornamento: 08/11/2026 ~11:49 CET**
+**Ultimo aggiornamento: 09/11/2026 ~02:00 CET**
+
+## 09/11/2026 ~02:00 CET — aggiornamento documentale giornaliero
+- **tab891 «Teleriscaldamento a biomassa» pushata l'08/11 — ciclo QA-dashboard 08/11 ~11:49 (unico del giorno, cap 1/giorno).** Commit `7cb50a23` (parent c17bef46, job documentale 08/11 ~02:00 mergiato solo su STATUS.md; 300 file, tree 791 blob; verifica indipendente via API: blob SHA app.py/STATUS.md/test = locali).
+- Feature tab891: rete di teleriscaldamento a biomassa (caldaia centrale a cippato + rete + sottostazioni vs caldaie a gas individuali), demo quartiere 40 edifici: risparmio 140.306,32 EUR/anno, VAN 178.526,92 EUR, TIR 6,31%, payback 12 anni, CO2 evitata 611,08 t/anno, CAPEX 1.570.000 EUR, CONVIENTE. Bump registry 890→891.
+- Verifiche: nuova tab 67 test + 13 subtest verdi, campione post-bump 343 + 75 subtest, sweep 0 violazioni _def, 24 chiavi st891 uniche, 0 residui == 890, 0 segreti hardcoded, numeri demo riverificati (diff VAN 8,7e-11). Push run1 killato (SIGTERM) a 472/493 blob, ref intatto; resume run2 da checkpoint OK. Prossima: tab892.
+- Streamlit keepalive 08/11 (05:17, 11:17, 17:17, 23:17): browser LIVE — app sveglia, nessuna pagina di sleep (il curl in loop 303 resta non indicativo); visibile il gate d'ingresso normale («SINGULARITY OS», richiesta Key/hardware key), nessuna chiave inserita.
+- **Job QA-dashboard ora giornaliero ~11:49** (ordine 02/11 19:46, cap 1 deploy/giorno).
+- Blocchi: vecchia chiave ENTSO-E nella storia git (da ruotare); app non pubblica — serve suo gesto su share.streamlit.io.
 
 ## 08/11/2026 ~02:00 CET — aggiornamento documentale giornaliero
 - **tab890 «Discarica» pushata il 07/11 — ciclo QA-dashboard 07/11 ~11:49 (unico del giorno, cap 1/giorno).** Commit `75c06b15` (parent 7930b9f8, job documentale 07/11 ~02:00 mergiato solo su STATUS.md; tree 2ccfaa0f, 790 blob; verifica indipendente via API: blob SHA app.py/STATUS.md/test = locali).
