@@ -1,4 +1,13 @@
-**Ultimo aggiornamento: 09/11/2026 ~11:49 CET**
+**Ultimo aggiornamento: 10/11/2026 ~02:00 CET**
+
+## 10/11/2026 ~02:00 CET — aggiornamento documentale giornaliero
+- **tab892 «Cogenerazione a fuel cell» pushata il 09/11 — ciclo QA-dashboard 09/11 ~11:49 (unico del giorno, cap 1/giorno).** Commit `179a8d9d` (parent ccb61b3f, job documentale 09/11 ~02:00; 494 blob al primo tentativo, VERIFY_OK indipendente via API: 792 blob; SHA locali = remoti per app.py/STATUS.md/test nuovo/test precedente).
+- Feature tab892: SOFC a gas naturale 100 kWe vs caldaia + rete — risparmio 71.838,38 EUR/anno, VAN 295.657,86 EUR, TIR 13,61%, payback 7 anni, CO2 evitata 79,60 t/anno, CAPEX 450.000 EUR, CONVIENTE. Bump registry 891→892.
+- Verifiche: nuova tab 68 test + 13 subtest verdi, tab891 67 + 13, campione post-bump 411 + 107, sweep 0 violazioni _def/_bc, 21 chiavi st892 uniche, 0 residui == 891, 0 segreti hardcoded, py_compile OK.
+- Lezioni in AGENTS.md: step «chiavi» del maker cerca il valore SORGENTE («18 chiavi» in w896_apply.py), non il nuovo (15); print apply un ciclo indietro, corretti a «891 -> 892»; coverage-gate sulla lista titoli di app.py, non su STATUS.md.
+- Streamlit keepalive 09/11 (05:17, 11:17, 17:17, 23:17): browser LIVE — app sveglia, nessuna pagina di sleep (il curl in loop 303 resta non indicativo); visibile il gate d'ingresso normale («SINGULARITY OS», richiesta Key/hardware key), nessuna chiave inserita.
+- **Job QA-dashboard ora giornaliero ~11:49** (ordine 02/11 19:46, cap 1 deploy/giorno). Prossima: tab893.
+- Blocchi: vecchia chiave ENTSO-E nella storia git (da ruotare); app non pubblica — serve suo gesto su share.streamlit.io.
 
 ## 09/11/2026 ~02:00 CET — aggiornamento documentale giornaliero
 - **tab891 «Teleriscaldamento a biomassa» pushata l'08/11 — ciclo QA-dashboard 08/11 ~11:49 (unico del giorno, cap 1/giorno).** Commit `7cb50a23` (parent c17bef46, job documentale 08/11 ~02:00 mergiato solo su STATUS.md; 300 file, tree 791 blob; verifica indipendente via API: blob SHA app.py/STATUS.md/test = locali).
