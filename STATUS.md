@@ -1,4 +1,13 @@
-**Ultimo aggiornamento: 10/11/2026 ~11:49 CET**
+**Ultimo aggiornamento: 11/11/2026 ~02:00 CET**
+
+## 11/11/2026 ~02:00 CET — aggiornamento documentale giornaliero
+- **tab893 «🏠 NZEB: l'edificio a energia quasi zero paga?» pushata il 10/11 — ciclo QA-dashboard 10/11 ~11:49 (unico del giorno, cap 1/giorno).** Commit `4e70a7f0` (parent ed4cd86b, job documentale 10/11 ~02:00; 300 file).
+- Feature tab893: retrofit integrato vs caldaia+rete, demo 1.000 m2 — risparmio 16.256,00 EUR/anno, VAN -15.888,84 EUR, TIR 4,34%, payback 16 anni, CO2 evitata 33,95 t/anno, CAPEX 245.000 EUR, EP_nren 188,75→8,19 kWh/m2/anno, FER 87,20%, NZEB RAGGIUNTO, verdetto MARGINALE. Bump registry 892→893.
+- Verifiche: py_compile OK; nuova tab 80 test + 24 subtest; tab892 68+13; campione post-bump 398+108; sweep _def/_bc 0 violazioni; 893 tab; 0 residui == 892; 0 duplicati su 8.732 chiavi st*; 0 segreti hardcoded.
+- Fix derivazione: print apply un ciclo indietro sistemati nel maker (step 8, catena ora allineata); coppia tab 886 tolta dal maker (chain docstring parte da tab887).
+- Streamlit keepalive 10/11 (05:17, 11:17, 17:17, 23:18): browser LIVE — app sveglia, nessuna pagina di sleep (il curl in loop 303 resta non indicativo); visibile il gate d'ingresso normale («SINGULARITY OS», richiesta Key/hardware key), nessuna chiave inserita.
+- **Job QA-dashboard ora giornaliero ~11:49** (ordine 02/11 19:46, cap 1 deploy/giorno). Prossima: tab894.
+- Blocchi: vecchia chiave ENTSO-E nella storia git (da ruotare); app non pubblica — serve suo gesto su share.streamlit.io.
 
 ## 10/11/2026 ~02:00 CET — aggiornamento documentale giornaliero
 - **tab892 «Cogenerazione a fuel cell» pushata il 09/11 — ciclo QA-dashboard 09/11 ~11:49 (unico del giorno, cap 1/giorno).** Commit `179a8d9d` (parent ccb61b3f, job documentale 09/11 ~02:00; 494 blob al primo tentativo, VERIFY_OK indipendente via API: 792 blob; SHA locali = remoti per app.py/STATUS.md/test nuovo/test precedente).
