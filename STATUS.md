@@ -1,4 +1,13 @@
-**Ultimo aggiornamento: 11/11/2026 ~11:49 CET**
+**Ultimo aggiornamento: 12/11/2026 ~02:00 CET**
+
+## 12/11/2026 ~02:00 CET — aggiornamento documentale giornaliero
+- **tab894 «☀️📉 Cannibalizzazione FV: il prezzo catturato crolla con la penetrazione solare?» pushata l'11/11 — ciclo QA-dashboard 11/11 ~11:49 (unico del giorno, cap 1/giorno).** Commit `545a997a` (parent ab0152f8, job documentale 11/11 ~02:00 mergiato solo su STATUS.md; 496 blob, tree 794).
+- Feature tab894: 10 MWp, LCOE 68,34 EUR/MWh, pi* 16,04% — VAN pi 0,10 +1.206.869,29 EUR (CONVIENTE), pi 0,30 -2.788.764,00 EUR (NON_CONVIENTE); mitigazioni a pi 0,30: batteria -4.045.643,45 EUR, PPA fisso 75 EUR/MWh +984.889,66 EUR (CONVIENTE), est-ovest -2.700.860,06 EUR. Bump registry 893→894.
+- Verifiche: py_compile OK; nuova tab 83 test + 87 subtest; tab893 80 + 24 (totale 163 + 111); campione post-bump 398 + 108; sweep _def/_bc 0 violazioni; 894 tab; 0 residui == 893; 0 duplicati su 8.756 chiavi st*; 0 segreti hardcoded.
+- Lezione derivazione in AGENTS.md: step 8 FIX PRINT del maker ora solo verifica di allineamento (catena allineata dalla tab893).
+- Streamlit keepalive 11/11 (05:17, 11:17, 17:17, 23:18): browser LIVE 4/4 — app sveglia, nessuna pagina di sleep (il curl in loop 303 resta non indicativo); visibile il gate d'ingresso normale («SINGULARITY OS», richiesta Key/hardware key), nessuna chiave inserita.
+- **Job QA-dashboard ora giornaliero ~11:49** (ordine 02/11 19:46, cap 1 deploy/giorno). Prossima: tab895.
+- Blocchi: vecchia chiave ENTSO-E nella storia git (da ruotare); app non pubblica — serve suo gesto su share.streamlit.io.
 
 ## 11/11/2026 ~02:00 CET — aggiornamento documentale giornaliero
 - **tab893 «🏠 NZEB: l'edificio a energia quasi zero paga?» pushata il 10/11 — ciclo QA-dashboard 10/11 ~11:49 (unico del giorno, cap 1/giorno).** Commit `4e70a7f0` (parent ed4cd86b, job documentale 10/11 ~02:00; 300 file).
