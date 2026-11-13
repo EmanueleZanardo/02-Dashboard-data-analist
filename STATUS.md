@@ -1,4 +1,12 @@
-**Ultimo aggiornamento: 12/11/2026 ~11:49 CET**
+**Ultimo aggiornamento: 13/11/2026 ~02:00 CET**
+
+## 13/11/2026 ~02:00 CET — aggiornamento documentale giornaliero
+- **tab895 «⛏️💰 Bitcoin mining: il miner come carico flessibile» pushata il 12/11 — ciclo QA-dashboard 12/11 ~11:49 (unico del giorno, cap 1/giorno).** Commit `c295a3a2` (parent 784d998b, job documentale 12/11 ~02:00 mergiato solo su STATUS.md; 497 blob, tree e9f30580).
+- Feature tab895: flotta 100 miner 200 TH/s, P 400 kW, ricavo 401.500 EUR/anno, margine 154.460 EUR/anno, CAPEX 300.000 EUR, VAN +368.730,97 EUR, TIR 42,82%, payback 2 anni, CONVIENTE; scenari hashprice x0,7 NON_CONVIENTE / x1,3 VAN +890.216,43 EUR; delta ore eccesso +104.420 EUR/anno.
+- Verifiche: nuova tab 82 test + 58 subtest; tab894 83 + 87; campione post-bump 398 + 108; sweep chiavi 0 violazioni; 895 tab; 0 residui == 894; 0 segreti hardcoded. Coverage-gate (894 titoli): miner/ASIC/hashrate/crypto = 0 tab. Scartati: metanazione (tab622), VPPA (CfD tab585 vicina), UVAM/MSD, market coupling, GNL rigassificazione (tab287), intraday.
+- Streamlit keepalive 12/11 (05:18, 11:18, 17:18, 23:18): browser LIVE 4/4 — app sveglia, nessuna pagina di sleep (il curl in loop 303 resta non indicativo); prima schermata ora gate «SINGULARITY OS — Identificazione Biometrica / Hardware Key Richiesta» (campo Key + «Decripta Terminale»), nessuna chiave inserita — il keep-alive verifica che l'app risponda, non più il contenuto della dashboard.
+- **Job QA-dashboard ora giornaliero ~11:49** (ordine 02/11 19:46, cap 1 deploy/giorno). Prossima: tab896.
+- Blocchi: vecchia chiave ENTSO-E nella storia git (da ruotare); app non pubblica — serve suo gesto su share.streamlit.io.
 
 ## 12/11/2026 ~02:00 CET — aggiornamento documentale giornaliero
 - **tab894 «☀️📉 Cannibalizzazione FV: il prezzo catturato crolla con la penetrazione solare?» pushata l'11/11 — ciclo QA-dashboard 11/11 ~11:49 (unico del giorno, cap 1/giorno).** Commit `545a997a` (parent ab0152f8, job documentale 11/11 ~02:00 mergiato solo su STATUS.md; 496 blob, tree 794).
