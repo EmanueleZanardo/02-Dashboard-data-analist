@@ -1,4 +1,12 @@
-**Ultimo aggiornamento: 13/11/2026 ~11:49 CET**
+**Ultimo aggiornamento: 14/11/2026 ~02:00 CET**
+
+## 14/11/2026 ~02:00 CET — aggiornamento documentale giornaliero
+- **tab896 «☀️🔋 Ibrido FV + accumulo co-locato: un solo allaccio, due ricavi» pushata il 13/11 — ciclo QA-dashboard 13/11 ~11:49 (unico del giorno, cap 1/giorno).** Commit `54234488` (parent `096070f1`, job documentale 13/11 ~02:00 mergiato solo su STATUS.md; 498 blob, tree `7a14318c`).
+- Feature tab896: FV 5 MWp + batteria 2 MW/4 MWh: VAN -375.692,63 EUR, TIR -1,26%, payback nessuno, NON_CONVIENTE; breakeven batteria 156,08 EUR/kWh, breakeven picco 161,93 EUR/MWh; scenari spread alto e batteria economica CONVIENTI, curtailment alto MARGINALE. Coverage-gate: co-locato 0 tab in tutto il repo.
+- Verifiche: nuova tab 85 test + 96 subtest; tab895 82 + 58; campione post-bump 398 + 108; sweep chiavi 0 violazioni; 896 tab; 0 segreti hardcoded. Repo rinominato su GitHub in `02-Dashboard-data-analist` (redirect automatico; push via endpoint normalizzato /repositories/1308136898).
+- Streamlit keepalive 13/11 (05:17, 11:17, 17:17, 23:17): browser LIVE 4/4 — app sveglia, nessuna pagina di sleep (il curl in loop 303 resta non indicativo); prima schermata ora gate «SINGULARITY OS — Identificazione Biometrica / Hardware Key Richiesta» (campo Key + «Decripta Terminale»), nessuna chiave inserita — il keep-alive verifica che l'app risponda, non più il contenuto della dashboard.
+- **Job QA-dashboard ora giornaliero ~11:49** (ordine 02/11 19:46, cap 1 deploy/giorno). Prossima: tab897.
+- Blocchi: vecchia chiave ENTSO-E nella storia git (da ruotare); app non pubblica — serve suo gesto su share.streamlit.io.
 
 ## 13/11/2026 ~02:00 CET — aggiornamento documentale giornaliero
 - **tab895 «⛏️💰 Bitcoin mining: il miner come carico flessibile» pushata il 12/11 — ciclo QA-dashboard 12/11 ~11:49 (unico del giorno, cap 1/giorno).** Commit `c295a3a2` (parent 784d998b, job documentale 12/11 ~02:00 mergiato solo su STATUS.md; 497 blob, tree e9f30580).
