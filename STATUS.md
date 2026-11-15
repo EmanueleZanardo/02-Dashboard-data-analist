@@ -1,4 +1,12 @@
-**Ultimo aggiornamento: 14/11/2026 ~11:49 CET**
+**Ultimo aggiornamento: 15/11/2026 ~02:00 CET**
+
+## 15/11/2026 ~02:00 CET — aggiornamento documentale giornaliero
+- **tab897 «🔋📉 Degradazione batteria: l'accumulo invecchia — augmentation o sostituzione?» pushata il 14/11 — ciclo QA-dashboard 14/11 ~11:49 (unico del giorno, cap 1/giorno).** Commit `416c06f6` (parent `f0f4cc3c`, job documentale 14/11 ~02:00 mergiato solo su STATUS.md; 499 blob, tree `d257b761`).
+- Feature tab897: batteria 4 MWh, degrado 0,0275/anno, SOH(10) 0,725, fine vita base anno 11, augmentation anno 5 (ΔE 0,44 MWh, CAPEX 110.000 EUR): VAN delta -46.185,62 EUR, TIR -10,00%, payback nessuno, NON_CONVIENTE; breakeven CAPEX augmentation 116,03 EUR/kWh; scenari: degrado alto ed economica NON_CONVIENTI, spread alto (180 EUR/MWh) CONVIENTE (VAN +76.280,96 EUR, payback 11).
+- Verifiche: nuova tab 86 test + 132 subtest; tab896 85 + 96; campione post-bump 398 + 108; sweep chiavi 0 violazioni; 897 tab; 0 residui == 896; 0 segreti hardcoded. Ricalcolo indipendente worker: tutti i 29 scalari e i 4 scenari coincidenti. Bug fixati in authoring: mh897_eol (proxy E_ch==0 → SOH fine < soglia); payback ridefinito ≥ T_aug; E_dis totale sostituzione 15.053,51 → 15.053,50 in prosa. Maker w901_make_makers.py trovato rotto (NameError riga 190, _old_restore usato prima di essere definito) — fixato in w902_make_makers.py, lezione in AGENTS.md.
+- Streamlit keepalive 14/11 (05:17, 11:17, 17:17, 23:17): browser LIVE 4/4 — app sveglia, nessuna pagina di sleep (il curl in loop 303 resta non indicativo); prima schermata ora gate «SINGULARITY OS — Identificazione Biometrica / Hardware Key Richiesta» (campo Key + «Decripta Terminale»), nessuna chiave inserita — il keep-alive verifica che l'app risponda, non più il contenuto della dashboard.
+- **Job QA-dashboard ora giornaliero ~11:49** (ordine 02/11 19:46, cap 1 deploy/giorno). Prossima: tab898.
+- Blocchi: vecchia chiave ENTSO-E nella storia git (da ruotare); app non pubblica — serve suo gesto su share.streamlit.io.
 
 ## 14/11/2026 ~02:00 CET — aggiornamento documentale giornaliero
 - **tab896 «☀️🔋 Ibrido FV + accumulo co-locato: un solo allaccio, due ricavi» pushata il 13/11 — ciclo QA-dashboard 13/11 ~11:49 (unico del giorno, cap 1/giorno).** Commit `54234488` (parent `096070f1`, job documentale 13/11 ~02:00 mergiato solo su STATUS.md; 498 blob, tree `7a14318c`).
