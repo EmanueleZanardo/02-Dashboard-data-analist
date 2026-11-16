@@ -1,4 +1,12 @@
-**Ultimo aggiornamento: 15/11/2026 ~11:49 CET**
+**Ultimo aggiornamento: 16/11/2026 ~02:00 CET**
+
+## 16/11/2026 ~02:00 CET — aggiornamento documentale giornaliero
+- **tab898 «🌍📜 EU ETS: le quote CO2 dell'impianto — comprare, coprirsi o abbattere?» pushata il 15/11 — ciclo QA-dashboard 15/11 ~11:49 (unico del giorno, cap 1/giorno).** Commit `587ce27b` (parent `74b37ce8`, job documentale 15/11 ~02:00 mergiato solo su STATUS.md; 500 blob, tree `475934ef`).
+- Business case tab898: CCGT 50 MW, E0 100.000 tCO2/anno, allocazione gratuita 40.000 t in calo 5%/anno, EUA 85 EUR/t +3%/anno, abbattimento 30%, CAPEX 12.000.000 EUR: VAN 7.989.849,71 EUR, TIR 16,40%, payback 5 anni, CONVIENTE; breakeven p0 54,55 EUR/t; scenari: EUA alto CONVIENTE, EUA basso MARGINALE (VAN -1.195.126,25), abbattimento 50% e crescita 0% CONVIENTI.
+- Verifiche: nuova tab 85 test + 131 subtest; tab897 86 + 132; campione post-bump 398 + 108; sweep chiavi 0 violazioni; 898 tab; 0 segreti hardcoded. Ricalcolo indipendente worker: 27 scalari + 13 valori scenario coincidenti.
+- Streamlit keepalive 15/11 (05:17, 11:18, 17:17, 23:17): browser LIVE 4/4 — app sveglia, nessuna pagina di sleep (il curl in loop 303 resta non indicativo); schermata gate «SINGULARITY OS — Identificazione Biometrica / Hardware Key Richiesta» (campo Key + «Decripta Terminale»), nessuna chiave inserita — il keep-alive verifica che l'app risponda, non più il contenuto della dashboard.
+- **Job QA-dashboard ora giornaliero ~11:49** (ordine 02/11 19:46, cap 1 deploy/giorno). Prossima: tab899.
+- Blocchi: vecchia chiave ENTSO-E nella storia git (da ruotare); app non pubblica — serve suo gesto su share.streamlit.io.
 
 ## 15/11/2026 ~02:00 CET — aggiornamento documentale giornaliero
 - **tab897 «🔋📉 Degradazione batteria: l'accumulo invecchia — augmentation o sostituzione?» pushata il 14/11 — ciclo QA-dashboard 14/11 ~11:49 (unico del giorno, cap 1/giorno).** Commit `416c06f6` (parent `f0f4cc3c`, job documentale 14/11 ~02:00 mergiato solo su STATUS.md; 499 blob, tree `d257b761`).
