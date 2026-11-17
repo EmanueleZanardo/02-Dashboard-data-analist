@@ -1,4 +1,13 @@
-**Ultimo aggiornamento: 16/11/2026 ~11:49 CET**
+**Ultimo aggiornamento: 17/11/2026 ~02:00 CET**
+
+## 17/11/2026 ~02:00 CET — aggiornamento documentale giornaliero
+- **tab899 «♨️🏛️ Conto Termico: l'incentivo GSE sul calore rinnovabile paga davvero?» pushata il 16/11 — ciclo QA-dashboard 16/11 ~11:49 (unico del giorno, cap 1/giorno).** Commit `6eab6d1` (parent `002799ed`, job documentale 16/11 ~02:00).
+- Business case tab899: VAN 4.881,21 EUR, TIR 12,82%, payback 6 anni, CONVIENTE; risparmio 1.100 EUR/anno, rata incentivo 800 EUR/anno; CO2 evitata 3,10 t/anno.
+- Verifiche: 77 test nuovi verdi; regression sample 300 verdi; ricalcolo indipendente COMPUTE_BAD 0; sweep chiavi demo/UI su 364 tab: 0 mismatch (regex sweep va case-insensitive — 26 falsi positivi con `[a-z_0-9]` per chiavi con maiuscole).
+- Incidente: apply fermato allo step STATUS.md per `w904_STATUS_remoto.md` mancante; ripresa manuale con fetch blob remoto via git-data API (contents API vuota sopra 1 MB). Lezione: scaricare la base STATUS remota PRIMA dell'apply.
+- Streamlit keepalive 16/11 (05:17, 11:17, 17:17, 23:19): browser LIVE 4/4 — app sveglia, nessuna pagina di sleep (il curl in loop 303 resta non indicativo); schermata gate «SINGULARITY OS — Identificazione Biometrica / Hardware Key Richiesta» (campo Key + «Decripta Terminale»), nessuna chiave inserita — il keep-alive verifica che l'app risponda, non più il contenuto della dashboard.
+- **Job QA-dashboard ora giornaliero ~11:49** (ordine 02/11 19:46, cap 1 deploy/giorno). Prossima: tab900.
+- Blocchi: vecchia chiave ENTSO-E nella storia git (da ruotare); app non pubblica — serve suo gesto su share.streamlit.io.
 
 ## 16/11/2026 ~02:00 CET — aggiornamento documentale giornaliero
 - **tab898 «🌍📜 EU ETS: le quote CO2 dell'impianto — comprare, coprirsi o abbattere?» pushata il 15/11 — ciclo QA-dashboard 15/11 ~11:49 (unico del giorno, cap 1/giorno).** Commit `587ce27b` (parent `74b37ce8`, job documentale 15/11 ~02:00 mergiato solo su STATUS.md; 500 blob, tree `475934ef`).
