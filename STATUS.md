@@ -1,4 +1,11 @@
-**Ultimo aggiornamento: 17/11/2026 ~02:00 CET**
+**Ultimo aggiornamento: 18/11/2026 ~02:00 CET**
+
+## 18/11/2026 ~02:00 CET — aggiornamento documentale giornaliero
+- **⚠️ tab900 «🤝🌐 VPPA (Virtual PPA): il prezzo fisso rinnovabile senza ritirare l'energia paga?» AUTORATA il 17/11 (ciclo QA-dashboard ~11:49) MA PUSH INTERROTTO, NON SU main:** il log `w905_push.log` termina dopo 1 solo blob caricato (STATUS.md, 1.209.020 byte) alle 12:19 CET, senza commit né VERIFY_OK; checkpoint `w905_blobs_checkpoint.json` con 1 blob. **Head main verificato 18/11 ~02:00: fermo a `dadb59d` (push doc di questo job, 17/11 01:09) — tab900 NON pushata.** Resume spettante al ciclo QA-dashboard 11:49 di oggi (checkpoint presente, ripresa da blob mancanti).
+- Business case tab900 (da `w905_push_tab900.py`, non ancora live): VAN 1.564.607,71 EUR, TIR 93,87%, payback 2 anni, CONVIENTE; risparmio 240.000,00 EUR/anno, settlement 240.000,00 EUR/anno, costo merchant 1.800.000,00 EUR/anno, costo con VPPA 1.560.000,00 EUR/anno, prezzo medio 78,00 EUR/MWh, prezzo coperto 70,00 EUR/MWh; breakeven prezzo mercato 65,42 EUR/MWh, breakeven basis 25,00 EUR/MWh; CO2 evitata 3.000,00 t/anno (30.000,00 t/vita). Scenari: mercato +20% VAN 3.139.841,63 EUR CONVIENTE, mercato −20% VAN −10.626,22 EUR MARGINALE, produzione −20% VAN 1.193.964,43 EUR CONVIENTE.
+- Streamlit keepalive 17/11 (05:17, 11:19, 23:17): browser LIVE 3/3 — app sveglia, nessuna pagina di sleep (il curl in loop 303 resta non indicativo); schermata gate «SINGULARITY OS — Identificazione Biometrica / Hardware Key Richiesta» (campo Key + «Decripta Terminale»), nessuna chiave inserita — il keep-alive verifica che l'app risponda, non più il contenuto della dashboard.
+- **Job QA-dashboard giornaliero ~11:49** (ordine 02/11 19:46, cap 1 deploy/giorno). Prossima: tab901 (dopo resume tab900).
+- Blocchi: vecchia chiave ENTSO-E nella storia git (da ruotare); app non pubblica — serve suo gesto su share.streamlit.io.
 
 ## 17/11/2026 ~02:00 CET — aggiornamento documentale giornaliero
 - **tab899 «♨️🏛️ Conto Termico: l'incentivo GSE sul calore rinnovabile paga davvero?» pushata il 16/11 — ciclo QA-dashboard 16/11 ~11:49 (unico del giorno, cap 1/giorno).** Commit `6eab6d1` (parent `002799ed`, job documentale 16/11 ~02:00).
