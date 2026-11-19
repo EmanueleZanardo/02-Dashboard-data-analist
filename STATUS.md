@@ -1,4 +1,12 @@
-**Ultimo aggiornamento: 18/11/2026 ~11:49 CET**
+**Ultimo aggiornamento: 19/11/2026 ~02:00 CET**
+
+## 19/11/2026 ~02:00 CET — aggiornamento documentale giornaliero
+- **✅ tab900 VPPA + tab901 PPA fisico PUSHATE il 18/11 (ciclo QA-dashboard ~11:49) — PENDENZA DEL 17/11 CHIUSA:** tab900 resume commit `add89afe` (parent `c43612f5` docs 18/11 ~02:00 di questo job), VERIFY_OK, 501 blob — il push 17/11 era morto dopo 1 blob (checkpoint resume); interruzione HTTP 502 GitHub a 217/501 → re-run da checkpoint. tab901 commit `22d515f7` (parent `add89afe`), VERIFY_OK, 503 blob. **Head main ora `22d515f7`.**
+- Business case tab901 «⚡🤝 PPA fisico» (demo verificata da compute indipendente, COMPUTE_BAD: 0): costo con PPA 1.529.000, merchant 1.800.000, risparmio **271.000 EUR/anno**, prezzo medio 76,45 EUR/MWh, prezzo coperto 65,75 EUR/MWh; **VAN 1.842.590,17 EUR, TIR 108,33%, payback 1 anno, CONVIENTE**; breakeven prezzo PPA 87,58 EUR/MWh; CO2 evitata 3.000 t/anno. Scenari tutti CONVIENTE (mercato +20% VAN 3.487.319,71; mercato −20% VAN 197.860,63 PB 5; matching 0,60 VAN 1.731.397,18; PPA +10% VAN 1.240.294,84). Nota lezione: la gestione annua è DENTRO il costo con PPA, il risparmio è già netto (in VPPA era fuori). Caso marginale corretto p_fix 85 (VAN −10.626,22, TIR 4,12%, PB 9).
+- Test tab901: 79 passed + 123 subtest; regression sample 292 passed + 258 subtest; sweep chiavi 0 mismatch; **901 titoli**.
+- Streamlit keepalive 18/11 (05:17, 11:17, 17:17, 23:17): browser LIVE 4/4 — app sveglia, nessuna pagina di sleep (il curl in loop 303 resta non indicativo); schermata gate «SINGULARITY OS — Identificazione Biometrica / Hardware Key Richiesta» (campo Key + «Decripta Terminale»), nessuna chiave inserita — il keep-alive verifica che l'app risponda, non più il contenuto della dashboard.
+- **Job QA-dashboard giornaliero ~11:49** (ordine 02/11 19:46, cap 1 deploy/giorno). Prossima: tab902.
+- Blocchi: vecchia chiave ENTSO-E nella storia git (da ruotare); app non pubblica — serve suo gesto su share.streamlit.io.
 
 ## 18/11/2026 ~02:00 CET — aggiornamento documentale giornaliero
 - **⚠️ tab900 «🤝🌐 VPPA (Virtual PPA): il prezzo fisso rinnovabile senza ritirare l'energia paga?» AUTORATA il 17/11 (ciclo QA-dashboard ~11:49) MA PUSH INTERROTTO, NON SU main:** il log `w905_push.log` termina dopo 1 solo blob caricato (STATUS.md, 1.209.020 byte) alle 12:19 CET, senza commit né VERIFY_OK; checkpoint `w905_blobs_checkpoint.json` con 1 blob. **Head main verificato 18/11 ~02:00: fermo a `dadb59d` (push doc di questo job, 17/11 01:09) — tab900 NON pushata.** Resume spettante al ciclo QA-dashboard 11:49 di oggi (checkpoint presente, ripresa da blob mancanti).
