@@ -1,4 +1,12 @@
-**Ultimo aggiornamento: 19/11/2026 ~11:49 CET**
+**Ultimo aggiornamento: 20/11/2026 ~02:00 CET**
+
+## 20/11/2026 ~02:00 CET — aggiornamento documentale giornaliero
+- **✅ tab902 CCfD PUSHATA il 19/11 (ciclo QA-dashboard ~11:49) — commit `d7147e6`** (parent `8a99a00b`, docs 19/11 ~02:00 di questo job), VERIFY_OK. **Head main ora `d7147e6`.**
+- Business case tab902 «📜💶 CCfD (Carbon Contract for Difference): il prezzo CO2 garantito sblocca la decarbonizzazione industriale?» (demo cementificio, verificata da compute indipendente, COMPUTE_BAD: 0): VAN con CCfD **144.427.005,45 EUR (TIR 12,66%, payback 7, CONVIENTE)** vs VAN senza −888.207,08 EUR (TIR 4,95%, payback 11, MARGINALE); breakeven strike 85,21 EUR/t; derisking 145.315.212,53 EUR. Payout two-way (strike − ETS) × CO2 abbattuta, 4 scenari.
+- Test tab902: 79 nuova tab (153 subtest) + 233 in repo (tab902/901/900) + 138 registry-tail; sweep chiavi demo/UI 367 demo, 0 mismatch; **902 titoli**; py_compile OK; nessun segreto nuovo.
+- Streamlit keepalive 19/11 (05:17, 11:17, 17:18, 23:17): browser LIVE 4/4 — app sveglia, nessuna pagina di sleep (il curl in loop 303 resta non indicativo); schermata gate «SINGULARITY OS — Identificazione Biometrica / Hardware Key Richiesta» (campo Key + «Decripta Terminale»), nessuna chiave inserita — il keep-alive verifica che l'app risponda, non più il contenuto della dashboard.
+- **Job QA-dashboard giornaliero ~11:49** (ordine 02/11 19:46, cap 1 deploy/giorno). Prossima: tab903.
+- Blocchi: vecchia chiave ENTSO-E nella storia git (da ruotare); app non pubblica — serve suo gesto su share.streamlit.io.
 
 ## 19/11/2026 ~02:00 CET — aggiornamento documentale giornaliero
 - **✅ tab900 VPPA + tab901 PPA fisico PUSHATE il 18/11 (ciclo QA-dashboard ~11:49) — PENDENZA DEL 17/11 CHIUSA:** tab900 resume commit `add89afe` (parent `c43612f5` docs 18/11 ~02:00 di questo job), VERIFY_OK, 501 blob — il push 17/11 era morto dopo 1 blob (checkpoint resume); interruzione HTTP 502 GitHub a 217/501 → re-run da checkpoint. tab901 commit `22d515f7` (parent `add89afe`), VERIFY_OK, 503 blob. **Head main ora `22d515f7`.**
