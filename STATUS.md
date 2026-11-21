@@ -1,4 +1,12 @@
-**Ultimo aggiornamento: 20/11/2026 ~11:49 CET**
+**Ultimo aggiornamento: 21/11/2026 ~02:00 CET**
+
+## 21/11/2026 ~02:00 CET — aggiornamento documentale giornaliero
+- **✅ tab903 MI PUSHATA il 20/11 (ciclo QA-dashboard ~11:49) — commit `7f32f96`** (parent `f88d3db4`, docs 20/11 ~02:00 di questo job), VERIFY_OK. **Head main ora `7f32f96`.**
+- Business case tab903 «⏱️⚡ Mercato infragiornaliero (MI): l'arbitraggio intraday con batteria paga?» (demo verificata da compute indipendente, COMPUTE_BAD: 0): VAN **−2.136.221,68 EUR (TIR −1,23%, payback nessuno, NON_CONVIENTE)**; margine netto 460.860 EUR/anno; breakeven spread 87,98 EUR/MWh, breakeven cicli 2,88/giorno. Scenari: spread +30% MARGINALE, spread −30% NON_CONVIENTE, cicli 3/giorno CONVIENTE (+298.698,11), eta 0,80 NON_CONVIENTE.
+- Test tab903: 79 nuova tab (132 subtest) + 312 in repo (tab903/902/901/900, 543 subtest) + 138 registry-tail; sweep chiavi demo/UI 368 demo, 0 mismatch; **903 titoli**; py_compile OK; nessun segreto nuovo. Push interrotto (SIGTERM) a 138 blob, ripreso da checkpoint senza danni, VERIFY_OK.
+- Streamlit keepalive 20/11 (05:17, 11:17, 17:18, 23:17): browser LIVE 4/4 — app sveglia, nessuna pagina di sleep (il curl in loop 303 resta non indicativo); schermata gate «SINGULARITY OS — Identificazione Biometrica / Hardware Key Richiesta» (campo Key + «Decripta Terminale»), nessuna chiave inserita — il keep-alive verifica che l'app risponda, non più il contenuto della dashboard.
+- **Job QA-dashboard giornaliero ~11:49** (ordine 02/11 19:46, cap 1 deploy/giorno). Prossima: tab904.
+- Blocchi: vecchia chiave ENTSO-E nella storia git (da ruotare); app non pubblica — serve suo gesto su share.streamlit.io.
 
 ## 20/11/2026 ~02:00 CET — aggiornamento documentale giornaliero
 - **✅ tab902 CCfD PUSHATA il 19/11 (ciclo QA-dashboard ~11:49) — commit `d7147e6`** (parent `8a99a00b`, docs 19/11 ~02:00 di questo job), VERIFY_OK. **Head main ora `d7147e6`.**
