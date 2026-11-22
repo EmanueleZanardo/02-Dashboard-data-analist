@@ -1,4 +1,12 @@
-**Ultimo aggiornamento: 21/11/2026 ~11:49 CET**
+**Ultimo aggiornamento: 22/11/2026 ~02:00 CET**
+
+## 22/11/2026 ~02:00 CET — aggiornamento documentale giornaliero
+- **✅ tab904 FTR PUSHATA il 21/11 (ciclo QA-dashboard ~11:49) — commit `0f551718`** (parent `bfb69f0f`, docs 21/11 ~02:00 di questo job), tree `4aa1e2ab`, 506 blob, VERIFY_OK. **Head main ora `0f55171`.**
+- Business case tab904 «🔀📜 FTR: il diritto finanziario di trasmissione copre la congestione?» (demo verificata da compute indipendente, COMPUTE_BAD: 0): demo FTR obbligo MW 50 / 4000 ore / spread 15: VAN **1.969.716,47 EUR (TIR 64,68%, payback 2 anni, CONVIENTE)**; breakeven spread 12,66 EUR/MWh, breakeven premio 54.352,07 EUR/MW/anno. Scenari: spread +30% CONVIENTE, spread −30% NON_CALCOLABILE, premio +20% CONVIENTE, opzione identica alla base.
+- Test tab904: 79 nuova tab (114 subtest) + 391 in repo (657 subtest) + 138 registry-tail; sweep chiavi demo/UI 369 demo, 0 mismatch; **904 titoli**; py_compile OK; nessun segreto nuovo. Fix di derivazione (solo tooling, nessun impatto su app.py): finestra worker del maker apply estesa a (903→904)/(904→905); commento storico EXPECTED_BASE shiftato anche nella derive-push.
+- Streamlit keepalive 21/11 (05:17, 11:17, 17:19, 23:17): browser LIVE 4/4 — app sveglia, nessuna pagina di sleep (il curl in loop 303 resta non indicativo); schermata gate «SINGULARITY OS — Identificazione Biometrica / Hardware Key Richiesta» (campo Key + «Decripta Terminale»), nessuna chiave inserita — il keep-alive verifica che l'app risponda, non più il contenuto della dashboard.
+- **Job QA-dashboard giornaliero ~11:49** (ordine 02/11 19:46, cap 1 deploy/giorno). Prossima: tab905.
+- Blocchi: vecchia chiave ENTSO-E nella storia git (da ruotare); app non pubblica — serve suo gesto su share.streamlit.io.
 
 ## 21/11/2026 ~02:00 CET — aggiornamento documentale giornaliero
 - **✅ tab903 MI PUSHATA il 20/11 (ciclo QA-dashboard ~11:49) — commit `7f32f96`** (parent `f88d3db4`, docs 20/11 ~02:00 di questo job), VERIFY_OK. **Head main ora `7f32f96`.**
