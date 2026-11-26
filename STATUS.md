@@ -1,4 +1,28 @@
-**Ultimo aggiornamento: 25/11/2026 ~02:00 CET**
+**Ultimo aggiornamento: 26/11/2026 ~02:00 CET**
+
+## 26/11/2026 ~02:00 CET — aggiornamento documentale giornaliero
+- **NESSUN ciclo QA-dashboard il 25/11 (run ~11:49 saltato per esaurimento token Muse — usage 100%, reset 26/11 00:42 CET):** nessun report qa-cycle-2026-11-25*, nessuna nuova tab. Ultima tab resta la **907 UVAM** (pushata 24/11, commit `96a0cf11`: margine 103.300 EUR/anno, VAN 297.234,94 EUR, TIR 62,85%, CONVIENTE). Head main `d33c8c8` (docs 25/11 ~02:00 di questo job). Prossima: tab908 (in attesa del ciclo 26/11).
+- Streamlit keepalive 25/11: nessun esito registrato (run saltati per token); ultimo verificato 24/11 4/4 LIVE (05:18, 11:17, 17:20, 23:17).
+- La dashboard Streamlit NON è toccata dalla pausa Vercel (app Streamlit Cloud, non Vercel).
+- **Job QA-dashboard giornaliero ~11:49** (ordine 02/11 19:46, cap 1 deploy/giorno).
+- **✅ tab907 UVAM PUSHATA il 24/11 (ciclo QA-dashboard ~11:49) — commit `96a0cf11`** (parent `c80f7504`, docs 24/11 ~02:00 di questo job, tree `09e1a775`). **Head main ora `96a0cf1`.**
+- Business case tab907 «⚡🏛️ UVAM sul MSD di Terna» — margine 103.300 EUR/anno, VAN 297.234,94 EUR, TIR 62,85%, payback 2 anni, CONVIENTE; BE prezzo disp 8.252,63 EUR/MW/anno. Scenari tutti CONVIENTE (disp +30% VAN 482.320,07; disp −30% VAN 112.149,81; attivazioni −50% VAN 208.913,62; durata 3 anni VAN 131.311,52).
+- Test tab907: compute COMPUTE_BAD 0; nuova tab 86 passed; pytest 769 passed, 1173 subtests (tab912→tab905 + registry-tail); py_compile OK; sweep chiavi demo/UI 372 demo, 0 mismatch; **907 titoli**; 0 segreti nuovi.
+- Push interrotto a 87/509 blob (SIGTERM), ripreso da checkpoint e VERIFY_OK (509 blob, 0 cancellazioni). Correzione VAN demo: 297.235,14 atteso nel brief era errato di 0,20 EUR; valore corretto 297.234,94 applicato ovunque.
+- Streamlit keepalive 24/11 (05:18, 11:17, 17:20, 23:17): browser LIVE 4/4 — app sveglia, nessuna pagina di sleep; schermata gate «SINGULARITY OS — Identificazione Biometrica / Hardware Key Richiesta» (campo Key + «Decripta Terminale»), nessuna chiave inserita — il keep-alive verifica che l'app risponda, non più il contenuto della dashboard.
+- **Job QA-dashboard giornaliero ~11:49** (ordine 02/11 19:46, cap 1 deploy/giorno). Prossima: tab908.
+- **✅ tab906 TEE PUSHATA il 23/11 (ciclo QA-dashboard ~11:49) — commit `67ac63c9`** (parent `8b51be7c`, docs 23/11 ~02:00 di questo job). **Head main ora `67ac63c`.**
+- Business case tab906 «🤍📜 Certificati Bianchi (TEE): il risparmio energetico si vende?» — TEE/anno 200, ricavo 52.000 EUR/anno, margine 44.000, VAN 70.496,97 EUR, TIR 24,32%, payback 3 anni, CONVIENTE; BE prezzo TEE 40 EUR/TEE, BE risparmio 357,85 MWh/anno. Scenari tutti CONVIENTE tranne durata 3 anni (VAN −177,09, MARGINALE).
+- Test tab906: compute COMPUTE_BAD 0; nuova tab 76 passed; in repo 545 passed (tab906→tab900); registry-tail 138 passed; py_compile OK; sweep chiavi demo/UI 371 demo, 0 mismatch; **906 titoli**; 0 segreti nuovi.
+- Push interrotto da restart servizio a 51/508 blob, ripreso da checkpoint e VERIFY_OK (508 blob, 0 cancellazioni). Remoto mosso solo su STATUS.md dal job documentale (merge su base remota).
+- Streamlit keepalive 23/11 (05:19, 11:19, 17:19, 23:17): browser LIVE 4/4 — app sveglia, nessuna pagina di sleep; schermata gate «SINGULARITY OS — Identificazione Biometrica / Hardware Key Richiesta» (campo Key + «Decripta Terminale»), nessuna chiave inserita — il keep-alive verifica che l'app risponda, non più il contenuto della dashboard.
+- **Job QA-dashboard giornaliero ~11:49** (ordine 02/11 19:46, cap 1 deploy/giorno). Prossima: tab907.
+- **✅ tab905 GO PUSHATA il 22/11 (ciclo QA-dashboard ~11:49) — commit `dc3e5f98`** (parent `4c41c061`, docs 22/11 ~02:00 di questo job). **Head main ora `dc3e5f9`.**
+- Business case tab905 «🌱📜 Garanzie di Origine (GO): il certificato rinnovabile paga?» — copertura grigia+GO 900.000 EUR/anno vs bundled 925.000, beneficio netto 50.000 EUR/anno, CONVIENTE; BE GO 9,50, BE verde 89,50 EUR/MWh. Correzione verificata al brief: BE verde 89,50 (non 90,00) — la gestione si annulla nel delta bundled/copertura; corretti anche gli scenari (91,75 / 87,25 / 87,25).
+- Test tab905: compute COMPUTE_BAD 0 (14/14 + 5/5 scenari); 78 test nuova tab; in repo 469 passed / 770 subtests; registry-tail 138 passed; py_compile OK; sweep chiavi demo/UI 370 demo, 0 mismatch; **905 titoli**; 0 segreti nuovi.
+- Streamlit keepalive 22/11 (05:17, 11:17, 17:19, 23:17): browser LIVE 4/4 — app sveglia, nessuna pagina di sleep (il curl in loop 303 resta non indicativo); schermata gate «SINGULARITY OS — Identificazione Biometrica / Hardware Key Richiesta» (campo Key + «Decripta Terminale»), nessuna chiave inserita — il keep-alive verifica che l'app risponda, non più il contenuto della dashboard.
+- **Job QA-dashboard giornaliero ~11:49** (ordine 02/11 19:46, cap 1 deploy/giorno). Prossima: tab906.
+- Blocchi: vecchia chiave ENTSO-E nella storia git (da ruotare); app non pubblica — serve suo gesto su share.streamlit.io.
 
 ## 25/11/2026 ~02:00 CET — aggiornamento documentale giornaliero
 - **✅ tab907 UVAM PUSHATA il 24/11 (ciclo QA-dashboard ~11:49) — commit `96a0cf11`** (parent `c80f7504`, docs 24/11 ~02:00 di questo job, tree `09e1a775`). **Head main ora `96a0cf1`.**
