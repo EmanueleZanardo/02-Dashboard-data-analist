@@ -92449,6 +92449,1569 @@ def demo_calcoli():
     return mh770_calcola(**mh770_demo())
 
 
+# W914 (27/11/2026): tab909 "Comunita
+# Energetica Rinnovabile (CER):
+# l'energia condivisa paga?"
+#
+# Effetto ECONOMICO: una Comunita
+# Energetica Rinnovabile con
+# impianto fotovoltaico produce
+# ogni anno energia elettrica da
+# un impianto in kWp con una
+# produzione specifica in
+# kWh/kWp/anno. Una quota della
+# produzione viene autoconsumata
+# fisicamente dai membri (risparmio
+# in bolletta al prezzo
+# dell'energia evitata); il resto
+# viene immesso in rete. Una quota
+# dell'energia immessa viene
+# condivisa virtualmente tra i
+# membri della comunita e riceve
+# la tariffa premio del GSE in
+# EUR/kWh; l'energia immessa non
+# condivisa viene venduta con il
+# ritiro dedicato al prezzo di
+# ritiro in EUR/kWh. Il ricavo
+# annuo e la somma di risparmio in
+# bolletta, ricavo incentivo e
+# ricavo ritiro. I costi annui
+# sono O&M per kWp piu gestione
+# della comunita: il margine annuo
+# e ricavo meno costi. Il VAN e
+# meno CAPEX piu margine per
+# l'annualita a tasso dato sulla
+# vita utile; la TIR e il tasso che
+# azzera il VAN a CAPEX fissato
+# (bisezione); il payback e il
+# primo anno in cui il cumulato
+# del margine raggiunge il CAPEX.
+# Il breakeven incentivo e
+# l'incentivo in EUR/kWh che
+# azzera il VAN (formula chiusa
+# sotto, espresso anche in
+# EUR/MWh); il breakeven quota e
+# la quota condivisa che azzera il
+# VAN (formula chiusa sotto, da
+# margine lineare nella quota). La
+# CO2 evitata e kWh annui prodotti
+# per fattore CO2 diviso 1000, in
+# t/anno.
+# Insight chiave: con potenza 200
+# kWp e produzione specifica 1.200
+# kWh/kWp/anno il caso demo e
+# MARGINALE con VAN meno
+# 13.607,79; il margine annuo e
+# 21.376 EUR e la TIR e 4,42 per
+# cento, sotto il tasso di
+# attualizzazione del 5 per cento.
+# Con incentivo 0,13 EUR/kWh il
+# VAN sale a 15.105,14 e il
+# verdetto diventa CONVIENTE. Con
+# incentivo 0,08 EUR/kWh il VAN
+# scende a meno 56.677,19 e il
+# verdetto diventa NON_CONVIENTE.
+# Con quota condivisa 0,80 il VAN
+# sale a 748,67 e il verdetto
+# diventa CONVIENTE: la quota
+# condivisa sposta il risultato
+# quasi quanto l'incentivo. Con
+# tasso 8 per cento il VAN scende
+# a meno 70.127,28 e il verdetto
+# diventa NON_CONVIENTE. Con CAPEX
+# 1.000 EUR/kWp (CAPEX 200.000
+# EUR) il VAN sale a 66.392,21 e
+# il verdetto diventa CONVIENTE.
+# Confronto: produzione 240.000
+# kWh contro autoconsumo 48.000
+# kWh, risparmio 10.560 contro
+# energia immessa 192.000 kWh,
+# energia condivisa 115.200 kWh
+# contro ricavo incentivo 12.672,
+# energia resto 76.800 kWh contro
+# ricavo ritiro 6.144, ricavo
+# 29.376 contro costi 8.000,
+# margine 21.376 contro VAN meno
+# 13.607,79, TIR 4,42 per cento
+# contro payback 14 anni,
+# breakeven incentivo 0,1195
+# EUR/kWh contro breakeven quota
+# 78,96 per cento, CO2 60 t/anno.
+# Verdetto principale: MARGINALE.
+# ONESTA VERDETTO: NON_CALCOLABILE
+# se il margine annuo e zero o
+# negativo (la comunita non genera
+# cassa: VAN, TIR e payback non
+# hanno senso economico, la guard
+# UI salta KPI, grafico, tabella e
+# CSV) oppure se un input e degenere
+# (vedi valida); altrimenti
+# CONVIENTE se il VAN e maggiore di
+# 0; MARGINALE se il VAN e minore o
+# uguale a 0 e il suo valore
+# assoluto e minore o uguale a
+# tolleranza per CAPEX (VAN zero
+# compreso: MARGINALE);
+# NON_CONVIENTE altrimenti. La vita
+# zero NON e degenere: da VAN meno
+# CAPEX, TIR None, payback None e
+# verdetto NON_CONVIENTE. La
+# potenza zero NON e degenere: da
+# produzione zero, ricavo zero,
+# margine meno 3.000 e verdetto
+# NON_CALCOLABILE. Il CAPEX zero
+# NON e degenere: da VAN 266.392,21,
+# TIR None, payback 0 e verdetto
+# CONVIENTE. L'incentivo zero NON
+# e degenere: da ricavo incentivo
+# zero, margine 8.704, VAN meno
+# 171.528,92 e verdetto
+# NON_CONVIENTE. La quota
+# condivisa zero NON e degenere: da
+# energia condivisa zero, ricavo
+# ritiro 15.360, VAN meno
+# 56.677,19 e verdetto
+# NON_CONVIENTE. La quota
+# condivisa 1,0 NON e degenere: da
+# energia condivisa 192.000 kWh,
+# ricavo incentivo 21.120, VAN
+# 15.105,14 e verdetto CONVIENTE.
+# Il tasso zero NON e degenere: da
+# VAN 147.520 e verdetto CONVIENTE.
+# La produzione specifica zero NON
+# e degenere: da produzione zero,
+# margine meno 8.000 e verdetto
+# NON_CALCOLABILE. Il prezzo
+# energia evitato zero NON e
+# degenere: da risparmio zero,
+# margine 10.816, VAN meno
+# 145.208,73 e verdetto
+# NON_CONVIENTE. Il prezzo ritiro
+# zero NON e degenere: da ricavo
+# ritiro zero, margine 15.232, VAN
+# meno 90.175,61 e verdetto
+# NON_CONVIENTE.
+# ONESTA TOLLERANZA: la tolleranza
+# e in FRAZIONE (0,10 = 10 per
+# cento del CAPEX), usata DIRETTA
+# nel verdetto, NON divisa per 100.
+# ONESTA FLUSSI: i flussi per VAN,
+# TIR e payback sono meno CAPEX
+# all'anno zero e margine annuo
+# costante per ogni anno di vita
+# utile, SOLO anni di vita utile,
+# SEMPLIFICAZIONE DICHIARATA; nel
+# mondo reale produzione, prezzi e
+# incentivo possono variare, qui si
+# usano i valori medi annui
+# costanti; dopo la fine della vita
+# utile l'impianto puo continuare
+# ma fuori da questo conto.
+# L'energia condivisa e virtuale:
+# non passa per un cavo dedicato,
+# si calcola per fasce orarie
+# dall'energia immessa e dai
+# prelievi dei membri,
+# SEMPLIFICAZIONE DICHIARATA (qui
+# la quota condivisa e un input).
+# ONESTA TIR: la TIR azzera il VAN
+# a CAPEX fissato: VAN(r) uguale
+# meno CAPEX piu margine per
+# annualita(r, vita). La TIR NON
+# dipende dal tasso inserito: con
+# tasso 8 per cento la TIR resta
+# 4,42 per cento, con tasso zero la
+# TIR resta 4,42 per cento.
+# ONESTA BREAKEVEN: il breakeven
+# incentivo e l'incentivo che
+# azzera il VAN: nella demo 0,1195
+# EUR/kWh, pari a 119,48 EUR/MWh
+# (a quell'incentivo il VAN e
+# zero); NON e l'incentivo che
+# azzera il margine (il margine
+# cresce con l'incentivo ma il
+# breakeven misura il VAN). Il
+# breakeven incentivo e INVARIANTE
+# all'incentivo corrente (dipende
+# da CAPEX, risparmio, ricavo
+# ritiro, costi, annualita vita ed
+# energia condivisa, non
+# dall'incentivo inserito). Il
+# breakeven quota e la quota
+# condivisa che azzera il VAN:
+# nella demo 78,96 per cento (a
+# quella quota il VAN e zero). Il
+# breakeven quota e INVARIANTE
+# alla quota corrente (dipende da
+# CAPEX, risparmio, energia
+# immessa, prezzo ritiro, costi,
+# incentivo e annualita vita, non
+# dalla quota inserita). Se il
+# valore del breakeven incentivo e
+# minore di zero, il breakeven
+# incentivo e 0,0: la comunita
+# conviene gia senza incentivo
+# (nella demo con CAPEX 200.000
+# EUR il breakeven incentivo e
+# 0,0638, positivo; con CAPEX zero
+# il breakeven incentivo e 0,0).
+# Se l'energia condivisa e zero,
+# il breakeven incentivo e None.
+# Se il valore del breakeven quota
+# e minore di zero, il breakeven
+# quota e 0,0 (nella demo con
+# CAPEX 200.000 EUR il breakeven
+# quota e 0,0); se il valore e
+# maggiore di 1, il breakeven quota
+# e None (nemmeno con quota 100
+# per cento il VAN diventa
+# positivo: nella demo con tasso 8
+# per cento il breakeven quota e
+# None, con incentivo 0,08 il
+# breakeven quota e None); se
+# incentivo e prezzo ritiro sono
+# uguali, il margine non dipende
+# dalla quota e il breakeven quota
+# e None (nella demo con incentivo
+# 0,08 il margine non dipende dalla
+# quota). Con incentivo zero la
+# quota condivisa non aiuta (il
+# ritiro dedicato 0,08 rende piu
+# del premio 0,00): la formula da
+# una quota negativa e la regola la
+# fissa a 0,0. Se la vita e zero,
+# l'annualita e zero e i due
+# breakeven sono None.
+# ONESTA CO2: la CO2 evitata e
+# kWh annui prodotti per fattore
+# CO2 diviso 1000, in t/anno:
+# 240.000 per 0,25 diviso 1000
+# uguale 60. Il fattore 0,25 e una
+# SEMPLIFICAZIONE DICHIARATA: i
+# kWh prodotti evitano emissioni
+# secondo il mix elettrico reale,
+# ma il fattore vero dipende da
+# fonte, ora e stagione.
+# DISTINZIONE ESPLICITA (questa
+# scheda NON e altro): qui SOLO il
+# MECCANISMO DI CONDIVISIONE
+# VIRTUALE piu TARIFFA PREMIO
+# sull'energia condivisa, NIENTE
+# fisica dell'impianto oltre la
+# produzione annua (le schede FV
+# dedicate coprono la produzione
+# fisica: qui la produzione annua
+# in kWh e un input, potenza per
+# produzione specifica), NIENTE
+# autoconsumo fisico dietro il
+# contatore da solo (solo risparmio
+# in bolletta, niente condivisione
+# virtuale e niente tariffa premio:
+# qui l'autoconsumo e solo una
+# delle tre gambe del ricavo),
+# NIENTE vendita diretta al vicino
+# (prezzo bilaterale tra privati,
+# non tariffa premio del GSE
+# sull'energia condivisa), NIENTE
+# solo ritiro dedicato (solo
+# vendita dell'energia immessa,
+# niente premio: qui il ritiro e
+# solo la gamba residua),
+# NIENTE certificato di origine
+# (titolo negoziabile sul mercato,
+# non incentivo: la scheda dei
+# Certificati Bianchi copre le
+# Garanzie di Origine; qui il
+# beneficio e la tariffa premio,
+# non un titolo), NIENTE Conto
+# Termico (contributo per il
+# calore, non per l'elettricita:
+# la scheda del Conto Termico
+# copre il calore; qui si misura
+# elettricita condivisa, non
+# calore), NIENTE detrazione
+# fiscale (sconto in dichiarazione
+# dei redditi, non incentivo del
+# GSE: la scheda della detrazione
+# fiscale copre lo sconto fiscale;
+# qui il beneficio e la tariffa
+# premio, non una detrazione).
+# Qui si misura quanto paga
+# l'energia condivisa, non un
+# titolo e non uno sconto fiscale.
+#
+# Fisica ed economia (costanti come
+# letterali qui dentro, mai costanti
+# di modulo; denaro in EUR, energia
+# in kWh, incentivo e prezzi in
+# EUR/kWh, anni in anni, fattore
+# CO2 in kg/kWh):
+#
+#   annualita = (1 meno (1 piu
+#       tasso) alla meno n) diviso
+#       tasso (n se tasso zero;
+#       zero se n zero)
+#   E prod = potenza kWp per
+#       produzione specifica
+#       (kWh/anno)
+#   E auto = E prod per quota
+#       autoconsumo (kWh/anno)
+#   risparmio bolletta = E auto
+#       per prezzo energia evitato
+#       (EUR/anno)
+#   E immessa = E prod meno E auto
+#       (kWh/anno)
+#   E condivisa = E immessa per
+#       quota condivisa (kWh/anno)
+#   ricavo incentivo = E condivisa
+#       per incentivo (EUR/anno)
+#   E resto = E immessa meno E
+#       condivisa (kWh/anno)
+#   ricavo ritiro = E resto per
+#       prezzo ritiro (EUR/anno)
+#   ricavo = risparmio bolletta
+#       piu ricavo incentivo piu
+#       ricavo ritiro (EUR/anno)
+#   costi = O&M unitario per
+#       potenza kWp piu gestione
+#       CER (EUR/anno)
+#   margine = ricavo meno costi
+#       (EUR/anno)
+#   VAN = meno CAPEX piu margine
+#       per annualita (tasso, vita)
+#       (EUR)
+#   TIR = tasso che azzera il VAN
+#       a CAPEX fissato (bisezione;
+#       None se nessun cambio di
+#       segno nei flussi)
+#   payback = primo anno con
+#       cumulato del margine
+#       maggiore o uguale a CAPEX
+#       (anni interi; 0 se CAPEX
+#       zero o negativo; None se
+#       mai entro la vita)
+#   payback frazionale = (t meno 1)
+#       piu (CAPEX meno (t meno 1)
+#       per margine) diviso
+#       margine, con t uguale
+#       payback (anni; 0 se CAPEX
+#       zero o negativo; None se
+#       margine zero o negativo o
+#       vita zero o payback mai
+#       raggiunto)
+#   breakeven incentivo = (CAPEX
+#       diviso annualita vita meno
+#       (risparmio piu ricavo
+#       ritiro meno costi)) diviso
+#       E condivisa (EUR/kWh,
+#       incentivo che azzera il
+#       VAN; 0,0 se il valore e
+#       minore di zero; None se E
+#       condivisa zero o se vita
+#       zero)
+#   breakeven incentivo EUR/MWh =
+#       breakeven incentivo per
+#       1000 (EUR/MWh; None se
+#       breakeven incentivo None)
+#   breakeven quota = (CAPEX diviso
+#       annualita vita meno
+#       (risparmio piu E immessa
+#       per prezzo ritiro meno
+#       costi)) diviso (E immessa
+#       per (incentivo meno prezzo
+#       ritiro)) (frazione, quota
+#       che azzera il VAN; 0,0 se
+#       il valore e minore di zero;
+#       None se il valore e
+#       maggiore di 1 o se il
+#       denominatore e zero o se
+#       vita zero)
+#   CO2 evitata = E prod per
+#       fattore CO2 diviso 1000
+#       (t/anno; fattore 0,25)
+#   flussi = meno CAPEX all'anno
+#       zero, poi margine per ogni
+#       anno di vita utile (solo
+#       anni di vita utile,
+#       SEMPLIFICAZIONE DICHIARATA)
+#   scenari: base; incentivo 0,13
+#       EUR/kWh; incentivo 0,08
+#       EUR/kWh; quota condivisa
+#       0,80; tasso 8 per cento;
+#       CAPEX 1.000 EUR/kWp
+#   confronto: E prod contro E
+#       auto contro risparmio
+#       contro E immessa contro E
+#       condivisa contro ricavo
+#       incentivo contro E resto
+#       contro ricavo ritiro contro
+#       ricavo contro costi contro
+#       margine contro VAN contro
+#       TIR contro payback contro
+#       breakeven incentivo contro
+#       breakeven quota contro CO2
+#       evitata contro verdetto
+#   verdetto:
+#       NON_CALCOLABILE se il
+#       margine e zero o negativo o
+#       se un input e degenere (vedi
+#       valida); altrimenti
+#       CONVIENTE se il VAN e
+#       maggiore di 0; MARGINALE se
+#       il VAN e minore o uguale a 0
+#       e il suo valore assoluto e
+#       minore o uguale a tolleranza
+#       per CAPEX; NON_CONVIENTE
+#       altrimenti
+#
+# Validazione (regime degenere degli
+# helper, identico alla guard UI, vedi
+# sotto): potenza kWp maggiore o
+# uguale a 0, produzione specifica
+# maggiore o uguale a 0
+# (kWh/kWp/anno), quota autoconsumo
+# tra 0 e 1 inclusi (frazione),
+# prezzo energia evitato maggiore o
+# uguale a 0 (EUR/kWh), quota
+# condivisa tra 0 e 1 inclusi
+# (frazione), incentivo maggiore o
+# uguale a 0 (EUR/kWh), prezzo
+# ritiro maggiore o uguale a 0
+# (EUR/kWh), CAPEX maggiore o
+# uguale a 0 (EUR), O&M unitario
+# maggiore o uguale a 0
+# (EUR/kWp/anno), gestione CER
+# maggiore o uguale a 0 (EUR/anno),
+# vita intera maggiore o uguale a 0
+# (anni), tasso maggiore o uguale a
+# 0 (frazione, senza tetto superiore:
+# il tetto 0,20 e solo dello slider
+# UI), tolleranza tra 0 e 1 inclusi
+# (frazione). Tutti gli input devono
+# essere finiti (NaN, infiniti,
+# bool e stringhe rifiutati). La
+# vita zero NON e degenere: da VAN
+# meno CAPEX, TIR None, payback
+# None e verdetto NON_CONVIENTE
+# (NOTA: il brief del ciclo
+# elencava la vita minore o uguale
+# a zero tra i degeneri ma elencava
+# anche la vita zero tra i casi
+# limite con VAN meno CAPEX e
+# verdetto NON_CONVIENTE: prevale
+# il caso limite concreto, come la
+# durata zero della scheda
+# precedente, e la vita negativa
+# resta degenere). La potenza zero e
+# AMMESSA qui (da produzione zero,
+# ricavo zero, margine meno 3.000
+# e verdetto NON_CALCOLABILE).
+# L'incentivo zero e AMMESSO qui
+# (da ricavo incentivo zero, VAN
+# meno 171.528,92 e verdetto
+# NON_CONVIENTE). La quota
+# condivisa zero e AMMESSA qui (da
+# energia condivisa zero, VAN meno
+# 56.677,19 e verdetto
+# NON_CONVIENTE). La quota
+# condivisa 1,0 e AMMESSA qui (da
+# energia condivisa 192.000 kWh,
+# VAN 15.105,14 e verdetto
+# CONVIENTE). Il CAPEX zero e
+# AMMESSO qui (da VAN 266.392,21,
+# TIR None, payback 0 e verdetto
+# CONVIENTE). Il tasso zero e
+# AMMESSO qui (da VAN 147.520 e
+# verdetto CONVIENTE). La
+# produzione specifica zero e
+# AMMESSA qui (da produzione zero,
+# margine meno 8.000 e verdetto
+# NON_CALCOLABILE). Il prezzo
+# energia evitato zero e AMMESSO
+# qui (da risparmio zero, VAN meno
+# 145.208,73 e verdetto
+# NON_CONVIENTE). Il prezzo ritiro
+# zero e AMMESSO qui (da ricavo
+# ritiro zero, VAN meno 90.175,61
+# e verdetto NON_CONVIENTE).
+# Guard degenere della UI (IDENTICA
+# agli helper, nessuna divergenza di
+# verdetto): potenza negativa,
+# produzione specifica negativa,
+# quota autoconsumo negativa o
+# sopra 1, prezzo energia evitato
+# negativo, quota condivisa
+# negativa o sopra 1, incentivo
+# negativo, prezzo ritiro negativo,
+# CAPEX negativo, O&M negativo,
+# gestione CER negativa, vita
+# negativa o non intera, tasso
+# negativo, tolleranza negativa o
+# sopra 1, OPPURE margine annuo
+# zero o negativo, quindi verdetto
+# NON_CALCOLABILE, KPI e grafico e
+# tabella e CSV saltati. Tutti gli
+# slider UI hanno minimo 0, quindi
+# i casi negativi sono NON
+# RAGGIUNGIBILI via slider: la
+# guard li controlla comunque. I
+# casi uguali a 0 raggiungibili via
+# slider sono bloccati in UI
+# esattamente come negli helper dove
+# previsto (margine zero o
+# negativo): nessuna divergenza,
+# perche qui gli helper NON
+# ammettono un margine zero o
+# negativo nel verdetto calcolabile.
+# I campi dove lo zero e ammesso in
+# entrambi non creano divergenza
+# (potenza zero o produzione zero o
+# quote zero o 1 o incentivo zero o
+# prezzi zero o CAPEX zero o O&M
+# zero o gestione zero o vita zero o
+# tasso zero o tolleranza zero danno
+# casi calcolabili con verdetto
+# economico o NON_CALCOLABILE per
+# margine). La vita sopra 30 non e
+# raggiungibile via slider (massimo
+# 30) ma e ammessa negli helper allo
+# stesso modo. La tolleranza sopra
+# 0,50 e ammessa negli helper e
+# limitata solo dallo slider UI
+# (0,50): nessuna divergenza nel
+# range raggiungibile via slider,
+# perche la guard UI controlla solo
+# gli stessi limiti degli helper. Il
+# tasso sopra 0,20 non e
+# raggiungibile via slider (massimo
+# 0,20) ma e ammesso negli helper
+# allo stesso modo.
+#
+# Demo (valori scelti e documentati
+# qui, numeri esatti da
+# mh909_demo_calcoli): potenza 200
+# kWp, produzione specifica 1.200
+# kWh/kWp/anno, quota autoconsumo
+# 0,20, prezzo energia evitato 0,22
+# EUR/kWh, quota condivisa 0,60,
+# incentivo 0,11 EUR/kWh, prezzo
+# ritiro 0,08 EUR/kWh, CAPEX
+# 280.000 EUR, O&M 25 EUR/kWp/anno,
+# gestione CER 3.000 EUR/anno, vita
+# 20 anni, tasso 0,05, tolleranza
+# 0,10 (frazione), E prod 240.000
+# kWh/anno, E auto 48.000 kWh/anno,
+# risparmio 10.560 EUR/anno, E
+# immessa 192.000 kWh/anno, E
+# condivisa 115.200 kWh/anno,
+# ricavo incentivo 12.672 EUR/anno,
+# E resto 76.800 kWh/anno, ricavo
+# ritiro 6.144 EUR/anno, ricavo
+# 29.376 EUR/anno, costi 8.000
+# EUR/anno, margine 21.376
+# EUR/anno, VAN meno 13.607,79 EUR,
+# TIR 4,42 per cento, payback 14
+# anni (frazionale 13,10),
+# breakeven incentivo 0,1195
+# EUR/kWh (119,48 EUR/MWh),
+# breakeven quota 78,96 per cento,
+# CO2 evitata 60 t/anno.
+# Scenario base: potenza 200 kWp,
+# produzione 240.000 kWh, E auto
+# 48.000 kWh, risparmio 10.560,
+# E condivisa 115.200 kWh, ricavo
+# incentivo 12.672, ricavo 29.376,
+# costi 8.000, margine 21.376, VAN
+# meno 13.607,79, MARGINALE.
+# Scenario incentivo 0,13 EUR/kWh:
+# ricavo incentivo 14.976, ricavo
+# 31.680, margine 23.680, VAN
+# 15.105,14, TIR 5,63 per cento,
+# payback 12 anni, breakeven
+# incentivo 0,1195, breakeven quota
+# 47,37 per cento, CONVIENTE.
+# Scenario incentivo 0,08 EUR/kWh:
+# ricavo incentivo 9.216, ricavo
+# 25.920, margine 17.920, VAN meno
+# 56.677,19, TIR 2,48 per cento,
+# payback 16 anni, breakeven
+# incentivo 0,1195, breakeven quota
+# non definito, NON_CONVIENTE.
+# Scenario quota condivisa 0,80: E
+# condivisa 153.600 kWh, ricavo
+# incentivo 16.896, E resto 38.400
+# kWh, ricavo ritiro 3.072, ricavo
+# 30.528, margine 22.528, VAN
+# 748,67, TIR 5,03 per cento,
+# payback 13 anni, breakeven
+# incentivo 0,1096, breakeven quota
+# 78,96 per cento, CONVIENTE.
+# Scenario tasso 8 per cento: VAN
+# meno 70.127,28, TIR 4,42 per
+# cento, payback 14 anni,
+# breakeven incentivo 0,1720,
+# breakeven quota non definito,
+# NON_CONVIENTE.
+# Scenario CAPEX 1.000 EUR/kWp
+# (CAPEX 200.000 EUR): VAN
+# 66.392,21, TIR 8,66 per cento,
+# payback 10 anni, breakeven
+# incentivo 0,0638, breakeven quota
+# 0,00 per cento, CONVIENTE.
+# Confronto: E prod 240.000 contro
+# E auto 48.000, risparmio 10.560
+# contro E immessa 192.000, E
+# condivisa 115.200 contro ricavo
+# incentivo 12.672, E resto 76.800
+# contro ricavo ritiro 6.144,
+# ricavo 29.376 contro costi 8.000,
+# margine 21.376 contro VAN meno
+# 13.607,79, TIR 4,42 per cento
+# contro payback 14 anni,
+# breakeven incentivo 0,1195
+# EUR/kWh contro breakeven quota
+# 78,96 per cento, CO2 60 t/anno.
+# Verdetto principale: MARGINALE.
+#
+#
+def mh909_num(x, nome):
+    """Valida un numero reale finito (bool e stringhe rifiutati)."""
+    import math
+    if isinstance(x, bool) or not isinstance(x, (int, float)):
+        raise ValueError(f"{nome}: deve essere un numero reale")
+    v = float(x)
+    if math.isnan(v) or math.isinf(v):
+        raise ValueError(f"{nome}: deve essere finito")
+    return v
+
+
+def mh909_nneg(x, nome):
+    """Valida un numero maggiore o uguale a 0."""
+    v = mh909_num(x, nome)
+    if v < 0.0:
+        raise ValueError(f"{nome}: non puo' essere negativo")
+    return v
+
+
+def mh909_pos(x, nome):
+    """Valida un numero maggiore di 0."""
+    v = mh909_num(x, nome)
+    if v <= 0.0:
+        raise ValueError(f"{nome}: deve essere positivo")
+    return v
+
+
+def mh909_fraz(x, nome):
+    """Valida una frazione tra 0 e 1 inclusi."""
+    v = mh909_num(x, nome)
+    if v < 0.0 or v > 1.0:
+        raise ValueError(f"{nome}: deve stare tra 0 e 1 inclusi")
+    return v
+
+
+def mh909_durata(x, nome):
+    """Valida una durata in anni interi maggiore o uguale a 0."""
+    v = mh909_num(x, nome)
+    if v < 0.0 or int(v) != v:
+        raise ValueError(f"{nome}: deve essere un intero maggiore o uguale a 0")
+    return int(v)
+
+
+def mh909_intero(x, nome):
+    """Valida un conteggio intero maggiore o uguale a 0."""
+    v = mh909_num(x, nome)
+    if v < 0.0 or int(v) != v:
+        raise ValueError(f"{nome}: deve essere un intero maggiore o uguale a 0")
+    return int(v)
+
+
+def mh909_annuity(durata_anni, tasso_frazione):
+    """Annualita: (1 meno (1 piu tasso) alla meno durata) diviso tasso; durata se tasso zero; zero se durata zero (demo 20 anni al 5 per cento = 12,4622103425; 20 anni al 8 per cento = 9,8181474074; 20 anni a tasso zero = 20; 30 anni al 5 per cento = 15,3724510264)."""
+    n = mh909_durata(durata_anni, "durata")
+    r = mh909_num(tasso_frazione, "tasso")
+    if n == 0:
+        return 0.0
+    if r == 0.0:
+        return float(n)
+    return (1.0 - (1.0 + r) ** -n) / r
+
+
+def mh909_e_prod(potenza_kwp, produzione_specifica):
+    """E prod in kWh/anno: potenza kWp per produzione specifica (demo 200 per 1200 = 240000; potenza zero: 0; produzione zero: 0; produzione 1500: 200 per 1500 = 300000; potenza 100: 100 per 1200 = 120000)."""
+    p = mh909_nneg(potenza_kwp, "potenza")
+    s = mh909_nneg(produzione_specifica, "produzione specifica")
+    return p * s
+
+
+def mh909_e_auto(e_prod_kwh, quota_autoconsumo):
+    """E auto in kWh/anno: E prod per quota autoconsumo (demo 240000 per 0,20 = 48000; quota zero: 0; quota 1,0: 240000; E prod zero: 0)."""
+    e = mh909_nneg(e_prod_kwh, "E prod")
+    q = mh909_fraz(quota_autoconsumo, "quota autoconsumo")
+    return e * q
+
+
+def mh909_risparmio_bolletta(e_auto_kwh, prezzo_evitato):
+    """Risparmio bolletta in EUR/anno: E auto per prezzo energia evitato (demo 48000 per 0,22 = 10560; E auto zero: 0; prezzo zero: 0; quota 1,0: 240000 per 0,22 = 52800; prezzo 0,30: 48000 per 0,30 = 14400)."""
+    e = mh909_nneg(e_auto_kwh, "E auto")
+    p = mh909_nneg(prezzo_evitato, "prezzo energia evitato")
+    return e * p
+
+
+def mh909_e_immessa(e_prod_kwh, e_auto_kwh):
+    """E immessa in kWh/anno: E prod meno E auto (demo 240000 meno 48000 = 192000; quota autoconsumo zero: 240000; quota 1,0: 0; E prod zero: 0)."""
+    e = mh909_nneg(e_prod_kwh, "E prod")
+    a = mh909_nneg(e_auto_kwh, "E auto")
+    return e - a
+
+
+def mh909_e_cond(e_immessa_kwh, quota_condivisa):
+    """E condivisa in kWh/anno: E immessa per quota condivisa (demo 192000 per 0,60 = 115200; quota zero: 0; quota 0,80: 192000 per 0,80 = 153600; quota 1,0: 192000; E immessa zero: 0)."""
+    e = mh909_nneg(e_immessa_kwh, "E immessa")
+    q = mh909_fraz(quota_condivisa, "quota condivisa")
+    return e * q
+
+
+def mh909_ricavo_incentivo(e_cond_kwh, incentivo_eur_kwh):
+    """Ricavo incentivo in EUR/anno: E condivisa per incentivo (demo 115200 per 0,11 = 12672; incentivo 0,13: 115200 per 0,13 = 14976; incentivo 0,08: 115200 per 0,08 = 9216; incentivo zero: 0; quota 0,80: 153600 per 0,11 = 16896; quota 1,0: 192000 per 0,11 = 21120)."""
+    e = mh909_nneg(e_cond_kwh, "E condivisa")
+    i = mh909_nneg(incentivo_eur_kwh, "incentivo")
+    return e * i
+
+
+def mh909_e_resto(e_immessa_kwh, e_cond_kwh):
+    """E resto in kWh/anno: E immessa meno E condivisa (demo 192000 meno 115200 = 76800; quota zero: 192000; quota 0,80: 192000 meno 153600 = 38400; quota 1,0: 0)."""
+    e = mh909_nneg(e_immessa_kwh, "E immessa")
+    c = mh909_nneg(e_cond_kwh, "E condivisa")
+    return e - c
+
+
+def mh909_ricavo_ritiro(e_resto_kwh, prezzo_ritiro):
+    """Ricavo ritiro in EUR/anno: E resto per prezzo ritiro (demo 76800 per 0,08 = 6144; quota zero: 192000 per 0,08 = 15360; quota 0,80: 38400 per 0,08 = 3072; quota 1,0: 0; prezzo ritiro zero: 0; prezzo ritiro 0,12: 76800 per 0,12 = 9216)."""
+    e = mh909_nneg(e_resto_kwh, "E resto")
+    p = mh909_nneg(prezzo_ritiro, "prezzo ritiro")
+    return e * p
+
+
+def mh909_ricavo(risparmio_eur_anno, ricavo_incentivo_eur_anno,
+                 ricavo_ritiro_eur_anno):
+    """Ricavo in EUR/anno: risparmio piu ricavo incentivo piu ricavo ritiro (demo 10560 piu 12672 piu 6144 = 29376; incentivo 0,13: 10560 piu 14976 piu 6144 = 31680; incentivo zero: 10560 piu 0 piu 6144 = 16704; quota 1,0: 10560 piu 21120 piu 0 = 31680; prezzo ritiro zero: 10560 piu 12672 piu 0 = 23232)."""
+    r = mh909_nneg(risparmio_eur_anno, "risparmio")
+    i = mh909_nneg(ricavo_incentivo_eur_anno, "ricavo incentivo")
+    t = mh909_nneg(ricavo_ritiro_eur_anno, "ricavo ritiro")
+    return r + i + t
+
+
+def mh909_costi(om_unitario, potenza_kwp, gestione_cer):
+    """Costi in EUR/anno: O&M unitario per potenza kWp piu gestione CER (demo 25 per 200 piu 3000 = 8000; O&M zero: 3000; gestione zero: 5000; potenza zero: 3000; potenza 100: 25 per 100 piu 3000 = 5500; O&M 50: 50 per 200 piu 3000 = 13000)."""
+    o = mh909_nneg(om_unitario, "O&M unitario")
+    p = mh909_nneg(potenza_kwp, "potenza")
+    g = mh909_nneg(gestione_cer, "gestione CER")
+    return o * p + g
+
+
+def mh909_margine(ricavo_eur_anno, costi_eur_anno):
+    """Margine annuo in EUR/anno: ricavo meno costi (demo 29376 meno 8000 = 21376; incentivo 0,13: 31680 meno 8000 = 23680; incentivo zero: 16704 meno 8000 = 8704; potenza zero: 0 meno 3000 = meno 3000; produzione zero: 0 meno 8000 = meno 8000; O&M zero: 29376 meno 3000 = 26376)."""
+    r = mh909_nneg(ricavo_eur_anno, "ricavo")
+    c = mh909_nneg(costi_eur_anno, "costi")
+    return r - c
+
+def mh909_van(capex_eur, margine_eur_anno, vita_anni,
+              tasso_frazione):
+    """VAN in EUR: meno CAPEX piu margine per annualita(tasso, vita) (demo meno 280000 piu 21376 per 12,4622103425 = meno 13607,79; incentivo 0,13: meno 280000 piu 23680 per 12,4622103425 = 15105,14; incentivo 0,08: meno 280000 piu 17920 per 12,4622103425 = meno 56677,19; quota 0,80: meno 280000 piu 22528 per 12,4622103425 = 748,67; CAPEX 200000: meno 200000 piu 21376 per 12,4622103425 = 66392,21; vita zero: meno 280000; CAPEX zero: 266392,21; tasso zero: meno 280000 piu 21376 per 20 = 147520; potenza zero: meno 280000 piu meno 3000 per 12,4622103425 = meno 317386,63)."""
+    c = mh909_num(capex_eur, "CAPEX")
+    m = mh909_num(margine_eur_anno, "margine")
+    a = mh909_annuity(vita_anni, tasso_frazione)
+    return -c + m * a
+
+
+def mh909_tir(capex_eur, margine_eur_anno, vita_anni):
+    """TIR in frazione: tasso che azzera il VAN a CAPEX fissato, per bisezione tra meno 0,9 e 10; None se nessun cambio di segno nei flussi (demo 0,0442; incentivo 0,13: 0,0563; incentivo 0,08: 0,0248; quota 0,80: 0,0503; tasso 8 per cento: 0,0442; CAPEX 200000: 0,0866; incentivo zero: meno 0,0415; prezzo evitato zero: meno 0,0234; CAPEX zero, margine zero o negativo, vita zero: None)."""
+    c = mh909_num(capex_eur, "CAPEX")
+    m = mh909_num(margine_eur_anno, "margine")
+    n = mh909_durata(vita_anni, "vita")
+    if c <= 0.0 or m <= 0.0 or n <= 0:
+        return None
+
+    def _van_a_tasso(r):
+        return -c + m * mh909_annuity(n, r)
+
+    lo = -0.9
+    hi = 10.0
+    if _van_a_tasso(lo) * _van_a_tasso(hi) > 0.0:
+        return None
+    for _ in range(200):
+        mid = (lo + hi) / 2.0
+        if _van_a_tasso(lo) * _van_a_tasso(mid) <= 0.0:
+            hi = mid
+        else:
+            lo = mid
+    return (lo + hi) / 2.0
+
+
+def mh909_payback(capex_eur, margine_eur_anno, vita_anni):
+    """Payback in anni interi: primo anno con cumulato del margine maggiore o uguale a CAPEX; 0 se CAPEX zero o negativo; None se mai entro la vita o margine zero o negativo (demo 14 anni: anno 13 cumulato 277888 sotto CAPEX, anno 14 cumulato 299264 sopra CAPEX; incentivo 0,13: 12 anni; incentivo 0,08: 16 anni; quota 0,80: 13 anni; CAPEX 200000: 10 anni; prezzo ritiro zero: 19 anni; CAPEX zero: 0; vita zero: None; incentivo zero: None)."""
+    c = mh909_num(capex_eur, "CAPEX")
+    m = mh909_num(margine_eur_anno, "margine")
+    n = mh909_durata(vita_anni, "vita")
+    if c <= 0.0:
+        return 0
+    if m <= 0.0 or n <= 0:
+        return None
+    for k in range(1, n + 1):
+        if k * m >= c:
+            return k
+    return None
+
+
+def mh909_payback_fraz(capex_eur, margine_eur_anno, vita_anni):
+    """Payback frazionale in anni: (t meno 1) piu (CAPEX meno (t meno 1) per margine) diviso margine, con t uguale payback; 0 se CAPEX zero o negativo; None se margine zero o negativo o vita zero o payback mai raggiunto (demo 13 piu (280000 meno 277888) diviso 21376 = 13,10; incentivo 0,13: 11,82; incentivo 0,08: 15,63; quota 0,80: 12,43; CAPEX 200000: 9,36; prezzo ritiro zero: 18,38; CAPEX zero: 0; vita zero: None)."""
+    c = mh909_num(capex_eur, "CAPEX")
+    m = mh909_num(margine_eur_anno, "margine")
+    n = mh909_durata(vita_anni, "vita")
+    if c <= 0.0:
+        return 0.0
+    if m <= 0.0 or n <= 0:
+        return None
+    t = mh909_payback(c, m, n)
+    if t is None:
+        return None
+    return (t - 1) + (c - (t - 1) * m) / m
+
+
+def mh909_be_incentivo(capex_eur, risparmio_eur_anno,
+                       ricavo_ritiro_eur_anno, costi_eur_anno,
+                       e_cond_kwh, vita_anni, tasso_frazione):
+    """Breakeven incentivo in EUR/kWh: (CAPEX diviso annualita vita meno (risparmio piu ricavo ritiro meno costi)) diviso E condivisa; 0,0 se il valore e minore di zero; None se E condivisa zero o se vita zero (demo (280000 diviso 12,4622103425 meno (10560 piu 6144 meno 8000)) diviso 115200 = 0,1195; incentivo 0,13: 0,1195; incentivo 0,08: 0,1195; quota 0,80: 0,1096; tasso 8 per cento: 0,1720; CAPEX 200000: 0,0638; CAPEX zero: 0,0; quota zero: None; quota 1,0: 0,1037; tasso zero: 0,0460; prezzo evitato zero: 0,2111; prezzo ritiro zero: 0,1728; vita zero: None). E l'incentivo che azzera il VAN, NON l'incentivo che azzera il margine."""
+    ca = mh909_nneg(capex_eur, "CAPEX")
+    ri = mh909_nneg(risparmio_eur_anno, "risparmio")
+    rr = mh909_nneg(ricavo_ritiro_eur_anno, "ricavo ritiro")
+    co = mh909_nneg(costi_eur_anno, "costi")
+    ec = mh909_nneg(e_cond_kwh, "E condivisa")
+    n = mh909_durata(vita_anni, "vita")
+    if n == 0:
+        return None
+    if ec == 0.0:
+        return None
+    a = mh909_annuity(n, tasso_frazione)
+    v = (ca / a - (ri + rr - co)) / ec
+    if v < 0.0:
+        return 0.0
+    return v
+
+
+def mh909_be_incentivo_mwh(be_incentivo_eur_kwh):
+    """Breakeven incentivo in EUR/MWh: breakeven incentivo per 1000; None se breakeven incentivo None (demo 0,1195 per 1000 = 119,48; quota 0,80: 0,1096 per 1000 = 109,61; tasso 8 per cento: 0,1720 per 1000 = 172,00; CAPEX 200000: 0,0638 per 1000 = 63,75; quota zero: None)."""
+    if be_incentivo_eur_kwh is None:
+        return None
+    v = mh909_nneg(be_incentivo_eur_kwh, "breakeven incentivo")
+    return v * 1000.0
+
+
+def mh909_be_quota(capex_eur, risparmio_eur_anno,
+                   e_immessa_kwh, prezzo_ritiro_eur_kwh,
+                   costi_eur_anno, incentivo_eur_kwh,
+                   vita_anni, tasso_frazione):
+    """Breakeven quota in frazione: (CAPEX diviso annualita vita meno (risparmio piu E immessa per prezzo ritiro meno costi)) diviso (E immessa per (incentivo meno prezzo ritiro)); 0,0 se il valore e minore di zero; None se il valore e maggiore di 1 o se il denominatore e zero o se vita zero (demo (280000 diviso 12,4622103425 meno (10560 piu 192000 per 0,08 meno 8000)) diviso (192000 per (0,11 meno 0,08)) = 0,7896; incentivo 0,13: 0,4737; incentivo 0,08: None; quota 0,80: 0,7896; tasso 8 per cento: None; CAPEX 200000: 0,0; quota zero: 0,7896; quota 1,0: 0,7896; tasso zero: 0,0; prezzo ritiro zero: 0,9426; incentivo zero: 0,0; vita zero: None). E la quota che azzera il VAN, NON la quota che azzera il margine."""
+    ca = mh909_nneg(capex_eur, "CAPEX")
+    ri = mh909_nneg(risparmio_eur_anno, "risparmio")
+    ei = mh909_nneg(e_immessa_kwh, "E immessa")
+    pr = mh909_nneg(prezzo_ritiro_eur_kwh, "prezzo ritiro")
+    co = mh909_nneg(costi_eur_anno, "costi")
+    inc = mh909_nneg(incentivo_eur_kwh, "incentivo")
+    n = mh909_durata(vita_anni, "vita")
+    if n == 0:
+        return None
+    a = mh909_annuity(n, tasso_frazione)
+    den = ei * (inc - pr)
+    if den == 0.0:
+        return None
+    q = (ca / a - (ri + ei * pr - co)) / den
+    if q < 0.0:
+        return 0.0
+    if q > 1.0:
+        return None
+    return q
+
+
+def mh909_co2(e_prod_kwh):
+    """CO2 evitata in t/anno: E prod per fattore CO2 diviso 1000, con fattore 0,25 (demo 240000 per 0,25 diviso 1000 = 60; E prod zero: 0; produzione 1500: 300000 per 0,25 diviso 1000 = 75; potenza 100: 120000 per 0,25 diviso 1000 = 30). Il fattore 0,25 e una SEMPLIFICAZIONE DICHIARATA."""
+    e = mh909_nneg(e_prod_kwh, "E prod")
+    return e * 0.25 / 1000.0
+
+
+def mh909_verdetto(van_eur, tol_frazione, capex_eur,
+                   margine_eur_anno):
+    """Verdetto: NON_CALCOLABILE se il VAN e None o il margine e zero o negativo (guard degenere: la UI salta KPI, grafico, tabella e CSV); altrimenti CONVIENTE se il VAN e maggiore di 0; MARGINALE se il VAN e minore o uguale a 0 e il suo valore assoluto e minore o uguale a tolleranza per CAPEX (VAN zero compreso); NON_CONVIENTE altrimenti."""
+    if van_eur is None:
+        return "NON_CALCOLABILE"
+    if margine_eur_anno is None:
+        return "NON_CALCOLABILE"
+    m = mh909_num(margine_eur_anno, "margine")
+    if m <= 0.0:
+        return "NON_CALCOLABILE"
+    v = mh909_num(van_eur, "VAN")
+    tol = mh909_fraz(tol_frazione, "tolleranza")
+    c = mh909_nneg(capex_eur, "CAPEX")
+    if v > 0.0:
+        return "CONVIENTE"
+    if abs(v) <= tol * c:
+        return "MARGINALE"
+    return "NON_CONVIENTE"
+
+
+def mh909_confronto(e_prod_kwh, e_auto_kwh,
+                    risparmio_eur_anno, e_immessa_kwh,
+                    e_cond_kwh, ricavo_incentivo_eur_anno,
+                    e_resto_kwh, ricavo_ritiro_eur_anno,
+                    ricavo_eur_anno, costi_eur_anno,
+                    margine_eur_anno, van_eur, tir_frazione,
+                    payback_anni, payback_fraz_anni,
+                    be_incentivo_eur_kwh,
+                    be_incentivo_eur_mwh,
+                    be_quota_frazione, co2_t_anno, verdetto):
+    """Confronto CER: E prod contro E auto, risparmio, E immessa, E condivisa, ricavo incentivo, E resto, ricavo ritiro, ricavo, costi, margine, VAN, TIR, payback, breakeven incentivo, breakeven quota e CO2 evitata (demo E prod 240000, E auto 48000, risparmio 10560, E immessa 192000, E condivisa 115200, ricavo incentivo 12672, E resto 76800, ricavo ritiro 6144, ricavo 29376, costi 8000, margine 21376, VAN meno 13607,79, TIR 0,0442, payback 14, breakeven incentivo 0,1195, breakeven quota 0,7896, CO2 60)."""
+    ep = mh909_nneg(e_prod_kwh, "E prod")
+    ea = mh909_nneg(e_auto_kwh, "E auto")
+    ri = mh909_nneg(risparmio_eur_anno, "risparmio")
+    ei = mh909_nneg(e_immessa_kwh, "E immessa")
+    ec = mh909_nneg(e_cond_kwh, "E condivisa")
+    rii = mh909_nneg(ricavo_incentivo_eur_anno,
+                     "ricavo incentivo")
+    er = mh909_nneg(e_resto_kwh, "E resto")
+    rr = mh909_nneg(ricavo_ritiro_eur_anno, "ricavo ritiro")
+    ric = mh909_nneg(ricavo_eur_anno, "ricavo")
+    co = mh909_nneg(costi_eur_anno, "costi")
+    m = mh909_num(margine_eur_anno, "margine")
+    v = mh909_num(van_eur, "VAN")
+    if tir_frazione is None:
+        ti = None
+    else:
+        ti = mh909_num(tir_frazione, "TIR")
+    if payback_anni is None:
+        pb = None
+    else:
+        pb = mh909_durata(payback_anni, "payback")
+    if payback_fraz_anni is None:
+        pbf = None
+    else:
+        pbf = mh909_num(payback_fraz_anni, "payback frazionale")
+    if be_incentivo_eur_kwh is None:
+        bei = None
+    else:
+        bei = mh909_num(be_incentivo_eur_kwh,
+                        "breakeven incentivo")
+    if be_incentivo_eur_mwh is None:
+        beim = None
+    else:
+        beim = mh909_num(be_incentivo_eur_mwh,
+                         "breakeven incentivo MWh")
+    if be_quota_frazione is None:
+        beq = None
+    else:
+        beq = mh909_num(be_quota_frazione, "breakeven quota")
+    co2 = mh909_nneg(co2_t_anno, "CO2 evitata")
+    if not isinstance(verdetto, str) or verdetto not in (
+            "CONVIENTE", "MARGINALE", "NON_CONVIENTE",
+            "NON_CALCOLABILE"):
+        raise ValueError("verdetto: deve essere uno dei quattro verdetti")
+    return {
+        "e_prod_kwh": ep,
+        "e_auto_kwh": ea,
+        "risparmio_eur_anno": ri,
+        "e_immessa_kwh": ei,
+        "e_cond_kwh": ec,
+        "ricavo_incentivo_eur_anno": rii,
+        "e_resto_kwh": er,
+        "ricavo_ritiro_eur_anno": rr,
+        "ricavo_eur_anno": ric,
+        "costi_eur_anno": co,
+        "margine_eur_anno": m,
+        "van_eur": v,
+        "tir_frazione": ti,
+        "payback_anni": pb,
+        "payback_fraz_anni": pbf,
+        "be_incentivo_eur_kwh": bei,
+        "be_incentivo_eur_mwh": beim,
+        "be_quota_frazione": beq,
+        "co2_t_anno": co2,
+        "verdetto": verdetto,
+    }
+
+
+def mh909_scenario(nome, base_kwargs, overrides):
+    """Scenario a varianti di input: nome, input base e override (dict) ricalcolati per intero con mh909_calcola; ritorna il riepilogo con E prod, E auto, risparmio, E immessa, E condivisa, ricavo incentivo, E resto, ricavo ritiro, ricavo, costi, margine, VAN, TIR, payback, breakeven incentivo, breakeven quota, CO2 e verdetto (demo incentivo 0,13 EUR/kWh: VAN 15105,14, CONVIENTE; demo incentivo 0,08 EUR/kWh: VAN meno 56677,19, NON_CONVIENTE; demo quota condivisa 0,80: VAN 748,67, CONVIENTE; demo tasso 8 per cento: VAN meno 70127,28, NON_CONVIENTE; demo CAPEX 1.000 EUR/kWp: VAN 66392,21, CONVIENTE)."""
+    if not isinstance(nome, str) or not nome:
+        raise ValueError("nome scenario: deve essere una stringa non vuota")
+    if not isinstance(base_kwargs, dict) or not isinstance(overrides, dict):
+        raise ValueError("input scenario: devono essere dict")
+    kw = dict(base_kwargs)
+    kw.update(overrides)
+    bc = mh909_calcola(_scenari=False, **kw)
+    return {
+        "nome": nome,
+        "potenza_kwp": bc["potenza_kwp"],
+        "produzione_specifica":
+            bc["produzione_specifica"],
+        "quota_autoconsumo": bc["quota_autoconsumo"],
+        "prezzo_energia_evitato":
+            bc["prezzo_energia_evitato"],
+        "quota_condivisa": bc["quota_condivisa"],
+        "incentivo_eur_kwh": bc["incentivo_eur_kwh"],
+        "prezzo_ritiro_eur_kwh":
+            bc["prezzo_ritiro_eur_kwh"],
+        "capex_eur": bc["capex_eur"],
+        "om_eur_kwp_anno": bc["om_eur_kwp_anno"],
+        "gestione_cer_eur_anno":
+            bc["gestione_cer_eur_anno"],
+        "vita_anni": bc["vita_anni"],
+        "tasso_frazione": bc["tasso_frazione"],
+        "tol_frazione": bc["tol_frazione"],
+        "e_prod_kwh": bc["e_prod_kwh"],
+        "e_auto_kwh": bc["e_auto_kwh"],
+        "risparmio_eur_anno": bc["risparmio_eur_anno"],
+        "e_immessa_kwh": bc["e_immessa_kwh"],
+        "e_cond_kwh": bc["e_cond_kwh"],
+        "ricavo_incentivo_eur_anno":
+            bc["ricavo_incentivo_eur_anno"],
+        "e_resto_kwh": bc["e_resto_kwh"],
+        "ricavo_ritiro_eur_anno":
+            bc["ricavo_ritiro_eur_anno"],
+        "ricavo_eur_anno": bc["ricavo_eur_anno"],
+        "costi_eur_anno": bc["costi_eur_anno"],
+        "margine_eur_anno": bc["margine_eur_anno"],
+        "van_eur": bc["van_eur"],
+        "tir_frazione": bc["tir_frazione"],
+        "payback_anni": bc["payback_anni"],
+        "payback_fraz_anni": bc["payback_fraz_anni"],
+        "be_incentivo_eur_kwh":
+            bc["be_incentivo_eur_kwh"],
+        "be_incentivo_eur_mwh":
+            bc["be_incentivo_eur_mwh"],
+        "be_quota_frazione": bc["be_quota_frazione"],
+        "co2_t_anno": bc["co2_t_anno"],
+        "verdetto": bc["verdetto"],
+    }
+
+
+def mh909_valida(potenza_kwp, produzione_specifica,
+                 quota_autoconsumo, prezzo_energia_evitato,
+                 quota_condivisa, incentivo_eur_kwh,
+                 prezzo_ritiro_eur_kwh, capex_eur,
+                 om_eur_kwp_anno, gestione_cer_eur_anno,
+                 vita_anni, tasso_frazione, tol_frazione):
+    """Validazione degli input: ritorna il dict con valido e errore (errore vuoto se valido; mai eccezioni, nemmeno per tipi non numerici, NaN o infiniti). La guard UI e IDENTICA a questa validazione (stessi casi degeneri, stessi zeri bloccati): nessuna divergenza helper vs UI. La vita zero e AMMESSA qui (da VAN meno CAPEX, TIR None, payback None, verdetto NON_CONVIENTE). La potenza zero e AMMESSA qui (da produzione zero, ricavo zero, margine meno 3.000 e verdetto NON_CALCOLABILE). L'incentivo zero e AMMESSO qui (da ricavo incentivo zero, VAN meno 171.528,92 e verdetto NON_CONVIENTE). La quota condivisa zero e AMMESSA qui (da energia condivisa zero, VAN meno 56.677,19 e verdetto NON_CONVIENTE). La quota condivisa 1,0 e AMMESSA qui (da energia condivisa 192.000 kWh, VAN 15.105,14 e verdetto CONVIENTE). Il CAPEX zero e AMMESSO qui (da VAN 266.392,21, TIR None, payback 0 e verdetto CONVIENTE). Il tasso zero e AMMESSO qui (da VAN 147.520 e verdetto CONVIENTE). La produzione specifica zero e AMMESSA qui (da produzione zero, margine meno 8.000 e verdetto NON_CALCOLABILE)."""
+    import math
+
+    def _finito(v):
+        return (isinstance(v, (int, float))
+                and not isinstance(v, bool)
+                and math.isfinite(float(v)))
+
+    ingressi = (potenza_kwp, produzione_specifica,
+                quota_autoconsumo, prezzo_energia_evitato,
+                quota_condivisa, incentivo_eur_kwh,
+                prezzo_ritiro_eur_kwh, capex_eur,
+                om_eur_kwp_anno, gestione_cer_eur_anno,
+                vita_anni, tasso_frazione, tol_frazione)
+    nomi = ("potenza", "produzione specifica",
+            "quota autoconsumo", "prezzo energia evitato",
+            "quota condivisa", "incentivo", "prezzo ritiro",
+            "CAPEX", "O&M", "gestione CER", "vita", "tasso",
+            "tolleranza")
+    for v, n in zip(ingressi, nomi):
+        if not _finito(v):
+            return {"valido": False,
+                    "errore": f"{n}: deve essere un numero finito"}
+    try:
+        mh909_nneg(potenza_kwp, "potenza")
+        mh909_nneg(produzione_specifica,
+                   "produzione specifica")
+        mh909_fraz(quota_autoconsumo, "quota autoconsumo")
+        mh909_nneg(prezzo_energia_evitato,
+                   "prezzo energia evitato")
+        mh909_fraz(quota_condivisa, "quota condivisa")
+        mh909_nneg(incentivo_eur_kwh, "incentivo")
+        mh909_nneg(prezzo_ritiro_eur_kwh, "prezzo ritiro")
+        mh909_nneg(capex_eur, "CAPEX")
+        mh909_nneg(om_eur_kwp_anno, "O&M")
+        mh909_nneg(gestione_cer_eur_anno, "gestione CER")
+        mh909_durata(vita_anni, "vita")
+        mh909_nneg(tasso_frazione, "tasso")
+        mh909_fraz(tol_frazione, "tolleranza")
+    except ValueError as e:
+        return {"valido": False, "errore": str(e)}
+    return {"valido": True, "errore": ""}
+
+def mh909_calcola(d=None, _scenari=True, **kwargs):
+    """Orchestratore CER: accetta gli input come dict singolo (d) oppure come keyword (le keyword vincono sul dict). Il parametro interno _scenari disattiva il ricalcolo degli scenari nelle chiamate annidate di mh909_scenario (evita ricorsione). Valida gli input e SOLLEVA ValueError per il regime degenere di input (potenza negativa, produzione specifica negativa, quota autoconsumo negativa o sopra 1, prezzo energia evitato negativo, quota condivisa negativa o sopra 1, incentivo negativo, prezzo ritiro negativo, CAPEX negativo, O&M negativo, gestione CER negativa, vita negativa o non intera, tasso negativo, tolleranza negativa o sopra 1, input non numerici o non finiti). La vita zero NON solleva: da VAN meno CAPEX, TIR None, payback None e verdetto NON_CONVIENTE. La potenza zero NON solleva: da produzione zero, ricavo zero, margine meno 3.000 e verdetto NON_CALCOLABILE. L'incentivo zero NON solleva: da ricavo incentivo zero e VAN meno 171.528,92 con verdetto NON_CONVIENTE. La quota condivisa zero NON solleva: da energia condivisa zero e VAN meno 56.677,19 con verdetto NON_CONVIENTE. La quota condivisa 1,0 NON solleva: da energia condivisa 192.000 kWh e VAN 15.105,14 con verdetto CONVIENTE. Il CAPEX zero NON solleva: da VAN 266.392,21, TIR None, payback 0 e verdetto CONVIENTE. Il tasso zero NON solleva: da VAN 147.520 con verdetto CONVIENTE. La produzione specifica zero NON solleva: da produzione zero, margine meno 8.000 e verdetto NON_CALCOLABILE. Il prezzo energia evitato zero NON solleva: da risparmio zero e VAN meno 145.208,73 con verdetto NON_CONVIENTE. Il prezzo ritiro zero NON solleva: da ricavo ritiro zero e VAN meno 90.175,61 con verdetto NON_CONVIENTE. Poi calcola E prod, E auto, risparmio, E immessa, E condivisa, ricavo incentivo, E resto, ricavo ritiro, ricavo, costi, margine, VAN, TIR, payback, breakeven incentivo (incentivo che azzera il VAN) e breakeven quota (quota che azzera il VAN), CO2 evitata, scenari (base; incentivo 0,13 EUR/kWh; incentivo 0,08 EUR/kWh; quota condivisa 0,80; tasso 8 per cento; CAPEX 1.000 EUR/kWp), confronto, flussi e tabelle. Ritorna il dict completo con df_scenari, df_confronto, df_tabella, df_flussi e df_ricavo_costi."""
+    if d is not None:
+        if not isinstance(d, dict):
+            raise ValueError("input: deve essere un dict")
+        merged = dict(d)
+        merged.update(kwargs)
+        kwargs = merged
+    ordine = ("potenza_kwp", "produzione_specifica",
+              "quota_autoconsumo", "prezzo_energia_evitato",
+              "quota_condivisa", "incentivo_eur_kwh",
+              "prezzo_ritiro_eur_kwh", "capex_eur",
+              "om_eur_kwp_anno", "gestione_cer_eur_anno",
+              "vita_anni", "tasso_frazione", "tol_frazione")
+    vals = [kwargs.get(k) for k in ordine]
+    val = mh909_valida(*vals)
+    if not val["valido"]:
+        raise ValueError(val["errore"])
+    (po, pr, qa, pe, qc, inc, prr, ca, om, ge, vi, ta,
+     tol) = (
+        mh909_nneg(vals[0], "potenza"),
+        mh909_nneg(vals[1], "produzione specifica"),
+        mh909_fraz(vals[2], "quota autoconsumo"),
+        mh909_nneg(vals[3], "prezzo energia evitato"),
+        mh909_fraz(vals[4], "quota condivisa"),
+        mh909_nneg(vals[5], "incentivo"),
+        mh909_nneg(vals[6], "prezzo ritiro"),
+        mh909_nneg(vals[7], "CAPEX"),
+        mh909_nneg(vals[8], "O&M"),
+        mh909_nneg(vals[9], "gestione CER"),
+        mh909_durata(vals[10], "vita"),
+        mh909_nneg(vals[11], "tasso"),
+        mh909_fraz(vals[12], "tolleranza"))
+    ep = mh909_e_prod(po, pr)
+    ea = mh909_e_auto(ep, qa)
+    ris = mh909_risparmio_bolletta(ea, pe)
+    ei = mh909_e_immessa(ep, ea)
+    ec = mh909_e_cond(ei, qc)
+    rii = mh909_ricavo_incentivo(ec, inc)
+    er = mh909_e_resto(ei, ec)
+    rr = mh909_ricavo_ritiro(er, prr)
+    ric = mh909_ricavo(ris, rii, rr)
+    cos = mh909_costi(om, po, ge)
+    mar = mh909_margine(ric, cos)
+    van = mh909_van(ca, mar, vi, ta)
+    tir = mh909_tir(ca, mar, vi)
+    pb = mh909_payback(ca, mar, vi)
+    pbf = mh909_payback_fraz(ca, mar, vi)
+    bei = mh909_be_incentivo(ca, ris, rr, cos, ec, vi, ta)
+    beim = mh909_be_incentivo_mwh(bei)
+    beq = mh909_be_quota(ca, ris, ei, prr, cos, inc, vi, ta)
+    co2 = mh909_co2(ep)
+    verd = mh909_verdetto(van, tol, ca, mar)
+    conf = mh909_confronto(ep, ea, ris, ei, ec, rii, er, rr,
+                           ric, cos, mar, van, tir, pb, pbf,
+                           bei, beim, beq, co2, verd)
+    base_kw = dict(kwargs)
+    if _scenari:
+        scenari = [
+            mh909_scenario("Base", base_kw, {}),
+            mh909_scenario("Incentivo 0,13 EUR/kWh", base_kw,
+                           {"incentivo_eur_kwh": 0.13}),
+            mh909_scenario("Incentivo 0,08 EUR/kWh", base_kw,
+                           {"incentivo_eur_kwh": 0.08}),
+            mh909_scenario("Quota condivisa 0,80", base_kw,
+                           {"quota_condivisa": 0.80}),
+            mh909_scenario("Tasso 8 %", base_kw,
+                           {"tasso_frazione": 0.08}),
+            mh909_scenario("CAPEX 1.000 EUR/kWp", base_kw,
+                           {"capex_eur": 200000.0}),
+        ]
+        base = scenari[0]
+    else:
+        scenari = []
+        base = None
+    import pandas as _pd
+    df_scenari = _pd.DataFrame([
+        {"Scenario": s["nome"],
+         "Potenza (kWp)": s["potenza_kwp"],
+         "Produzione specifica (kWh/kWp/anno)":
+             s["produzione_specifica"],
+         "Quota autoconsumo": s["quota_autoconsumo"],
+         "Prezzo energia evitato (EUR/kWh)":
+             s["prezzo_energia_evitato"],
+         "Quota condivisa": s["quota_condivisa"],
+         "Incentivo (EUR/kWh)": s["incentivo_eur_kwh"],
+         "Prezzo ritiro (EUR/kWh)":
+             s["prezzo_ritiro_eur_kwh"],
+         "CAPEX (EUR)": s["capex_eur"],
+         "E prod (kWh/anno)": s["e_prod_kwh"],
+         "E auto (kWh/anno)": s["e_auto_kwh"],
+         "Risparmio (EUR/anno)": s["risparmio_eur_anno"],
+         "E immessa (kWh/anno)": s["e_immessa_kwh"],
+         "E condivisa (kWh/anno)": s["e_cond_kwh"],
+         "Ricavo incentivo (EUR/anno)":
+             s["ricavo_incentivo_eur_anno"],
+         "E resto (kWh/anno)": s["e_resto_kwh"],
+         "Ricavo ritiro (EUR/anno)":
+             s["ricavo_ritiro_eur_anno"],
+         "Ricavo (EUR/anno)": s["ricavo_eur_anno"],
+         "Costi (EUR/anno)": s["costi_eur_anno"],
+         "Margine (EUR/anno)": s["margine_eur_anno"],
+         "VAN (EUR)": s["van_eur"],
+         "TIR (%)": (None if s["tir_frazione"] is None
+                     else s["tir_frazione"] * 100.0),
+         "Payback (anni)": s["payback_anni"],
+         "Breakeven incentivo (EUR/kWh)":
+             s["be_incentivo_eur_kwh"],
+         "Breakeven incentivo (EUR/MWh)":
+             s["be_incentivo_eur_mwh"],
+         "Breakeven quota": s["be_quota_frazione"],
+         "CO2 evitata (t/anno)": s["co2_t_anno"],
+         "Verdetto": s["verdetto"]}
+        for s in scenari])
+    df_confronto = _pd.DataFrame([
+        {"Voce": "E prod (kWh/anno)",
+         "Valore": ep},
+        {"Voce": "E auto (kWh/anno)",
+         "Valore": ea},
+        {"Voce": "Risparmio bolletta (EUR/anno)",
+         "Valore": ris},
+        {"Voce": "E immessa (kWh/anno)",
+         "Valore": ei},
+        {"Voce": "E condivisa (kWh/anno)",
+         "Valore": ec},
+        {"Voce": "Ricavo incentivo (EUR/anno)",
+         "Valore": rii},
+        {"Voce": "E resto (kWh/anno)",
+         "Valore": er},
+        {"Voce": "Ricavo ritiro (EUR/anno)",
+         "Valore": rr},
+        {"Voce": "Ricavo (EUR/anno)",
+         "Valore": ric},
+        {"Voce": "Costi (EUR/anno)",
+         "Valore": cos},
+        {"Voce": "Margine annuo (EUR/anno)",
+         "Valore": mar},
+        {"Voce": "VAN (EUR)",
+         "Valore": van},
+        {"Voce": "TIR (frazione)",
+         "Valore": tir},
+        {"Voce": "Payback (anni)",
+         "Valore": pb},
+        {"Voce": "Payback frazionale (anni)",
+         "Valore": pbf},
+        {"Voce": "Breakeven incentivo (EUR/kWh)",
+         "Valore": bei},
+        {"Voce": "Breakeven incentivo (EUR/MWh)",
+         "Valore": beim},
+        {"Voce": "Breakeven quota",
+         "Valore": beq},
+        {"Voce": "CO2 evitata (t/anno)",
+         "Valore": co2},
+        {"Voce": "Verdetto",
+         "Valore": verd},
+    ])
+    df_tabella = _pd.DataFrame([
+        {"Voce": "Potenza (kWp)", "Valore": po},
+        {"Voce": "Produzione specifica (kWh/kWp/anno)",
+         "Valore": pr},
+        {"Voce": "Quota autoconsumo", "Valore": qa},
+        {"Voce": "Prezzo energia evitato (EUR/kWh)",
+         "Valore": pe},
+        {"Voce": "Quota condivisa", "Valore": qc},
+        {"Voce": "Incentivo (EUR/kWh)", "Valore": inc},
+        {"Voce": "Prezzo ritiro (EUR/kWh)", "Valore": prr},
+        {"Voce": "CAPEX (EUR)", "Valore": ca},
+        {"Voce": "O&M (EUR/kWp/anno)", "Valore": om},
+        {"Voce": "Gestione CER (EUR/anno)", "Valore": ge},
+        {"Voce": "Vita utile (anni)", "Valore": vi},
+        {"Voce": "Tasso attualizzazione (frazione)",
+         "Valore": ta},
+        {"Voce": "Tolleranza (frazione)", "Valore": tol},
+        {"Voce": "E prod (kWh/anno)", "Valore": ep},
+        {"Voce": "E auto (kWh/anno)", "Valore": ea},
+        {"Voce": "Risparmio bolletta (EUR/anno)",
+         "Valore": ris},
+        {"Voce": "E immessa (kWh/anno)", "Valore": ei},
+        {"Voce": "E condivisa (kWh/anno)", "Valore": ec},
+        {"Voce": "Ricavo incentivo (EUR/anno)",
+         "Valore": rii},
+        {"Voce": "E resto (kWh/anno)", "Valore": er},
+        {"Voce": "Ricavo ritiro (EUR/anno)", "Valore": rr},
+        {"Voce": "Ricavo (EUR/anno)", "Valore": ric},
+        {"Voce": "Costi (EUR/anno)", "Valore": cos},
+        {"Voce": "Margine annuo (EUR/anno)", "Valore": mar},
+        {"Voce": "VAN (EUR)", "Valore": van},
+        {"Voce": "TIR (frazione)", "Valore": tir},
+        {"Voce": "Payback (anni)", "Valore": pb},
+        {"Voce": "Payback frazionale (anni)",
+         "Valore": pbf},
+        {"Voce": "Breakeven incentivo (EUR/kWh)",
+         "Valore": bei},
+        {"Voce": "Breakeven incentivo (EUR/MWh)",
+         "Valore": beim},
+        {"Voce": "Breakeven quota", "Valore": beq},
+        {"Voce": "CO2 evitata (t/anno)", "Valore": co2},
+        {"Voce": "Verdetto", "Valore": verd},
+    ])
+    righe_flussi = [{"Anno": 0, "Flusso (EUR)": -ca,
+                     "Cumulato (EUR)": -ca}]
+    cum = -ca
+    for anno in range(1, vi + 1):
+        cum = cum + mar
+        righe_flussi.append({"Anno": anno,
+                             "Flusso (EUR)": mar,
+                             "Cumulato (EUR)": cum})
+    df_flussi = _pd.DataFrame(righe_flussi)
+    df_ricavo_costi = _pd.DataFrame([
+        {"Voce": "Risparmio bolletta (EUR/anno)",
+         "Valore": ris},
+        {"Voce": "Ricavo incentivo (EUR/anno)",
+         "Valore": rii},
+        {"Voce": "Ricavo ritiro (EUR/anno)",
+         "Valore": rr},
+        {"Voce": "Ricavo (EUR/anno)",
+         "Valore": ric},
+        {"Voce": "Costi (EUR/anno)",
+         "Valore": cos},
+        {"Voce": "Margine annuo (EUR/anno)",
+         "Valore": mar},
+        {"Voce": "VAN (EUR)",
+         "Valore": van},
+    ])
+    return {
+        "valid": True,
+        "errore": "",
+        "potenza_kwp": po,
+        "produzione_specifica": pr,
+        "quota_autoconsumo": qa,
+        "prezzo_energia_evitato": pe,
+        "quota_condivisa": qc,
+        "incentivo_eur_kwh": inc,
+        "prezzo_ritiro_eur_kwh": prr,
+        "capex_eur": ca,
+        "om_eur_kwp_anno": om,
+        "gestione_cer_eur_anno": ge,
+        "vita_anni": vi,
+        "tasso_frazione": ta,
+        "tol_frazione": tol,
+        "e_prod_kwh": ep,
+        "e_auto_kwh": ea,
+        "risparmio_eur_anno": ris,
+        "e_immessa_kwh": ei,
+        "e_cond_kwh": ec,
+        "ricavo_incentivo_eur_anno": rii,
+        "e_resto_kwh": er,
+        "ricavo_ritiro_eur_anno": rr,
+        "ricavo_eur_anno": ric,
+        "costi_eur_anno": cos,
+        "margine_eur_anno": mar,
+        "van_eur": van,
+        "tir_frazione": tir,
+        "payback_anni": pb,
+        "payback_fraz_anni": pbf,
+        "be_incentivo_eur_kwh": bei,
+        "be_incentivo_eur_mwh": beim,
+        "be_quota_frazione": beq,
+        "co2_t_anno": co2,
+        "verdetto": verd,
+        "scenari": scenari,
+        "scenario_base": base,
+        "confronto": conf,
+        "df_scenari": df_scenari,
+        "df_confronto": df_confronto,
+        "df_tabella": df_tabella,
+        "df_flussi": df_flussi,
+        "df_ricavo_costi": df_ricavo_costi,
+    }
+
+
+def mh909_sensibilita(**kwargs):
+    """Sensibilita' del caso: ricalcola il caso con una variante alla volta (tutte le altre voci invariate) e ritorna un dict nome verso dict di mh909_calcola. Varianti: incentivo 0,13 EUR/kWh, incentivo 0,08 EUR/kWh, quota condivisa 0,80, tasso 8 per cento, CAPEX 1.000 EUR/kWp, potenza zero, incentivo zero, quota condivisa zero, quota condivisa 1,0, CAPEX zero, vita zero, tasso zero, produzione specifica zero, prezzo energia evitato zero, prezzo ritiro zero, O&M zero, gestione CER zero, vita 30 anni, quota autoconsumo zero, quota autoconsumo 1,0, produzione specifica 1.500 kWh/kWp/anno. Ogni variante e' un calcolo completo (scenari, VAN, TIR, payback, verdetto, confronto): nessuna formula approssimata."""
+    base = dict(kwargs)
+    varianti = {
+        "inc013": dict(base, incentivo_eur_kwh=0.13),
+        "inc008": dict(base, incentivo_eur_kwh=0.08),
+        "qc080": dict(base, quota_condivisa=0.80),
+        "tasso8": dict(base, tasso_frazione=0.08),
+        "capex200k": dict(base, capex_eur=200000.0),
+        "pot0": dict(base, potenza_kwp=0.0),
+        "inc0": dict(base, incentivo_eur_kwh=0.0),
+        "qc0": dict(base, quota_condivisa=0.0),
+        "qc1": dict(base, quota_condivisa=1.0),
+        "capex0": dict(base, capex_eur=0.0),
+        "vita0": dict(base, vita_anni=0),
+        "tasso0": dict(base, tasso_frazione=0.0),
+        "prod0": dict(base, produzione_specifica=0.0),
+        "pe0": dict(base, prezzo_energia_evitato=0.0),
+        "pr0": dict(base, prezzo_ritiro_eur_kwh=0.0),
+        "om0": dict(base, om_eur_kwp_anno=0.0),
+        "gest0": dict(base, gestione_cer_eur_anno=0.0),
+        "vita30": dict(base, vita_anni=30),
+        "qa0": dict(base, quota_autoconsumo=0.0),
+        "qa1": dict(base, quota_autoconsumo=1.0),
+        "prod1500": dict(base, produzione_specifica=1500.0),
+    }
+    return {nome: mh909_calcola(**kw)
+            for nome, kw in varianti.items()}
+
+
+def mh909_csv(bc, ingressi):
+    """CSV (separatore punto e virgola) CER: righe voce/valore con input, fisica, economia e scenari. bc: dict di mh909_calcola; ingressi: dict degli input."""
+    import pandas as _pd
+    righe = [
+        ("potenza_kwp", ingressi["potenza_kwp"]),
+        ("produzione_specifica",
+         ingressi["produzione_specifica"]),
+        ("quota_autoconsumo", ingressi["quota_autoconsumo"]),
+        ("prezzo_energia_evitato",
+         ingressi["prezzo_energia_evitato"]),
+        ("quota_condivisa", ingressi["quota_condivisa"]),
+        ("incentivo_eur_kwh", ingressi["incentivo_eur_kwh"]),
+        ("prezzo_ritiro_eur_kwh",
+         ingressi["prezzo_ritiro_eur_kwh"]),
+        ("capex_eur", ingressi["capex_eur"]),
+        ("om_eur_kwp_anno", ingressi["om_eur_kwp_anno"]),
+        ("gestione_cer_eur_anno",
+         ingressi["gestione_cer_eur_anno"]),
+        ("vita_anni", ingressi["vita_anni"]),
+        ("tasso_frazione", ingressi["tasso_frazione"]),
+        ("tol_frazione", ingressi["tol_frazione"]),
+        ("e_prod_kwh", bc["e_prod_kwh"]),
+        ("e_auto_kwh", bc["e_auto_kwh"]),
+        ("risparmio_eur_anno", bc["risparmio_eur_anno"]),
+        ("e_immessa_kwh", bc["e_immessa_kwh"]),
+        ("e_cond_kwh", bc["e_cond_kwh"]),
+        ("ricavo_incentivo_eur_anno",
+         bc["ricavo_incentivo_eur_anno"]),
+        ("e_resto_kwh", bc["e_resto_kwh"]),
+        ("ricavo_ritiro_eur_anno",
+         bc["ricavo_ritiro_eur_anno"]),
+        ("ricavo_eur_anno", bc["ricavo_eur_anno"]),
+        ("costi_eur_anno", bc["costi_eur_anno"]),
+        ("margine_eur_anno", bc["margine_eur_anno"]),
+        ("van_eur", bc["van_eur"]),
+        ("tir_frazione", bc["tir_frazione"]),
+        ("payback_anni", bc["payback_anni"]),
+        ("payback_fraz_anni", bc["payback_fraz_anni"]),
+        ("be_incentivo_eur_kwh",
+         bc["be_incentivo_eur_kwh"]),
+        ("be_incentivo_eur_mwh",
+         bc["be_incentivo_eur_mwh"]),
+        ("be_quota_frazione", bc["be_quota_frazione"]),
+        ("co2_t_anno", bc["co2_t_anno"]),
+        ("verdetto", bc["verdetto"]),
+        ("confronto_e_prod_kwh",
+         bc["confronto"]["e_prod_kwh"]),
+        ("confronto_e_auto_kwh",
+         bc["confronto"]["e_auto_kwh"]),
+        ("confronto_risparmio_eur_anno",
+         bc["confronto"]["risparmio_eur_anno"]),
+        ("confronto_e_immessa_kwh",
+         bc["confronto"]["e_immessa_kwh"]),
+        ("confronto_e_cond_kwh",
+         bc["confronto"]["e_cond_kwh"]),
+        ("confronto_ricavo_incentivo_eur_anno",
+         bc["confronto"]["ricavo_incentivo_eur_anno"]),
+        ("confronto_e_resto_kwh",
+         bc["confronto"]["e_resto_kwh"]),
+        ("confronto_ricavo_ritiro_eur_anno",
+         bc["confronto"]["ricavo_ritiro_eur_anno"]),
+        ("confronto_ricavo_eur_anno",
+         bc["confronto"]["ricavo_eur_anno"]),
+        ("confronto_costi_eur_anno",
+         bc["confronto"]["costi_eur_anno"]),
+        ("confronto_margine_eur_anno",
+         bc["confronto"]["margine_eur_anno"]),
+        ("confronto_van_eur",
+         bc["confronto"]["van_eur"]),
+        ("confronto_tir_frazione",
+         bc["confronto"]["tir_frazione"]),
+        ("confronto_payback_anni",
+         bc["confronto"]["payback_anni"]),
+        ("confronto_be_incentivo_eur_kwh",
+         bc["confronto"]["be_incentivo_eur_kwh"]),
+        ("confronto_be_incentivo_eur_mwh",
+         bc["confronto"]["be_incentivo_eur_mwh"]),
+        ("confronto_be_quota_frazione",
+         bc["confronto"]["be_quota_frazione"]),
+        ("confronto_co2_t_anno",
+         bc["confronto"]["co2_t_anno"]),
+    ]
+    nomi_scenari = ("base", "inc013", "inc008", "qc080",
+                    "tasso8", "capex200k")
+    for s, nome in zip(bc["scenari"], nomi_scenari):
+        righe.append((f"scenario_{nome}_potenza_kwp",
+                      s["potenza_kwp"]))
+        righe.append((f"scenario_{nome}_produzione_specifica",
+                      s["produzione_specifica"]))
+        righe.append((f"scenario_{nome}_quota_autoconsumo",
+                      s["quota_autoconsumo"]))
+        righe.append((f"scenario_{nome}_quota_condivisa",
+                      s["quota_condivisa"]))
+        righe.append((f"scenario_{nome}_incentivo_eur_kwh",
+                      s["incentivo_eur_kwh"]))
+        righe.append((f"scenario_{nome}_capex_eur",
+                      s["capex_eur"]))
+        righe.append((f"scenario_{nome}_e_prod_kwh",
+                      s["e_prod_kwh"]))
+        righe.append((f"scenario_{nome}_e_auto_kwh",
+                      s["e_auto_kwh"]))
+        righe.append((f"scenario_{nome}_risparmio_eur_anno",
+                      s["risparmio_eur_anno"]))
+        righe.append((f"scenario_{nome}_e_immessa_kwh",
+                      s["e_immessa_kwh"]))
+        righe.append((f"scenario_{nome}_e_cond_kwh",
+                      s["e_cond_kwh"]))
+        righe.append((f"scenario_{nome}_ricavo_incentivo_eur_anno",
+                      s["ricavo_incentivo_eur_anno"]))
+        righe.append((f"scenario_{nome}_e_resto_kwh",
+                      s["e_resto_kwh"]))
+        righe.append((f"scenario_{nome}_ricavo_ritiro_eur_anno",
+                      s["ricavo_ritiro_eur_anno"]))
+        righe.append((f"scenario_{nome}_ricavo_eur_anno",
+                      s["ricavo_eur_anno"]))
+        righe.append((f"scenario_{nome}_costi_eur_anno",
+                      s["costi_eur_anno"]))
+        righe.append((f"scenario_{nome}_margine_eur_anno",
+                      s["margine_eur_anno"]))
+        righe.append((f"scenario_{nome}_van_eur",
+                      s["van_eur"]))
+        righe.append((f"scenario_{nome}_tir_frazione",
+                      s["tir_frazione"]))
+        righe.append((f"scenario_{nome}_payback_anni",
+                      s["payback_anni"]))
+        righe.append((f"scenario_{nome}_be_incentivo_eur_kwh",
+                      s["be_incentivo_eur_kwh"]))
+        righe.append((f"scenario_{nome}_be_incentivo_eur_mwh",
+                      s["be_incentivo_eur_mwh"]))
+        righe.append((f"scenario_{nome}_be_quota_frazione",
+                      s["be_quota_frazione"]))
+        righe.append((f"scenario_{nome}_co2_t_anno",
+                      s["co2_t_anno"]))
+        righe.append((f"scenario_{nome}_verdetto",
+                      s["verdetto"]))
+    df = _pd.DataFrame(righe, columns=["voce", "valore"])
+    return df.to_csv(index=False, sep=";")
+
+
+def mh909_demo():
+    """Demo: potenza 200 kWp, produzione specifica 1200 kWh/kWp/anno, quota autoconsumo 0,20, prezzo energia evitato 0,22 EUR/kWh, quota condivisa 0,60, incentivo 0,11 EUR/kWh, prezzo ritiro 0,08 EUR/kWh, CAPEX 280000 EUR, O&M 25 EUR/kWp/anno, gestione CER 3000 EUR/anno, vita 20 anni, tasso 0,05, tolleranza 0,10."""
+    return {
+        "potenza_kwp": 200.0,
+        "produzione_specifica": 1200.0,
+        "quota_autoconsumo": 0.20,
+        "prezzo_energia_evitato": 0.22,
+        "quota_condivisa": 0.60,
+        "incentivo_eur_kwh": 0.11,
+        "prezzo_ritiro_eur_kwh": 0.08,
+        "capex_eur": 280000.0,
+        "om_eur_kwp_anno": 25.0,
+        "gestione_cer_eur_anno": 3000.0,
+        "vita_anni": 20,
+        "tasso_frazione": 0.05,
+        "tol_frazione": 0.10,
+    }
+
+
+def mh909_demo_calcoli():
+    """Demo calcolata: E prod 240000, E auto 48000, risparmio 10560, E immessa 192000, E condivisa 115200, ricavo incentivo 12672, E resto 76800, ricavo ritiro 6144, ricavo 29376, costi 8000, margine 21376, VAN meno 13607,79, TIR 0,0442, payback 14 anni, breakeven incentivo 0,1195, breakeven quota 0,7896, CO2 60, MARGINALE."""
+    d = mh909_demo()
+    return mh909_calcola(**d)
+
+
+def demo_calcoli():
+    """Alias di mh909_demo_calcoli per compatibilita con lo schema delle schede precedenti."""
+    return mh909_demo_calcoli()
+
+
 # W913 (26/11/2026): tab908 "Ecobonus:
 # quanto vale davvero lo sconto
 # fiscale sul retrofit energetico?"
@@ -344425,7 +345988,7 @@ def mh503_riepilogo(contratti, r_pct, u_pct, stoccabili):
 
 
     # ---------- Tab di analisi ----------
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256, tab257, tab258, tab259, tab260, tab261, tab262, tab263, tab264, tab265, tab266, tab267, tab268, tab269, tab270, tab271, tab272, tab273, tab274, tab275, tab276, tab277, tab278, tab279, tab280, tab281, tab282, tab283, tab284, tab285, tab286, tab287, tab288, tab289, tab290, tab291, tab292, tab293, tab294, tab295, tab296, tab297, tab298, tab299, tab300, tab301, tab302, tab303, tab304, tab305, tab306, tab307, tab308, tab309, tab310, tab311, tab312, tab313, tab314, tab315, tab316, tab317, tab318, tab319, tab320, tab321, tab322, tab323, tab324, tab325, tab326, tab327, tab328, tab329, tab330, tab331, tab332, tab333, tab334, tab335, tab336, tab337, tab338, tab339, tab340, tab341, tab342, tab343, tab344, tab345, tab346, tab347, tab348, tab349, tab350, tab351, tab352, tab353, tab354, tab355, tab356, tab357, tab358, tab359, tab360, tab361, tab362, tab363, tab364, tab365, tab366, tab367, tab368, tab369, tab370, tab371, tab372, tab373, tab374, tab375, tab376, tab377, tab378, tab379, tab380, tab381, tab382, tab383, tab384, tab385, tab386, tab387, tab388, tab389, tab390, tab391, tab392, tab393, tab394, tab395, tab396, tab397, tab398, tab399, tab400, tab401, tab402, tab403, tab404, tab405, tab406, tab407, tab408, tab409, tab410, tab411, tab412, tab413, tab414, tab415, tab416, tab417, tab418, tab419, tab420, tab421, tab422, tab423, tab424, tab425, tab426, tab427, tab428, tab429, tab430, tab431, tab432, tab433, tab434, tab435, tab436, tab437, tab438, tab439, tab440, tab441, tab442, tab443, tab444, tab445, tab446, tab447, tab448, tab449, tab450, tab451, tab452, tab453, tab454, tab455, tab456, tab457, tab458, tab459, tab460, tab461, tab462, tab463, tab464, tab465, tab466, tab467, tab468, tab469, tab470, tab471, tab472, tab473, tab474, tab475, tab476, tab477, tab478, tab479, tab480, tab481, tab482, tab483, tab484, tab485, tab486, tab487, tab488, tab489, tab490, tab491, tab492, tab493, tab494, tab495, tab496, tab497, tab498, tab499, tab500, tab501, tab502, tab503, tab504, tab505, tab506, tab507, tab508, tab509, tab510, tab511, tab512, tab513, tab514, tab515, tab516, tab517, tab518, tab519, tab520, tab521, tab522, tab523, tab524, tab525, tab526, tab527, tab528, tab529, tab530, tab531, tab532, tab533, tab534, tab535, tab536, tab537, tab538, tab539, tab540, tab541, tab542, tab543, tab544, tab545, tab546, tab547, tab548, tab549, tab550, tab551, tab552, tab553, tab554, tab555, tab556, tab557, tab558, tab559, tab560, tab561, tab562, tab563, tab564, tab565, tab566, tab567, tab568, tab569, tab570, tab571, tab572, tab573, tab574, tab575, tab576, tab577, tab578, tab579, tab580, tab581, tab582, tab583, tab584, tab585, tab586, tab587, tab588, tab589, tab590, tab591, tab592, tab593, tab594, tab595, tab596, tab597, tab598, tab599, tab600, tab601, tab602, tab603, tab604, tab605, tab606, tab607, tab608, tab609, tab610, tab611, tab612, tab613, tab614, tab615, tab616, tab617, tab618, tab619, tab620, tab621, tab622, tab623, tab624, tab625, tab626, tab627, tab628, tab629, tab630, tab631, tab632, tab633, tab634, tab635, tab636, tab637, tab638, tab639, tab640, tab641, tab642, tab643, tab644, tab645, tab646, tab647, tab648, tab649, tab650, tab651, tab652, tab653, tab654, tab655, tab656, tab657, tab658, tab659, tab660, tab661, tab662, tab663, tab664, tab665, tab666, tab667, tab668, tab669, tab670, tab671, tab672, tab673, tab674, tab675, tab676, tab677, tab678, tab679, tab680, tab681, tab682, tab683, tab684, tab685, tab686, tab687, tab688, tab689, tab690, tab691, tab692, tab693, tab694, tab695, tab696, tab697, tab698, tab699, tab700, tab701, tab702, tab703, tab704, tab705, tab706, tab707, tab708, tab709, tab710, tab711, tab712, tab713, tab714, tab715, tab716, tab717, tab718, tab719, tab720, tab721, tab722, tab723, tab724, tab725, tab726, tab727, tab728, tab729, tab730, tab731, tab732, tab733, tab734, tab735, tab736, tab737, tab738, tab739, tab740, tab741, tab742, tab743, tab744, tab745, tab746, tab747, tab748, tab749, tab750, tab751, tab752, tab753, tab754, tab755, tab756, tab757, tab758, tab759, tab760, tab761, tab762, tab763, tab764, tab765, tab766, tab767, tab768, tab769, tab770, tab771, tab772, tab773, tab774, tab775, tab776, tab777, tab778, tab779, tab780, tab781, tab782, tab783, tab784, tab785, tab786, tab787, tab788, tab789, tab790, tab791, tab792, tab793, tab794, tab795, tab796, tab797, tab798, tab799, tab800, tab801, tab802, tab803, tab804, tab805, tab806, tab807, tab808, tab809, tab810, tab811, tab812, tab813, tab814, tab815, tab816, tab817, tab818, tab819, tab820, tab821, tab822, tab823, tab824, tab825, tab826, tab827, tab828, tab829, tab830, tab831, tab832, tab833, tab834, tab835, tab836, tab837, tab838, tab839, tab840, tab841, tab842, tab843, tab844, tab845, tab846, tab847, tab848, tab849, tab850, tab851, tab852, tab853, tab854, tab855, tab856, tab857, tab858, tab859, tab860, tab861, tab862, tab863, tab864, tab865, tab866, tab867, tab868, tab869, tab870, tab871, tab872, tab873, tab874, tab875, tab876, tab877, tab878, tab879, tab880, tab881, tab882, tab883, tab884, tab885, tab886, tab887, tab888, tab889, tab890, tab891, tab892, tab893, tab894, tab895, tab896, tab897, tab898, tab899, tab900, tab901, tab902, tab903, tab904, tab905, tab906, tab907, tab908 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete", "🔥 Teleriscaldamento vs caldaia", "🌿 Clean spread (con CO₂)", "🇮🇹 PUN da prezzi zonali", "❄️ Pompa di calore vs caldaia", "🏢 PUE & costo data center", "🔌 Gruppo elettrogeno vs blackout", "🚗 Flotta aziendale: TCO diesel vs elettrico", "📜 Garanzie di origine: costo del 100% rinnovabile", "♻️ Fine vita FV: revamping vs dismissione", "🌾️ Agrivoltaico: doppio reddito", "🟢 Biometano: business case", "🌬️ Eolico onshore: business case", "🌊 Idroelettrico run-of-river: business case", "🔥 Geotermia profonda: business case", "☀️ Solare termodinamico (CSP): business case", "🌬️ Eolico offshore: business case", "☀️ Fotovoltaico utility-scale: business case", "⚛️ Nucleare SMR: business case", "📊 Posizione vs limiti di rischio", "💧 Cash flow at risk (CFaR)", "⚡ Aste MI: scostamenti vs MGP", "🌡️ Stress climatico: domanda e prezzo", "🌪️ Derivati meteo: pricing HDD/CDD", "🚢 LNG vs gasdotto: costo delivered", "🛢️ Crack spread: margine raffinazione 3-2-1", "🧪 Margine petrolchimico: nafta → etilene", "🛢️ Carry petrolio: contango & stoccaggio fisico", "🏭 Unit commitment CCGT: accendere o no?", "🛛️ Differenziali greggio: sweet vs sour", "⛽ Basis gas TTF–PSV", "🚢⚡ Rigassificazione GNL: margine terminale", "⚡🔥 Clean spark spread: margine centrale a gas", "⚫🔥 Clean dark spread: margine centrale a carbone", "🔀💰 PTR transfrontaliero: vale il prezzo d'asta?", "📊💹 Sharpe & Sortino: la strategia rende davvero?", "🪓📊 Component VaR: quale posizione tagliare per prima?", "🛡📉 Hedge ratio ottimale: quanto coprire con i futures?", "🧪📉 Backtest del VaR: il modello tiene?", "🧪🛡 Backtest dell'ES: la coda e' sottostimata?", "🪓🛡 Component ES: chi contribuisce alla coda?", "➕📊 Marginal VaR: quanto rischio aggiunge il nuovo trade?", "🚦📏 Limite VaR: quanto margine resta?", "🧪⚡ Stress test: quanto perde il book negli scenari?", "🧮📊 Rapporto di diversificazione: quanto rischio risparmia il book?", "🛡️🔍 Rischio di modello: quale VaR credere?", "✂️📉 Incremental VaR: quanto rischio togli chiudendo la posizione?", "🧱📉 Capacità VaR: quanto nozionale puoi ancora aggiungere?", "🗂️📊 VaR per segmento: dove si concentra il rischio?", "🎯🛡 Risk budgeting: il book rispetta i target?", "💎📊 RAROC: il rendimento ripaga il rischio?", "🌊📉 Expected Shortfall: la perdita oltre il VaR", "💥📈 Stress di correlazione: quanto sale il VaR se si rompono?", "🎯💥 Rho critica: a quale correlazione il VaR tocca il limite?", "💧📉 LVaR: il VaR corretto per il costo di liquidazione", "📐📉 Cornish-Fisher: il VaR corretto per skew e code grasse", "📐🌊 Expected Shortfall con Cornish-Fisher: la coda oltre il VaR con code grasse", "📉💥 VaR rotto: la probabilita' di breccia con code grasse", "⏳📉 VaR multi-orizzonte: lo scaling con autocorrelazione dei rendimenti", "🏔️📉 Valori estremi (Hill): il VaR oltre il massimo storico", "🌊📉 POT-GPD: il VaR dalla coda paretiana oltre soglia", "🧠📉 CAViaR: il VaR adattivo che impara dai rendimenti", "🌀📉 Copula t-Student: il VaR che vede le code muoversi insieme", "🎛📉 FHS: il VaR con la volatilita' di oggi", "⚙️📉 GARCH(1,1): la volatilita' che ricorda", "🧪📉 Backtest VaR: il modello resiste al tempo?", "🎯📉 Convergenza forward: il forward indovina lo spot?", "🔄📉 Half-life di mean reversion: lo spot torna alla media?", "Ω📊 Omega ratio: oltre Sharpe e Sortino", "📈📉 Calmar ratio: il rendimento che paga il drawdown", "🩹 Pain index e Pain ratio: il dolore medio oltre il peggio", "🛟 Sterling ratio: il Calmar mediato sui peggiori drawdown", "🔻 Burke ratio: il drawdown penalizzato al quadrato", "🌊📉 CDaR: il drawdown medio oltre la soglia (il VaR dei drawdown)", "🔍📉 Martin ratio: il Calmar che guarda tutto il dolore", "⛵ Tempo di recupero: quanto resta sott'acqua l'equity", "🎯 Information ratio: la strategia batte davvero il benchmark?", "📊 Capture ratio: quanto cattura la strategia nei mercati su e giù?", "🎯 Hit rate: quanto spesso la strategia batte il benchmark?", "📏 Tracking error: quanto si discosta la strategia dal benchmark?", "📉 Max drawdown relativo: quanto si scende sotto il benchmark?", "📐 Treynor & Jensen: il premio per unita' di rischio sistematico", "⚖️ M² Modigliani: il rendimento a parita' di rischio col benchmark", "📉 Sortino ratio: il rendimento per unità di rischio al ribasso", "📉 Calmar ratio: il rendimento annuo per unità di max drawdown", "📐 K-ratio: la regolarità della crescita dell'equity", "🎯 Volatilità target: il sizing a volatilità costante", "📐 Kelly criterion: il sizing ottimale dall'edge stimato", "🎲 Risk of ruin: probabilita' di toccare una barriera di drawdown", "🎯 Sizing anti-rovina: f massima con ROR vincolato", "📊 Monte Carlo: distribuzione del capitale dopo N trade", "VaR & Expected Shortfall del P&L dopo N trade", "Kelly con costi di trading: sizing netto", "Frazione di Kelly: half-Kelly e trade-off crescita/volatilità", "Kelly robusto: sizing con edge incerta", "Kelly con portafoglio: due posizioni simultanee", "Kelly con correlazione: due posizioni correlate", "Kelly adattivo: win-rate rolling e size dinamica", "Kelly con controllo drawdown: sizing frazionato al drawdown", "Kelly con target di volatilità: sizing riscalato sulla vol", "Kelly bayesiano: sizing con win-rate posterior", "Kelly con lotti interi: sizing discreto e drag di arrotondamento", "Kelly con stop-loss: sizing con perdita troncata", "Kelly con take-profit: sizing con vincita troncata", "Kelly frazionario (fractional Kelly): λ·f*", "Rischio di rovina (risk of ruin): probabilita' di rovina prima del target", "Kelly con tre esiti: sizing con vincita, perdita parziale e perdita piena", "Kelly con limite di posizione: sizing con cap f_max", "Kelly con vincoli multipli: cap, lotti, stop e drawdown", "Kelly con incertezza: haircut bayesiano sulla p stimata", "Kelly su N trade: raddoppio, dimezzamento e crescita attesa", "Kelly: mappa di sensibilità f* e crescita su (p, b)", "Kelly su ritorni continui: f* = μ/σ² e volatility drag", "Kelly con costi di transazione: f* netto = (μ-c)/σ²", "Kelly e drawdown: probabilità di toccare un max drawdown", "Kelly frazionario: frazione ottima per un budget di volatilità", "Monte Carlo: VaR e Expected Shortfall di una posizione power", "Kelly con limite VaR: sizing con vincolo di perdita massima", "Component VaR: contributo al rischio per posizione", "Component ES: contributo al rischio di coda per posizione", "Shock correlazioni: stress test sul rischio di coda", "Backtest VaR di Kupiec: copertura e likelihood ratio", "Reverse stress test: quanto shock regge il limite?", "Mappa di rottura: superficie VaR su shock congiunti vol+corr", "Liquidity-adjusted VaR: VaR + costo di liquidazione", "Component VaR: attribution del VaR per asset", "Hedge VaR: copertura ottimale con futures", "Jump VaR: VaR con salti di prezzo (Merton)", "Delta-Gamma VaR: VaR parametrico di una posizione con opzioni", "Expected Shortfall: misura di rischio coerente", "VaR ed ES con code pesanti (t-Student)", "🌈📉 Misura spettrale: l'ES pesato con l'avversione al rischio", "🧲📈 Misura entropica: rischio con avversione costante (CARA)", "🌀📈 Wang transform: misura distorsiva del rischio", "🎯📈 EVaR: il bound di Chernoff piu' conservativo", "🔀📊 RVaR: la media dei quantili tra VaR ed ES", "🎯📊 Median Shortfall: la mediana della coda, robusta tra VaR ed ES", "🎯📉 LPM: il rischio downside contro un target", "📐⚖ Expectile: la misura di rischio elicitabile e coerente", "🌀 Distortion risk measures: VaR, ES e Wang da un'unica formula", "📊 Spectral risk measure: VaR ponderato dal tuo spettro di avversione", "🔀 Entropic risk measure: avversione esponenziale al rischio", "🎯 Contributi di rischio ES: allocazione di Eulero del portafoglio", "🔱 Risk parity: pesi a parità di contributo di rischio (risk budgeting)", "🎯 Numero effettivo di scommesse (ENB): quante posizioni indipendenti hai davvero?", "📈 Massima diversificazione (MD): i pesi che massimizzano il rapporto DR", "🛡️ Minima varianza (MV): i pesi che minimizzano la volatilità di portafoglio", "🎯 Sharpe massimo (MS): i pesi che massimizzano il rendimento per unità di rischio", "🎯 Rendimento target (TR): minima varianza a rendimento atteso fissato", "κ Kappa ratio: un'unica famiglia per Omega e Sortino", "📏 Tail ratio: la coda destra contro la sinistra", "🔄 Recovery factor: quanto rende ogni euro di drawdown", "💢 Pain index: il dolore che serve per il rendimento", "🛟 Sterling ratio: quanto rende contro i K peggiori drawdown", "⚖ Gain-to-Pain ratio: quanto guadagno per ogni euro perso", "🌊 Volatility drag: quanto rendimento mangia la volatilita'", "🎯 Omega ratio: quanto upside prendi per ogni euro di downside", "📐 Sharpe corretto: il rendimento per unita' di rischio con code grasse", "🎯 Probabilistic Sharpe ratio: lo Sharpe e' davvero significativo?", "🎯 Deflated Sharpe ratio: lo Sharpe sopravvive ai backtest multipli?", "🎚️ Kappa ratio: Omega e Sortino sono lo stesso strumento", "🔺 Farinelli-Tibiletti: Omega e upside potential in un'unica formula", "📊 Rachev ratio: tutta la coda destra contro tutta la coda sinistra", "⭐ STAR ratio: il rendimento medio contro la perdita attesa di coda", "📈 Gain-Loss ratio: guadagno atteso contro perdita attesa", "📉 Ulcer Performance Index (Martin ratio): il rischio drawdown contro il rendimento", "🎯 Calmar ratio: il rendimento medio contro il peggior drawdown", "🔃 MAR ratio: il rendimento composto contro il peggior drawdown", "🤕 Pain ratio: il rendimento medio contro il drawdown medio", "🚀 Upside Potential ratio: il guadagno atteso contro la downside deviation", "🔀 Sequence risk: l'ordine dei rendimenti cambia il drawdown", "🛡 CDaR: la perdita media dei peggiori drawdown", "⏱️ Tempo sott'acqua: durata dei drawdown e recupero", "🎯 Attribuzione del drawdown: chi ha causato il peggior calo", "🔄 Recupero dal drawdown: quanto rimbalzo serve per tornare al picco", "📐 Calmar ratio: rendimento per unita' di peggior perdita", "⚖️ Sortino ratio: rendimento per unita' di volatilita' negativa", "🧮 Omega ratio: guadagni pesati contro perdite pesate", "📉 Burke ratio: rendimento per unita' di drawdown quadratico", "🎯 Kappa ratio (Kappa-3): rendimento per unita' di coda cubica", "📈 Martin ratio: rendimento per unita' di Ulcer Index", "📈 Sterling ratio: rendimento per unita' di drawdown medio annuo", "🩹 Pain ratio: rendimento per unita' di dolore medio (Pain Index)", "📉 CDaR ratio: rendimento per unita' di coda media (Conditional Drawdown-at-Risk)", "🎯 Drawdown-at-Risk (DaR): la soglia di drawdown superata solo nell'alpha% dei casi", "📈 Recovery Factor: profitto totale per unita' di peggior drawdown", "📐 Calmar geometrico: CAGR composto per unita' di peggior drawdown", "💹 Gain-to-Pain ratio: guadagni totali per ogni punto perso", "🏞️ Lake ratio: l'area del dolore sotto il picco", "🌀 Rolling drawdown: il peggior calo in ogni finestra", "📏 Variance ratio: il prezzo segue un random walk?", "⛓️ Johansen: power e gas cointegrati?", "🔗 ECM: quanto in fretta power torna all'equilibrio col gas?", "💥 Risposta allo shock: di quanto uno shock del gas muove power?", "📜 Scomposizione storica: cosa ha mosso davvero il prezzo power?", "🌊 Spillover gas↔power: chi trasmette e chi riceve gli shock?", "📈 Previsione VECM(1): dove vanno power e gas nei prossimi H giorni?", "📊 Backtest VECM(1): il modello batte il random walk?", "⚖️ Lo spread è stazionario? Test ADF", "🔮 Quando rientra lo spread? Forecast mean-reversion", "💰 Vale la pena tradare il rientro? P&L atteso del trade", "📐 Quanto puntare sul rientro? Sizing Kelly del trade", "⚠️ Quanto posso perdere? VaR del trade dimensionato", "🧪⚠️ Stress test del trade: VaR sotto shock", "🛑 Stop & target: dove chiudere il trade", "🧭 Ottimizza stop/target: i migliori k", "⏳ Time stop: uscire se non succede niente", "🔀 Scale-out: tutto insieme o a pezzi?", "🧺 Portafoglio: quanti trade insieme?", "📐 Correlazione: la diversificazione è reale?", "💸 Costi veri: l'edge sopravvive al netto?", "📅 L'edge annualizzato: il trade si ripete?", "📉 VaR annuale: quanto capitale di rischio?", "📊 VaR per segnale: chi mangia il capitale?", "📈 Expected Shortfall: quanto perdi quando perdi?", "🎯 Risk budgeting: ogni segnale si guadagna il suo capitale", "🔔 Drift dei budget: quando ribilanciare?", "🔁 Ribilanciare: i nuovi pesi post-shock", "⏰ Frequenza di ribilanciamento", "💰 Costo di esecuzione: quanto costa davvero ruotare", "🎯 Calibrazione: previsto vs realizzato", "⏳ Scheduling di esecuzione", "📉 Implementation shortfall: scomponi il costo realizzato", "🏦 Costo del margine: il capitale fermo al clearing", "📞 Margin call: variazione margine e buffer di liquidità", "📏 DV01 del portafoglio forward: sensibilità del MtM a uno shift parallelo della curva", "🗓️ Ladder delle scadenze: profilo temporale di volumi, MtM e DV01", "🧪💥 Shock di curva: P&L del portafoglio sotto scenari di prezzo", "⏳ Theta del portafoglio forward: quanto vale il passare del tempo", "🏦 Rho del portafoglio forward: il MtM sotto il tasso d'interesse", "🧾🔍 P&L spiegato dalle greche: theta, delta e rho contro il ΔMtM realizzato", "📉 VaR ed Expected Shortfall del portafoglio forward: il rischio giornaliero", "🌪️📉 Stressed VaR: il VaR sotto volatilità stressata", "🪓🌪️ Component Stressed VaR: quale linea tagliare sotto stress?", "🪓🌊 Component Stressed ES: chi alimenta la coda sotto stress?", "🛡️🌪️ Copertura dello Stressed ES: quanto hedgiare per rientrare nel limite?", "⏳🌪️ Decadimento dello stress: aspettare o coprire?", "💸⏳ Costo dell'attesa: il budget di rischio consumato", "🚨⏳ Monitoraggio dell'attesa: il trigger di escalation", "🛡️📋 Esecuzione della copertura: il piano ordini", "📊✅ Verifica della copertura: il piano ha funzionato?", "🔓🛡️ Rilascio della copertura: quando alleggerire l'hedge?", "📓 Blotter delle coperture: registro operazioni", "🎯 Regret della copertura: fissato vs spot", "📑 Efficacia contabile: dollar-offset delle coperture", "🛑 De-designazione: continuare o chiudere la copertura?", "⚖️ Ribilanciamento: aggiustare l'hedge ratio senza de-designare", "📦 Cost-of-carry: scomponi il premio del forward", "📊📓 Diario dell'inefficacia: OCI vs P&L per periodo", "♻️ Recycling OCI: rilascio della riserva a P&L", "📉 Regressione di efficacia (OLS)", "🔭 Test prospettico di efficacia (scenari forward)", "📝 Documentazione della copertura (IFRS 9)", "🧾 Scritture contabili (IFRS 9)", "📋 Informativa IFRS 7 (coperture)", "📉 Sensibilità al rischio di mercato (IFRS 7.40)", "📒 Rollforward riserva cash-flow hedge (OCI)", "🧪 Test retrospettivo di efficacia (look-back)", "📅 Piano di recycling futuro (proiezione release OCI→P&L)", "🛑 Cessazione della copertura (hedge discontinuation)", "⏳ Costo della copertura (time value, IFRS 9)", "🧩 Componenti di rischio designati (IFRS 9)", "➡️ Forward element escluso (IFRS 9)", "⚠️💳 Rischio di credito che domina (IFRS 9)", "🔁 Aggregated exposure (esposizione aggregata, IFRS 9 6.3.4)", "🧱 Basis adjustment (adeguamento del costo, IFRS 9 6.5.11)", "⚖️📋 Hedge ratio designato (IFRS 9 6.4.1(c)(iii))", "🔀📊 Tipo di copertura (IFRS 9 6.5.2)", "🧪📐 Derivato ipotetico (IFRS 9 B6.5.5)", "⚖️🔄 Ribilanciamento (IFRS 9 6.5.5)", "⚖️🧺 Posizione netta (IFRS 9 6.6)", "⚖️📉 Ammortamento adeguamento FV hedge (IFRS 9 6.5.10)", "⚖️🔌 Own-use exemption NPNS (IFRS 9 2.4)", "⚖️⏹️ Cessazione hedge accounting (IFRS 9 6.5.12)", "🔗📄 Derivati incorporati (IFRS 9 4.3)", "⚖️📶 Gerarchia fair value (IFRS 13)", "🧾💸 SPPI test (IFRS 9 4.1.2(b))", "📉⏳ ECL a 3 stadi (IFRS 9 5.5)", "📐📊 Tasso di interesse effettivo (IFRS 9 5.4.1)", "🏦📋 Business model assessment (IFRS 9 4.1.1/4.1.2(a))", "🔁🏦 Modifica di passività (IFRS 9 3.3.2)", "🏭📤 Cessione crediti (IFRS 9 3.2)", "🛡️📑 Informativa rischio di credito (IFRS 7.35)", "💧📋 Informativa rischio di liquidità (IFRS 7.39)", "🔁📂 Reclassifica attività finanziarie (IFRS 9 4.4)", "⚠️💰 Inadempimenti e violazioni covenant (IFRS 7.18-19)", "⚖️📑 Compensazione attività/passività finanziarie (IFRS 7.13A-13F)", "📊📋 P&L per categoria (IFRS 7.20)", "🏦📥 Collateral & garanzie reali (IFRS 7.15)", "🔄📤 Trasferimenti di attività finanziarie (IFRS 7.42A-42H)", "📒➡️ Rollforward fondo svalutazione crediti (IFRS 7.16)", "⏰📉 Crediti scaduti non deteriorati (IFRS 7.37)", "💲📊 Fair value vs valore contabile (IFRS 7.25)", "🧾📊 Valore contabile per categoria (IFRS 7.8)", "🏛️💳 Rischio di credito proprio su passività FVTPL (IFRS 7.9-7.10)", "💧📉 Scadenze delle passività finanziarie (IFRS 7.39)", "🏦🔑 Garanzie reali acquisite in possesso (IFRS 7.38)", "📊🕐 Day-1 P&L differito (IFRS 7.27)", "🛡️📊 Risk appetite & limiti (IFRS 7.33-7.34)", "📐⚖️ Fair value: movimenti livello 3 (IFRS 7.28)", "🏷️📋 Fair value: eccezioni e approssimazioni (IFRS 7.29)", "🗂️⚠️ Concentrazioni di rischio (IFRS 7.32)", "📊🔀 Trasferimenti tra livelli fair value (IFRS 7.30)", "💸📊 FVA: funding valuation adjustment del portafoglio", "🧾📝 Informativa sull'hedge accounting (IFRS 7.24A-24F)", "🧭📊 Esposizioni ai rischi e origine (IFRS 7.31)", "💳📊 DVA: debit valuation adjustment del portafoglio", "🏦📏 Limiti di credito controparte (fido)", "📊⚖️ Rappresentativita' analisi di sensibilita' (IFRS 7.41-7.42)", "📊🔬 Fair value: metodi e assunzioni (IFRS 7.27)", "📊🎯 Sensibilita' fair value livello 3 (IFRS 7.27(h))", "📊🏦 XVA: CVA + DVA + FVA + KVA + ColVA (aggiustamenti di valutazione)", "📊🈤 Riclassifiche di attività finanziarie (IFRS 7.12B-12D)", "📊📉 Utili/perdite da derecognition di attività al costo ammortizzato (IFRS 7.20A)", "💸📊 Proventi e oneri da commissioni (IFRS 7.17)", "🛡️📊 Esposizione max al rischio di credito (IFRS 7.36)", "🔗📊 Fair value hedges del rischio di credito (IFRS 7.11)", "📊⚠️ Fonti di inefficacia delle coperture (IFRS 7.24D)", "💶📊 Inefficacia a P&L per tipo di copertura (IFRS 7.24G)", "📊🔄 Importi a OCI e riciclo a P&L (IFRS 7.24E)", "📊🗂️ Strumenti di copertura per categoria di rischio (IFRS 7.24F)", "📊📦 Elementi coperti per categoria di rischio (IFRS 7.24B)", "📊⚡ Premio di rischio forward (ex-post)", "🔌💰 Rendita da congestione (congestion rent)", "📊📅 Flussi di cassa futuri coperti (IFRS 7.24C)", "🏭🤝 EPC: rendimento energetico garantito (ESCO)", "📊↔️ Bid-ask spread e costi di transazione", "💱📉 Rischio cambio: costo EUR del procurement in USD", "🔄📐 Convertitore unità di misura energia e prezzi", "📜⚖️ CfD a due vie: payoff, MtM e sensibilità", "🔌📉 LoLE & EENS: adeguatezza del parco di generazione", "🧾⚖️ M&V IPMVP: verifica dei risparmi energetici", "🔋⏱️ Dispatch ottimale accumulo day-ahead", "📉⏳ Curva di durata prezzi", "🧱📐 Bootstrap curva forward (mensile→oraria)", "🔌📏 ELCC: capacity credit delle rinnovabili", "⚡🏛️ Asta del mercato della capacità: clearing e de-rating", "🔥📈 Spark/Dark spread: margini di generazione (clean)", "💱⛽ Prezzo CO₂ di switch: gas vs carbone", "🚢⛽ Bunker fuel: VLSFO vs LNG vs metanolo vs ammoniaca", "🌍🏠 ETS2: costo carbonio per edifici & trasporti", "🌍📉 MACC: curva dei costi di abbattimento CO₂", "🪵 Biomassa legnosa: business case (CHP)", "🧊 Accumulo termico (TES): peak-shaving del calore", "🔌🔋 V2G: ricavi da vehicle-to-grid", "🏦📊 WACC: costo del capitale per progetti energetici", "📊💨 P50/P90: incertezza della producibilità rinnovabile", "⚡📊 Profile cost: il costo della forma", "☀️🔌 Rapporto DC/AC: clipping vs capex", "🌐⚡ Integration cost: profile + balancing + grid", "🌬️♻️ Repowering eolico: più MWh dagli stessi MW", "☀️🧹 Soiling & degrado FV: quanto perdi senza pulire i pannelli", "⚡🔀 Redispatch: costi e ottimo della congestione", "☀️📐 Tilt & orientamento FV: l'angolo che massimizza il rendimento", "🔌🚗 Colonnine di ricarica pubblica: il business case", "🌬️📦 CAES: l'accumulo ad aria compressa", "🔋♻️ Second-life: batterie EV → storage stazionario", "☀️🪞 FV bifacciale: il guadagno posteriore ripaga il sovraccosto?", "🟢📄 PPA vs merchant: il prezzo fisso vale lo sconto?", "🌀 Volano (flywheel): accumulo cinetico per FCR e servizi di rete", "🔋🌊 Batterie a flusso (VRFB): accumulo long-duration", "⛽🌱 Biocarburanti (HVO): il premium per decarbonizzare", "🔋🧂 Batterie al sodio (Na-ion): l'accumulo senza litio conviene?", "📐 LACE: il costo che la rete evita (il vero valore di un impianto)", "🧪 LCOH: il costo dell'idrogeno verde (quando l'elettrolisi conviene)", "💧⚗️ Blending idrogeno in rete gas: il premium per decarbonizzare", "🔥⛽ Metanazione (Power-to-Methane): il metano sintetico da CO2 catturata", "⚗️💚 Power-to-Ammonia: l'ammoniaca verde da H2 (Haber-Bosch)", "🧪⛽ Power-to-Methanol: il metanolo verde da CO₂ (sintesi catalitica)", "✈️⛽ Power-to-SAF: il cherosene sintetico da CO₂ (Fischer-Tropsch)", "🏭💚 Power-to-Steel: l'acciaio verde da H2 (DRI)", "💧🗄️ Stoccaggio H2: lo storage idrogeno rende? (caverna salina)", "🚚💧 Trasporto H2: pipeline, trailer o liquido? (logistica idrogeno)", "🌬️🏭 Direct Air Capture: il costo della CO2 dall'aria", "💧🌊 Desalinizzazione RO: il costo dell'acqua dall'energia", "🌱⚗️ BECCS: bioenergia con cattura CO2 (rimozione netta)", "⚓ Cold ironing: elettrificare le navi in banchina", "🔷 Idrogeno turchese: la pirolisi del metano", "🔵 Idrogeno blu: il reforming con cattura CO2 (SMR+CCS)", "🏛️🎯 Aste FER-X: a che strike conviene partecipare?", "🩷 Idrogeno rosa: l'elettrolisi alimentata dal nucleare", "🤍 Idrogeno bianco: l'H2 naturale dal sottosuolo", "💛 Idrogeno giallo: l'elettrolisi alimentata dal fotovoltaico", "🧪🛢️ LOHC: l'idrogeno nei liquidi organici", "♻️🔥 Termovalorizzatore: il business case waste-to-energy", "🧊❄️ Telerifreddamento (district cooling): centrale frigorifera vs chiller", "⚡🏭 VPP (Virtual Power Plant): aggregare la flessibilità distribuita", "🔥♨️ Waste heat data center: il calore di scarto diventa teleriscaldamento", "🤖⚡ Inferenza AI: dal MW delle GPU al costo per milione di token", "🏭📋 Diagnosi energetica: audit e piano di efficientamento", "🔧⚙️ Motori elettrici: l'inverter paga?", "🌬️🔧 Aria compressa: quanto costano le perdite?", "🔌📉 Trasformatore: quanto costano le perdite a vuoto?", "💡 Relamping LED: il passaggio a LED paga davvero?", "❄️ Free cooling: quanto vale il freddo gratis?", "🔥 Caldaia a condensazione: il retrofit paga?", "🏢 Cappotto termico: il retrofit dell'involucro paga?", "❄️ Trigenerazione (CCHP): un solo combustibile, elettricita' + calore + freddo", "☀️🚿 Solare termico: quanta acqua calda dal tetto?", "♨️⚡ ORC: il calore di scarto diventa elettricità", "🌊 Energia delle maree: il business case tidal", "🌊⚡ Armoniche: quanto costano le distorsioni?", "⚡ Rifasamento: quanto costa il cos(phi) basso?", "🔥 Economizzatore fumi: il calore che esce dal camino", "⚖️ Sbilanciamento fasi: quanto costa la corrente nel neutro?", "💡🌃 Illuminazione pubblica: LED + telecontrollo — il business case", "🔥⚡ Forno a induzione: elettrificare il forno industriale paga?", "🌡💨 Essiccazione industriale: quanta energia per togliere l'acqua?", "🔌🏝️ Microrete industriale: quanto costa staccarsi dalla rete?", "♨️🕳️ Trappole di vapore: quanto vapore perdi dalle trappole rotte?", "🌡️🔥 Pompa di calore industriale ad alta temperatura: il COP di Carnot dal calore di scarto", "🌊〰️ Moto ondoso: il business case wave energy", "❄️🏭 Refrigerazione industriale: quanto costa il freddo?", "⚡📋 Demand response: quanto rendono i servizi di flessibilità?", "🧱💧 Essiccazione fanghi: togliere l'acqua dai fanghi paga?", "⚡📡 Riserva primaria FCR: vendere banda di regolazione di frequenza paga?", "⚡🔄 Riserva secondaria aFRR: la banda automatica di ripristino frequenza paga?", "⚡📋 Riserva terziaria mFRR: la banda manuale di bilanciamento paga?", "🔌📋 Riserva di sostituzione RR: la riserva lenta di Terna paga?", "🏛️⚡ Mercato della capacità: la remunerazione della capacità disponibile paga?", "📜💹 Trading GO: il market making sui certificati verdi paga?", "🌊💨 Eolico offshore flottante: il vento in mare aperto paga?", "☀️🌾 Agrivoltaico: doppio raccolto, un solo terreno?", "❄️💨 Aria liquida (LAES): l'accumulo criogenico di lunga durata?", "🏔️⚖️ Accumulo gravitazionale: blocchi, altezza e gravità come batteria?", "🔋⚡ Celle a combustibile: elettricità + calore senza combustione?", "🌬️🧪 DAC: la cattura diretta di CO2 dall'aria paga?", "🌱🔥 Biochar: il carbonio della biomassa resta nel suolo?", "☀️🔥 Solare termico: calore dal sole senza fotovoltaico?", "🌊☀️ Fotovoltaico galleggiante (FPV): il business case", "🏘️⚡ Comunità energetiche rinnovabili (CER): l'energia condivisa paga?", "🔌🏠 Vehicle-to-home (V2H): la batteria dell'auto alimenta la casa?", "💧🖥️ Immersion cooling: il raffreddamento a liquido del data center paga?", "⚡🏁 Black start: il riavvio della rete dopo il blackout paga?", "🔌⚡ Grid-forming + inerzia sintetica: la batteria che forma la rete paga?", "⚡ Supercondensatori: potenza istantanea per FFR e peak shaving paga?", "🔋♻️ Second life batterie EV: il riuso stazionario paga?", "☀️🗄️ Accumulo termico stagionale: il calore dell'estate per l'inverno paga?", "⚡🔌 Interconnessione HVDC: il cavo in corrente continua paga?", "🔋🌊 Batterie a flusso redox: potenza ed energia separate pagano?", "⚡🤝 Scambio peer-to-peer: vendere il surplus al vicino conviene?", "♨️💧 Calore dalle acque reflue: la fognatura scalda l'edificio?", "🌡️🕳️ Sonde geotermiche: la pompa di calore dal sottosuolo paga?", "🌬️🔥 Pompa di calore aerotermica: l'aria esterna scalda l'edificio a prezzo giusto?", "💧🔥 Pompa di calore ad acqua di falda: l'acqua del sottosuolo scalda l'edificio?", "🌬️♻️ Recuperatore di calore per ventilazione: l'aria esausta scalda l'aria nuova?", "🔥⚡ Pompa di calore ibrida: caldaia + pompa di calore, chi fa cosa?", "🔥 Pompa di calore ad assorbimento: il calore dal gas senza compressore paga?", "💧 Raffrescamento evaporativo (adiabatico): il freddo dall'acqua senza compressore paga?", "❄️🔥 Pompa di calore a CO2 transcritica: alta temperatura senza gas?", "🌱🔥 Biogas da digestione anaerobica: il business case dell'impianto", "🏝️ Microgrid in isola: PV + batteria + generatore, quanto costa l'autonomia?", "🚌🔌 Ricarica in deposito per bus elettrici: la gestione intelligente della potenza paga?", "🏭🌡️ Teleriscaldamento con pompa di calore di rete: la PdC distrettuale paga contro la caldaia a gas?", "🧱🔥 Accumulo termico a cambiamento di fase (PCM): il calore latente paga?", "🔋🧂 Batterie sodio-ione: senza litio, l'accumulo stazionario paga?", "🏜️🔥 Batteria a sabbia: il calore rinnovabile stoccato paga?", "🔥♻️ Teleriscaldamento 5G: l'anello a bassa temperatura paga?", "🌊⚡ Eolico offshore galleggiante: l'acqua profonda paga?", "🧂💧 Idrogeno in caverne saline: lo stoccaggio sotterraneo paga?", "🌊🧂 Energia da gradiente salino: la foce del fiume genera elettricità?", "🔋⚙️ Batterie ferro-aria: l'accumulo multi-giorno paga?", "🌊🔥 Pompa di calore ad acqua di mare: il mare scalda la città?", "🪵🔥 Torrefazione: i pellet torrefatti sostituiscono il carbone?", "🌿🔥 Syngas da gassificazione: la biomassa diventa gas combustibile?", "☀️❄️ Raffrescamento solare: il sole fa freddo con l'assorbitore?", "❄️🏙️ District cooling: il freddo centralizzato paga contro i chiller singoli?", "🔋♻️ Riciclo batterie al litio: il metallo recuperato paga lo smaltimento?", "☀️🗼 Solare a concentrazione (CSP) a torre: l'elettricità dispacciabile dal sole paga?", "🔥💧 Turbina a gas H2-ready: il co-firing a idrogeno paga il retrofit?", "🚚💧 Camion pesante a idrogeno: il fuel-cell paga contro il diesel?", "⚡🔥 Cogenerazione CAR: il risparmio di energia primaria paga i certificati?", "🔋🟡 Batterie zinco-aria: l'accumulo a basso costo paga contro LFP?", "⚗️ Elettrolizzatori a confronto: alcalino vs PEM vs SOEC — quale tecnologia paga?", "🌿⚗️ Ammoniaca verde: Haber-Bosch da H2 verde — il prezzo dell'NH3 paga?", "💧⚡ Mini-idroelettrico ad acqua fluente: il salto del torrente paga?", "🌿⛽ Biometano da upgrading del biogas: il metano pulito paga?", "💧❄️ Idrogeno liquido (LH2): la liquefazione paga?", "🌡️💧 Accumulo termico in acquifero (ATES): il calore estivo paga d'inverno?", "⚛️🔥 Fusione nucleare: a quale prezzo il primo impianto paga?", "🌡️🌋 Geotermia avanzata (EGS): il calore profondo diventa elettricità?", "🌊🌡️ OTEC: l'energia termica degli oceani paga?", "🧂🔥 Sali fusi: il calore stoccato ridà elettricità a prezzo giusto?", "🏭 Cemento verde: la cattura CO2 sul clinker paga?", "🔥🪟 Forno fusorio del vetro: l'elettrificazione paga?", "🏺🔥 Forno ceramico: l'elettrificazione della cottura paga?", "🌱🔥 Serra riscaldata: la pompa di calore batte la caldaia a gas?", "✈️⚡ Ground power elettrico in aeroporto: l'e-GPU batte diesel + APU?", "❄️⛷️ Innevamento artificiale: cannoni ventilatori o lance ad aria compressa?", "❄️🏭 Cella frigorifera: free-cooling e pompa di calore battono il gruppo tradizionale?", "🏊♨️ Piscina coperta riscaldata: pompa di calore + copertura battono la caldaia a gas?", "⚓🔌 Cold ironing portuale: la corrente da banchina batte i generatori diesel di bordo?", "⛴️🔋 Traghetto elettrico a batteria: la batteria batte il diesel sulla rotta breve?", "🚛🔋 Camion elettrico a batteria: la ricarica megawatt batte il diesel sul lungo raggio?", "🚆💧 Treno regionale a idrogeno: il fuel-cell batte il diesel sulle linee non elettrificate?", "🏭♨️ Calore di scarto industriale: il recupero termico paga contro la caldaia a gas?", "🏋️ Accumulo a gravità: sollevare pesi quando l'energia costa poco, venderla quando costa tanto?", "☀️🔥 Pannelli ibridi PVT: elettricità + calore dallo stesso tetto — il doppio rendimento paga?", "⚡🔥 Caldaia a elettrodi: vapore e calore industriale con elettricità in surplus — conviene più del gas?", "♻️🔥 Forno ad arco elettrico (EAF): fondere rottame con elettricità batte l'altoforno?", "📄 Cartiera: essiccare la carta con vapore o con pompa di calore?", "🍺 Birrificio: bollire il mosto con calore recuperato e pompa di calore batte la caldaia a gas?", "🧀 Caseificio: pastorizzare il latte con calore recuperato e pompa di calore batte la caldaia a gas?", "🧺 Lavanderia industriale: lavare a caldo con calore recuperato e pompa di calore batte la caldaia a gas?", "🥫 Conservificio: sterilizzare le conserve con calore recuperato e pompa di calore batte la caldaia a gas?", "🧵 Tintoria: tingere il tessuto con bagni caldi recuperati e pompa di calore batte la caldaia a gas?", "🪵 Essiccazione del legno: essiccare il legname con pompa di calore batte l'essiccatore a gas?", "🍝 Pastificio: essiccare la pasta con calore recuperato e pompa di calore batte l'essiccatore a gas?", "🍞 Panificio: forno elettrico con recupero fumi batte il forno a gas?", "🏭 Fonderia: fondere la ghisa a induzione con preriscaldo della carica batte il cubilotto a coke?", "🍬 Zuccherificio: concentrare il succo con multi-effetto e MVR batte l'evaporatore a singolo effetto a gas?", "🫙 Vetreria: fondere il vetro con forno ossi-combustibile + boost elettrico batte il forno rigenerativo a gas?", "🧵 Tintoria tessile: recuperare calore dalle acque reflue di tintura batte scaldare acqua nuova in caldaia a gas?", "🐄 Conceria: scaldare le vasche di concia con pompa di calore + recupero calore batte la caldaia a gas?", "🫒 Oleificio: la sansa che avanza alimenta un cogeneratore a biomassa e batte rete + caldaia a gas?", "🥩 Salumificio: stagionare e cuocere i salumi con pompa di calore + recupero calore batte caldaia a gas + frigorifero elettrico?", "🥃 Distilleria: distillare con pompa di calore + recupero calore dai condensatori batte la caldaia a gas?", "🏭 Cementificio: recuperare calore dai fumi del forno per preriscaldare la farina batte il combustibile comprato?", "🧱 Laterizi: cuocere i mattoni con recupero calore dai fumi batte il forno tunnel a gas?", "🐔 Mangimificio: essiccare il mangime con recupero calore dall'aria esausta batte l'essiccatore a gas?", "📦 Cartotecnica: la cogenerazione (CHP) batte caldaia + rete per un cartotecnico?", "🏭 Acciaieria: forno elettrico ad arco (EAF) vs altoforno — quando il rottame batte la ghisa?", "🔩 Galvanica: zincatura a caldo vs elettrolitica — quando lo zinco freddo batte il bagno a 450 °C?", "🫠 Pressofusione alluminio: forno fusorio elettrico a induzione batte il forno a gas?", "🎨 Verniciatura industriale: essiccare la vernice con pompa di calore + recupero calore dall'aria esausta batte il bruciatore a gas?", "🍷 Cantina vinicola: pompa di calore geotermica reversibile batte chiller + caldaia a gas?", "🥩♻️ Macelleria: il calore dei frigoriferi scalda acqua e negozio?", "🍦 Gelateria: pastorizzare con pompa di calore e freddo efficiente batte caldaia a gas + chiller tradizionale?", "🚗 Autolavaggio: pompa di calore + recupero calore dalle acque reflue batte la caldaia a gas per acqua calda e asciugatura?", "🍺 Birreria: scaldare il mosto con pompa di calore + recupero calore dal raffreddamento batte caldaia a gas + chiller tradizionale?", "🏋️ Palestra: pompa di calore + recupero calore dalle docce batte la caldaia a gas per acqua calda e riscaldamento?", "⛸️ Palaghiaccio: il calore di scarto del freddo pista scalda gli spogliatoi e batte caldaia a gas + chiller tradizionale?", "🏫 Scuola: pompa di calore + recupero calore dalla ventilazione batte la caldaia a gas per aule e mensa?", "🏛️ Museo: pompa di calore reversibile + recupero calore dalla ventilazione batte caldaia a gas + chiller per sale espositive?", "📚 Biblioteca: pompa di calore reversibile + recupero calore ventilazione sale lettura + climatizzazione continua depositi batte caldaia a gas + chiller?", "🎭 Teatro: pompa di calore reversibile + recupero calore ventilazione sala batte caldaia a gas + chiller?", "🎬 Cinema: pompa di calore reversibile + recupero calore ventilazione sale batte caldaia a gas + chiller?", "🏨 Albergo: pompa di calore reversibile + recupero calore docce su ACS batte caldaia a gas + chiller?", "🏥 Ospedale: pompa di calore reversibile + recupero calore ventilazione batte caldaia a gas + chiller?", "🛒 Supermercato: recupero calore banchi frigo + pompa di calore batte caldaia a gas + chiller?", "🍽️ Ristorante: pompa di calore + recupero calore celle frigo su ACS batte caldaia a gas + chiller?", "🏭 Centro logistico: pompa di calore per riscaldare un magazzino alto batte caldaia a gas + chiller uffici?", "🏛️ Biblioteca: pompa di calore reversibile + recupero calore dalla ventilazione sale lettura batte caldaia a gas + chiller?", "💊 Farmacia: pompa di calore reversibile + recupero calore dai frigoriferi farmaceutici batte caldaia a gas + chiller?", "💇 Parrucchiere: pompa di calore + recupero calore dalle acque di lavaggio batte caldaia a gas + chiller?", "🌸 Fioraio: pompa di calore + recupero calore dalla cella frigo fiori batte caldaia a gas + frigo tradizionale?", "🐟 Pescheria: macchina del ghiaccio in loco + celle efficienti + recupero calore condensatori su ACS batte ghiaccio comprato + celle tradizionali + caldaia a gas?", "🧁 Pasticceria: forno a gas efficiente + recupero calore forno su ACS + freddo efficiente batte forno a gas vecchio + celle tradizionali + caldaia a gas?", "🍗 Rosticceria: girarrosto a gas efficiente + recupero calore girarrosto su ACS + celle e banchi caldi efficienti batte girarrosto vecchio + celle tradizionali + caldaia a gas?", "🍲 Tavola calda: forno combinato efficiente + banchi caldi efficienti + celle efficienti + recupero calore cucina su ACS batte cucina a gas vecchia + banchi e celle tradizionali + caldaia a gas?", "☕ Bar / caffetteria: macchina espresso efficiente + frigo bibite efficiente + recupero calore macchina su ACS batte macchina espresso tradizionale + frigo tradizionale + caldaia a gas?", "🧺 Lavanderia self-service / a gettoni: lavatrici efficienti + asciugatrici a pompa di calore + recupero calore acque reflue su ACS batte lavatrici tradizionali + asciugatrici elettriche tradizionali + caldaia a gas?", "🦷 Studio dentistico: pompa di calore + recupero calore compressore su ACS + autoclave efficiente batte caldaia a gas + chiller + autoclave tradizionale?", "🧖 Centro estetico / SPA: pompa di calore + recupero calore acque reflue su ACS batte caldaia a gas + chiller + sauna elettrica tradizionale?", "🐾 Clinica veterinaria: pompa di calore + recupero calore ventilazione sale operatorie batte caldaia a gas + chiller + autoclave tradizionale?", "🧒 Asilo nido: pompa di calore + recupero calore ventilazione aule + mensa e lavanderia efficienti batte caldaia a gas + chiller + mensa tradizionale?", "⛪ Chiesa / luogo di culto: riscaldamento localizzato a panche + pompa di calore batte caldaia a gas ad aria + illuminazione tradizionale?", "🔧 Officina meccanica / autoriparazione: pompa di calore aria-aria + compressore VSD con recupero calore + LED battono caldaia a gas + compressore standard + illuminazione tradizionale?", "🛍️ Centro commerciale: pompa di calore + LED + banchi frigo chiusi + scale mobili con standby battono caldaia a gas + illuminazione tradizionale + banchi frigo aperti + scale sempre accese?", "💧 Depuratore: cogenerazione biogas + soffianti efficienti battono rete + caldaia a gas?", "🪩 Discoteca / locale notturno: pompa di calore + recupero calore ventilazione + LED battono caldaia a gas + chiller + illuminazione tradizionale?", "🫒 Frantoio oleario: pompa di calore + recupero calore acque reflue + motori efficienti battono caldaia a gas + motori tradizionali?", "🪵 Falegnameria: motori efficienti + aspirazione con inverter + caldaia a biomassa da scarti battono motori tradizionali + aspirazione sempre accesa + caldaia a gas?", "🖨️ Tipografia: presse efficienti + finitura servo + recupero calore essiccazione battono presse tradizionali + finitura tradizionale + essiccazione a gas?", "🍾 Impianto di imbottigliamento: riempitrici efficienti + soffiaggio efficiente + recupero calore lavaggio battono riempitrici tradizionali + soffiaggio tradizionale + lavaggio a gas?", "🌾 Mulino / molitura cereali: motori efficienti + trasporto pneumatico ottimizzato + recupero calore essiccazione battono motori tradizionali + trasporto tradizionale + essiccazione a gas?", "🐄 Sala mungitura: pompa del vuoto a velocita' variabile + refrigerazione latte efficiente + recupero calore acqua lavaggio battono pompa fissa + refrigerazione tradizionale + acqua calda a gas?", "🐖 Porcilaia / allevamento suino: ventilazione con inverter + raffrescamento evaporativo + recupero calore aria esausta battono ventilazione on/off + raffrescamento tradizionale + riscaldamento a gas?", "🐔 Allevamento avicolo / pollaio da carne: ventilazione con inverter + raffrescamento evaporativo + recupero calore aria esausta battono ventilazione on/off + raffrescamento tradizionale + riscaldamento a gas?", "🍫 Cioccolateria: raffinazione con motori efficienti + refrigerazione efficiente + recupero calore su concheggio battono raffinazione tradizionale + refrigerazione tradizionale + riscaldamento a gas?", "🚗 Carrozzeria: ventilazione cabina con inverter + aria compressa efficiente + recupero calore su cabina battono ventilazione tradizionale + aria compressa tradizionale + riscaldamento a gas?", "🧵 Tessitura: telai con azionamento efficiente + aria compressa efficiente + recupero calore su climatizzazione sala telai battono telai tradizionali + aria compressa tradizionale + riscaldamento a gas?", "👞 Calzaturificio: cucitura/montaggio con motori efficienti + aria compressa efficiente + recupero calore su forni di asciugatura collanti battono cucitura tradizionale + aria compressa tradizionale + riscaldamento a gas?", "🪟 Serramenti in legno: taglio/fresatura con motori efficienti + aria compressa efficiente + recupero calore su essiccazione vernici battono taglio tradizionale + aria compressa tradizionale + essiccazione a gas?", "🛣️ Impianto di asfalto: mescolatore efficiente + aspirazione con inverter + recupero calore fumi su tamburo battono mescolatore tradizionale + aspirazione tradizionale + bruciatore a gas?", "🏗️ Impianto di betonaggio: miscelatore ad alta efficienza + nastri con inverter + pompa di calore per acqua di impasto battono miscelatore tradizionale + nastri tradizionali + caldaia a gas per acqua?", "🪵 Segheria: seghe efficienti + aspirazione con inverter + essiccatoio a pompa di calore battono seghe tradizionali + aspirazione tradizionale + essiccatoio a gas?", "🌾 Malteria: ventilazione germinazione con inverter + ventilazione essiccatoio con inverter + recupero calore fumi + essiccatoio a pompa di calore battono ventilazione tradizionale + essiccatoio a gas?", "🏟️ Palazzetto: LED + pompa di calore + fotovoltaico battono illuminazione tradizionale + caldaia a gas?", "🚰 Acquedotto: pompe a velocita' variabile + riduzione perdite + fotovoltaico battono pompe a velocita' fissa + perdite alte?", "🚡 Funivia: azionamento con recupero in frenata + motori efficienti + fotovoltaico in stazione battono azionamento tradizionale senza recupero + riscaldamento stazione a gas?", "🍄 Fungaia: climatizzazione efficiente + recupero calore aria esausta + fotovoltaico in copertura + pompa di calore per pastorizzazione battono climatizzazione tradizionale + pastorizzazione substrato a gas?", "♨️ Terme: pompa di calore + recupero calore acque termali reflue + fotovoltaico battono caldaia a gas per vasche, ACS e ambienti?", "🏔️ Rifugio alpino: fotovoltaico + batteria + pompa di calore battono generatore diesel + caldaia a gasolio in autonomia off-grid?", "🏕️ Campeggio: fotovoltaico + batteria + pompa di calore + LED battono generatore diesel + caldaia a gas per piazzole, servizi e piscina in stagione?", "🐴 Maneggio: fotovoltaico + batteria + pompa di calore + LED arena battono caldaia a gas + prelievo da rete per box, scuderie e maneggio coperto?", "🚗 Autosalone: fotovoltaico + ricarica EV + pompa di calore battono caldaia a gas + prelievo da rete per showroom, officina e piazzale?", "🏡 Agriturismo: fotovoltaico + batteria + pompa di calore + solare termico battono caldaia a gas + prelievo da rete per camere e ristorante?", "📦 Magazzino logistico: fotovoltaico + batteria + pompa di calore + illuminazione LED battono caldaia a gas + rete + illuminazione tradizionale?", "🏭 Impianto di depurazione: soffianti ad alta efficienza + fotovoltaico + biogas da digestione anaerobica battono soffianti tradizionali + rete?", "🎓 Campus universitario: fotovoltaico + batteria + pompa di calore + LED + recupero calore laboratori battono caldaia a gas + rete + illuminazione tradizionale?", "⛸️ Palaghiaccio: frigorifero efficiente + recupero calore + fotovoltaico battono frigorifero tradizionale + caldaia a gas?", "🛣️ Autogrill: pompa di calore + recupero calore cucina + FV pensiline battono caldaia a gas + chiller?", "🍕 Pizzeria: forno elettrico con recupero fumi + pompa di calore batte il forno a gas?", "🐄 Stalla bovina da latte: raffreddamento latte + recupero calore + pompa di calore battono caldaia a gas + tank frigo tradizionale?", "🛞 Gommista: compressore a velocita' variabile + recupero calore compressore + pompa di calore battono caldaia a gas + compressore on/off tradizionale?", "🧺 Lavasecco: macchine efficienti + recupero calore vapore + pompa di calore + FV battono caldaia a gas + macchine tradizionali?", "🐟 Acquacoltura: pompe e ossigenatori efficienti + recupero calore + pompa di calore + FV battono caldaia a gas + pompaggio tradizionale?", "❄️ Surgelati: surgelazione rapida + celle frigorifere efficienti + recupero calore + pompa di calore + FV battono caldaia a gas + freddo tradizionale?", "🪑 Mobilificio: lavorazione legno efficiente + essiccazione a pompa di calore + verniciatura ad acqua + FV battono lavorazione tradizionale + essiccazione a gas + caldaia a gas?", "🐝 Apicoltura: smielatura + fusione cera + deumidificazione miele con pompa di calore + FV battono laboratorio tradizionale + caldaia a gas?", "🏥 RSA / casa di riposo: pompa di calore + recupero calore lavanderia e cucina + FV battono caldaia a gas + chiller tradizionale?", "☕ Torrefazione caffè: tostatore elettrico + recupero fumi + FV batte il tostatore a gas?", "🚗 Autonoleggio: flotta elettrica + ricarica in sede batte la flotta diesel?", "🌱 Vivaio floricolo: pompa di calore + irrigazione efficiente + FV in copertura battono caldaia a gas + pompaggio tradizionale?", "🏢 Coworking: pompa di calore reversibile + recupero calore ventilazione + LED + FV battono caldaia a gas + chiller + illuminazione tradizionale?", "🅿️ Parcheggio coperto: LED + ventilazione a controllo CO + FV su pensiline/copertura + ricarica EV battono illuminazione tradizionale + ventilazione sempre accesa?", "🤖 Magazzino automatizzato: LED + sensoristica + trasloelevatori/AGV elettrici + FV su tetto battono magazzino tradizionale con illuminazione sempre accesa e carrelli termici?", "♻️ Impianto di compostaggio: aerazione forzata + biofiltro + recupero calore + FV batte compostaggio tradizionale in cumuli aperti con rivoltamento diesel?", "🌾 Molino: motori efficienti + inverter + aspirazione efficiente + FV battono molino tradizionale con motori vecchi + aspirazione sempre accesa?", "🧱 Laterizio: recupero calore forno + essiccatoio efficiente + FV battono forno ed essiccatoio tradizionali a gas?", "🥩 Macello: celle frigorifere efficienti + recupero calore + FV battono celle tradizionali + caldaia a gas?", "🏭 Stampaggio plastica a iniezione: presse servo-elettriche + free-cooling stampi + FV battono presse idrauliche tradizionali + essiccazione a gas?", "⛏️ Cava / frantumazione inerti: frantoi elettrici efficienti + nastri con inverter + FV battono frantumazione diesel + nastri tradizionali?", "🪨 Marmificio / lavorazione marmo e pietra: seghe diamantate con inverter + lucidatura efficiente + FV battono seghe tradizionali + essiccazione a gas?", "🚰 Rubinetteria / produzione rubinetti e valvolame: CNC con inverter + lucidatura efficiente + FV battono lavorazioni tradizionali + essiccazione a gas?", "👓 Occhialeria / produzione occhiali e montature: stampaggio/fresatura efficienti + lucidatura efficiente + FV battono lavorazioni tradizionali + essiccazione a gas?", "👜 Pelletteria / borse, cinture e portafogli: taglio laser + rifinitura efficiente + FV battono taglio/cucitura tradizionali + essiccazione a gas?", "🧶 Maglieria / capi in maglia: macchine elettroniche efficienti + stiratura efficiente + FV battono maglieria tradizionale + vaporizzazione a gas?", "💎 Gioielleria / oreficeria: forni a induzione efficienti + lucidatura efficiente + FV battono fusione tradizionale + ricottura a gas?", "⌚ Orologeria: micromeccanica CNC efficiente + lucidatura efficiente + FV battono micromeccanica tradizionale + trattamenti termici a gas?", "🏭 Carpenteria metallica: taglio laser efficiente + saldatura efficiente + FV battono taglio plasma tradizionale + saldatura tradizionale + gas per preriscaldo?", "🏭 Prosciuttificio: stagionare e asciugare i prosciutti con pompa di calore + recupero calore + FV battono caldaia a gas + freddo tradizionale?", "🍇 Vigneto: irrigazione a goccia + ventilatori antibrina elettrici + FV battono irrigazione tradizionale + riscaldamento antibrina a gas?", "🍎 Frutteto: irrigazione a goccia + ventilatori antibrina + celle frigo efficienti + FV battono irrigazione tradizionale + antibrina a gas + celle tradizionali?", "🐑 Allevamento ovino: tosatura efficiente + illuminazione LED + acqua calda da pompa di calore + FV battono tosatura tradizionale + illuminazione tradizionale + acqua calda a gas?", "🐰 Coniglicoltura: ventilazione efficiente + illuminazione LED + riscaldamento da pompa di calore + FV battono ventilazione tradizionale + illuminazione tradizionale + riscaldamento a gas?", "🐌 Elicicoltura: irrigazione efficiente + ventilazione efficiente + riscaldamento da pompa di calore + FV battono irrigazione tradizionale + ventilazione tradizionale + riscaldamento a gas?", "🐛 Sericoltura: ventilazione efficiente + illuminazione LED + riscaldamento da pompa di calore + FV battono ventilazione tradizionale + illuminazione tradizionale + riscaldamento a gas?", "🌳 Tartuficoltura: irrigazione a goccia + celle frigo efficienti + riscaldamento da pompa di calore + FV battono irrigazione tradizionale + celle tradizionali + riscaldamento a gas?", "🫒 Olivicoltura: irrigazione a goccia + frantoio efficiente + pompa di calore + FV battono irrigazione tradizionale + frantoio tradizionale + riscaldamento a gas?", "🍬 Confetteria: cottura con pompa di calore + recupero calore + essiccazione efficiente + lucidatura efficiente + LED + FV battono cottura a gas + essiccazione a gas + lucidatura tradizionale + illuminazione tradizionale?", "🌾 Risaia: essiccare il risone con pompa di calore + recupero calore e irrigare efficiente + FV battono essiccatore a gas + irrigazione tradizionale?", "🏗️ Cantiere edile: gruppo elettrogeno diesel + riscaldamento a gasolio battono allaccio rete + batteria + FV + pompa di calore + LED?", "🗑️ Discarica: il biogas da discarica alimenta un cogeneratore e batte la torcia?", "🔥🌲 Teleriscaldamento a biomassa: la caldaia a cippato di rete batte le caldaie a gas dei singoli edifici?", "⚡🔋 Cogenerazione a fuel cell: l'elettricità + calore senza combustione paga?", "🏠 NZEB: l'edificio a energia quasi zero paga?", "☀️📉 Cannibalizzazione FV: il prezzo catturato crolla con la penetrazione solare?", "⛏️💰 Bitcoin mining: il miner come carico flessibile monetizza l'energia in eccesso?", "☀️🔋 Ibrido FV + accumulo co-locato: un solo allaccio, due ricavi — il sizing della batteria paga?", "🔋📉 Degradazione batteria: l'accumulo invecchia — augmentation o sostituzione?", "🌍📜 EU ETS: le quote CO2 dell'impianto — comprare, coprirsi o abbattere?", "♨️🏛️ Conto Termico: l'incentivo GSE sul calore rinnovabile paga davvero?", "🤝🌐 VPPA (Virtual PPA): il prezzo fisso rinnovabile senza ritirare l'energia paga?", "⚡🤝 PPA fisico: l'energia rinnovabile ritirata davvero a prezzo fisso paga?", "📜💶 CCfD (Carbon Contract for Difference): il prezzo CO2 garantito sblocca la decarbonizzazione industriale?", "⏱️⚡ Mercato infragiornaliero (MI): l'arbitraggio intraday con batteria paga?", "🔀📜 FTR: il diritto finanziario di trasmissione copre la congestione?", "🌱📜 Garanzie di Origine (GO): il certificato rinnovabile paga?", "🤍📜 Certificati Bianchi (TEE): il risparmio energetico si vende?", "⚡🏛️ UVAM sul MSD di Terna: aggregare flessibilità e venderla a Terna paga?", "🏛️💶 Ecobonus: quanto vale davvero lo sconto fiscale sul retrofit energetico?"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10, tab11, tab12, tab13, tab14, tab15, tab16, tab17, tab18, tab19, tab20, tab21, tab22, tab23, tab24, tab25, tab26, tab27, tab28, tab29, tab30, tab31, tab32, tab33, tab34, tab35, tab36, tab37, tab38, tab39, tab40, tab41, tab42, tab43, tab44, tab45, tab46, tab47, tab48, tab49, tab50, tab51, tab52, tab53, tab54, tab55, tab56, tab57, tab58, tab59, tab60, tab61, tab62, tab63, tab64, tab65, tab66, tab67, tab68, tab69, tab70, tab71, tab72, tab73, tab74, tab75, tab76, tab77, tab78, tab79, tab80, tab81, tab82, tab83, tab84, tab85, tab86, tab87, tab88, tab89, tab90, tab91, tab92, tab93, tab94, tab95, tab96, tab97, tab98, tab99, tab100, tab101, tab102, tab103, tab104, tab105, tab106, tab107, tab108, tab109, tab110, tab111, tab112, tab113, tab114, tab115, tab116, tab117, tab118, tab119, tab120, tab121, tab122, tab123, tab124, tab125, tab126, tab127, tab128, tab129, tab130, tab131, tab132, tab133, tab134, tab135, tab136, tab137, tab138, tab139, tab140, tab141, tab142, tab143, tab144, tab145, tab146, tab147, tab148, tab149, tab150, tab151, tab152, tab153, tab154, tab155, tab156, tab157, tab158, tab159, tab160, tab161, tab162, tab163, tab164, tab165, tab166, tab167, tab168, tab169, tab170, tab171, tab172, tab173, tab174, tab175, tab176, tab177, tab178, tab179, tab180, tab181, tab182, tab183, tab184, tab185, tab186, tab187, tab188, tab189, tab190, tab191, tab192, tab193, tab194, tab195, tab196, tab197, tab198, tab199, tab200, tab201, tab202, tab203, tab204, tab205, tab206, tab207, tab208, tab209, tab210, tab211, tab212, tab213, tab214, tab215, tab216, tab217, tab218, tab219, tab220, tab221, tab222, tab223, tab224, tab225, tab226, tab227, tab228, tab229, tab230, tab231, tab232, tab233, tab234, tab235, tab236, tab237, tab238, tab239, tab240, tab241, tab242, tab243, tab244, tab245, tab246, tab247, tab248, tab249, tab250, tab251, tab252, tab253, tab254, tab255, tab256, tab257, tab258, tab259, tab260, tab261, tab262, tab263, tab264, tab265, tab266, tab267, tab268, tab269, tab270, tab271, tab272, tab273, tab274, tab275, tab276, tab277, tab278, tab279, tab280, tab281, tab282, tab283, tab284, tab285, tab286, tab287, tab288, tab289, tab290, tab291, tab292, tab293, tab294, tab295, tab296, tab297, tab298, tab299, tab300, tab301, tab302, tab303, tab304, tab305, tab306, tab307, tab308, tab309, tab310, tab311, tab312, tab313, tab314, tab315, tab316, tab317, tab318, tab319, tab320, tab321, tab322, tab323, tab324, tab325, tab326, tab327, tab328, tab329, tab330, tab331, tab332, tab333, tab334, tab335, tab336, tab337, tab338, tab339, tab340, tab341, tab342, tab343, tab344, tab345, tab346, tab347, tab348, tab349, tab350, tab351, tab352, tab353, tab354, tab355, tab356, tab357, tab358, tab359, tab360, tab361, tab362, tab363, tab364, tab365, tab366, tab367, tab368, tab369, tab370, tab371, tab372, tab373, tab374, tab375, tab376, tab377, tab378, tab379, tab380, tab381, tab382, tab383, tab384, tab385, tab386, tab387, tab388, tab389, tab390, tab391, tab392, tab393, tab394, tab395, tab396, tab397, tab398, tab399, tab400, tab401, tab402, tab403, tab404, tab405, tab406, tab407, tab408, tab409, tab410, tab411, tab412, tab413, tab414, tab415, tab416, tab417, tab418, tab419, tab420, tab421, tab422, tab423, tab424, tab425, tab426, tab427, tab428, tab429, tab430, tab431, tab432, tab433, tab434, tab435, tab436, tab437, tab438, tab439, tab440, tab441, tab442, tab443, tab444, tab445, tab446, tab447, tab448, tab449, tab450, tab451, tab452, tab453, tab454, tab455, tab456, tab457, tab458, tab459, tab460, tab461, tab462, tab463, tab464, tab465, tab466, tab467, tab468, tab469, tab470, tab471, tab472, tab473, tab474, tab475, tab476, tab477, tab478, tab479, tab480, tab481, tab482, tab483, tab484, tab485, tab486, tab487, tab488, tab489, tab490, tab491, tab492, tab493, tab494, tab495, tab496, tab497, tab498, tab499, tab500, tab501, tab502, tab503, tab504, tab505, tab506, tab507, tab508, tab509, tab510, tab511, tab512, tab513, tab514, tab515, tab516, tab517, tab518, tab519, tab520, tab521, tab522, tab523, tab524, tab525, tab526, tab527, tab528, tab529, tab530, tab531, tab532, tab533, tab534, tab535, tab536, tab537, tab538, tab539, tab540, tab541, tab542, tab543, tab544, tab545, tab546, tab547, tab548, tab549, tab550, tab551, tab552, tab553, tab554, tab555, tab556, tab557, tab558, tab559, tab560, tab561, tab562, tab563, tab564, tab565, tab566, tab567, tab568, tab569, tab570, tab571, tab572, tab573, tab574, tab575, tab576, tab577, tab578, tab579, tab580, tab581, tab582, tab583, tab584, tab585, tab586, tab587, tab588, tab589, tab590, tab591, tab592, tab593, tab594, tab595, tab596, tab597, tab598, tab599, tab600, tab601, tab602, tab603, tab604, tab605, tab606, tab607, tab608, tab609, tab610, tab611, tab612, tab613, tab614, tab615, tab616, tab617, tab618, tab619, tab620, tab621, tab622, tab623, tab624, tab625, tab626, tab627, tab628, tab629, tab630, tab631, tab632, tab633, tab634, tab635, tab636, tab637, tab638, tab639, tab640, tab641, tab642, tab643, tab644, tab645, tab646, tab647, tab648, tab649, tab650, tab651, tab652, tab653, tab654, tab655, tab656, tab657, tab658, tab659, tab660, tab661, tab662, tab663, tab664, tab665, tab666, tab667, tab668, tab669, tab670, tab671, tab672, tab673, tab674, tab675, tab676, tab677, tab678, tab679, tab680, tab681, tab682, tab683, tab684, tab685, tab686, tab687, tab688, tab689, tab690, tab691, tab692, tab693, tab694, tab695, tab696, tab697, tab698, tab699, tab700, tab701, tab702, tab703, tab704, tab705, tab706, tab707, tab708, tab709, tab710, tab711, tab712, tab713, tab714, tab715, tab716, tab717, tab718, tab719, tab720, tab721, tab722, tab723, tab724, tab725, tab726, tab727, tab728, tab729, tab730, tab731, tab732, tab733, tab734, tab735, tab736, tab737, tab738, tab739, tab740, tab741, tab742, tab743, tab744, tab745, tab746, tab747, tab748, tab749, tab750, tab751, tab752, tab753, tab754, tab755, tab756, tab757, tab758, tab759, tab760, tab761, tab762, tab763, tab764, tab765, tab766, tab767, tab768, tab769, tab770, tab771, tab772, tab773, tab774, tab775, tab776, tab777, tab778, tab779, tab780, tab781, tab782, tab783, tab784, tab785, tab786, tab787, tab788, tab789, tab790, tab791, tab792, tab793, tab794, tab795, tab796, tab797, tab798, tab799, tab800, tab801, tab802, tab803, tab804, tab805, tab806, tab807, tab808, tab809, tab810, tab811, tab812, tab813, tab814, tab815, tab816, tab817, tab818, tab819, tab820, tab821, tab822, tab823, tab824, tab825, tab826, tab827, tab828, tab829, tab830, tab831, tab832, tab833, tab834, tab835, tab836, tab837, tab838, tab839, tab840, tab841, tab842, tab843, tab844, tab845, tab846, tab847, tab848, tab849, tab850, tab851, tab852, tab853, tab854, tab855, tab856, tab857, tab858, tab859, tab860, tab861, tab862, tab863, tab864, tab865, tab866, tab867, tab868, tab869, tab870, tab871, tab872, tab873, tab874, tab875, tab876, tab877, tab878, tab879, tab880, tab881, tab882, tab883, tab884, tab885, tab886, tab887, tab888, tab889, tab890, tab891, tab892, tab893, tab894, tab895, tab896, tab897, tab898, tab899, tab900, tab901, tab902, tab903, tab904, tab905, tab906, tab907, tab908, tab909 = st.tabs(["⏱️ Profilo giornaliero", "🔥 Heatmap oraria", "⚡ Fasce F1/F2/F3", "📋 Tabella dati", "⚠️ Rischio & Durata", "🔋 Arbitraggio Batteria", "📊 Base/Peak mensile", "💰 Costo fornitura", "📈 MtM hedging", "🔥 Spark spread", "📐 Shaping curva", "📅 Weekend", "☀️ Price capture", "📉 Volatilità", "🗓️ YoY", "⬇️ Prezzi negativi", "↕️ Spread intra-day", "📍 Picchi di prezzo", "📆 Settimana tipo", "📉 Curva durata", "🎯 Concentrazione costo", "🔄 Shifting carico", "🎯 Finestre di acquisto", "🗓️ Stagionalità", "💼 Budget tracker", "🎚️ Sensitività profilo", "🎲 VaR costo (MC)", "🔝 Top giorni di costo", "🎛️ Fasce ottimali", "📈 Autocorrelazione", "🧪 Stress test", "🔮 Forecast prezzo", "⚡ Rampe di prezzo", "🔁 Persistenza sopra soglia", "📆 Spread calendario", "🧩 Decomposizione", "📊 Sequenze", "💡 Valore flessibilità", "🕐 Top ore di costo", "🕯️ Candele OHLC", "📉 Crolli & recuperi", "🔄 Mean reversion", "📦 Strip forward", "🌡️ Climatologia prezzo", "🔀 Stabilità profilo", "⚖️ Fisso vs indicizzato", "🛡️ Cap & Floor", "🧾 Stima bolletta", "🧮 Margine fornitore", "🌉 Ponte budget", "🧬 Driver del costo", "🎯 Hedge ratio", "📏 Shape premium", "💸 Sbilanciamento", "🏭 Costo CO₂", "🛡️ Expected Shortfall", "⚡ Potenza di picco", "🏭 Costo per turno", "🧲 Concentrazione per fascia", "⏰ Ora di punta", "🧠 Efficienza profilo", "🪟 Finestra ottimale", "💹 Margine per impianto", "🔌 Picchi coincidenti", "🔗 Correlazione impianti", "🪜 Curva di merito", "🗓️ Giorni tipo", "📐 Struttura a termine", "🚨 Giorni critici", "🪜 Tranche di acquisto", "📊 Distribuzione prezzi", "⏳ Timing del costo", "🚨 Anomalie di prezzo", "🎯 Backtest ordini limite", "📜 Take-or-pay", "🔋 Sizing batteria", "🔔 Alert personalizzati", "☀️ Autoconsumo FV", "➕ Nuovo carico", "⛽ Fuel switching", "🔥⚡ Power-to-heat", "🗻 Valore idro", "🤝 PPA vs merchant", "⚡ Carico interrompibile", "🔌 Tolling agreement", "🔧 Fermo impianto", "📊 Profilo di carico", "🧪 Shock di scenario", "🪫 Degrado batteria", "⚫ Dark spread", "🏗️ LCOE vs prezzo", "🔧 Payback efficienza", "💰 Opzioni sul prezzo", "🔀 Opzione spark spread", "🔛 Dispatch ottimale", "🏭 Dispatch di portafoglio", "🌀 Opzione swing", "📊 Greche opzioni", "🌀 Opzione asiatica", "🎯 Strategie opzionarie", "🗓️ Opzione Bermudiana", "🛡️ Opzione barriera", "🔭 Opzione lookback", "🪆 Opzione composta", "🪙 Opzione digitale", "🧭 Opzione chooser", "⏳ Opzione forward start", "🌡️ Opzione quanto", "🗽 Opzione americana", "🟣 Opzione rainbow", "🔌 Ricarica EV ottimale", "🔀 Spread transfrontaliero", "🛢️ Stoccaggio gas", "🛢️📈 Stoccaggio estrinseco", "🧾 Comparatore tariffe", "📤 Il mio carico", "🗓️ Calendario del costo", "🎯 Fixing advisor", "📉 Margin call", "📈 Frontiera di fissazione", "🎰 Ventaglio di prezzo", "⚡ Rischio quanto", "🕰️ Lag di indicizzazione", "💱 Costo in franchi", "🌱 Garanzie d'origine", "⚡ Ricavi da riserva", "🛡️ CVA controparte", "🔋 LCOS batteria", "📊 Attribuzione P&L", "📉 Drawdown MtM", "🧪 Test efficacia hedge", "🕐 Volatilità intraday", "🔀 Regimi di prezzo", "📑 Report di periodo", "📏 Premio di rischio", "🎄 Effetto festività", "🎯 Radar prezzo obiettivo", "📝 Riconciliazione fattura", "🔍 Qualità dati", "🔗 Beta gas-power", "🌊 Volatilità a termine", "🚨 Indice di stress di mercato", "📊 Efficienza del fixing", "⏳ Baricentro del costo", "⚡ Energia reattiva", "⚡ Potenza impegnata", "🔄 Rollover coperture", "🔋 Peak shaving", "🌀 Esponente di Hurst", "🎯 Tornado sensibilità", "📈 Segnali tecnici", "⚠️ Rischio orario", "👥 Profili tipo", "🎯 Accuratezza forecast", "🌡️ Normalizzazione climatica", "📏 EnPI energetico", "🌍 Impronta CO₂", "📍 Event study", "☀️ Business case rinnovabile", "💧 Idrogeno verde", "📦 Rischio volume", "💰 Prezzo fisso equo", "🏭 Costo per sito", "⚡ Elasticità domanda", "📊 Fattore di carico", "🔥 Heat rate implicito", "🔌 Diversità di carico", "🌫️ Dunkelflaute", "🌞 Hellbrise", "🪜 Scala di copertura", "📏 Test di stazionarietà", "⛓️ Cointegrazione", "🔀 Causalità di Granger", "⏮️ Anticipo gas→power", "🎯 Matrice costo giorno×ora", "🛠️ Fermo manutenzione", "⚖️ Autoproduzione vs acquisto", "⚡ Flessibilità oraria", "🕰️ Orologio del prezzo", "📊 Quantili orari", "📆 Curva forward attesa", "⏳ Costo del ritardo", "💸 Slippage di esecuzione", "🪙 Revenue stacking", "💨 CO₂ implicita", "🏔️ Pompaggio", "🕐 Matching orario PPA", "🤝 Comunità energetica", "⚡🔥 Cogenerazione (CHP)", "⏸️ Curtailment rinnovabile", "🎯 Strategia di offerta", "⚡ Remunerazione capacità", "💨 Cattura CO₂ (CCS)", "🧬 Fattori di forma (PCA)", "🛡️ Copertura proxy", "🔋 Business case accumulo", "📊 KPI di performance", "🎲 VaR di portafoglio", "📊 Basis risk", "🌀 Rolling VaR", "📅 Radar scadenze contratti", "⚖️ Concentrazione controparte", "💧 Costo di liquidazione", "⏳ Opzione di differimento", "🏦 Dimensionamento debito (DSCR)", "🎯 Competitività offerta", "🌡️ Gradi giorno", "📊 Confronto fornitori", "💸 Sconto pronta cassa", "🤝 Scoring offerte PPA", "🎖️ Certificati Bianchi (TEE)", "🚪 Costo di uscita contratto", "🔄 Rinnovo vs switch fornitore", "📉 Backtest offerta indicizzata", "🛡️ Robustezza offerta", "💰 VAN offerte pluriennali", "🎯 Break-even offerte", "🔁 Opzione di estensione", "🚨 Anomalie di carico", "🌍 Costo CBAM stimato", "⚡ Oneri di dispacciamento", "💶 Oneri generali", "📦 Componenti trasporto & misura", "💡 Cessione eccedenze", "🔁 Scambio sul posto (SSP)", "🧾 Accise e IVA", "🦆 Duck curve", "🌍 Emissioni marginali (MEF)", "💡 Valore del forecast", "🧮 Budget di rischio", "🔍 Qualità dati (gap & outlier)", "🧮 Concentrazione temporale (HHI)", "💧 Waterfall del costo", "🎯 Score di timing", "🔁 Correlazione carico-prezzo", "📊 Curva di carico residua", "⚡ Flessibilità implicita", "🌙 Baseload notturno", "📊 Probabilità sforamento budget", "📋 Checklist gara fornitura", "🗺️ Mappa prezzo×carico", "⚡ Potenza impegnata ottimale", "⏱️ Picchi quartorari (15')", "🧾 Acconto & conguaglio", "💳 Conguaglio a rate", "🛡️ Deposito cauzionale", "🔄 Voltura e subentro", "💲 Interessi moratori & ritardo pagamenti", "🔌 Preventivo allacciamento", "💸 Capitale circolante", "⚡ Energia reattiva & penali cosφ", "⚖️ Bilancio energetico", "🌑 Costo interruzioni (VoLL)", "♨️ Recupero calore di scarto", "⛽ Capacità gas giornaliera", "⚡ Perdite di rete", "🔥 Teleriscaldamento vs caldaia", "🌿 Clean spread (con CO₂)", "🇮🇹 PUN da prezzi zonali", "❄️ Pompa di calore vs caldaia", "🏢 PUE & costo data center", "🔌 Gruppo elettrogeno vs blackout", "🚗 Flotta aziendale: TCO diesel vs elettrico", "📜 Garanzie di origine: costo del 100% rinnovabile", "♻️ Fine vita FV: revamping vs dismissione", "🌾️ Agrivoltaico: doppio reddito", "🟢 Biometano: business case", "🌬️ Eolico onshore: business case", "🌊 Idroelettrico run-of-river: business case", "🔥 Geotermia profonda: business case", "☀️ Solare termodinamico (CSP): business case", "🌬️ Eolico offshore: business case", "☀️ Fotovoltaico utility-scale: business case", "⚛️ Nucleare SMR: business case", "📊 Posizione vs limiti di rischio", "💧 Cash flow at risk (CFaR)", "⚡ Aste MI: scostamenti vs MGP", "🌡️ Stress climatico: domanda e prezzo", "🌪️ Derivati meteo: pricing HDD/CDD", "🚢 LNG vs gasdotto: costo delivered", "🛢️ Crack spread: margine raffinazione 3-2-1", "🧪 Margine petrolchimico: nafta → etilene", "🛢️ Carry petrolio: contango & stoccaggio fisico", "🏭 Unit commitment CCGT: accendere o no?", "🛛️ Differenziali greggio: sweet vs sour", "⛽ Basis gas TTF–PSV", "🚢⚡ Rigassificazione GNL: margine terminale", "⚡🔥 Clean spark spread: margine centrale a gas", "⚫🔥 Clean dark spread: margine centrale a carbone", "🔀💰 PTR transfrontaliero: vale il prezzo d'asta?", "📊💹 Sharpe & Sortino: la strategia rende davvero?", "🪓📊 Component VaR: quale posizione tagliare per prima?", "🛡📉 Hedge ratio ottimale: quanto coprire con i futures?", "🧪📉 Backtest del VaR: il modello tiene?", "🧪🛡 Backtest dell'ES: la coda e' sottostimata?", "🪓🛡 Component ES: chi contribuisce alla coda?", "➕📊 Marginal VaR: quanto rischio aggiunge il nuovo trade?", "🚦📏 Limite VaR: quanto margine resta?", "🧪⚡ Stress test: quanto perde il book negli scenari?", "🧮📊 Rapporto di diversificazione: quanto rischio risparmia il book?", "🛡️🔍 Rischio di modello: quale VaR credere?", "✂️📉 Incremental VaR: quanto rischio togli chiudendo la posizione?", "🧱📉 Capacità VaR: quanto nozionale puoi ancora aggiungere?", "🗂️📊 VaR per segmento: dove si concentra il rischio?", "🎯🛡 Risk budgeting: il book rispetta i target?", "💎📊 RAROC: il rendimento ripaga il rischio?", "🌊📉 Expected Shortfall: la perdita oltre il VaR", "💥📈 Stress di correlazione: quanto sale il VaR se si rompono?", "🎯💥 Rho critica: a quale correlazione il VaR tocca il limite?", "💧📉 LVaR: il VaR corretto per il costo di liquidazione", "📐📉 Cornish-Fisher: il VaR corretto per skew e code grasse", "📐🌊 Expected Shortfall con Cornish-Fisher: la coda oltre il VaR con code grasse", "📉💥 VaR rotto: la probabilita' di breccia con code grasse", "⏳📉 VaR multi-orizzonte: lo scaling con autocorrelazione dei rendimenti", "🏔️📉 Valori estremi (Hill): il VaR oltre il massimo storico", "🌊📉 POT-GPD: il VaR dalla coda paretiana oltre soglia", "🧠📉 CAViaR: il VaR adattivo che impara dai rendimenti", "🌀📉 Copula t-Student: il VaR che vede le code muoversi insieme", "🎛📉 FHS: il VaR con la volatilita' di oggi", "⚙️📉 GARCH(1,1): la volatilita' che ricorda", "🧪📉 Backtest VaR: il modello resiste al tempo?", "🎯📉 Convergenza forward: il forward indovina lo spot?", "🔄📉 Half-life di mean reversion: lo spot torna alla media?", "Ω📊 Omega ratio: oltre Sharpe e Sortino", "📈📉 Calmar ratio: il rendimento che paga il drawdown", "🩹 Pain index e Pain ratio: il dolore medio oltre il peggio", "🛟 Sterling ratio: il Calmar mediato sui peggiori drawdown", "🔻 Burke ratio: il drawdown penalizzato al quadrato", "🌊📉 CDaR: il drawdown medio oltre la soglia (il VaR dei drawdown)", "🔍📉 Martin ratio: il Calmar che guarda tutto il dolore", "⛵ Tempo di recupero: quanto resta sott'acqua l'equity", "🎯 Information ratio: la strategia batte davvero il benchmark?", "📊 Capture ratio: quanto cattura la strategia nei mercati su e giù?", "🎯 Hit rate: quanto spesso la strategia batte il benchmark?", "📏 Tracking error: quanto si discosta la strategia dal benchmark?", "📉 Max drawdown relativo: quanto si scende sotto il benchmark?", "📐 Treynor & Jensen: il premio per unita' di rischio sistematico", "⚖️ M² Modigliani: il rendimento a parita' di rischio col benchmark", "📉 Sortino ratio: il rendimento per unità di rischio al ribasso", "📉 Calmar ratio: il rendimento annuo per unità di max drawdown", "📐 K-ratio: la regolarità della crescita dell'equity", "🎯 Volatilità target: il sizing a volatilità costante", "📐 Kelly criterion: il sizing ottimale dall'edge stimato", "🎲 Risk of ruin: probabilita' di toccare una barriera di drawdown", "🎯 Sizing anti-rovina: f massima con ROR vincolato", "📊 Monte Carlo: distribuzione del capitale dopo N trade", "VaR & Expected Shortfall del P&L dopo N trade", "Kelly con costi di trading: sizing netto", "Frazione di Kelly: half-Kelly e trade-off crescita/volatilità", "Kelly robusto: sizing con edge incerta", "Kelly con portafoglio: due posizioni simultanee", "Kelly con correlazione: due posizioni correlate", "Kelly adattivo: win-rate rolling e size dinamica", "Kelly con controllo drawdown: sizing frazionato al drawdown", "Kelly con target di volatilità: sizing riscalato sulla vol", "Kelly bayesiano: sizing con win-rate posterior", "Kelly con lotti interi: sizing discreto e drag di arrotondamento", "Kelly con stop-loss: sizing con perdita troncata", "Kelly con take-profit: sizing con vincita troncata", "Kelly frazionario (fractional Kelly): λ·f*", "Rischio di rovina (risk of ruin): probabilita' di rovina prima del target", "Kelly con tre esiti: sizing con vincita, perdita parziale e perdita piena", "Kelly con limite di posizione: sizing con cap f_max", "Kelly con vincoli multipli: cap, lotti, stop e drawdown", "Kelly con incertezza: haircut bayesiano sulla p stimata", "Kelly su N trade: raddoppio, dimezzamento e crescita attesa", "Kelly: mappa di sensibilità f* e crescita su (p, b)", "Kelly su ritorni continui: f* = μ/σ² e volatility drag", "Kelly con costi di transazione: f* netto = (μ-c)/σ²", "Kelly e drawdown: probabilità di toccare un max drawdown", "Kelly frazionario: frazione ottima per un budget di volatilità", "Monte Carlo: VaR e Expected Shortfall di una posizione power", "Kelly con limite VaR: sizing con vincolo di perdita massima", "Component VaR: contributo al rischio per posizione", "Component ES: contributo al rischio di coda per posizione", "Shock correlazioni: stress test sul rischio di coda", "Backtest VaR di Kupiec: copertura e likelihood ratio", "Reverse stress test: quanto shock regge il limite?", "Mappa di rottura: superficie VaR su shock congiunti vol+corr", "Liquidity-adjusted VaR: VaR + costo di liquidazione", "Component VaR: attribution del VaR per asset", "Hedge VaR: copertura ottimale con futures", "Jump VaR: VaR con salti di prezzo (Merton)", "Delta-Gamma VaR: VaR parametrico di una posizione con opzioni", "Expected Shortfall: misura di rischio coerente", "VaR ed ES con code pesanti (t-Student)", "🌈📉 Misura spettrale: l'ES pesato con l'avversione al rischio", "🧲📈 Misura entropica: rischio con avversione costante (CARA)", "🌀📈 Wang transform: misura distorsiva del rischio", "🎯📈 EVaR: il bound di Chernoff piu' conservativo", "🔀📊 RVaR: la media dei quantili tra VaR ed ES", "🎯📊 Median Shortfall: la mediana della coda, robusta tra VaR ed ES", "🎯📉 LPM: il rischio downside contro un target", "📐⚖ Expectile: la misura di rischio elicitabile e coerente", "🌀 Distortion risk measures: VaR, ES e Wang da un'unica formula", "📊 Spectral risk measure: VaR ponderato dal tuo spettro di avversione", "🔀 Entropic risk measure: avversione esponenziale al rischio", "🎯 Contributi di rischio ES: allocazione di Eulero del portafoglio", "🔱 Risk parity: pesi a parità di contributo di rischio (risk budgeting)", "🎯 Numero effettivo di scommesse (ENB): quante posizioni indipendenti hai davvero?", "📈 Massima diversificazione (MD): i pesi che massimizzano il rapporto DR", "🛡️ Minima varianza (MV): i pesi che minimizzano la volatilità di portafoglio", "🎯 Sharpe massimo (MS): i pesi che massimizzano il rendimento per unità di rischio", "🎯 Rendimento target (TR): minima varianza a rendimento atteso fissato", "κ Kappa ratio: un'unica famiglia per Omega e Sortino", "📏 Tail ratio: la coda destra contro la sinistra", "🔄 Recovery factor: quanto rende ogni euro di drawdown", "💢 Pain index: il dolore che serve per il rendimento", "🛟 Sterling ratio: quanto rende contro i K peggiori drawdown", "⚖ Gain-to-Pain ratio: quanto guadagno per ogni euro perso", "🌊 Volatility drag: quanto rendimento mangia la volatilita'", "🎯 Omega ratio: quanto upside prendi per ogni euro di downside", "📐 Sharpe corretto: il rendimento per unita' di rischio con code grasse", "🎯 Probabilistic Sharpe ratio: lo Sharpe e' davvero significativo?", "🎯 Deflated Sharpe ratio: lo Sharpe sopravvive ai backtest multipli?", "🎚️ Kappa ratio: Omega e Sortino sono lo stesso strumento", "🔺 Farinelli-Tibiletti: Omega e upside potential in un'unica formula", "📊 Rachev ratio: tutta la coda destra contro tutta la coda sinistra", "⭐ STAR ratio: il rendimento medio contro la perdita attesa di coda", "📈 Gain-Loss ratio: guadagno atteso contro perdita attesa", "📉 Ulcer Performance Index (Martin ratio): il rischio drawdown contro il rendimento", "🎯 Calmar ratio: il rendimento medio contro il peggior drawdown", "🔃 MAR ratio: il rendimento composto contro il peggior drawdown", "🤕 Pain ratio: il rendimento medio contro il drawdown medio", "🚀 Upside Potential ratio: il guadagno atteso contro la downside deviation", "🔀 Sequence risk: l'ordine dei rendimenti cambia il drawdown", "🛡 CDaR: la perdita media dei peggiori drawdown", "⏱️ Tempo sott'acqua: durata dei drawdown e recupero", "🎯 Attribuzione del drawdown: chi ha causato il peggior calo", "🔄 Recupero dal drawdown: quanto rimbalzo serve per tornare al picco", "📐 Calmar ratio: rendimento per unita' di peggior perdita", "⚖️ Sortino ratio: rendimento per unita' di volatilita' negativa", "🧮 Omega ratio: guadagni pesati contro perdite pesate", "📉 Burke ratio: rendimento per unita' di drawdown quadratico", "🎯 Kappa ratio (Kappa-3): rendimento per unita' di coda cubica", "📈 Martin ratio: rendimento per unita' di Ulcer Index", "📈 Sterling ratio: rendimento per unita' di drawdown medio annuo", "🩹 Pain ratio: rendimento per unita' di dolore medio (Pain Index)", "📉 CDaR ratio: rendimento per unita' di coda media (Conditional Drawdown-at-Risk)", "🎯 Drawdown-at-Risk (DaR): la soglia di drawdown superata solo nell'alpha% dei casi", "📈 Recovery Factor: profitto totale per unita' di peggior drawdown", "📐 Calmar geometrico: CAGR composto per unita' di peggior drawdown", "💹 Gain-to-Pain ratio: guadagni totali per ogni punto perso", "🏞️ Lake ratio: l'area del dolore sotto il picco", "🌀 Rolling drawdown: il peggior calo in ogni finestra", "📏 Variance ratio: il prezzo segue un random walk?", "⛓️ Johansen: power e gas cointegrati?", "🔗 ECM: quanto in fretta power torna all'equilibrio col gas?", "💥 Risposta allo shock: di quanto uno shock del gas muove power?", "📜 Scomposizione storica: cosa ha mosso davvero il prezzo power?", "🌊 Spillover gas↔power: chi trasmette e chi riceve gli shock?", "📈 Previsione VECM(1): dove vanno power e gas nei prossimi H giorni?", "📊 Backtest VECM(1): il modello batte il random walk?", "⚖️ Lo spread è stazionario? Test ADF", "🔮 Quando rientra lo spread? Forecast mean-reversion", "💰 Vale la pena tradare il rientro? P&L atteso del trade", "📐 Quanto puntare sul rientro? Sizing Kelly del trade", "⚠️ Quanto posso perdere? VaR del trade dimensionato", "🧪⚠️ Stress test del trade: VaR sotto shock", "🛑 Stop & target: dove chiudere il trade", "🧭 Ottimizza stop/target: i migliori k", "⏳ Time stop: uscire se non succede niente", "🔀 Scale-out: tutto insieme o a pezzi?", "🧺 Portafoglio: quanti trade insieme?", "📐 Correlazione: la diversificazione è reale?", "💸 Costi veri: l'edge sopravvive al netto?", "📅 L'edge annualizzato: il trade si ripete?", "📉 VaR annuale: quanto capitale di rischio?", "📊 VaR per segnale: chi mangia il capitale?", "📈 Expected Shortfall: quanto perdi quando perdi?", "🎯 Risk budgeting: ogni segnale si guadagna il suo capitale", "🔔 Drift dei budget: quando ribilanciare?", "🔁 Ribilanciare: i nuovi pesi post-shock", "⏰ Frequenza di ribilanciamento", "💰 Costo di esecuzione: quanto costa davvero ruotare", "🎯 Calibrazione: previsto vs realizzato", "⏳ Scheduling di esecuzione", "📉 Implementation shortfall: scomponi il costo realizzato", "🏦 Costo del margine: il capitale fermo al clearing", "📞 Margin call: variazione margine e buffer di liquidità", "📏 DV01 del portafoglio forward: sensibilità del MtM a uno shift parallelo della curva", "🗓️ Ladder delle scadenze: profilo temporale di volumi, MtM e DV01", "🧪💥 Shock di curva: P&L del portafoglio sotto scenari di prezzo", "⏳ Theta del portafoglio forward: quanto vale il passare del tempo", "🏦 Rho del portafoglio forward: il MtM sotto il tasso d'interesse", "🧾🔍 P&L spiegato dalle greche: theta, delta e rho contro il ΔMtM realizzato", "📉 VaR ed Expected Shortfall del portafoglio forward: il rischio giornaliero", "🌪️📉 Stressed VaR: il VaR sotto volatilità stressata", "🪓🌪️ Component Stressed VaR: quale linea tagliare sotto stress?", "🪓🌊 Component Stressed ES: chi alimenta la coda sotto stress?", "🛡️🌪️ Copertura dello Stressed ES: quanto hedgiare per rientrare nel limite?", "⏳🌪️ Decadimento dello stress: aspettare o coprire?", "💸⏳ Costo dell'attesa: il budget di rischio consumato", "🚨⏳ Monitoraggio dell'attesa: il trigger di escalation", "🛡️📋 Esecuzione della copertura: il piano ordini", "📊✅ Verifica della copertura: il piano ha funzionato?", "🔓🛡️ Rilascio della copertura: quando alleggerire l'hedge?", "📓 Blotter delle coperture: registro operazioni", "🎯 Regret della copertura: fissato vs spot", "📑 Efficacia contabile: dollar-offset delle coperture", "🛑 De-designazione: continuare o chiudere la copertura?", "⚖️ Ribilanciamento: aggiustare l'hedge ratio senza de-designare", "📦 Cost-of-carry: scomponi il premio del forward", "📊📓 Diario dell'inefficacia: OCI vs P&L per periodo", "♻️ Recycling OCI: rilascio della riserva a P&L", "📉 Regressione di efficacia (OLS)", "🔭 Test prospettico di efficacia (scenari forward)", "📝 Documentazione della copertura (IFRS 9)", "🧾 Scritture contabili (IFRS 9)", "📋 Informativa IFRS 7 (coperture)", "📉 Sensibilità al rischio di mercato (IFRS 7.40)", "📒 Rollforward riserva cash-flow hedge (OCI)", "🧪 Test retrospettivo di efficacia (look-back)", "📅 Piano di recycling futuro (proiezione release OCI→P&L)", "🛑 Cessazione della copertura (hedge discontinuation)", "⏳ Costo della copertura (time value, IFRS 9)", "🧩 Componenti di rischio designati (IFRS 9)", "➡️ Forward element escluso (IFRS 9)", "⚠️💳 Rischio di credito che domina (IFRS 9)", "🔁 Aggregated exposure (esposizione aggregata, IFRS 9 6.3.4)", "🧱 Basis adjustment (adeguamento del costo, IFRS 9 6.5.11)", "⚖️📋 Hedge ratio designato (IFRS 9 6.4.1(c)(iii))", "🔀📊 Tipo di copertura (IFRS 9 6.5.2)", "🧪📐 Derivato ipotetico (IFRS 9 B6.5.5)", "⚖️🔄 Ribilanciamento (IFRS 9 6.5.5)", "⚖️🧺 Posizione netta (IFRS 9 6.6)", "⚖️📉 Ammortamento adeguamento FV hedge (IFRS 9 6.5.10)", "⚖️🔌 Own-use exemption NPNS (IFRS 9 2.4)", "⚖️⏹️ Cessazione hedge accounting (IFRS 9 6.5.12)", "🔗📄 Derivati incorporati (IFRS 9 4.3)", "⚖️📶 Gerarchia fair value (IFRS 13)", "🧾💸 SPPI test (IFRS 9 4.1.2(b))", "📉⏳ ECL a 3 stadi (IFRS 9 5.5)", "📐📊 Tasso di interesse effettivo (IFRS 9 5.4.1)", "🏦📋 Business model assessment (IFRS 9 4.1.1/4.1.2(a))", "🔁🏦 Modifica di passività (IFRS 9 3.3.2)", "🏭📤 Cessione crediti (IFRS 9 3.2)", "🛡️📑 Informativa rischio di credito (IFRS 7.35)", "💧📋 Informativa rischio di liquidità (IFRS 7.39)", "🔁📂 Reclassifica attività finanziarie (IFRS 9 4.4)", "⚠️💰 Inadempimenti e violazioni covenant (IFRS 7.18-19)", "⚖️📑 Compensazione attività/passività finanziarie (IFRS 7.13A-13F)", "📊📋 P&L per categoria (IFRS 7.20)", "🏦📥 Collateral & garanzie reali (IFRS 7.15)", "🔄📤 Trasferimenti di attività finanziarie (IFRS 7.42A-42H)", "📒➡️ Rollforward fondo svalutazione crediti (IFRS 7.16)", "⏰📉 Crediti scaduti non deteriorati (IFRS 7.37)", "💲📊 Fair value vs valore contabile (IFRS 7.25)", "🧾📊 Valore contabile per categoria (IFRS 7.8)", "🏛️💳 Rischio di credito proprio su passività FVTPL (IFRS 7.9-7.10)", "💧📉 Scadenze delle passività finanziarie (IFRS 7.39)", "🏦🔑 Garanzie reali acquisite in possesso (IFRS 7.38)", "📊🕐 Day-1 P&L differito (IFRS 7.27)", "🛡️📊 Risk appetite & limiti (IFRS 7.33-7.34)", "📐⚖️ Fair value: movimenti livello 3 (IFRS 7.28)", "🏷️📋 Fair value: eccezioni e approssimazioni (IFRS 7.29)", "🗂️⚠️ Concentrazioni di rischio (IFRS 7.32)", "📊🔀 Trasferimenti tra livelli fair value (IFRS 7.30)", "💸📊 FVA: funding valuation adjustment del portafoglio", "🧾📝 Informativa sull'hedge accounting (IFRS 7.24A-24F)", "🧭📊 Esposizioni ai rischi e origine (IFRS 7.31)", "💳📊 DVA: debit valuation adjustment del portafoglio", "🏦📏 Limiti di credito controparte (fido)", "📊⚖️ Rappresentativita' analisi di sensibilita' (IFRS 7.41-7.42)", "📊🔬 Fair value: metodi e assunzioni (IFRS 7.27)", "📊🎯 Sensibilita' fair value livello 3 (IFRS 7.27(h))", "📊🏦 XVA: CVA + DVA + FVA + KVA + ColVA (aggiustamenti di valutazione)", "📊🈤 Riclassifiche di attività finanziarie (IFRS 7.12B-12D)", "📊📉 Utili/perdite da derecognition di attività al costo ammortizzato (IFRS 7.20A)", "💸📊 Proventi e oneri da commissioni (IFRS 7.17)", "🛡️📊 Esposizione max al rischio di credito (IFRS 7.36)", "🔗📊 Fair value hedges del rischio di credito (IFRS 7.11)", "📊⚠️ Fonti di inefficacia delle coperture (IFRS 7.24D)", "💶📊 Inefficacia a P&L per tipo di copertura (IFRS 7.24G)", "📊🔄 Importi a OCI e riciclo a P&L (IFRS 7.24E)", "📊🗂️ Strumenti di copertura per categoria di rischio (IFRS 7.24F)", "📊📦 Elementi coperti per categoria di rischio (IFRS 7.24B)", "📊⚡ Premio di rischio forward (ex-post)", "🔌💰 Rendita da congestione (congestion rent)", "📊📅 Flussi di cassa futuri coperti (IFRS 7.24C)", "🏭🤝 EPC: rendimento energetico garantito (ESCO)", "📊↔️ Bid-ask spread e costi di transazione", "💱📉 Rischio cambio: costo EUR del procurement in USD", "🔄📐 Convertitore unità di misura energia e prezzi", "📜⚖️ CfD a due vie: payoff, MtM e sensibilità", "🔌📉 LoLE & EENS: adeguatezza del parco di generazione", "🧾⚖️ M&V IPMVP: verifica dei risparmi energetici", "🔋⏱️ Dispatch ottimale accumulo day-ahead", "📉⏳ Curva di durata prezzi", "🧱📐 Bootstrap curva forward (mensile→oraria)", "🔌📏 ELCC: capacity credit delle rinnovabili", "⚡🏛️ Asta del mercato della capacità: clearing e de-rating", "🔥📈 Spark/Dark spread: margini di generazione (clean)", "💱⛽ Prezzo CO₂ di switch: gas vs carbone", "🚢⛽ Bunker fuel: VLSFO vs LNG vs metanolo vs ammoniaca", "🌍🏠 ETS2: costo carbonio per edifici & trasporti", "🌍📉 MACC: curva dei costi di abbattimento CO₂", "🪵 Biomassa legnosa: business case (CHP)", "🧊 Accumulo termico (TES): peak-shaving del calore", "🔌🔋 V2G: ricavi da vehicle-to-grid", "🏦📊 WACC: costo del capitale per progetti energetici", "📊💨 P50/P90: incertezza della producibilità rinnovabile", "⚡📊 Profile cost: il costo della forma", "☀️🔌 Rapporto DC/AC: clipping vs capex", "🌐⚡ Integration cost: profile + balancing + grid", "🌬️♻️ Repowering eolico: più MWh dagli stessi MW", "☀️🧹 Soiling & degrado FV: quanto perdi senza pulire i pannelli", "⚡🔀 Redispatch: costi e ottimo della congestione", "☀️📐 Tilt & orientamento FV: l'angolo che massimizza il rendimento", "🔌🚗 Colonnine di ricarica pubblica: il business case", "🌬️📦 CAES: l'accumulo ad aria compressa", "🔋♻️ Second-life: batterie EV → storage stazionario", "☀️🪞 FV bifacciale: il guadagno posteriore ripaga il sovraccosto?", "🟢📄 PPA vs merchant: il prezzo fisso vale lo sconto?", "🌀 Volano (flywheel): accumulo cinetico per FCR e servizi di rete", "🔋🌊 Batterie a flusso (VRFB): accumulo long-duration", "⛽🌱 Biocarburanti (HVO): il premium per decarbonizzare", "🔋🧂 Batterie al sodio (Na-ion): l'accumulo senza litio conviene?", "📐 LACE: il costo che la rete evita (il vero valore di un impianto)", "🧪 LCOH: il costo dell'idrogeno verde (quando l'elettrolisi conviene)", "💧⚗️ Blending idrogeno in rete gas: il premium per decarbonizzare", "🔥⛽ Metanazione (Power-to-Methane): il metano sintetico da CO2 catturata", "⚗️💚 Power-to-Ammonia: l'ammoniaca verde da H2 (Haber-Bosch)", "🧪⛽ Power-to-Methanol: il metanolo verde da CO₂ (sintesi catalitica)", "✈️⛽ Power-to-SAF: il cherosene sintetico da CO₂ (Fischer-Tropsch)", "🏭💚 Power-to-Steel: l'acciaio verde da H2 (DRI)", "💧🗄️ Stoccaggio H2: lo storage idrogeno rende? (caverna salina)", "🚚💧 Trasporto H2: pipeline, trailer o liquido? (logistica idrogeno)", "🌬️🏭 Direct Air Capture: il costo della CO2 dall'aria", "💧🌊 Desalinizzazione RO: il costo dell'acqua dall'energia", "🌱⚗️ BECCS: bioenergia con cattura CO2 (rimozione netta)", "⚓ Cold ironing: elettrificare le navi in banchina", "🔷 Idrogeno turchese: la pirolisi del metano", "🔵 Idrogeno blu: il reforming con cattura CO2 (SMR+CCS)", "🏛️🎯 Aste FER-X: a che strike conviene partecipare?", "🩷 Idrogeno rosa: l'elettrolisi alimentata dal nucleare", "🤍 Idrogeno bianco: l'H2 naturale dal sottosuolo", "💛 Idrogeno giallo: l'elettrolisi alimentata dal fotovoltaico", "🧪🛢️ LOHC: l'idrogeno nei liquidi organici", "♻️🔥 Termovalorizzatore: il business case waste-to-energy", "🧊❄️ Telerifreddamento (district cooling): centrale frigorifera vs chiller", "⚡🏭 VPP (Virtual Power Plant): aggregare la flessibilità distribuita", "🔥♨️ Waste heat data center: il calore di scarto diventa teleriscaldamento", "🤖⚡ Inferenza AI: dal MW delle GPU al costo per milione di token", "🏭📋 Diagnosi energetica: audit e piano di efficientamento", "🔧⚙️ Motori elettrici: l'inverter paga?", "🌬️🔧 Aria compressa: quanto costano le perdite?", "🔌📉 Trasformatore: quanto costano le perdite a vuoto?", "💡 Relamping LED: il passaggio a LED paga davvero?", "❄️ Free cooling: quanto vale il freddo gratis?", "🔥 Caldaia a condensazione: il retrofit paga?", "🏢 Cappotto termico: il retrofit dell'involucro paga?", "❄️ Trigenerazione (CCHP): un solo combustibile, elettricita' + calore + freddo", "☀️🚿 Solare termico: quanta acqua calda dal tetto?", "♨️⚡ ORC: il calore di scarto diventa elettricità", "🌊 Energia delle maree: il business case tidal", "🌊⚡ Armoniche: quanto costano le distorsioni?", "⚡ Rifasamento: quanto costa il cos(phi) basso?", "🔥 Economizzatore fumi: il calore che esce dal camino", "⚖️ Sbilanciamento fasi: quanto costa la corrente nel neutro?", "💡🌃 Illuminazione pubblica: LED + telecontrollo — il business case", "🔥⚡ Forno a induzione: elettrificare il forno industriale paga?", "🌡💨 Essiccazione industriale: quanta energia per togliere l'acqua?", "🔌🏝️ Microrete industriale: quanto costa staccarsi dalla rete?", "♨️🕳️ Trappole di vapore: quanto vapore perdi dalle trappole rotte?", "🌡️🔥 Pompa di calore industriale ad alta temperatura: il COP di Carnot dal calore di scarto", "🌊〰️ Moto ondoso: il business case wave energy", "❄️🏭 Refrigerazione industriale: quanto costa il freddo?", "⚡📋 Demand response: quanto rendono i servizi di flessibilità?", "🧱💧 Essiccazione fanghi: togliere l'acqua dai fanghi paga?", "⚡📡 Riserva primaria FCR: vendere banda di regolazione di frequenza paga?", "⚡🔄 Riserva secondaria aFRR: la banda automatica di ripristino frequenza paga?", "⚡📋 Riserva terziaria mFRR: la banda manuale di bilanciamento paga?", "🔌📋 Riserva di sostituzione RR: la riserva lenta di Terna paga?", "🏛️⚡ Mercato della capacità: la remunerazione della capacità disponibile paga?", "📜💹 Trading GO: il market making sui certificati verdi paga?", "🌊💨 Eolico offshore flottante: il vento in mare aperto paga?", "☀️🌾 Agrivoltaico: doppio raccolto, un solo terreno?", "❄️💨 Aria liquida (LAES): l'accumulo criogenico di lunga durata?", "🏔️⚖️ Accumulo gravitazionale: blocchi, altezza e gravità come batteria?", "🔋⚡ Celle a combustibile: elettricità + calore senza combustione?", "🌬️🧪 DAC: la cattura diretta di CO2 dall'aria paga?", "🌱🔥 Biochar: il carbonio della biomassa resta nel suolo?", "☀️🔥 Solare termico: calore dal sole senza fotovoltaico?", "🌊☀️ Fotovoltaico galleggiante (FPV): il business case", "🏘️⚡ Comunità energetiche rinnovabili (CER): l'energia condivisa paga?", "🔌🏠 Vehicle-to-home (V2H): la batteria dell'auto alimenta la casa?", "💧🖥️ Immersion cooling: il raffreddamento a liquido del data center paga?", "⚡🏁 Black start: il riavvio della rete dopo il blackout paga?", "🔌⚡ Grid-forming + inerzia sintetica: la batteria che forma la rete paga?", "⚡ Supercondensatori: potenza istantanea per FFR e peak shaving paga?", "🔋♻️ Second life batterie EV: il riuso stazionario paga?", "☀️🗄️ Accumulo termico stagionale: il calore dell'estate per l'inverno paga?", "⚡🔌 Interconnessione HVDC: il cavo in corrente continua paga?", "🔋🌊 Batterie a flusso redox: potenza ed energia separate pagano?", "⚡🤝 Scambio peer-to-peer: vendere il surplus al vicino conviene?", "♨️💧 Calore dalle acque reflue: la fognatura scalda l'edificio?", "🌡️🕳️ Sonde geotermiche: la pompa di calore dal sottosuolo paga?", "🌬️🔥 Pompa di calore aerotermica: l'aria esterna scalda l'edificio a prezzo giusto?", "💧🔥 Pompa di calore ad acqua di falda: l'acqua del sottosuolo scalda l'edificio?", "🌬️♻️ Recuperatore di calore per ventilazione: l'aria esausta scalda l'aria nuova?", "🔥⚡ Pompa di calore ibrida: caldaia + pompa di calore, chi fa cosa?", "🔥 Pompa di calore ad assorbimento: il calore dal gas senza compressore paga?", "💧 Raffrescamento evaporativo (adiabatico): il freddo dall'acqua senza compressore paga?", "❄️🔥 Pompa di calore a CO2 transcritica: alta temperatura senza gas?", "🌱🔥 Biogas da digestione anaerobica: il business case dell'impianto", "🏝️ Microgrid in isola: PV + batteria + generatore, quanto costa l'autonomia?", "🚌🔌 Ricarica in deposito per bus elettrici: la gestione intelligente della potenza paga?", "🏭🌡️ Teleriscaldamento con pompa di calore di rete: la PdC distrettuale paga contro la caldaia a gas?", "🧱🔥 Accumulo termico a cambiamento di fase (PCM): il calore latente paga?", "🔋🧂 Batterie sodio-ione: senza litio, l'accumulo stazionario paga?", "🏜️🔥 Batteria a sabbia: il calore rinnovabile stoccato paga?", "🔥♻️ Teleriscaldamento 5G: l'anello a bassa temperatura paga?", "🌊⚡ Eolico offshore galleggiante: l'acqua profonda paga?", "🧂💧 Idrogeno in caverne saline: lo stoccaggio sotterraneo paga?", "🌊🧂 Energia da gradiente salino: la foce del fiume genera elettricità?", "🔋⚙️ Batterie ferro-aria: l'accumulo multi-giorno paga?", "🌊🔥 Pompa di calore ad acqua di mare: il mare scalda la città?", "🪵🔥 Torrefazione: i pellet torrefatti sostituiscono il carbone?", "🌿🔥 Syngas da gassificazione: la biomassa diventa gas combustibile?", "☀️❄️ Raffrescamento solare: il sole fa freddo con l'assorbitore?", "❄️🏙️ District cooling: il freddo centralizzato paga contro i chiller singoli?", "🔋♻️ Riciclo batterie al litio: il metallo recuperato paga lo smaltimento?", "☀️🗼 Solare a concentrazione (CSP) a torre: l'elettricità dispacciabile dal sole paga?", "🔥💧 Turbina a gas H2-ready: il co-firing a idrogeno paga il retrofit?", "🚚💧 Camion pesante a idrogeno: il fuel-cell paga contro il diesel?", "⚡🔥 Cogenerazione CAR: il risparmio di energia primaria paga i certificati?", "🔋🟡 Batterie zinco-aria: l'accumulo a basso costo paga contro LFP?", "⚗️ Elettrolizzatori a confronto: alcalino vs PEM vs SOEC — quale tecnologia paga?", "🌿⚗️ Ammoniaca verde: Haber-Bosch da H2 verde — il prezzo dell'NH3 paga?", "💧⚡ Mini-idroelettrico ad acqua fluente: il salto del torrente paga?", "🌿⛽ Biometano da upgrading del biogas: il metano pulito paga?", "💧❄️ Idrogeno liquido (LH2): la liquefazione paga?", "🌡️💧 Accumulo termico in acquifero (ATES): il calore estivo paga d'inverno?", "⚛️🔥 Fusione nucleare: a quale prezzo il primo impianto paga?", "🌡️🌋 Geotermia avanzata (EGS): il calore profondo diventa elettricità?", "🌊🌡️ OTEC: l'energia termica degli oceani paga?", "🧂🔥 Sali fusi: il calore stoccato ridà elettricità a prezzo giusto?", "🏭 Cemento verde: la cattura CO2 sul clinker paga?", "🔥🪟 Forno fusorio del vetro: l'elettrificazione paga?", "🏺🔥 Forno ceramico: l'elettrificazione della cottura paga?", "🌱🔥 Serra riscaldata: la pompa di calore batte la caldaia a gas?", "✈️⚡ Ground power elettrico in aeroporto: l'e-GPU batte diesel + APU?", "❄️⛷️ Innevamento artificiale: cannoni ventilatori o lance ad aria compressa?", "❄️🏭 Cella frigorifera: free-cooling e pompa di calore battono il gruppo tradizionale?", "🏊♨️ Piscina coperta riscaldata: pompa di calore + copertura battono la caldaia a gas?", "⚓🔌 Cold ironing portuale: la corrente da banchina batte i generatori diesel di bordo?", "⛴️🔋 Traghetto elettrico a batteria: la batteria batte il diesel sulla rotta breve?", "🚛🔋 Camion elettrico a batteria: la ricarica megawatt batte il diesel sul lungo raggio?", "🚆💧 Treno regionale a idrogeno: il fuel-cell batte il diesel sulle linee non elettrificate?", "🏭♨️ Calore di scarto industriale: il recupero termico paga contro la caldaia a gas?", "🏋️ Accumulo a gravità: sollevare pesi quando l'energia costa poco, venderla quando costa tanto?", "☀️🔥 Pannelli ibridi PVT: elettricità + calore dallo stesso tetto — il doppio rendimento paga?", "⚡🔥 Caldaia a elettrodi: vapore e calore industriale con elettricità in surplus — conviene più del gas?", "♻️🔥 Forno ad arco elettrico (EAF): fondere rottame con elettricità batte l'altoforno?", "📄 Cartiera: essiccare la carta con vapore o con pompa di calore?", "🍺 Birrificio: bollire il mosto con calore recuperato e pompa di calore batte la caldaia a gas?", "🧀 Caseificio: pastorizzare il latte con calore recuperato e pompa di calore batte la caldaia a gas?", "🧺 Lavanderia industriale: lavare a caldo con calore recuperato e pompa di calore batte la caldaia a gas?", "🥫 Conservificio: sterilizzare le conserve con calore recuperato e pompa di calore batte la caldaia a gas?", "🧵 Tintoria: tingere il tessuto con bagni caldi recuperati e pompa di calore batte la caldaia a gas?", "🪵 Essiccazione del legno: essiccare il legname con pompa di calore batte l'essiccatore a gas?", "🍝 Pastificio: essiccare la pasta con calore recuperato e pompa di calore batte l'essiccatore a gas?", "🍞 Panificio: forno elettrico con recupero fumi batte il forno a gas?", "🏭 Fonderia: fondere la ghisa a induzione con preriscaldo della carica batte il cubilotto a coke?", "🍬 Zuccherificio: concentrare il succo con multi-effetto e MVR batte l'evaporatore a singolo effetto a gas?", "🫙 Vetreria: fondere il vetro con forno ossi-combustibile + boost elettrico batte il forno rigenerativo a gas?", "🧵 Tintoria tessile: recuperare calore dalle acque reflue di tintura batte scaldare acqua nuova in caldaia a gas?", "🐄 Conceria: scaldare le vasche di concia con pompa di calore + recupero calore batte la caldaia a gas?", "🫒 Oleificio: la sansa che avanza alimenta un cogeneratore a biomassa e batte rete + caldaia a gas?", "🥩 Salumificio: stagionare e cuocere i salumi con pompa di calore + recupero calore batte caldaia a gas + frigorifero elettrico?", "🥃 Distilleria: distillare con pompa di calore + recupero calore dai condensatori batte la caldaia a gas?", "🏭 Cementificio: recuperare calore dai fumi del forno per preriscaldare la farina batte il combustibile comprato?", "🧱 Laterizi: cuocere i mattoni con recupero calore dai fumi batte il forno tunnel a gas?", "🐔 Mangimificio: essiccare il mangime con recupero calore dall'aria esausta batte l'essiccatore a gas?", "📦 Cartotecnica: la cogenerazione (CHP) batte caldaia + rete per un cartotecnico?", "🏭 Acciaieria: forno elettrico ad arco (EAF) vs altoforno — quando il rottame batte la ghisa?", "🔩 Galvanica: zincatura a caldo vs elettrolitica — quando lo zinco freddo batte il bagno a 450 °C?", "🫠 Pressofusione alluminio: forno fusorio elettrico a induzione batte il forno a gas?", "🎨 Verniciatura industriale: essiccare la vernice con pompa di calore + recupero calore dall'aria esausta batte il bruciatore a gas?", "🍷 Cantina vinicola: pompa di calore geotermica reversibile batte chiller + caldaia a gas?", "🥩♻️ Macelleria: il calore dei frigoriferi scalda acqua e negozio?", "🍦 Gelateria: pastorizzare con pompa di calore e freddo efficiente batte caldaia a gas + chiller tradizionale?", "🚗 Autolavaggio: pompa di calore + recupero calore dalle acque reflue batte la caldaia a gas per acqua calda e asciugatura?", "🍺 Birreria: scaldare il mosto con pompa di calore + recupero calore dal raffreddamento batte caldaia a gas + chiller tradizionale?", "🏋️ Palestra: pompa di calore + recupero calore dalle docce batte la caldaia a gas per acqua calda e riscaldamento?", "⛸️ Palaghiaccio: il calore di scarto del freddo pista scalda gli spogliatoi e batte caldaia a gas + chiller tradizionale?", "🏫 Scuola: pompa di calore + recupero calore dalla ventilazione batte la caldaia a gas per aule e mensa?", "🏛️ Museo: pompa di calore reversibile + recupero calore dalla ventilazione batte caldaia a gas + chiller per sale espositive?", "📚 Biblioteca: pompa di calore reversibile + recupero calore ventilazione sale lettura + climatizzazione continua depositi batte caldaia a gas + chiller?", "🎭 Teatro: pompa di calore reversibile + recupero calore ventilazione sala batte caldaia a gas + chiller?", "🎬 Cinema: pompa di calore reversibile + recupero calore ventilazione sale batte caldaia a gas + chiller?", "🏨 Albergo: pompa di calore reversibile + recupero calore docce su ACS batte caldaia a gas + chiller?", "🏥 Ospedale: pompa di calore reversibile + recupero calore ventilazione batte caldaia a gas + chiller?", "🛒 Supermercato: recupero calore banchi frigo + pompa di calore batte caldaia a gas + chiller?", "🍽️ Ristorante: pompa di calore + recupero calore celle frigo su ACS batte caldaia a gas + chiller?", "🏭 Centro logistico: pompa di calore per riscaldare un magazzino alto batte caldaia a gas + chiller uffici?", "🏛️ Biblioteca: pompa di calore reversibile + recupero calore dalla ventilazione sale lettura batte caldaia a gas + chiller?", "💊 Farmacia: pompa di calore reversibile + recupero calore dai frigoriferi farmaceutici batte caldaia a gas + chiller?", "💇 Parrucchiere: pompa di calore + recupero calore dalle acque di lavaggio batte caldaia a gas + chiller?", "🌸 Fioraio: pompa di calore + recupero calore dalla cella frigo fiori batte caldaia a gas + frigo tradizionale?", "🐟 Pescheria: macchina del ghiaccio in loco + celle efficienti + recupero calore condensatori su ACS batte ghiaccio comprato + celle tradizionali + caldaia a gas?", "🧁 Pasticceria: forno a gas efficiente + recupero calore forno su ACS + freddo efficiente batte forno a gas vecchio + celle tradizionali + caldaia a gas?", "🍗 Rosticceria: girarrosto a gas efficiente + recupero calore girarrosto su ACS + celle e banchi caldi efficienti batte girarrosto vecchio + celle tradizionali + caldaia a gas?", "🍲 Tavola calda: forno combinato efficiente + banchi caldi efficienti + celle efficienti + recupero calore cucina su ACS batte cucina a gas vecchia + banchi e celle tradizionali + caldaia a gas?", "☕ Bar / caffetteria: macchina espresso efficiente + frigo bibite efficiente + recupero calore macchina su ACS batte macchina espresso tradizionale + frigo tradizionale + caldaia a gas?", "🧺 Lavanderia self-service / a gettoni: lavatrici efficienti + asciugatrici a pompa di calore + recupero calore acque reflue su ACS batte lavatrici tradizionali + asciugatrici elettriche tradizionali + caldaia a gas?", "🦷 Studio dentistico: pompa di calore + recupero calore compressore su ACS + autoclave efficiente batte caldaia a gas + chiller + autoclave tradizionale?", "🧖 Centro estetico / SPA: pompa di calore + recupero calore acque reflue su ACS batte caldaia a gas + chiller + sauna elettrica tradizionale?", "🐾 Clinica veterinaria: pompa di calore + recupero calore ventilazione sale operatorie batte caldaia a gas + chiller + autoclave tradizionale?", "🧒 Asilo nido: pompa di calore + recupero calore ventilazione aule + mensa e lavanderia efficienti batte caldaia a gas + chiller + mensa tradizionale?", "⛪ Chiesa / luogo di culto: riscaldamento localizzato a panche + pompa di calore batte caldaia a gas ad aria + illuminazione tradizionale?", "🔧 Officina meccanica / autoriparazione: pompa di calore aria-aria + compressore VSD con recupero calore + LED battono caldaia a gas + compressore standard + illuminazione tradizionale?", "🛍️ Centro commerciale: pompa di calore + LED + banchi frigo chiusi + scale mobili con standby battono caldaia a gas + illuminazione tradizionale + banchi frigo aperti + scale sempre accese?", "💧 Depuratore: cogenerazione biogas + soffianti efficienti battono rete + caldaia a gas?", "🪩 Discoteca / locale notturno: pompa di calore + recupero calore ventilazione + LED battono caldaia a gas + chiller + illuminazione tradizionale?", "🫒 Frantoio oleario: pompa di calore + recupero calore acque reflue + motori efficienti battono caldaia a gas + motori tradizionali?", "🪵 Falegnameria: motori efficienti + aspirazione con inverter + caldaia a biomassa da scarti battono motori tradizionali + aspirazione sempre accesa + caldaia a gas?", "🖨️ Tipografia: presse efficienti + finitura servo + recupero calore essiccazione battono presse tradizionali + finitura tradizionale + essiccazione a gas?", "🍾 Impianto di imbottigliamento: riempitrici efficienti + soffiaggio efficiente + recupero calore lavaggio battono riempitrici tradizionali + soffiaggio tradizionale + lavaggio a gas?", "🌾 Mulino / molitura cereali: motori efficienti + trasporto pneumatico ottimizzato + recupero calore essiccazione battono motori tradizionali + trasporto tradizionale + essiccazione a gas?", "🐄 Sala mungitura: pompa del vuoto a velocita' variabile + refrigerazione latte efficiente + recupero calore acqua lavaggio battono pompa fissa + refrigerazione tradizionale + acqua calda a gas?", "🐖 Porcilaia / allevamento suino: ventilazione con inverter + raffrescamento evaporativo + recupero calore aria esausta battono ventilazione on/off + raffrescamento tradizionale + riscaldamento a gas?", "🐔 Allevamento avicolo / pollaio da carne: ventilazione con inverter + raffrescamento evaporativo + recupero calore aria esausta battono ventilazione on/off + raffrescamento tradizionale + riscaldamento a gas?", "🍫 Cioccolateria: raffinazione con motori efficienti + refrigerazione efficiente + recupero calore su concheggio battono raffinazione tradizionale + refrigerazione tradizionale + riscaldamento a gas?", "🚗 Carrozzeria: ventilazione cabina con inverter + aria compressa efficiente + recupero calore su cabina battono ventilazione tradizionale + aria compressa tradizionale + riscaldamento a gas?", "🧵 Tessitura: telai con azionamento efficiente + aria compressa efficiente + recupero calore su climatizzazione sala telai battono telai tradizionali + aria compressa tradizionale + riscaldamento a gas?", "👞 Calzaturificio: cucitura/montaggio con motori efficienti + aria compressa efficiente + recupero calore su forni di asciugatura collanti battono cucitura tradizionale + aria compressa tradizionale + riscaldamento a gas?", "🪟 Serramenti in legno: taglio/fresatura con motori efficienti + aria compressa efficiente + recupero calore su essiccazione vernici battono taglio tradizionale + aria compressa tradizionale + essiccazione a gas?", "🛣️ Impianto di asfalto: mescolatore efficiente + aspirazione con inverter + recupero calore fumi su tamburo battono mescolatore tradizionale + aspirazione tradizionale + bruciatore a gas?", "🏗️ Impianto di betonaggio: miscelatore ad alta efficienza + nastri con inverter + pompa di calore per acqua di impasto battono miscelatore tradizionale + nastri tradizionali + caldaia a gas per acqua?", "🪵 Segheria: seghe efficienti + aspirazione con inverter + essiccatoio a pompa di calore battono seghe tradizionali + aspirazione tradizionale + essiccatoio a gas?", "🌾 Malteria: ventilazione germinazione con inverter + ventilazione essiccatoio con inverter + recupero calore fumi + essiccatoio a pompa di calore battono ventilazione tradizionale + essiccatoio a gas?", "🏟️ Palazzetto: LED + pompa di calore + fotovoltaico battono illuminazione tradizionale + caldaia a gas?", "🚰 Acquedotto: pompe a velocita' variabile + riduzione perdite + fotovoltaico battono pompe a velocita' fissa + perdite alte?", "🚡 Funivia: azionamento con recupero in frenata + motori efficienti + fotovoltaico in stazione battono azionamento tradizionale senza recupero + riscaldamento stazione a gas?", "🍄 Fungaia: climatizzazione efficiente + recupero calore aria esausta + fotovoltaico in copertura + pompa di calore per pastorizzazione battono climatizzazione tradizionale + pastorizzazione substrato a gas?", "♨️ Terme: pompa di calore + recupero calore acque termali reflue + fotovoltaico battono caldaia a gas per vasche, ACS e ambienti?", "🏔️ Rifugio alpino: fotovoltaico + batteria + pompa di calore battono generatore diesel + caldaia a gasolio in autonomia off-grid?", "🏕️ Campeggio: fotovoltaico + batteria + pompa di calore + LED battono generatore diesel + caldaia a gas per piazzole, servizi e piscina in stagione?", "🐴 Maneggio: fotovoltaico + batteria + pompa di calore + LED arena battono caldaia a gas + prelievo da rete per box, scuderie e maneggio coperto?", "🚗 Autosalone: fotovoltaico + ricarica EV + pompa di calore battono caldaia a gas + prelievo da rete per showroom, officina e piazzale?", "🏡 Agriturismo: fotovoltaico + batteria + pompa di calore + solare termico battono caldaia a gas + prelievo da rete per camere e ristorante?", "📦 Magazzino logistico: fotovoltaico + batteria + pompa di calore + illuminazione LED battono caldaia a gas + rete + illuminazione tradizionale?", "🏭 Impianto di depurazione: soffianti ad alta efficienza + fotovoltaico + biogas da digestione anaerobica battono soffianti tradizionali + rete?", "🎓 Campus universitario: fotovoltaico + batteria + pompa di calore + LED + recupero calore laboratori battono caldaia a gas + rete + illuminazione tradizionale?", "⛸️ Palaghiaccio: frigorifero efficiente + recupero calore + fotovoltaico battono frigorifero tradizionale + caldaia a gas?", "🛣️ Autogrill: pompa di calore + recupero calore cucina + FV pensiline battono caldaia a gas + chiller?", "🍕 Pizzeria: forno elettrico con recupero fumi + pompa di calore batte il forno a gas?", "🐄 Stalla bovina da latte: raffreddamento latte + recupero calore + pompa di calore battono caldaia a gas + tank frigo tradizionale?", "🛞 Gommista: compressore a velocita' variabile + recupero calore compressore + pompa di calore battono caldaia a gas + compressore on/off tradizionale?", "🧺 Lavasecco: macchine efficienti + recupero calore vapore + pompa di calore + FV battono caldaia a gas + macchine tradizionali?", "🐟 Acquacoltura: pompe e ossigenatori efficienti + recupero calore + pompa di calore + FV battono caldaia a gas + pompaggio tradizionale?", "❄️ Surgelati: surgelazione rapida + celle frigorifere efficienti + recupero calore + pompa di calore + FV battono caldaia a gas + freddo tradizionale?", "🪑 Mobilificio: lavorazione legno efficiente + essiccazione a pompa di calore + verniciatura ad acqua + FV battono lavorazione tradizionale + essiccazione a gas + caldaia a gas?", "🐝 Apicoltura: smielatura + fusione cera + deumidificazione miele con pompa di calore + FV battono laboratorio tradizionale + caldaia a gas?", "🏥 RSA / casa di riposo: pompa di calore + recupero calore lavanderia e cucina + FV battono caldaia a gas + chiller tradizionale?", "☕ Torrefazione caffè: tostatore elettrico + recupero fumi + FV batte il tostatore a gas?", "🚗 Autonoleggio: flotta elettrica + ricarica in sede batte la flotta diesel?", "🌱 Vivaio floricolo: pompa di calore + irrigazione efficiente + FV in copertura battono caldaia a gas + pompaggio tradizionale?", "🏢 Coworking: pompa di calore reversibile + recupero calore ventilazione + LED + FV battono caldaia a gas + chiller + illuminazione tradizionale?", "🅿️ Parcheggio coperto: LED + ventilazione a controllo CO + FV su pensiline/copertura + ricarica EV battono illuminazione tradizionale + ventilazione sempre accesa?", "🤖 Magazzino automatizzato: LED + sensoristica + trasloelevatori/AGV elettrici + FV su tetto battono magazzino tradizionale con illuminazione sempre accesa e carrelli termici?", "♻️ Impianto di compostaggio: aerazione forzata + biofiltro + recupero calore + FV batte compostaggio tradizionale in cumuli aperti con rivoltamento diesel?", "🌾 Molino: motori efficienti + inverter + aspirazione efficiente + FV battono molino tradizionale con motori vecchi + aspirazione sempre accesa?", "🧱 Laterizio: recupero calore forno + essiccatoio efficiente + FV battono forno ed essiccatoio tradizionali a gas?", "🥩 Macello: celle frigorifere efficienti + recupero calore + FV battono celle tradizionali + caldaia a gas?", "🏭 Stampaggio plastica a iniezione: presse servo-elettriche + free-cooling stampi + FV battono presse idrauliche tradizionali + essiccazione a gas?", "⛏️ Cava / frantumazione inerti: frantoi elettrici efficienti + nastri con inverter + FV battono frantumazione diesel + nastri tradizionali?", "🪨 Marmificio / lavorazione marmo e pietra: seghe diamantate con inverter + lucidatura efficiente + FV battono seghe tradizionali + essiccazione a gas?", "🚰 Rubinetteria / produzione rubinetti e valvolame: CNC con inverter + lucidatura efficiente + FV battono lavorazioni tradizionali + essiccazione a gas?", "👓 Occhialeria / produzione occhiali e montature: stampaggio/fresatura efficienti + lucidatura efficiente + FV battono lavorazioni tradizionali + essiccazione a gas?", "👜 Pelletteria / borse, cinture e portafogli: taglio laser + rifinitura efficiente + FV battono taglio/cucitura tradizionali + essiccazione a gas?", "🧶 Maglieria / capi in maglia: macchine elettroniche efficienti + stiratura efficiente + FV battono maglieria tradizionale + vaporizzazione a gas?", "💎 Gioielleria / oreficeria: forni a induzione efficienti + lucidatura efficiente + FV battono fusione tradizionale + ricottura a gas?", "⌚ Orologeria: micromeccanica CNC efficiente + lucidatura efficiente + FV battono micromeccanica tradizionale + trattamenti termici a gas?", "🏭 Carpenteria metallica: taglio laser efficiente + saldatura efficiente + FV battono taglio plasma tradizionale + saldatura tradizionale + gas per preriscaldo?", "🏭 Prosciuttificio: stagionare e asciugare i prosciutti con pompa di calore + recupero calore + FV battono caldaia a gas + freddo tradizionale?", "🍇 Vigneto: irrigazione a goccia + ventilatori antibrina elettrici + FV battono irrigazione tradizionale + riscaldamento antibrina a gas?", "🍎 Frutteto: irrigazione a goccia + ventilatori antibrina + celle frigo efficienti + FV battono irrigazione tradizionale + antibrina a gas + celle tradizionali?", "🐑 Allevamento ovino: tosatura efficiente + illuminazione LED + acqua calda da pompa di calore + FV battono tosatura tradizionale + illuminazione tradizionale + acqua calda a gas?", "🐰 Coniglicoltura: ventilazione efficiente + illuminazione LED + riscaldamento da pompa di calore + FV battono ventilazione tradizionale + illuminazione tradizionale + riscaldamento a gas?", "🐌 Elicicoltura: irrigazione efficiente + ventilazione efficiente + riscaldamento da pompa di calore + FV battono irrigazione tradizionale + ventilazione tradizionale + riscaldamento a gas?", "🐛 Sericoltura: ventilazione efficiente + illuminazione LED + riscaldamento da pompa di calore + FV battono ventilazione tradizionale + illuminazione tradizionale + riscaldamento a gas?", "🌳 Tartuficoltura: irrigazione a goccia + celle frigo efficienti + riscaldamento da pompa di calore + FV battono irrigazione tradizionale + celle tradizionali + riscaldamento a gas?", "🫒 Olivicoltura: irrigazione a goccia + frantoio efficiente + pompa di calore + FV battono irrigazione tradizionale + frantoio tradizionale + riscaldamento a gas?", "🍬 Confetteria: cottura con pompa di calore + recupero calore + essiccazione efficiente + lucidatura efficiente + LED + FV battono cottura a gas + essiccazione a gas + lucidatura tradizionale + illuminazione tradizionale?", "🌾 Risaia: essiccare il risone con pompa di calore + recupero calore e irrigare efficiente + FV battono essiccatore a gas + irrigazione tradizionale?", "🏗️ Cantiere edile: gruppo elettrogeno diesel + riscaldamento a gasolio battono allaccio rete + batteria + FV + pompa di calore + LED?", "🗑️ Discarica: il biogas da discarica alimenta un cogeneratore e batte la torcia?", "🔥🌲 Teleriscaldamento a biomassa: la caldaia a cippato di rete batte le caldaie a gas dei singoli edifici?", "⚡🔋 Cogenerazione a fuel cell: l'elettricità + calore senza combustione paga?", "🏠 NZEB: l'edificio a energia quasi zero paga?", "☀️📉 Cannibalizzazione FV: il prezzo catturato crolla con la penetrazione solare?", "⛏️💰 Bitcoin mining: il miner come carico flessibile monetizza l'energia in eccesso?", "☀️🔋 Ibrido FV + accumulo co-locato: un solo allaccio, due ricavi — il sizing della batteria paga?", "🔋📉 Degradazione batteria: l'accumulo invecchia — augmentation o sostituzione?", "🌍📜 EU ETS: le quote CO2 dell'impianto — comprare, coprirsi o abbattere?", "♨️🏛️ Conto Termico: l'incentivo GSE sul calore rinnovabile paga davvero?", "🤝🌐 VPPA (Virtual PPA): il prezzo fisso rinnovabile senza ritirare l'energia paga?", "⚡🤝 PPA fisico: l'energia rinnovabile ritirata davvero a prezzo fisso paga?", "📜💶 CCfD (Carbon Contract for Difference): il prezzo CO2 garantito sblocca la decarbonizzazione industriale?", "⏱️⚡ Mercato infragiornaliero (MI): l'arbitraggio intraday con batteria paga?", "🔀📜 FTR: il diritto finanziario di trasmissione copre la congestione?", "🌱📜 Garanzie di Origine (GO): il certificato rinnovabile paga?", "🤍📜 Certificati Bianchi (TEE): il risparmio energetico si vende?", "⚡🏛️ UVAM sul MSD di Terna: aggregare flessibilità e venderla a Terna paga?", "🏛️💶 Ecobonus: quanto vale davvero lo sconto fiscale sul retrofit energetico?", "🤝☀️ Comunità Energetica Rinnovabile (CER): l'energia condivisa paga?"])
 
     with tab1:
         st.markdown("**Curva di carico giornaliera**: prezzo medio per ora del giorno (banda = ±1 deviazione std, linea tratteggiata = massimo).")
@@ -511604,6 +513167,386 @@ Spark spread;1200000;4,0"""
                     "text/csv", key="st908_csv_scenari")
             except ValueError as _e908:
                 st.error(f"Input non valido: {_e908}")
+
+
+    # W914
+    with tab909:
+        st.markdown("<h1>🤝☀️ Comunità Energetica Rinnovabile (CER): l'energia condivisa paga?</h1>", unsafe_allow_html=True)
+        st.info(edu("🤝☀️ Comunità Energetica Rinnovabile (CER): l'energia condivisa paga?", "Una Comunita Energetica Rinnovabile con impianto fotovoltaico produce ogni anno energia elettrica da un impianto in kWp con una produzione specifica in kWh/kWp/anno (demo 200 per 1.200 = 240.000 kWh/anno). Una quota della produzione viene autoconsumata fisicamente dai membri (demo 240.000 per 0,20 = 48.000 kWh/anno) e vale un risparmio in bolletta al prezzo dell'energia evitata (demo 48.000 per 0,22 = 10.560 EUR/anno). Il resto viene immesso in rete (demo 240.000 meno 48.000 = 192.000 kWh/anno). Una quota dell'energia immessa viene condivisa virtualmente tra i membri della comunita (demo 192.000 per 0,60 = 115.200 kWh/anno) e riceve la tariffa premio del GSE (demo 115.200 per 0,11 = 12.672 EUR/anno). L'energia immessa non condivisa (demo 192.000 meno 115.200 = 76.800 kWh/anno) viene venduta con il ritiro dedicato (demo 76.800 per 0,08 = 6.144 EUR/anno). Il ricavo annuo e la somma delle tre gambe (demo 10.560 piu 12.672 piu 6.144 = 29.376 EUR/anno). I costi annui sono O&M per kWp piu gestione della comunita (demo 25 per 200 piu 3.000 = 8.000 EUR/anno). Il margine annuo e ricavo meno costi (demo 29.376 meno 8.000 = 21.376 EUR/anno). Il VAN e meno CAPEX piu margine per l'annualita a tasso dato sulla vita utile (demo meno 280.000 piu 21.376 per 12,4622103425 = meno 13.607,79 EUR). La TIR e il tasso che azzera il VAN a CAPEX fissato (demo 4,42 %). Il payback e il primo anno in cui il cumulato del margine raggiunge il CAPEX (demo 14 anni: cumulato anno 13 = 277.888 sotto CAPEX, anno 14 = 299.264 sopra CAPEX; frazionale 13,10 anni). Il breakeven incentivo e l'incentivo che azzera il VAN in EUR/kWh (demo 0,1195, pari a 119,48 EUR/MWh): NON e l'incentivo che azzera il margine. Il breakeven quota e la quota condivisa che azzera il VAN in frazione (demo 0,7896, pari a 78,96 %): NON e la quota che azzera il margine. La CO2 evitata e kWh annui prodotti per fattore CO2 diviso 1000 in t/anno (demo 240.000 per 0,25 diviso 1000 = 60). Gli scenari sono: base con potenza 200 kWp, produzione 240.000 kWh, E auto 48.000 kWh, risparmio 10.560, E condivisa 115.200 kWh, ricavo incentivo 12.672, ricavo 29.376, costi 8.000, margine 21.376, VAN meno 13.607,79, TIR 4,42 %, payback 14 anni, breakeven incentivo 0,1195, breakeven quota 78,96 %, CO2 60 t/anno, MARGINALE; incentivo 0,13 EUR/kWh con ricavo incentivo 14.976, ricavo 31.680, margine 23.680, VAN 15.105,14, TIR 5,63 %, payback 12 anni, breakeven incentivo 0,1195, breakeven quota 47,37 %, CONVIENTE; incentivo 0,08 EUR/kWh con ricavo incentivo 9.216, ricavo 25.920, margine 17.920, VAN meno 56.677,19, TIR 2,48 %, payback 16 anni, breakeven incentivo 0,1195, breakeven quota non definito, NON_CONVIENTE; quota condivisa 0,80 con E condivisa 153.600 kWh, ricavo incentivo 16.896, E resto 38.400 kWh, ricavo ritiro 3.072, ricavo 30.528, margine 22.528, VAN 748,67, TIR 5,03 %, payback 13 anni, breakeven incentivo 0,1096, breakeven quota 78,96 %, CONVIENTE; tasso 8 % con VAN meno 70.127,28, TIR 4,42 %, payback 14 anni, breakeven incentivo 0,1720, breakeven quota non definito, NON_CONVIENTE; CAPEX 1.000 EUR/kWp (CAPEX 200.000 EUR) con VAN 66.392,21, TIR 8,66 %, payback 10 anni, breakeven incentivo 0,0638, breakeven quota 0,00 %, CONVIENTE. Insight chiave: con potenza 200 kWp e produzione specifica 1.200 kWh/kWp/anno il caso e MARGINALE con VAN meno 13.607,79; il margine annuo e 21.376 EUR e la TIR e 4,42 %, sotto il tasso di attualizzazione del 5 %. Con incentivo 0,13 EUR/kWh il VAN sale a 15.105,14 e il verdetto diventa CONVIENTE. Con incentivo 0,08 EUR/kWh il VAN scende a meno 56.677,19 e il verdetto diventa NON_CONVIENTE. Con quota condivisa 0,80 il VAN sale a 748,67 e il verdetto diventa CONVIENTE: la quota condivisa sposta il risultato quasi quanto l'incentivo. Con tasso 8 % il VAN scende a meno 70.127,28 e il verdetto diventa NON_CONVIENTE. Con CAPEX 1.000 EUR/kWp il VAN sale a 66.392,21 e il verdetto diventa CONVIENTE. Con potenza zero la produzione e zero, il ricavo e zero, i costi sono 3.000 e il margine e meno 3.000 e il verdetto e NON_CALCOLABILE (VAN meno 317.386,63, TIR e payback non definiti, breakeven non definiti). Con incentivo zero il ricavo incentivo e zero e il VAN e meno 171.528,92 e il verdetto e NON_CONVIENTE (margine 8.704, TIR meno 4,15 %, payback non definito, breakeven incentivo 0,1195, breakeven quota 0,00 %). Con quota condivisa zero l'energia condivisa e zero e il VAN e meno 56.677,19 e il verdetto e NON_CONVIENTE (ricavo ritiro 15.360, margine 17.920, TIR 2,48 %, payback 16 anni, breakeven incentivo non definito, breakeven quota 78,96 %). Con quota condivisa 1,0 l'energia condivisa e 192.000 kWh e il VAN e 15.105,14 e il verdetto e CONVIENTE (ricavo incentivo 21.120, margine 23.680, TIR 5,63 %, payback 12 anni, breakeven incentivo 0,1037, breakeven quota 78,96 %). Con CAPEX zero il VAN e 266.392,21 e il verdetto e CONVIENTE, con payback zero anni (TIR non definita, breakeven incentivo 0,00, breakeven quota 0,00 %). Con vita zero il VAN e meno 280.000 e il verdetto e NON_CONVIENTE (TIR e payback non definiti, breakeven non definiti). Con tasso zero il VAN e 147.520 e il verdetto e CONVIENTE (TIR 4,42 %, payback 14 anni, breakeven incentivo 0,0460, breakeven quota 0,00 %). Con produzione specifica zero la produzione e zero e il margine e meno 8.000 e il verdetto e NON_CALCOLABILE (VAN meno 379.697,68, TIR e payback non definiti, breakeven non definiti). Con prezzo energia evitato zero il risparmio e zero e il VAN e meno 145.208,73 e il verdetto e NON_CONVIENTE (margine 10.816, TIR meno 2,34 %, payback non definito, breakeven incentivo 0,2111, breakeven quota non definito). Con prezzo ritiro zero il ricavo ritiro e zero e il VAN e meno 90.175,61 e il verdetto e NON_CONVIENTE (margine 15.232, TIR 0,82 %, payback 19 anni, breakeven incentivo 0,1728, breakeven quota 94,26 %). I flussi per VAN, TIR e payback sono meno CAPEX all'anno zero e margine annuo costante per ogni anno di vita utile, SOLO anni di vita utile, SEMPLIFICAZIONE DICHIARATA; nel mondo reale produzione, prezzi e incentivo possono variare, qui si usano i valori medi annui costanti; dopo la fine della vita utile l'impianto puo continuare ma fuori da questo conto. L'energia condivisa e virtuale: non passa per un cavo dedicato, si calcola per fasce orarie dall'energia immessa e dai prelievi dei membri, SEMPLIFICAZIONE DICHIARATA (qui la quota condivisa e un input). Il fattore CO2 0,25 e una SEMPLIFICAZIONE DICHIARATA: i kWh prodotti evitano emissioni secondo il mix elettrico reale, ma il fattore vero dipende da fonte, ora e stagione. La tolleranza e in FRAZIONE (0,10 = 10 % del CAPEX), usata diretta nel verdetto, NON divisa per 100. Il verdetto e: NON_CALCOLABILE se il margine annuo e zero o negativo oppure se un input e degenere (potenza negativa, produzione specifica negativa, quota autoconsumo negativa o sopra 1, prezzo energia evitato negativo, quota condivisa negativa o sopra 1, incentivo negativo, prezzo ritiro negativo, CAPEX negativo, O&M negativo, gestione CER negativa, vita negativa o non intera, tasso negativo, tolleranza negativa o sopra 1); altrimenti CONVIENTE se il VAN e maggiore di zero, MARGINALE se il VAN e minore o uguale a zero e il suo valore assoluto e minore o uguale a tolleranza per CAPEX, NON_CONVIENTE altrimenti. NOTA SULLA GUARD: la guard UI e IDENTICA a quella degli helper, nessuna divergenza di verdetto. Tutti gli slider hanno minimo 0, quindi i casi negativi sono NON RAGGIUNGIBILI via slider, ma la guard li controlla comunque; i casi uguali a zero raggiungibili via slider sono bloccati in UI esattamente come negli helper dove previsto (margine zero o negativo). Gli zeri ammessi in entrambi (potenza, produzione specifica, quote, incentivo, prezzi, CAPEX, O&M, gestione, vita, tasso, tolleranza) non creano divergenza: danno casi calcolabili con verdetto economico o NON_CALCOLABILE per margine; potenza zero da produzione zero e verdetto NON_CALCOLABILE in entrambi; incentivo zero da ricavo incentivo zero e verdetto NON_CONVIENTE in entrambi; quota zero da energia condivisa zero e verdetto NON_CONVIENTE in entrambi; quota 1,0 da energia condivisa 192.000 kWh e verdetto CONVIENTE in entrambi; CAPEX zero da VAN 266.392,21 e verdetto CONVIENTE in entrambi; vita zero da VAN meno CAPEX e verdetto NON_CONVIENTE in entrambi; tasso zero da VAN 147.520 e verdetto CONVIENTE in entrambi; produzione zero da margine meno 8.000 e verdetto NON_CALCOLABILE in entrambi. La vita sopra 30 non e raggiungibile via slider (massimo 30) ma e ammessa in entrambi allo stesso modo. La tolleranza sopra 0,50 e ammessa negli helper e limitata solo dallo slider: la guard controlla solo gli stessi limiti degli helper. Il tasso sopra 0,20 non e raggiungibile via slider (massimo 0,20) ma e ammesso in entrambi allo stesso modo. Distinzione esplicita: qui SOLO il MECCANISMO DI CONDIVISIONE VIRTUALE piu TARIFFA PREMIO sull'energia condivisa, NIENTE fisica dell'impianto oltre la produzione annua (le schede FV dedicate coprono la produzione fisica: qui la produzione annua in kWh e un input, potenza per produzione specifica), NIENTE autoconsumo fisico dietro il contatore da solo (solo risparmio in bolletta, niente condivisione virtuale e niente tariffa premio: qui l'autoconsumo e solo una delle tre gambe del ricavo), NIENTE vendita diretta al vicino (prezzo bilaterale tra privati, non tariffa premio del GSE sull'energia condivisa), NIENTE solo ritiro dedicato (solo vendita dell'energia immessa, niente premio: qui il ritiro e solo la gamba residua), NIENTE certificato di origine (titolo negoziabile sul mercato, non incentivo: la scheda dei Certificati Bianchi copre le Garanzie di Origine; qui il beneficio e la tariffa premio, non un titolo), NIENTE Conto Termico (contributo per il calore, non per l'elettricita: la scheda del Conto Termico copre il calore; qui si misura elettricita condivisa, non calore), NIENTE detrazione fiscale (sconto in dichiarazione dei redditi, non incentivo del GSE: la scheda della detrazione fiscale copre lo sconto fiscale; qui il beneficio e la tariffa premio, non una detrazione). Nota: qui si misura quanto paga l'energia condivisa, non un titolo e non uno sconto fiscale."))
+        _def909 = mh909_demo()
+        st.markdown("**Impianto e produzione**")
+        _c909a = st.columns(4)
+        with _c909a[0]:
+            _po909 = st.slider("Potenza (kWp)",
+                               min_value=0, max_value=500,
+                               value=int(_def909["potenza_kwp"]),
+                               step=10, key="st909_potenza_kwp")
+        with _c909a[1]:
+            _pr909 = st.slider("Produzione specifica (kWh/kWp/anno)",
+                               min_value=0, max_value=2000,
+                               value=int(_def909["produzione_specifica"]),
+                               step=50, key="st909_produzione_specifica")
+        with _c909a[2]:
+            _qa909 = st.slider("Quota autoconsumo",
+                               min_value=0.0, max_value=1.0,
+                               value=float(_def909["quota_autoconsumo"]),
+                               step=0.01, key="st909_quota_autoconsumo")
+        with _c909a[3]:
+            _pe909 = st.slider("Prezzo energia evitata (EUR/kWh)",
+                               min_value=0.0, max_value=0.50,
+                               value=float(_def909["prezzo_energia_evitato"]),
+                               step=0.01, key="st909_prezzo_energia_evitato")
+        st.markdown("**Condivisione e prezzi**")
+        _c909b = st.columns(4)
+        with _c909b[0]:
+            _qc909 = st.slider("Quota condivisa",
+                               min_value=0.0, max_value=1.0,
+                               value=float(_def909["quota_condivisa"]),
+                               step=0.01, key="st909_quota_condivisa")
+        with _c909b[1]:
+            _inc909 = st.slider("Incentivo (EUR/kWh)",
+                                min_value=0.0, max_value=0.30,
+                                value=float(_def909["incentivo_eur_kwh"]),
+                                step=0.005, key="st909_incentivo_eur_kwh")
+        with _c909b[2]:
+            _prr909 = st.slider("Prezzo ritiro (EUR/kWh)",
+                                min_value=0.0, max_value=0.30,
+                                value=float(_def909["prezzo_ritiro_eur_kwh"]),
+                                step=0.005, key="st909_prezzo_ritiro_eur_kwh")
+        with _c909b[3]:
+            _ca909 = st.slider("CAPEX (EUR)",
+                               min_value=0, max_value=600000,
+                               value=int(_def909["capex_eur"]),
+                               step=5000, key="st909_capex_eur")
+        st.markdown("**Costi, vita e finanza**")
+        _c909c = st.columns(4)
+        with _c909c[0]:
+            _om909 = st.slider("O&M (EUR/kWp/anno)",
+                               min_value=0, max_value=100,
+                               value=int(_def909["om_eur_kwp_anno"]),
+                               step=1, key="st909_om_eur_kwp_anno")
+        with _c909c[1]:
+            _ge909 = st.slider("Gestione CER (EUR/anno)",
+                               min_value=0, max_value=20000,
+                               value=int(_def909["gestione_cer_eur_anno"]),
+                               step=500, key="st909_gestione_cer_eur_anno")
+        with _c909c[2]:
+            _vi909 = st.slider("Vita utile (anni)",
+                               min_value=0, max_value=30,
+                               value=int(_def909["vita_anni"]),
+                               step=1, key="st909_vita_anni")
+        with _c909c[3]:
+            _ta909 = st.slider("Tasso attualizzazione (frazione)",
+                               min_value=0.0, max_value=0.20,
+                               value=float(_def909["tasso_frazione"]),
+                               step=0.005, key="st909_tasso_frazione")
+        st.markdown("**Tolleranza**")
+        _c909d = st.columns(4)
+        with _c909d[0]:
+            _tol909 = st.slider("Tolleranza MARGINALE (frazione)",
+                                min_value=0.0, max_value=0.50,
+                                value=float(_def909["tol_frazione"]),
+                                step=0.01, key="st909_tol_frazione")
+        with _c909d[1]:
+            _stb909 = st.checkbox("Mostra tabella dettaglio",
+                                  value=True,
+                                  key="st909_show_tabella")
+        with _c909d[2]:
+            _ssc909 = st.checkbox("Mostra scenari",
+                                  value=True,
+                                  key="st909_show_scenari")
+        with _c909d[3]:
+            _scf909 = st.checkbox("Mostra confronto",
+                                  value=True,
+                                  key="st909_show_confronto")
+        _c909e = st.columns(4)
+        with _c909e[0]:
+            _nota909 = st.checkbox("Mostra nota didattica",
+                                   value=True,
+                                   key="st909_nota")
+        if st.button("Calcola CER",
+                     key="st909_calcola"):
+            try:
+                _ep909 = float(_po909) * float(_pr909)
+                _ea909 = _ep909 * float(_qa909)
+                _ris909 = _ea909 * float(_pe909)
+                _ei909 = _ep909 - _ea909
+                _ec909 = _ei909 * float(_qc909)
+                _rii909 = _ec909 * float(_inc909)
+                _er909 = _ei909 - _ec909
+                _rr909 = _er909 * float(_prr909)
+                _ric909 = _ris909 + _rii909 + _rr909
+                _cos909 = float(_om909) * float(_po909) + float(_ge909)
+                _mar909 = _ric909 - _cos909
+                _deg909 = (float(_po909) < 0.0 or
+                           float(_pr909) < 0.0 or
+                           float(_qa909) < 0.0 or
+                           float(_qa909) > 1.0 or
+                           float(_pe909) < 0.0 or
+                           float(_qc909) < 0.0 or
+                           float(_qc909) > 1.0 or
+                           float(_inc909) < 0.0 or
+                           float(_prr909) < 0.0 or
+                           float(_ca909) < 0.0 or
+                           float(_om909) < 0.0 or
+                           float(_ge909) < 0.0 or
+                           float(_vi909) < 0.0 or
+                           float(_vi909) != float(int(float(_vi909))) or
+                           float(_ta909) < 0.0 or
+                           float(_tol909) < 0.0 or
+                           float(_tol909) > 1.0 or
+                           _mar909 <= 0.0)
+                if _deg909:
+                    st.warning("Verdetto: NON_CALCOLABILE "
+                            "(regime degenere: potenza "
+                            "negativa, produzione specifica "
+                            "negativa, quota autoconsumo "
+                            "negativa o sopra 1, prezzo "
+                            "energia evitata negativo, quota "
+                            "condivisa negativa o sopra 1, "
+                            "incentivo negativo, prezzo "
+                            "ritiro negativo, CAPEX negativo, "
+                            "O&M negativo, gestione CER "
+                            "negativa, vita negativa o non "
+                            "intera, tasso negativo, "
+                            "tolleranza negativa o sopra 1, "
+                            "oppure margine annuo zero o "
+                            "negativo: la comunita non "
+                            "genera cassa e VAN, TIR e "
+                            "payback non hanno senso "
+                            "economico). "
+                            "KPI, grafico, tabella e CSV non "
+                            "calcolabili: si mostra solo il verdetto "
+                            "e questa nota. NOTA: la guard UI e "
+                            "IDENTICA a quella degli helper, nessuna "
+                            "divergenza di verdetto. Tutti gli "
+                            "slider hanno minimo 0, quindi i "
+                            "casi negativi sono NON RAGGIUNGIBILI "
+                            "via slider, ma la guard li "
+                            "controlla comunque; i casi uguali "
+                            "a zero raggiungibili via slider "
+                            "sono bloccati in UI esattamente "
+                            "come negli helper dove previsto "
+                            "(margine zero o negativo). "
+                            "Gli zeri ammessi in "
+                            "entrambi (potenza, produzione "
+                            "specifica, quote, incentivo, "
+                            "prezzi, CAPEX, O&M, gestione, "
+                            "vita, tasso, tolleranza) "
+                            "non creano divergenza: danno casi "
+                            "calcolabili con verdetto economico "
+                            "o NON_CALCOLABILE per margine; "
+                            "potenza zero da produzione zero e "
+                            "verdetto NON_CALCOLABILE in entrambi; "
+                            "incentivo zero da ricavo incentivo "
+                            "zero e verdetto NON_CONVIENTE in "
+                            "entrambi; quota zero da energia "
+                            "condivisa zero e verdetto "
+                            "NON_CONVIENTE in entrambi; quota "
+                            "1,0 da energia condivisa 192.000 "
+                            "kWh e verdetto CONVIENTE in "
+                            "entrambi; CAPEX zero da VAN "
+                            "266.392,21 e verdetto CONVIENTE in "
+                            "entrambi; vita zero da VAN meno "
+                            "CAPEX e verdetto NON_CONVIENTE in "
+                            "entrambi; tasso zero da VAN "
+                            "147.520 e verdetto CONVIENTE in "
+                            "entrambi; produzione zero da "
+                            "margine meno 8.000 e verdetto "
+                            "NON_CALCOLABILE in entrambi. "
+                            "La vita sopra 30 non "
+                            "e raggiungibile via slider "
+                            "(massimo 30) ma e ammessa in "
+                            "entrambi allo stesso modo. "
+                            "La tolleranza sopra 0,50 "
+                            "e ammessa negli helper e limitata "
+                            "solo dallo slider: la guard "
+                            "controlla solo gli stessi limiti "
+                            "degli helper. Il tasso sopra 0,20 "
+                            "non e raggiungibile via slider "
+                            "(massimo 0,20) ma e ammesso in "
+                            "entrambi allo stesso modo.")
+                    st.stop()
+                _bc909 = mh909_calcola(
+                    potenza_kwp=float(_po909),
+                    produzione_specifica=float(_pr909),
+                    quota_autoconsumo=float(_qa909),
+                    prezzo_energia_evitato=float(_pe909),
+                    quota_condivisa=float(_qc909),
+                    incentivo_eur_kwh=float(_inc909),
+                    prezzo_ritiro_eur_kwh=float(_prr909),
+                    capex_eur=float(_ca909),
+                    om_eur_kwp_anno=float(_om909),
+                    gestione_cer_eur_anno=float(_ge909),
+                    vita_anni=int(_vi909),
+                    tasso_frazione=float(_ta909),
+                    tol_frazione=float(_tol909))
+                _k909a = st.columns(2)
+                _k909a[0].paiac("VAN (EUR)",
+                                 f"{_bc909['van_eur']:,.2f}")
+                _k909a[1].paiac("TIR (%)",
+                                 f"{_bc909['tir_frazione'] * 100:,.2f}" if _bc909['tir_frazione'] is not None else "n/d")
+                _k909b = st.columns(2)
+                _k909b[0].paiac("Ricavo (EUR/anno)",
+                                 f"{_bc909['ricavo_eur_anno']:,.2f}")
+                _k909b[1].paiac("Margine annuo (EUR/anno)",
+                                 f"{_bc909['margine_eur_anno']:,.2f}")
+                _v909 = _bc909["verdetto"]
+                _tir909 = (f"{_bc909['tir_frazione'] * 100:,.2f} %"
+                           if _bc909['tir_frazione'] is not None
+                           else "n/d")
+                _pb909 = (f"{_bc909['payback_anni']} anni"
+                          if _bc909['payback_anni'] is not None
+                          else "n/d")
+                _bei909 = (f"{_bc909['be_incentivo_eur_kwh']:,.4f}"
+                           if _bc909['be_incentivo_eur_kwh'] is not None
+                           else "n/d")
+                _beim909 = (f"{_bc909['be_incentivo_eur_mwh']:,.2f}"
+                            if _bc909['be_incentivo_eur_mwh'] is not None
+                            else "n/d")
+                _beq909 = (f"{_bc909['be_quota_frazione'] * 100:,.2f}"
+                           if _bc909['be_quota_frazione'] is not None
+                           else "n/d")
+                _txt909 = (f"Verdetto: {_v909} : E prod "
+                           f"{_bc909['e_prod_kwh']:,.2f} kWh/anno, "
+                           f"E auto "
+                           f"{_bc909['e_auto_kwh']:,.2f} kWh/anno, "
+                           f"risparmio "
+                           f"{_bc909['risparmio_eur_anno']:,.2f} EUR/anno, "
+                           f"E immessa "
+                           f"{_bc909['e_immessa_kwh']:,.2f} kWh/anno, "
+                           f"E condivisa "
+                           f"{_bc909['e_cond_kwh']:,.2f} kWh/anno, "
+                           f"ricavo incentivo "
+                           f"{_bc909['ricavo_incentivo_eur_anno']:,.2f} EUR/anno, "
+                           f"E resto "
+                           f"{_bc909['e_resto_kwh']:,.2f} kWh/anno, "
+                           f"ricavo ritiro "
+                           f"{_bc909['ricavo_ritiro_eur_anno']:,.2f} EUR/anno, "
+                           f"ricavo "
+                           f"{_bc909['ricavo_eur_anno']:,.2f} EUR/anno, "
+                           f"costi "
+                           f"{_bc909['costi_eur_anno']:,.2f} EUR/anno, "
+                           f"margine annuo "
+                           f"{_bc909['margine_eur_anno']:,.2f} EUR/anno, "
+                           f"VAN "
+                           f"{_bc909['van_eur']:,.2f} EUR, "
+                           f"TIR {_tir909}, "
+                           f"payback {_pb909}, "
+                           f"breakeven incentivo "
+                           f"{_bei909} EUR/kWh "
+                           f"({_beim909} EUR/MWh), "
+                           f"breakeven quota "
+                           f"{_beq909} %, CO2 evitata "
+                           f"{_bc909['co2_t_anno']:,.2f} t/anno.")
+                if _v909 == "CONVIENTE":
+                    st.success(f"{_txt909}")
+                elif _v909 == "MARGINALE":
+                    st.warning(f"{_txt909}")
+                elif _v909 == "NON_CONVIENTE":
+                    st.error(f"{_txt909}")
+                else:
+                    st.info(f"{_txt909}")
+                st.markdown(f"**Riepilogo** : potenza "
+                            f"{_bc909['potenza_kwp']:,.2f} kWp, "
+                            f"produzione specifica "
+                            f"{_bc909['produzione_specifica']:,.2f} kWh/kWp/anno, "
+                            f"quota autoconsumo "
+                            f"{_bc909['quota_autoconsumo']:,.2f}, "
+                            f"prezzo energia evitata "
+                            f"{_bc909['prezzo_energia_evitato']:,.2f} EUR/kWh, "
+                            f"quota condivisa "
+                            f"{_bc909['quota_condivisa']:,.2f}, "
+                            f"incentivo "
+                            f"{_bc909['incentivo_eur_kwh']:,.2f} EUR/kWh, "
+                            f"prezzo ritiro "
+                            f"{_bc909['prezzo_ritiro_eur_kwh']:,.2f} EUR/kWh, "
+                            f"CAPEX "
+                            f"{_bc909['capex_eur']:,.2f} EUR, "
+                            f"O&M "
+                            f"{_bc909['om_eur_kwp_anno']:,.2f} EUR/kWp/anno, "
+                            f"gestione CER "
+                            f"{_bc909['gestione_cer_eur_anno']:,.2f} EUR/anno, "
+                            f"vita utile "
+                            f"{_bc909['vita_anni']} anni, "
+                            f"tasso attualizzazione "
+                            f"{_bc909['tasso_frazione']:,.2f}, "
+                            f"tolleranza "
+                            f"{_bc909['tol_frazione']:,.2f}, "
+                            f"E prod "
+                            f"{_bc909['e_prod_kwh']:,.2f} kWh/anno, "
+                            f"E auto "
+                            f"{_bc909['e_auto_kwh']:,.2f} kWh/anno, "
+                            f"risparmio "
+                            f"{_bc909['risparmio_eur_anno']:,.2f} EUR/anno, "
+                            f"E immessa "
+                            f"{_bc909['e_immessa_kwh']:,.2f} kWh/anno, "
+                            f"E condivisa "
+                            f"{_bc909['e_cond_kwh']:,.2f} kWh/anno, "
+                            f"ricavo incentivo "
+                            f"{_bc909['ricavo_incentivo_eur_anno']:,.2f} EUR/anno, "
+                            f"E resto "
+                            f"{_bc909['e_resto_kwh']:,.2f} kWh/anno, "
+                            f"ricavo ritiro "
+                            f"{_bc909['ricavo_ritiro_eur_anno']:,.2f} EUR/anno, "
+                            f"ricavo "
+                            f"{_bc909['ricavo_eur_anno']:,.2f} EUR/anno, "
+                            f"costi "
+                            f"{_bc909['costi_eur_anno']:,.2f} EUR/anno, "
+                            f"margine annuo "
+                            f"{_bc909['margine_eur_anno']:,.2f} EUR/anno, "
+                            f"VAN "
+                            f"{_bc909['van_eur']:,.2f} EUR, "
+                            f"TIR {_tir909}, "
+                            f"payback {_pb909}, "
+                            f"breakeven incentivo "
+                            f"{_bei909} EUR/kWh "
+                            f"({_beim909} EUR/MWh), "
+                            f"breakeven quota "
+                            f"{_beq909} %, "
+                            f"CO2 evitata "
+                            f"{_bc909['co2_t_anno']:,.2f} t/anno, "
+                            f"verdetto {_bc909['verdetto']}.")
+                if _nota909:
+                    st.info("NOTA DIDATTICA : Con potenza 200 kWp, produzione specifica 1.200 kWh/kWp/anno, quota autoconsumo 0,20, prezzo energia evitato 0,22 EUR/kWh, quota condivisa 0,60, incentivo 0,11 EUR/kWh, prezzo ritiro 0,08 EUR/kWh, CAPEX 280.000 EUR, O&M 25 EUR/kWp/anno, gestione CER 3.000 EUR/anno, vita 20 anni e tasso 0,05 i driver sono incentivo, quota condivisa e CAPEX, non la produzione da sola: E prod 240.000 kWh/anno, E auto 48.000 kWh/anno, risparmio 10.560 EUR/anno, E immessa 192.000 kWh/anno, E condivisa 115.200 kWh/anno, ricavo incentivo 12.672 EUR/anno, E resto 76.800 kWh/anno, ricavo ritiro 6.144 EUR/anno, ricavo 29.376 EUR/anno, costi 8.000 EUR/anno, margine 21.376 EUR/anno, VAN meno 13.607,79 EUR, TIR 4,42 %, payback 14 anni (frazionale 13,10), breakeven incentivo 0,1195 EUR/kWh (119,48 EUR/MWh), breakeven quota 78,96 %, CO2 evitata 60 t/anno. Con incentivo 0,13 EUR/kWh il VAN diventa 15.105,14 EUR e il verdetto diventa CONVIENTE (ricavo incentivo 14.976 EUR/anno, margine 23.680 EUR/anno, TIR 5,63 %, payback 12 anni, breakeven quota 47,37 %). Con incentivo 0,08 EUR/kWh il VAN diventa meno 56.677,19 EUR e il verdetto diventa NON_CONVIENTE (ricavo incentivo 9.216 EUR/anno, margine 17.920 EUR/anno, TIR 2,48 %, payback 16 anni, breakeven quota non definito). Con quota condivisa 0,80 il VAN diventa 748,67 EUR e il verdetto diventa CONVIENTE (E condivisa 153.600 kWh/anno, ricavo incentivo 16.896 EUR/anno, margine 22.528 EUR/anno, TIR 5,03 %, payback 13 anni, breakeven incentivo 0,1096 EUR/kWh). Con tasso 8 % il VAN diventa meno 70.127,28 EUR e il verdetto diventa NON_CONVIENTE (TIR 4,42 %, payback 14 anni, breakeven incentivo 0,1720 EUR/kWh, breakeven quota non definito). Con CAPEX 1.000 EUR/kWp il VAN diventa 66.392,21 EUR e il verdetto diventa CONVIENTE (CAPEX 200.000 EUR, TIR 8,66 %, payback 10 anni, breakeven incentivo 0,0638 EUR/kWh, breakeven quota 0,00 %). Con potenza zero la produzione e zero e il margine e meno 3.000 EUR e il verdetto e NON_CALCOLABILE (VAN meno 317.386,63 EUR, TIR e payback non definiti, breakeven non definiti). Con incentivo zero il VAN e meno 171.528,92 EUR e il verdetto e NON_CONVIENTE (margine 8.704 EUR/anno, TIR meno 4,15 %, payback non definito, breakeven incentivo 0,1195 EUR/kWh, breakeven quota 0,00 %). Con quota condivisa zero il VAN e meno 56.677,19 EUR e il verdetto e NON_CONVIENTE (ricavo ritiro 15.360 EUR/anno, margine 17.920 EUR/anno, TIR 2,48 %, payback 16 anni, breakeven incentivo non definito, breakeven quota 78,96 %). Con quota condivisa 1,0 il VAN e 15.105,14 EUR e il verdetto e CONVIENTE (E condivisa 192.000 kWh/anno, ricavo incentivo 21.120 EUR/anno, margine 23.680 EUR/anno, TIR 5,63 %, payback 12 anni, breakeven incentivo 0,1037 EUR/kWh). Con CAPEX zero il VAN diventa 266.392,21 EUR e il verdetto e CONVIENTE (payback zero anni, TIR non definita, breakeven incentivo 0,00, breakeven quota 0,00 %). Con vita zero il VAN e meno 280.000 EUR e il verdetto e NON_CONVIENTE (TIR e payback non definiti, breakeven non definiti). Con tasso zero il VAN e 147.520 EUR e il verdetto e CONVIENTE (TIR 4,42 %, payback 14 anni, breakeven incentivo 0,0460 EUR/kWh, breakeven quota 0,00 %). Con produzione specifica zero la produzione e zero e il margine e meno 8.000 EUR e il verdetto e NON_CALCOLABILE (VAN meno 379.697,68 EUR, TIR e payback non definiti, breakeven non definiti). Con prezzo energia evitato zero il VAN e meno 145.208,73 EUR e il verdetto e NON_CONVIENTE (margine 10.816 EUR/anno, TIR meno 2,34 %, payback non definito, breakeven incentivo 0,2111 EUR/kWh, breakeven quota non definito). Con prezzo ritiro zero il VAN e meno 90.175,61 EUR e il verdetto e NON_CONVIENTE (margine 15.232 EUR/anno, TIR 0,82 %, payback 19 anni, breakeven incentivo 0,1728 EUR/kWh, breakeven quota 94,26 %). Con O&M zero il VAN diventa 48.703,26 EUR (margine 26.376 EUR/anno, TIR 6,97 %, payback 11 anni, breakeven incentivo 0,0761 EUR/kWh, breakeven quota 0,00 %). Con gestione CER zero il VAN diventa 23.778,84 EUR (margine 24.376 EUR/anno, TIR 5,98 %, payback 12 anni, breakeven incentivo 0,0934 EUR/kWh, breakeven quota 26,87 %). Con vita 30 anni il VAN diventa 48.601,51 EUR (TIR 6,47 %, payback 14 anni, breakeven incentivo 0,0826 EUR/kWh, breakeven quota 5,11 %). Con quota autoconsumo zero il VAN diventa meno 86.586,50 EUR (E auto zero, ricavo 23.520 EUR/anno, margine 15.520 EUR/anno, TIR 1,00 %, payback 19 anni, breakeven incentivo 0,1582 EUR/kWh, breakeven quota non definito). Con quota autoconsumo 1,0 il VAN diventa 278.307,02 EUR (E auto 240.000 kWh/anno, ricavo 52.800 EUR/anno, margine 44.800 EUR/anno, TIR 15,03 %, payback 7 anni, breakeven non definiti). Con produzione specifica 1.500 kWh/kWp/anno il VAN diventa 77.914,68 EUR (E prod 300.000 kWh/anno, margine 28.720 EUR/anno, TIR 8,09 %, payback 10 anni, breakeven incentivo 0,0666 EUR/kWh, breakeven quota 0,00 %, CO2 75 t/anno). Il breakeven incentivo e l'incentivo che azzera il VAN, NON l'incentivo che azzera il margine: a 0,1195 EUR/kWh il VAN e zero nella demo; a 0,1096 EUR/kWh il VAN e zero con quota 0,80. Il breakeven incentivo e INVARIANTE all'incentivo corrente: con incentivo 0,13 e con incentivo 0,08 resta 0,1195 EUR/kWh. Il breakeven quota e la quota che azzera il VAN, NON la quota che azzera il margine: a 78,96 % il VAN e zero nella demo. Il breakeven quota e INVARIANTE alla quota corrente: con quota 0,80 e con quota 1,0 resta 78,96 %. La TIR azzera il VAN a CAPEX fissato: con tasso 8 % la TIR resta 4,42 %, con tasso zero la TIR resta 4,42 %. La CO2 evitata e kWh annui prodotti per fattore CO2 diviso 1000, in t/anno: 240.000 per 0,25 diviso 1000 = 60. Guard UI identica agli helper, nessuna divergenza di verdetto: i casi negativi sono non raggiungibili via slider (minimo 0) ma controllati comunque; i casi uguali a zero raggiungibili via slider sono bloccati in UI esattamente come negli helper dove previsto (margine zero o negativo); gli zeri ammessi in entrambi non creano divergenza; potenza zero da produzione zero e verdetto NON_CALCOLABILE in entrambi; incentivo zero da ricavo incentivo zero e verdetto NON_CONVIENTE in entrambi; quota zero da energia condivisa zero e verdetto NON_CONVIENTE in entrambi; quota 1,0 da energia condivisa 192.000 kWh e verdetto CONVIENTE in entrambi; CAPEX zero da VAN 266.392,21 e verdetto CONVIENTE in entrambi; vita zero da VAN meno CAPEX e verdetto NON_CONVIENTE in entrambi; tasso zero da VAN 147.520 e verdetto CONVIENTE in entrambi; produzione zero da margine meno 8.000 e verdetto NON_CALCOLABILE in entrambi; la vita sopra 30 non e raggiungibile via slider (massimo 30) ma e ammessa in entrambi allo stesso modo; la tolleranza sopra 0,50 e ammessa negli helper e limitata solo dallo slider; il tasso sopra 0,20 non e raggiungibile via slider (massimo 0,20) ma e ammesso in entrambi allo stesso modo. Distinzione esplicita: qui SOLO il MECCANISMO DI CONDIVISIONE VIRTUALE piu TARIFFA PREMIO sull'energia condivisa, NIENTE fisica dell'impianto oltre la produzione annua (le schede FV dedicate coprono la produzione fisica: qui la produzione annua in kWh e un input, potenza per produzione specifica), NIENTE autoconsumo fisico dietro il contatore da solo (solo risparmio in bolletta, niente condivisione virtuale e niente tariffa premio: qui l'autoconsumo e solo una delle tre gambe del ricavo), NIENTE vendita diretta al vicino (prezzo bilaterale tra privati, non tariffa premio del GSE sull'energia condivisa), NIENTE solo ritiro dedicato (solo vendita dell'energia immessa, niente premio: qui il ritiro e solo la gamba residua), NIENTE certificato di origine (titolo negoziabile sul mercato, non incentivo: la scheda dei Certificati Bianchi copre le Garanzie di Origine; qui il beneficio e la tariffa premio, non un titolo), NIENTE Conto Termico (contributo per il calore, non per l'elettricita: la scheda del Conto Termico copre il calore; qui si misura elettricita condivisa, non calore), NIENTE detrazione fiscale (sconto in dichiarazione dei redditi, non incentivo del GSE: la scheda della detrazione fiscale copre lo sconto fiscale; qui il beneficio e la tariffa premio, non una detrazione). Nota: qui si misura quanto paga l'energia condivisa, non un titolo e non uno sconto fiscale.")
+                st.markdown("**Ricavo, costi, margine e VAN**")
+                st.bar_chart(_bc909["df_ricavo_costi"].set_index("Voce"))
+                if _ssc909:
+                    st.markdown("**Scenari**")
+                    st.dataframe(_bc909["df_scenari"])
+                if _scf909:
+                    st.markdown("**Confronto CER**")
+                    st.dataframe(_bc909["df_confronto"])
+                if _stb909:
+                    st.markdown("**Voci fisiche ed economiche**")
+                    st.dataframe(_bc909["df_tabella"])
+                _in909 = {"potenza_kwp": float(_po909),
+                          "produzione_specifica": float(_pr909),
+                          "quota_autoconsumo": float(_qa909),
+                          "prezzo_energia_evitato": float(_pe909),
+                          "quota_condivisa": float(_qc909),
+                          "incentivo_eur_kwh": float(_inc909),
+                          "prezzo_ritiro_eur_kwh": float(_prr909),
+                          "capex_eur": float(_ca909),
+                          "om_eur_kwp_anno": float(_om909),
+                          "gestione_cer_eur_anno": float(_ge909),
+                          "vita_anni": int(_vi909),
+                          "tasso_frazione": float(_ta909),
+                          "tol_frazione": float(_tol909)}
+                _csv909 = mh909_csv(_bc909, _in909)
+                st.download_button(
+                    "Scarica CSV CER",
+                    _csv909.encode("utf-8"),
+                    "cer.csv",
+                    "text/csv", key="st909_csv")
+                _csvs909 = _bc909["df_scenari"].to_csv(index=False, sep=";")
+                st.download_button(
+                    "Scarica CSV scenari CER",
+                    _csvs909.encode("utf-8"),
+                    "cer_scenari.csv",
+                    "text/csv", key="st909_csv_scenari")
+            except ValueError as _e909:
+                st.error(f"Input non valido: {_e909}")
 
 
 # Footer
