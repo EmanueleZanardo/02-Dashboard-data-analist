@@ -2156,7 +2156,7 @@ class TestConteggioTitoliPreApply(unittest.TestCase):
         # post apply 909.
         if os.path.exists(_APP_WD):
             src = open(_APP_WD, encoding="utf-8", errors="ignore").read()
-            self.assertEqual(len(re.findall(r"with tab\d+:", src)), 909)
+            self.assertEqual(len(re.findall(r"with tab\d+:", src)), 910)
         else:
             self.skipTest("nessuna copia di lavoro del repo trovata")
 
@@ -2171,10 +2171,10 @@ class TestCatenaPostApply(unittest.TestCase):
         if not os.path.exists(_APP_WD):
             self.skipTest("nessuna copia di lavoro del repo trovata")
         src = open(_APP_WD, encoding="utf-8", errors="ignore").read()
-        nuova = (", " + ", ".join("tab%d" % n for n in range(906, 910))
+        nuova = (", " + ", ".join("tab%d" % n for n in range(907, 911))
                 + " = st.tabs([")
         self.assertIn(nuova, src)
-        vecchia = (", " + ", ".join("tab%d" % n for n in range(906, 909))
+        vecchia = (", " + ", ".join("tab%d" % n for n in range(907, 910))
                 + " = st.tabs([")
         self.assertNotIn(vecchia, src)
 
